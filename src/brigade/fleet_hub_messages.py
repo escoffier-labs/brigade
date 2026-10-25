@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
 import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import threading
+from time import monotonic
 from typing import Any, TypeGuard
+
+from . import fleet_hub_events
+from .fleet_hub_server import MAX_HANDLER_THREADS
 
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
@@ -22,6 +31,27 @@ RETENTION_DAYS = 90
 MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_SQLITE_INTEGER = (1 << 63) - 1
+MAX_WAIT_MS = 20_000
+MAX_WAITERS_PER_CALLER = 2
+MAX_WAITERS = MAX_HANDLER_THREADS // 4
+MAX_WAITERS_PER_SOURCE = 2
+_WAKE_LOCK = threading.Lock()
+_WAKE_CONDITIONS: dict[str, threading.Condition] = {}
+_WAKE_EPOCHS: dict[str, int] = {}
+_ACTIVE_WAITERS: dict[str, int] = {}
+_SOURCE_WAITERS: dict[str, int] = {}
+_LOCAL = threading.local()
+
+
+def _source_cap_applies(source_ip: str) -> bool:
+    """Loopback peers are a local reverse proxy (such as Tailscale Serve) whose
+    clients are indistinguishable, so only the per-caller and global caps apply."""
+    try:
+        return not ipaddress.ip_address(source_ip).is_loopback
+    except ValueError:
+        return True
+
+
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 _SENDER_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _THREAD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$")
@@ -42,6 +72,10 @@ _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
 
 class MessageError(ValueError):
     """A bounded queue request was invalid."""
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class MessageForbidden(MessageError):
@@ -69,7 +103,7 @@ class MessageQuotaError(MessageError):
 
     def __init__(self, message: str, *, code: str, recipient: str | None = None) -> None:
         super().__init__(message)
-        self.code = code
+        self.code: str = code
         self.recipient = recipient
 
 
@@ -115,6 +149,8 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
         extras[field] = value
     kind = raw.get("kind")
     if kind is not None:
+        if kind == "operator_question":
+            raise MessageError("operator_question is reserved for hub-created operator questions")
         if not isinstance(kind, str) or kind not in KINDS:
             raise MessageError("kind must be message, question, or completion")
         if kind != "message":
@@ -230,6 +266,17 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def unread_count(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, int]:
+    """Count one inbox without fetching bodies or writing retention cleanup."""
+    if set(raw) - {"action"}:
+        raise MessageError("count accepts no arguments")
+    count = conn.execute(
+        "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL AND created_at>=?",
+        (recipient, _expiry_cutoff()),
+    ).fetchone()[0]
+    return {"unread_count": int(count)}
+
+
 def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
     """Unread message totals keyed by enrolled machine identity for the fleet board."""
     _prune_expired(conn)
@@ -318,20 +365,60 @@ def _active_principal(conn: sqlite3.Connection, principal: str) -> bool:
     )
 
 
-def _as_active_principal(conn: sqlite3.Connection, principal: str, operation: Any) -> Any:
+def _wake_epoch(recipient: str) -> int:
+    with _WAKE_LOCK:
+        return _WAKE_EPOCHS.get(recipient, 0)
+
+
+def _notify_recipient(recipient: str) -> None:
+    with _WAKE_LOCK:
+        _WAKE_EPOCHS[recipient] = _WAKE_EPOCHS.get(recipient, 0) + 1
+        condition = _WAKE_CONDITIONS.get(recipient)
+        if condition is not None:
+            condition.notify_all()
+
+
+def _queue_notification(recipient: str) -> None:
+    pending = getattr(_LOCAL, "pending_notifications", None)
+    if isinstance(pending, list):
+        pending.append(recipient)
+
+
+@dataclass
+class _ConnectionState:
+    closed: bool = False
+
+
+def _as_active_principal(
+    conn: sqlite3.Connection,
+    principal: str,
+    operation: Any,
+    *,
+    read_only: bool = False,
+    connection_state: _ConnectionState | None = None,
+) -> Any:
     opened = not conn.in_transaction
     if opened:
-        conn.execute("BEGIN IMMEDIATE")
+        conn.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
+        _LOCAL.pending_notifications = []
     try:
         if not _active_principal(conn, principal):
             raise MessageAuthError("sender is not an active hub principal")
         result = operation()
         if opened:
-            conn.commit()
+            if connection_state is None or not connection_state.closed:
+                conn.commit()
+            pending = getattr(_LOCAL, "pending_notifications", None)
+            _LOCAL.pending_notifications = None
+            if pending:
+                for recipient in pending:
+                    _notify_recipient(recipient)
         return result
     except BaseException:
         if opened:
-            conn.rollback()
+            _LOCAL.pending_notifications = None
+            if connection_state is None or not connection_state.closed:
+                conn.rollback()
         raise
 
 
@@ -508,6 +595,9 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
             "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
             (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
         )
+        from . import fleet_hub_message_keys
+
+        fleet_hub_message_keys.revoke(conn, principal_id)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -541,7 +631,18 @@ def send(
     sender: str,
     reply_to: int | None = None,
 ) -> dict[str, Any]:
-    _prune_expired(conn)
+    return _send(conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender))
+
+
+def _send(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    sender: str,
+    extras: dict[str, str],
+    reply_to: int | None = None,
+) -> dict[str, Any]:
+    """Insert validated metadata. Only question creation supplies the reserved kind."""
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
     body = _text(raw.get("body"), "body", BODY_LIMIT)
@@ -552,12 +653,12 @@ def send(
     if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    extras = _metadata(raw, sender=sender)
     message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
         conn.execute("BEGIN IMMEDIATE")
     try:
+        _prune_expired(conn)
         now = datetime.now(timezone.utc)
         if not _active_principal(conn, sender):
             raise MessageAuthError("sender is not an active hub principal")
@@ -567,9 +668,19 @@ def send(
         if existing is not None:
             if existing[1] is not None and existing[1] != message_hash:
                 raise MessageConflict("client_id was already used for a different message")
+            existing_row = _fetch(conn, int(existing[0])) or {}
             if opened:
                 conn.commit()
-            return _fetch(conn, int(existing[0])) or {}
+                _notify_recipient(recipient)
+            else:
+                _queue_notification(recipient)
+            return existing_row
+        if reply_to is not None:
+            if not _sqlite_integer(reply_to):
+                raise MessageError("reply_to must be a positive integer within SQLite's range")
+            original = _fetch(conn, reply_to)
+            if original is None or original["recipient"] != sender or original["sender"] != recipient:
+                raise MessageError("reply_to must identify an inbox message from the recipient")
         from .fleet_hub_message_grants import require_granted, require_recipient_cap
 
         require_granted(conn, sender, recipient)
@@ -625,16 +736,67 @@ def send(
             "INSERT INTO fleet_message_sends(sender,client_id,received_at) VALUES(?,?,?)",
             (sender, client_id, now.isoformat()),
         )
+        result = _fetch(conn, message_id) or {}
+        # Same transaction as the insert, so an event exists exactly when the message does.
+        fleet_hub_events.record_message_created(conn, result)
         if opened:
             conn.commit()
-        return _fetch(conn, message_id) or {}
+            _notify_recipient(recipient)
+        else:
+            _queue_notification(recipient)
+        return result
     except BaseException:
         if opened:
             conn.rollback()
         raise
 
 
-def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, Any]:
+def _validate_wait_ms(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > MAX_WAIT_MS:
+        raise MessageError(f"wait_ms must be an integer between 0 and {MAX_WAIT_MS}")
+    return value
+
+
+def _default_open_conn(conn: sqlite3.Connection) -> Callable[[], sqlite3.Connection]:
+    db_file: str | None = None
+    for _seq, name, path in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main" and isinstance(path, str) and path:
+            db_file = path
+            break
+    if not db_file:
+        raise MessageError("waiting on messages requires a file-backed hub database")
+    from . import fleet_hub_http
+
+    db_path = Path(db_file)
+    return lambda: fleet_hub_http.open_db(db_path)
+
+
+def _query_inbox_rows(
+    conn: sqlite3.Connection,
+    *,
+    recipient: str,
+    after: int,
+    unacked: bool,
+) -> list[tuple[Any, ...]]:
+    _prune_expired(conn)
+    return conn.execute(
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
+        "FROM fleet_messages WHERE recipient=? AND id>? "
+        + ("AND acked_at IS NULL " if unacked else "")
+        + "ORDER BY id LIMIT 100",
+        (recipient, after),
+    ).fetchall()
+
+
+def list_messages(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    recipient: str,
+    open_conn: Callable[[], sqlite3.Connection] | None = None,
+    source_ip: str = "",
+    connection_state: _ConnectionState | None = None,
+) -> dict[str, Any]:
     opened = not conn.in_transaction
     _prune_expired(conn)
     after = raw.get("after", 0)
@@ -643,6 +805,8 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     unacked = raw.get("unacked", False)
     if not isinstance(unacked, bool):
         raise MessageError("unacked must be a boolean")
+    wait_ms = _validate_wait_ms(raw.get("wait_ms", 0))
+    wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
         "FROM fleet_messages WHERE recipient=? AND id>? "
@@ -652,7 +816,69 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     ).fetchall()
     if opened:
         conn.commit()
-    return _message_page(rows, after=after)
+    if rows or wait_ms == 0:
+        return _message_page(rows, after=after)
+
+    reopen = open_conn if open_conn is not None else _default_open_conn(conn)
+    if not _active_principal(conn, recipient):
+        raise MessageAuthError("sender is not an active hub principal")
+    if conn.in_transaction:
+        conn.commit()
+    conn.close()
+    if connection_state is not None:
+        connection_state.closed = True
+
+    with _WAKE_LOCK:
+        active = _ACTIVE_WAITERS.get(recipient, 0)
+        source_active = _SOURCE_WAITERS.get(source_ip, 0)
+        if (
+            active >= MAX_WAITERS_PER_CALLER
+            or sum(_ACTIVE_WAITERS.values()) >= MAX_WAITERS
+            or (_source_cap_applies(source_ip) and source_active >= MAX_WAITERS_PER_SOURCE)
+        ):
+            raise MessageQuotaError("message wait capacity reached", code="message_wait_capped")
+        condition = _WAKE_CONDITIONS.get(recipient)
+        if condition is None:
+            condition = threading.Condition(_WAKE_LOCK)
+            _WAKE_CONDITIONS[recipient] = condition
+        _ACTIVE_WAITERS[recipient] = active + 1
+        _SOURCE_WAITERS[source_ip] = source_active + 1
+
+    try:
+        deadline = monotonic() + wait_ms / 1000.0
+        while True:
+            with _WAKE_LOCK:
+                remaining_seconds = deadline - monotonic()
+                if _WAKE_EPOCHS.get(recipient, 0) == wake_epoch and remaining_seconds > 0:
+                    condition.wait(timeout=remaining_seconds)
+                wake_epoch = _WAKE_EPOCHS.get(recipient, 0)
+
+            reopened_conn = reopen()
+            try:
+                rows = _as_active_principal(
+                    reopened_conn,
+                    recipient,
+                    lambda reopened_conn=reopened_conn: _query_inbox_rows(
+                        reopened_conn, recipient=recipient, after=after, unacked=unacked
+                    ),
+                )
+            finally:
+                reopened_conn.close()
+            if rows or monotonic() >= deadline:
+                return _message_page(rows, after=after)
+    finally:
+        with _WAKE_LOCK:
+            remaining = _ACTIVE_WAITERS[recipient] - 1
+            if remaining == 0:
+                _ACTIVE_WAITERS.pop(recipient, None)
+                _WAKE_CONDITIONS.pop(recipient, None)
+            else:
+                _ACTIVE_WAITERS[recipient] = remaining
+            source_remaining = _SOURCE_WAITERS[source_ip] - 1
+            if source_remaining == 0:
+                _SOURCE_WAITERS.pop(source_ip, None)
+            else:
+                _SOURCE_WAITERS[source_ip] = source_remaining
 
 
 def _message_page(rows: list[tuple[Any, ...]], *, after: int) -> dict[str, Any]:
@@ -719,6 +945,7 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 
 
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+    _metadata(raw, sender=sender)
     _prune_expired(conn)
     message_id = raw.get("id")
     if not _sqlite_integer(message_id):
@@ -789,22 +1016,215 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[int, dict[str, Any]]:
+def _station_read(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, snapshot_write: bool = False
+) -> dict[str, Any]:
+    """Read-only directory/claims for message credentials, without admin access."""
+    from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
+    from . import fleet_hub_paging as paging
+
+    action = raw["action"]
+    allowed = {"action", "all", "limit", "cursor"} | ({"filter"} if action == "who" else set())
+    include_all = raw.get("all", False)
+    query = raw.get("filter", "")
+    if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
+        raise MessageError("invalid station read arguments")
+
+    limit = paging.page_limit(raw)
+    snapshot = paging.load(conn, raw, caller=caller)
+
+    if snapshot is not None:
+        stored_snapshot, offsets, snapshot_id = snapshot
+        return paging.snapshot_page(
+            conn,
+            stored_snapshot,
+            offsets,
+            snapshot_id,
+            limit=limit,
+            snapshot_write=snapshot_write,
+        )
+
+    # Load the caller's grants once; checking every row with require_granted
+    # would issue one query per claim or session.
+    patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
+
+    def permitted(recipient: str) -> bool:
+        return grants.permits(patterns, caller, recipient)
+
+    active_nodes = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL")}
+    active_principals = {
+        str(row[0])
+        for row in conn.execute("SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL")
+    }
+
+    def visible(key: str, row: dict[str, Any]) -> bool:
+        if key == "claims":
+            return permitted(str(row["owner_node"]))
+        identity = str(row["principal_id"] if key == "principals" else row["node_id"])
+        active = active_principals if key == "principals" else active_nodes
+        return identity in active and permitted(identity)
+
+    if action == "claims":
+        if not caller.startswith("agent:"):
+            rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
+        else:
+            rows = [
+                {key: value for key, value in row.items() if key not in {"job", "session", "owner_conductor"}}
+                for row in fleet_hub.list_claims(conn, include_all=include_all)
+                if permitted(row["owner_node"])
+            ]
+        rows.sort(key=lambda row: str(row.get("target", "")))
+        return paging.page(
+            conn, raw, {"claims": rows}, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write
+        )
+
+    nodes = [
+        {"node_id": str(row[0])}
+        for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL ORDER BY node_id")
+        if permitted(str(row[0]))
+    ]
+    principals = [
+        {"principal_id": str(row[0]), "label": str(row[1])}
+        for row in conn.execute(
+            "SELECT principal_id,label FROM fleet_message_principals WHERE revoked_at IS NULL ORDER BY principal_id"
+        )
+        if permitted(str(row[0]))
+    ]
+    # Only an agent limited to named nodes needs a bound node list, and that list
+    # is bounded by its grants. Everyone else filters to active nodes by subquery.
+    all_nodes_visible = not caller.startswith("agent:") or bool({"*", "node:*"} & patterns)
+    node_ids = None if all_nodes_visible else {node["node_id"] for node in nodes}
+    fields = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
+    sessions = [
+        {field: row[field] for field in fields}
+        for row in fleet_hub_sessions.list_sessions(
+            conn,
+            include_all=include_all,
+            node_ids=node_ids,
+            text_filter=query or None,
+            active_nodes_only=True,
+        )
+    ]
+    needle = query.casefold()
+    data = {
+        key: [row for row in rows if any(needle in str(value).casefold() for value in row.values())]
+        for key, rows in (("nodes", nodes), ("principals", principals), ("sessions", sessions))
+    }
+    return paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
+
+
+def handle(
+    conn: sqlite3.Connection,
+    raw: Any,
+    *,
+    caller: str | None,
+    open_conn: Callable[[], sqlite3.Connection] | None = None,
+    source_ip: str = "",
+    authenticated_generation: str | None = None,
+) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if action in ("question_create", "question_status", "question_desktop"):
+        from . import fleet_hub_questions
+
+        return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
+    if isinstance(action, str) and action.startswith("events_"):
+        return fleet_hub_events.handle(conn, raw, caller=caller)
+    if action in ("keys_publish", "keys_get", "manifests_get"):
+        from . import fleet_hub_identity, fleet_hub_message_keys
+
+        if action == "keys_publish":
+
+            def publish_key() -> dict[str, Any]:
+                if authenticated_generation is not None:
+                    from .fleet_hub_questions import _generation
+
+                    if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                        raise MessageAuthError("key publication credential generation changed")
+                return fleet_hub_message_keys.publish(conn, raw, caller=caller)
+
+            return 201, _as_active_principal(conn, caller, publish_key)
+
+        def read_mesh() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("mesh read credential generation changed")
+            if action == "manifests_get":
+                return fleet_hub_identity.manifests(conn, raw)
+            return fleet_hub_message_keys.get(conn, raw, caller=caller)
+
+        result = _as_active_principal(conn, caller, read_mesh, read_only=True)
+        if action == "manifests_get":
+            return 200, result
+        return (200, result) if result else (404, {"error": "key not found"})
+    if action in ("who", "claims"):
+        from .fleet_hub_paging import SnapshotWriteRequired
+
+        def read_station(*, snapshot_write: bool = False) -> dict[str, Any]:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("station read credential generation changed")
+            return _station_read(conn, raw, caller=caller, snapshot_write=snapshot_write)
+
+        try:
+            result = _as_active_principal(conn, caller, read_station, read_only=True)
+        except SnapshotWriteRequired:
+            # Small reads never take write admission. Rebuild a new snapshot
+            # after BEGIN IMMEDIATE so its data and authorization are current,
+            # and concurrent snapshot writers cannot race the storage caps.
+            result = _as_active_principal(conn, caller, lambda: read_station(snapshot_write=True))
+        return 200, result
+    if action == "identity":
+        if set(raw) != {"action"}:
+            raise MessageError("identity accepts only action")
+        return 200, _as_active_principal(conn, caller, lambda: {"principal": caller}, read_only=True)
+    if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
+
+        def insert_reply() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("reply credential generation changed")
+            if action == "reply":
+                return reply(conn, raw, sender=caller)
+            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))
+
+        # Hold the write lock from credential comparison through insertion and
+        # the question audit trigger, including the alternate send/reply_to path.
+        message = _as_active_principal(conn, caller, insert_reply)
+        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "send":
-        return 201, {"message": send(conn, raw, sender=caller)}
+        return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
+    if action == "count":
+        return 200, _as_active_principal(
+            conn, caller, lambda: unread_count(conn, raw, recipient=caller), read_only=True
+        )
     if action == "list":
-        return 200, _as_active_principal(conn, caller, lambda: list_messages(conn, raw, recipient=caller))
+        connection_state = _ConnectionState()
+        return 200, _as_active_principal(
+            conn,
+            caller,
+            lambda: list_messages(
+                conn,
+                raw,
+                recipient=caller,
+                open_conn=open_conn,
+                source_ip=source_ip,
+                connection_state=connection_state,
+            ),
+            connection_state=connection_state,
+        )
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
-    if action == "reply":
-        message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
-        return (201, {"message": message}) if message else (404, {"error": "message not found"})
-    raise MessageError("action must be send, list, sent, ack, or reply")
+    raise MessageError("action must be send, list, sent, count, ack, reply, who, claims, or identity")

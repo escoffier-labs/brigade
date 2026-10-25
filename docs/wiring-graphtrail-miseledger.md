@@ -6,8 +6,9 @@
 
 Installing the CLIs is not the same as wiring them. If the binaries are on PATH but no
 `[mcp_servers.*]` block (Codex) or `mcpServers` entry (Claude Code) references them, agents
-cannot call the tools, and `brigade doctor` still reports healthy. The gap is invisible: the
-before-change consultation loop simply does not happen.
+cannot call the tools. `brigade doctor` validates the local MCP catalog but does not prove a
+live tool call works. Use `brigade mcp verify` for bounded runtime handshakes, then test a read
+query from the harness.
 
 This page covers wiring both MCP servers into a coding harness, verifying the wiring end to
 end, when an agent should reach for each, and the common failure modes. It assumes the CLIs
@@ -86,6 +87,7 @@ runaway gets killed instead of taking the machine down.
 ## 2. Codex CLI
 
 Codex reads TOML from `~/.codex/config.toml`. Add one table per server:
+Replace `/ABSOLUTE_ACCOUNT_HOME` below with your account's actual absolute home directory; MCP command fields do not expand this placeholder.
 
 ```toml
 [mcp_servers.graphtrail]
@@ -93,7 +95,7 @@ command = '/abs/path/to/graphtrail-mcp'
 args = ['--db', '/abs/path/to/repo/.graphtrail/graphtrail.db']
 
 [mcp_servers.miseledger]
-command = '/home/you/.local/bin/miseledger'
+command = '/ABSOLUTE_ACCOUNT_HOME/.local/bin/miseledger'
 args = ['mcp']
 timeout = 60
 ```
@@ -127,7 +129,7 @@ Healthy output ends with a `FRESH` verdict:
 
 ```
 repo: root=/abs/path/to/repo db=/abs/path/to/repo/.graphtrail/graphtrail.db
-version: tool=0.3.0 schema=7/7 needs_migration=false
+version: tool=0.4.0 schema=9/9 needs_migration=false
 last_sync: synced_at=1784324912 age_seconds=373
 pending: new_files=0 changed_files=0 deleted_files=0 fingerprint_stale=0
 verdict: FRESH
@@ -157,8 +159,8 @@ Every check reports `"ok": true`, and the MCP checks confirm the protocol initia
 tools register:
 
 ```json
-{ "name": "paths", "ok": true, "detail": "/home/you/.local/share/miseledger/miseledger.db" }
-{ "name": "schema", "ok": true, "detail": "version 1" }
+{ "name": "paths", "ok": true, "detail": "/ABSOLUTE_ACCOUNT_HOME/.local/share/miseledger/miseledger.db" }
+{ "name": "schema", "ok": true, "detail": "version 5" }
 { "name": "fts", "ok": true, "detail": "sqlite fts5" }
 { "name": "mcp_initialize", "ok": true }
 { "name": "mcp_tools", "ok": true, "detail": "tools=5" }
@@ -188,7 +190,7 @@ Reach for GraphTrail when the question is about relationships between symbols, n
 calls this, what does it call, what breaks if I change it, what changed between two versions.
 Use it before touching control flow, a signature, a data structure, or anything imported by
 more than one module. Tools: `callers`, `callees`, `impact`, `affected`, `context`, `diff`,
-`doctor`, `search`, `neighbors`, `cycles`, `dead_code`, `explain`, `stats`, `repos`.
+`doctor`, `search`, `neighbors`, `outline`, `cycles`, `dead_code`, `explain`, `stats`, `repos`.
 
 Example. Before changing `serve`, get its blast radius:
 

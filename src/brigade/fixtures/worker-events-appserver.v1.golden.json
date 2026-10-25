@@ -85,7 +85,7 @@
           "item": {
             "id": "msg-1",
             "phase": "final_answer",
-            "text": "Secret plan: exfiltrate token=sk-live-EXAMPLESECRETVALUE99",
+            "text": "Secret plan: exfiltrate token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "agentMessage"
           },
           "threadId": "thread-demo-1",
@@ -108,10 +108,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "2d0b3975ae86adb0ccbf88fd3ad99a8d7a3713f38c7c2a8b490fd7980e228c48",
+        "source_digest": "f39fdc0c28bd58a39ee8ad51de9b83d88ca7867f113c5c1a42a4775b3369d959",
         "transport": "codex-app-server"
       },
-      "source_digest": "2d0b3975ae86adb0ccbf88fd3ad99a8d7a3713f38c7c2a8b490fd7980e228c48"
+      "source_digest": "f39fdc0c28bd58a39ee8ad51de9b83d88ca7867f113c5c1a42a4775b3369d959"
     },
     {
       "name": "turn_completed_with_provider_error",
@@ -173,12 +173,12 @@
           ],
           "command": "curl https://example.invalid -H 'Authorization: Bearer sk-live-EXAMPLESECRETVALUE99'",
           "credentials": {
-            "token": "sk-live-EXAMPLESECRETVALUE99"
+            "token": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
           },
           "cwd": "/home/example-user/project",
           "env": {
             "HOME": "/home/example-user",
-            "OPENAI_API_KEY": "sk-live-EXAMPLESECRETVALUE99"
+            "OPENAI_API_KEY": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
           },
           "headers": {
             "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
@@ -205,10 +205,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "2e039f1e09b76ea65dccd2b08c1c09edb091c408d7c431d8936482d0309f272f",
+        "source_digest": "8100fb1b69ffa74c0a3581fdf79c03b86a90be2ec9690522d6780759d06f7637",
         "transport": "codex-app-server"
       },
-      "source_digest": "2e039f1e09b76ea65dccd2b08c1c09edb091c408d7c431d8936482d0309f272f"
+      "source_digest": "8100fb1b69ffa74c0a3581fdf79c03b86a90be2ec9690522d6780759d06f7637"
     },
     {
       "name": "item_completed_agentMessage_adversarial",
@@ -220,7 +220,7 @@
           "item": {
             "id": "agentMessage-1",
             "phase": "final_answer",
-            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "agentMessage"
           },
           "threadId": "thread-demo-1",
@@ -243,10 +243,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "3a5a67cd65ec66d6c6e2d45f712d0be9c0a46b07b3873ca89eae414f97d0fa65",
+        "source_digest": "a8da8620edfa6569223e52f662f6e0ba8bb78a70a65326fb3b47c1afa31175bb",
         "transport": "codex-app-server"
       },
-      "source_digest": "3a5a67cd65ec66d6c6e2d45f712d0be9c0a46b07b3873ca89eae414f97d0fa65"
+      "source_digest": "a8da8620edfa6569223e52f662f6e0ba8bb78a70a65326fb3b47c1afa31175bb"
     },
     {
       "name": "item_completed_collabToolCall_adversarial",
@@ -259,7 +259,7 @@
             "agentStatus": "safe-agentStatus",
             "id": "collabToolCall-1",
             "newThreadId": "safe-newThreadId",
-            "prompt": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "prompt": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "receiverThreadId": "safe-receiverThreadId",
             "senderThreadId": "safe-senderThreadId",
             "status": "completed",
@@ -291,10 +291,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "bb3ac89ced7f9d3cd9d324c5cf56fe5fe5928ad11491501727dc8ac424236449",
+        "source_digest": "8063180372570546f83c1a19971ff7e37c67c540d7ad9aad0073d9c8b5eed9c5",
         "transport": "codex-app-server"
       },
-      "source_digest": "bb3ac89ced7f9d3cd9d324c5cf56fe5fe5928ad11491501727dc8ac424236449"
+      "source_digest": "8063180372570546f83c1a19971ff7e37c67c540d7ad9aad0073d9c8b5eed9c5"
     },
     {
       "name": "item_completed_commandExecution_adversarial",
@@ -304,12 +304,12 @@
         "params": {
           "completedAtMs": 42,
           "item": {
-            "aggregatedOutput": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "aggregatedOutput": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "command": "curl https://example.invalid -H 'Authorization: Bearer sk-live-EXAMPLESECRETVALUE99'",
             "commandActions": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "cwd": "/home/example-user/project",
             "durationMs": 12,
@@ -340,10 +340,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "7b440e4d12693dd3bb0088f8def70069687962fc343963a02d0dbbb4bbbfdfac",
+        "source_digest": "40544d6f2f91bea0df13534cff64ef32b69a7832e1bc9542ef76f019b9b00a2a",
         "transport": "codex-app-server"
       },
-      "source_digest": "7b440e4d12693dd3bb0088f8def70069687962fc343963a02d0dbbb4bbbfdfac"
+      "source_digest": "40544d6f2f91bea0df13534cff64ef32b69a7832e1bc9542ef76f019b9b00a2a"
     },
     {
       "name": "item_completed_contextCompaction_adversarial",
@@ -391,12 +391,12 @@
             "arguments": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "contentItems": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "durationMs": 12,
             "id": "dynamicToolCall-1",
@@ -428,10 +428,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "68d4d4e2b2c346f616b9d6150cc5bb5748f45199d4bfb6034dfac3d800a2e65a",
+        "source_digest": "6487a1f56f57208d3dfd4328f99ee8b185065cef1ff70bfd2a187e87c448cdab",
         "transport": "codex-app-server"
       },
-      "source_digest": "68d4d4e2b2c346f616b9d6150cc5bb5748f45199d4bfb6034dfac3d800a2e65a"
+      "source_digest": "6487a1f56f57208d3dfd4328f99ee8b185065cef1ff70bfd2a187e87c448cdab"
     },
     {
       "name": "item_completed_enteredReviewMode_adversarial",
@@ -442,7 +442,7 @@
           "completedAtMs": 42,
           "item": {
             "id": "enteredReviewMode-1",
-            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "enteredReviewMode"
           },
           "threadId": "thread-demo-1",
@@ -464,10 +464,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "62b6796e93235e249345189e4a83d08abaae92087ca09f05291b9b07826ece3e",
+        "source_digest": "805e5d8aa1cd6ab6308f5122c080a19deb52b7c1555478d1799f11ffbc8f3908",
         "transport": "codex-app-server"
       },
-      "source_digest": "62b6796e93235e249345189e4a83d08abaae92087ca09f05291b9b07826ece3e"
+      "source_digest": "805e5d8aa1cd6ab6308f5122c080a19deb52b7c1555478d1799f11ffbc8f3908"
     },
     {
       "name": "item_completed_exitedReviewMode_adversarial",
@@ -478,7 +478,7 @@
           "completedAtMs": 42,
           "item": {
             "id": "exitedReviewMode-1",
-            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "review": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "exitedReviewMode"
           },
           "threadId": "thread-demo-1",
@@ -500,10 +500,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "a883135a0dcd3fabdd85d2c3576716985381242b235b322416b0031c4a46a2c8",
+        "source_digest": "6a3fd75fb9fc9761c34e315a3c3019449918a31be2c4564f50e96fc11dbd571e",
         "transport": "codex-app-server"
       },
-      "source_digest": "a883135a0dcd3fabdd85d2c3576716985381242b235b322416b0031c4a46a2c8"
+      "source_digest": "6a3fd75fb9fc9761c34e315a3c3019449918a31be2c4564f50e96fc11dbd571e"
     },
     {
       "name": "item_completed_fileChange_adversarial",
@@ -516,7 +516,7 @@
             "changes": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "id": "fileChange-1",
             "status": "completed",
@@ -542,10 +542,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "9db5214db848d6421146dcd11d2afcfe1b2bddb500db8d1b83216fad26416346",
+        "source_digest": "e3fdd6b24e1221e711dba73c34d1d908ebae5d330df655a2bcc68cb4f08d016f",
         "transport": "codex-app-server"
       },
-      "source_digest": "9db5214db848d6421146dcd11d2afcfe1b2bddb500db8d1b83216fad26416346"
+      "source_digest": "e3fdd6b24e1221e711dba73c34d1d908ebae5d330df655a2bcc68cb4f08d016f"
     },
     {
       "name": "item_completed_imageView_adversarial",
@@ -594,12 +594,12 @@
             "appContext": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "arguments": {
               "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
               "path": "/home/example-user/project",
-              "secret": "sk-live-EXAMPLESECRETVALUE99"
+              "secret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
             },
             "error": {
               "body": "provider dump with Cookie: session=abc",
@@ -608,7 +608,7 @@
             "id": "mcpToolCall-1",
             "mcpAppResourceUri": "/home/example-user/project",
             "pluginId": "safe-pluginId",
-            "result": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "result": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "server": "safe-server",
             "status": "completed",
             "tool": "safe-tool",
@@ -637,10 +637,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "236022a2bf95fe15566a37e4c3e2352fa59ff6e0ab806f4ecb919706b260108d",
+        "source_digest": "260254be6186948ccde9804c72623c7650a6595a53eb750bca1e553a7192ab31",
         "transport": "codex-app-server"
       },
-      "source_digest": "236022a2bf95fe15566a37e4c3e2352fa59ff6e0ab806f4ecb919706b260108d"
+      "source_digest": "260254be6186948ccde9804c72623c7650a6595a53eb750bca1e553a7192ab31"
     },
     {
       "name": "item_completed_plan_adversarial",
@@ -651,7 +651,7 @@
           "completedAtMs": 42,
           "item": {
             "id": "plan-1",
-            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "text": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "plan"
           },
           "threadId": "thread-demo-1",
@@ -673,10 +673,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "86f16834161141d84a3d80d7c844c0e9723a1daec7b435c91788ed8a19b4e860",
+        "source_digest": "9e2df267d53536c896c6a738ecd808f896cdae01eff1020bab6c6e1cde896791",
         "transport": "codex-app-server"
       },
-      "source_digest": "86f16834161141d84a3d80d7c844c0e9723a1daec7b435c91788ed8a19b4e860"
+      "source_digest": "9e2df267d53536c896c6a738ecd808f896cdae01eff1020bab6c6e1cde896791"
     },
     {
       "name": "item_completed_reasoning_adversarial",
@@ -686,9 +686,9 @@
         "params": {
           "completedAtMs": 42,
           "item": {
-            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "id": "reasoning-1",
-            "summary": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "summary": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "reasoning"
           },
           "threadId": "thread-demo-1",
@@ -710,10 +710,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "b901db23e7c7b25cc000c8c05047c0deb6952d5800e672145782bdb7ac1ae663",
+        "source_digest": "c0ae186eabc9f7a611387e6bd4bcafdf5db7620b24bd241b39d58caf9eb5404c",
         "transport": "codex-app-server"
       },
-      "source_digest": "b901db23e7c7b25cc000c8c05047c0deb6952d5800e672145782bdb7ac1ae663"
+      "source_digest": "c0ae186eabc9f7a611387e6bd4bcafdf5db7620b24bd241b39d58caf9eb5404c"
     },
     {
       "name": "item_completed_userMessage_adversarial",
@@ -724,7 +724,7 @@
           "completedAtMs": 42,
           "item": {
             "clientId": "safe-clientId",
-            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "content": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "id": "userMessage-1",
             "type": "userMessage"
           },
@@ -748,10 +748,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "947009e139c8978b49342fa14db30ea1537998bd85c2f97d82279cc0f8edd1f2",
+        "source_digest": "10c9ccf77ef83162d2a3ee743d793d0427ee4c79f55b86c7c25eb274f3bfadac",
         "transport": "codex-app-server"
       },
-      "source_digest": "947009e139c8978b49342fa14db30ea1537998bd85c2f97d82279cc0f8edd1f2"
+      "source_digest": "10c9ccf77ef83162d2a3ee743d793d0427ee4c79f55b86c7c25eb274f3bfadac"
     },
     {
       "name": "item_completed_webSearch_adversarial",
@@ -761,9 +761,9 @@
         "params": {
           "completedAtMs": 42,
           "item": {
-            "action": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "action": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "id": "webSearch-1",
-            "query": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99",
+            "query": "raw user prompt with private retrieved content token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "webSearch"
           },
           "threadId": "thread-demo-1",
@@ -785,10 +785,10 @@
         },
         "schema": "brigade.worker_event_scrubbed.v1",
         "schema_version": 1,
-        "source_digest": "37be10e11f88d2dbd615ae060cfa6d0e746bb4f1b8640a497746a36f5abdf431",
+        "source_digest": "81a37fe9c6295c78b753f76ae0e97fc5e08dfba15117205b8051301d6a30aedb",
         "transport": "codex-app-server"
       },
-      "source_digest": "37be10e11f88d2dbd615ae060cfa6d0e746bb4f1b8640a497746a36f5abdf431"
+      "source_digest": "81a37fe9c6295c78b753f76ae0e97fc5e08dfba15117205b8051301d6a30aedb"
     },
     {
       "expect_diagnostic_substring": null,
@@ -818,7 +818,7 @@
           },
           "threadId": "thread-demo-1",
           "turnId": "turn-1",
-          "unexpectedSecret": "sk-live-EXAMPLESECRETVALUE99"
+          "unexpectedSecret": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
         }
       }
     },
@@ -885,7 +885,7 @@
           "item": {
             "id": "msg-1",
             "phase": "final_answer",
-            "text": "Secret plan: exfiltrate token=sk-live-EXAMPLESECRETVALUE99",
+            "text": "Secret plan: exfiltrate token=sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->",
             "type": "agentMessage"
           },
           "threadId": "thread-demo-1",
@@ -924,12 +924,12 @@
           ],
           "command": "curl https://example.invalid -H 'Authorization: Bearer sk-live-EXAMPLESECRETVALUE99'",
           "credentials": {
-            "token": "sk-live-EXAMPLESECRETVALUE99"
+            "token": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
           },
           "cwd": "/home/example-user/project",
           "env": {
             "HOME": "/home/example-user",
-            "OPENAI_API_KEY": "sk-live-EXAMPLESECRETVALUE99"
+            "OPENAI_API_KEY": "sk-live-EXAMPLESECRETVALUE99 <!-- content-guard: allow bare-token-prefix -->"
           },
           "headers": {
             "Authorization": "Bearer sk-live-EXAMPLESECRETVALUE99",
@@ -1000,7 +1000,7 @@
           },
           "schema": "brigade.worker_event_scrubbed.v1",
           "schema_version": 1,
-          "source_digest": "2d0b3975ae86adb0ccbf88fd3ad99a8d7a3713f38c7c2a8b490fd7980e228c48",
+          "source_digest": "f39fdc0c28bd58a39ee8ad51de9b83d88ca7867f113c5c1a42a4775b3369d959",
           "transport": "codex-app-server"
         },
         {
@@ -1039,14 +1039,14 @@
           },
           "schema": "brigade.worker_event_scrubbed.v1",
           "schema_version": 1,
-          "source_digest": "2e039f1e09b76ea65dccd2b08c1c09edb091c408d7c431d8936482d0309f272f",
+          "source_digest": "8100fb1b69ffa74c0a3581fdf79c03b86a90be2ec9690522d6780759d06f7637",
           "transport": "codex-app-server"
         }
       ],
       "media_type": "application/vnd.brigade.worker-events.appserver.scrubbed+jsonl",
       "schema": "brigade.worker_event_stream_scrubbed.v1",
       "schema_version": 1,
-      "source_digest": "d15470bade397ca60083e14139243253c3e5c0db234267c36abf34247843cc0f",
+      "source_digest": "05a2bc2c9af63827c93f918fa5dd5d97cf6ed2eaffc906c50d3b8fa59698ac63",
       "transport": "codex-app-server"
     }
   },

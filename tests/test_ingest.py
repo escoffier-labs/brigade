@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -1091,13 +1092,16 @@ def test_promote_mints_stable_id_for_new_card_and_preserves_it_on_update(tmp_tar
     assert "replacement body" in updated
 
 
-def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys):
+@pytest.mark.parametrize("archive_collision", [False, True])
+def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys, archive_collision):
     """Exact content match reinforces the existing card instead of filing a duplicate."""
     from datetime import date
 
     from brigade.card_fingerprint import content_fingerprint
 
     inbox = _seed(tmp_target)
+    if archive_collision:
+        (inbox / "processed/2026-05-13-1100-dup.md").write_text("Previously processed handoff.\n")
     body = (
         "Always flush the shared widget cache after a schema migration completes "
         "otherwise application reads return stale rows for several minutes"
@@ -1167,6 +1171,18 @@ def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, cap
     assert f"fingerprint: {fp}" in text
     assert "2026-05-13-1100-dup.md" in text
     assert body in text
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "reinforced"
+        assert rows[0]["similarity"] == 1.0
+        assert rows[0]["card_path"] == "memory/cards/widget-cache.md"
+        evidence = tmp_target / rows[0]["evidence_id"]
+        assert evidence.parent == inbox / "processed"
+        assert body in evidence.read_text()
 
 
 def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: Path, capsys):
@@ -1195,6 +1211,10 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
         "2026-05-13-1101-near.md",
         _card_handoff_body("schema-flush-v2.md", "schema-flush-v2", reworded),
     )
+    assert ingest_mod.run(target=tmp_target, dry_run=True, promote_cards=True, route_documents=True) == 0
+    assert not (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").exists()
+    assert existing.read_text() == before
+    capsys.readouterr()
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
     assert "near-match reinforce proposal: memory/cards/schema-flush.md" in out
@@ -1203,6 +1223,17 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
     assert not (tmp_target / "memory" / "cards" / "schema-flush-v2.md").exists()
     inbox_files = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
     assert len(inbox_files) == 1
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "near-match"
+        assert rows[0]["card_path"] == "memory/cards/schema-flush.md"
+        assert rows[0]["evidence_id"].endswith("2026-05-13-1101-near.md")
+        assert tmp_target / rows[0]["evidence_id"] == inbox_files[0]
+        assert 0.9 <= rows[0]["similarity"] < 1
 
 
 def test_create_card_below_threshold_still_promotes(tmp_target: Path):
@@ -1290,6 +1321,13 @@ def test_create_card_opposite_polarity_near_match_flags_contradiction(tmp_target
     assert "contradiction candidate vs memory/cards/foo-flag.md" in out
     assert "opposite polarity" in out
     assert "reinforce →" not in out
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "opposite-polarity"
     assert existing.read_text() == before
     assert not (tmp_target / "memory" / "cards" / "foo-flag-v2.md").exists()
 
@@ -1442,3 +1480,638 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
     assert not (tmp_target / "memory/cards/busy.md").exists()
     assert not (inbox / "processed/busy-publication.md").exists()
     assert not list((tmp_target / "memory/review-inbox").glob("*.md"))
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
+def test_reinforcement_keeps_pending_near_match_in_care_queue(tmp_target, monkeypatch, capsys):
+    from datetime import date, datetime, timezone
+
+    from brigade import memory_cmd, memory_evidence_log
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class LocalDate(date):
+        @classmethod
+        def today(cls):
+            return Clock.current.date()
+
+    monkeypatch.setattr(memory_evidence_log, "datetime", Clock)
+    monkeypatch.setattr(ingest_mod, "date", LocalDate)
+    inbox = _seed(tmp_target)
+    card = tmp_target / "memory/cards/example.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    body = "Always flush the shared widget cache after every schema migration completes to avoid stale application rows"
+    card.write_text(f"---\ntopic: example\nlast_reviewed: 2026-10-01\n---\n\n# example\n\n{body}\n")
+    near = "pending-near.md"
+    _write_handoff(inbox, near, _card_handoff_body("near.md", "example", body.replace("Always", "Always please")))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    initial = json.loads(capsys.readouterr().out)
+    pending = [issue for issue in initial["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending) == 1
+    evidence = list((tmp_target / "memory/handoff-inbox").glob(f"*{near}"))
+    assert len(evidence) == 1
+    assert pending[0]["evidence_references"] == [evidence[0].relative_to(tmp_target).as_posix()]
+
+    Clock.current = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+    _write_handoff(inbox, "exact.md", _card_handoff_body("duplicate.md", "example", body))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert "last_reviewed: 2026-10-12" in card.read_text()
+    before = card.read_bytes(), card.stat().st_mtime_ns
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    pending_after = [issue for issue in payload["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending_after) == 1
+    assert pending_after[0]["evidence_references"] == pending[0]["evidence_references"]
+    assert (card.read_bytes(), card.stat().st_mtime_ns) == before
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
+@pytest.mark.parametrize("kind", ["near-match", "reinforced"])
+def test_external_handoff_logs_identifier_without_evidence_body(tmp_path, kind):
+    owner, source = tmp_path / "owner", tmp_path / "writer"
+    _seed(owner)
+    inbox = _seed(source)
+    body = "Always flush the shared widget cache after every schema migration completes to avoid stale application rows"
+    card = owner / "memory/cards/example.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(f"---\ntopic: example\n---\n\n# example\n\n{body}\n")
+    before = card.read_bytes()
+    handoff = _write_handoff(
+        inbox,
+        "external-evidence.md",
+        textwrap.dedent(
+            _card_handoff_body(
+                "new.md", "example", body.replace("Always", "Always please") if kind == "near-match" else body
+            )
+        ).replace(
+            "## Recommended memory action", "## Evidence\n\n- Private evidence body.\n\n## Recommended memory action"
+        ),
+    )
+    assert ingest_mod.ingest_into(source=source, owner=owner, stats=ingest_mod.IngestStats(), promote_cards=True) == 0
+    rows = [
+        json.loads(line) for line in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["kind"] == kind
+    assert not handoff.exists()
+    ledger = (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text()
+    assert "Private evidence body." not in ledger
+    assert source.as_posix() not in ledger
+    if kind == "near-match":
+        evidence = owner / rows[0]["evidence_id"]
+        assert evidence.parent == owner / "memory/handoff-inbox"
+        assert "Private evidence body." in evidence.read_text()
+        assert card.read_bytes() == before
+    else:
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", rows[0]["evidence_id"])
+        assert "Private evidence body." in (inbox / "processed" / handoff.name).read_text()
+
+
+_PLAIN_HANDOFF = """\
+# Memory Handoff
+
+## Recommended memory action
+no-card
+
+## Summary
+plain handoff
+"""
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def test_ingest_leaves_git_tracked_handoffs_in_place(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    tracked = _write_handoff(inbox, "2026-10-20-0900-tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_target, "add", "-f", "--", str(tracked.relative_to(tmp_target)))
+    _git(tmp_target, "commit", "-q", "-m", "track handoff")
+    untracked = _write_handoff(inbox, "2026-10-20-0901-untracked.md", _PLAIN_HANDOFF)
+
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert tracked.is_file()
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+    assert stats.processed == 1
+    assert stats.skipped == 1
+    assert any("tracked by git" in line and tracked.name in line for line in stats.actions)
+    status = _git(tmp_target, "status", "--porcelain", "--", str(tracked.relative_to(tmp_target)))
+    assert status.stdout == ""
+
+
+def test_ingest_tracking_check_does_not_run_fsmonitor_hook(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    hook = tmp_path / "fsmonitor-hook"
+    marker = tmp_path / "fsmonitor-hook.called"
+    hook.write_text('#!/bin/sh\nprintf ran > "$0.called"\n', encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    _git(tmp_path, "config", "core.fsmonitor", hook.as_posix())
+
+    handoffs, tracked_handoffs = ingest_mod._list_handoffs(inbox)
+
+    assert handoffs == []
+    assert tracked_handoffs == [tracked]
+    assert not marker.exists()
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+    assert tracked.is_file()
+    assert not marker.exists()
+
+
+def test_archive_refuses_git_tracked_handoff(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+
+    assert tracked.is_file()
+    assert not (inbox / "processed" / "tracked.md").exists()
+
+
+@pytest.mark.parametrize("outer_repo", [False, True], ids=["standalone", "nested"])
+@pytest.mark.parametrize("broken_marker", ["gitdir-file", "incomplete-directory"])
+def test_archive_preserves_handoff_with_broken_git_metadata(tmp_path: Path, capsys, outer_repo, broken_marker):
+    if outer_repo:
+        _git(tmp_path, "init", "-q")
+    repo = tmp_path / "inner"
+    inbox = repo / "inbox"
+    inbox.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(repo, "add", "--", "inbox/tracked.md")
+    marker = repo / ".git"
+    if broken_marker == "gitdir-file":
+        marker.rename(repo / "saved-git")
+        marker.write_text("gitdir: missing-metadata\n", encoding="utf-8")
+    else:
+        # Git discovery can skip this incomplete repository for an outer one.
+        (marker / "HEAD").unlink()
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+    assert "git tracking check failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gitdir_kind", ["separate", "linked", "configured-root"])
+def test_tracking_check_supports_gitdir_files(tmp_path: Path, gitdir_kind):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if gitdir_kind != "linked":
+        _git(repo, "init", "-q")
+        (repo / ".git").rename(tmp_path / "metadata")
+        (repo / ".git").write_text("gitdir: ../metadata\n", encoding="utf-8")
+        if gitdir_kind == "configured-root":
+            _git(repo, "config", "core.worktree", str(tmp_path))
+    else:
+        _git(repo, "init", "-q")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "seed worktree")
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "-q", "-b", "linked", str(linked))
+        repo = linked
+    inbox = repo / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "tracked note.md", _PLAIN_HANDOFF)
+    # update-index stages inside this marker even when core.worktree is above it.
+    _git(repo, "update-index", "--add", "--", "inbox/tracked note.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
+@pytest.mark.parametrize(
+    "worktree_name",
+    [
+        "wörk",
+        pytest.param(
+            "tree ",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Win32 paths do not preserve trailing directory spaces"),
+        ),
+    ],
+)
+def test_tracking_check_preserves_configured_worktree_path(tmp_path: Path, worktree_name: str):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    worktree = repo / worktree_name
+    inbox = worktree / "inbox"
+    inbox.mkdir(parents=True)
+    # The trimmed sibling makes whitespace loss a false negative, not an error.
+    (repo / "tree" / "inbox").mkdir(parents=True)
+    _git(repo, "config", "core.worktree", str(worktree))
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(worktree, "add", "--", "inbox/tracked.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
+def test_ingest_without_git_binary_archives_as_before(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0902-nogit.md", _PLAIN_HANDOFF)
+
+    def _missing_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _missing_git)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).is_file()
+    assert stats.processed == 1
+
+
+def test_archive_treats_failed_tracking_check_as_tracked(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "unknown.md", _PLAIN_HANDOFF)
+
+    def _broken_git(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: detected dubious ownership")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _broken_git)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+
+
+def test_ingest_skips_handoff_tracked_after_listing(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0903-race.md", _PLAIN_HANDOFF)
+    calls: list[Path] = []
+
+    def _tracked_after_listing(directory: Path):
+        calls.append(directory)
+        return set() if len(calls) == 1 else {handoff.name}
+
+    monkeypatch.setattr(ingest_mod, "_git_tracked_names", _tracked_after_listing)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert stats.skipped == 1
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("tracking_change", ["tracked", "unverifiable"])
+def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monkeypatch, tracking_change):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    dest = tmp_target / "TOOLS.md"
+    dest.write_bytes(b"# TOOLS.md\n\nExisting runbook.\n")
+    before = dest.read_bytes()
+    handoff = _write_handoff(
+        inbox,
+        "late-tracking.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        - Run the weekly check.
+        """,
+    )
+    original = handoff.read_bytes()
+    real_parse = ingest_mod.parse
+
+    with monkeypatch.context() as patch:
+
+        def change_tracking_after_listing(path: Path):
+            sections = real_parse(path)
+            if tracking_change == "tracked":
+                _git(tmp_target, "add", "-f", "--", str(path.relative_to(tmp_target)))
+            else:
+
+                def broken_git(cmd, **kwargs):
+                    return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: index unavailable\n")
+
+                patch.setattr(ingest_mod.subprocess, "run", broken_git)
+            return sections
+
+        patch.setattr(ingest_mod, "parse", change_tracking_after_listing)
+        stats = ingest_mod.IngestStats()
+        assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats, route_documents=True) == 0
+
+    assert dest.read_bytes() == before
+    assert handoff.read_bytes() == original
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert not list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert stats.skipped == 1
+    assert stats.routed == stats.inboxed == 0
+    assert any(handoff.name in action and "tracking unverifiable" in action for action in stats.actions)
+
+    if tracking_change == "tracked":
+        _git(tmp_target, "rm", "--cached", "-f", "--", str(handoff.relative_to(tmp_target)))
+    retry_stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=retry_stats, route_documents=True) == 0
+    appended = b"\n\n- Run the weekly check.\n".replace(b"\n", os.linesep.encode("ascii"))
+    assert dest.read_bytes() == before + appended
+    assert retry_stats.routed == 1
+    assert retry_stats.skipped == retry_stats.inboxed == 0
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).read_bytes() == original
+
+
+def test_ingest_leaves_inbox_in_place_when_tracking_check_fails(tmp_target: Path, monkeypatch, capsys):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0904-unknown.md", _PLAIN_HANDOFF)
+
+    def _broken_git(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: detected dubious ownership\n")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _broken_git)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert stats.processed == 0
+    assert stats.skipped == 1
+    err = capsys.readouterr().err
+    assert "git tracking check failed" in err
+    assert "dubious ownership" in err
+
+
+def test_archive_ignores_git_ceiling_directories(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+    assert tracked.is_file()
+
+
+def test_tracking_check_ignores_git_object_directory(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", ".git/objects")
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == []
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+
+
+@pytest.mark.parametrize("inbox_name", ["inbox", "in[box]"])
+def test_tracking_check_preserves_handoffs_in_every_containing_repo(tmp_path: Path, inbox_name: str):
+    inbox = tmp_path / inbox_name
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    outer_tracked = _write_handoff(inbox, "outer.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "--literal-pathspecs", "add", "--", f"{inbox_name}/outer.md")
+    # Initializing the nested repo must not hide the outer index's staged file.
+    _git(inbox, "init", "-q")
+    inner_tracked = _write_handoff(inbox, "inner.md", _PLAIN_HANDOFF)
+    _git(inbox, "add", "--", "inner.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert set(tracked) == {outer_tracked, inner_tracked}
+    for handoff in tracked:
+        with pytest.raises(ingest_mod.TrackedHandoffError):
+            ingest_mod._archive(handoff, inbox / "processed")
+        assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
+@pytest.mark.parametrize("literal_env", [None, "1"])
+@pytest.mark.parametrize("directory_names", [("Inbox", "inbox"), ("ÄInbox", "äinbox")])
+def test_tracking_check_matches_directory_case_alias(tmp_path: Path, monkeypatch, literal_env, directory_names):
+    indexed_name, actual_name = directory_names
+    inbox = tmp_path / indexed_name
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "core.ignorecase", "true")
+    _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", f"{indexed_name}/tracked.md")
+    unrelated = tmp_path / "deleted-directory"
+    unrelated.mkdir()
+    (unrelated / "note.txt").write_text("unrelated tracked file")
+    _git(tmp_path, "add", "--", "deleted-directory/note.txt")
+    (unrelated / "note.txt").unlink()
+    unrelated.rmdir()
+    renamed = tmp_path / actual_name
+    inbox.rename(renamed)
+    if not inbox.exists():
+        # Model case-insensitive directory lookup on case-sensitive hosts.
+        inbox.symlink_to(renamed, target_is_directory=True)
+    handoff = renamed / "tracked.md"
+    untracked = _write_handoff(renamed, "untracked.md", _PLAIN_HANDOFF)
+    if literal_env is None:
+        monkeypatch.delenv("GIT_LITERAL_PATHSPECS", raising=False)
+    else:
+        monkeypatch.setenv("GIT_LITERAL_PATHSPECS", literal_env)
+
+    handoffs, tracked = ingest_mod._list_handoffs(renamed)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, renamed / "processed")
+    assert handoff.is_file()
+    assert not (renamed / "processed").exists()
+    ingest_mod._archive(untracked, renamed / "processed")
+    assert not untracked.exists()
+    assert (renamed / "processed" / untracked.name).is_file()
+
+
+def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, monkeypatch):
+    # A hardlink stands in for a case-insensitive filesystem, where the index
+    # spelling `Tracked.md` and the listed `tracked.md` name the same file.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    if (inbox / "Tracked.md").exists():
+        pytest.skip("hardlink stand-in requires case-sensitive paths; this filesystem already aliases case")
+    os.link(handoff, inbox / "Tracked.md")
+    monkeypatch.setattr(ingest_mod, "_git_tracked_names", lambda directory: {"Tracked.md"})
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoff in tracked
+    assert handoff not in handoffs
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+
+
+def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path: Path, monkeypatch, capsys):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    original = handoff.read_bytes()
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    stat = Path.stat
+    injected = False
+
+    def fail_once(path, *args, **kwargs):
+        nonlocal injected
+        if path == handoff and not injected:
+            injected = True
+            raise OSError(errno.EIO, "identity lookup failed", str(path))
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_once)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert injected
+    assert handoff.read_bytes() == original
+    assert not (inbox / "processed").exists()
+    assert _git(tmp_path, "status", "--porcelain").stdout == "A  inbox/tracked.md\n"
+    stderr = capsys.readouterr().err
+    assert "git tracking check failed" in stderr
+    assert "identity lookup failed" in stderr
+
+
+@pytest.mark.parametrize("indexed_name", ["tracked.md", "Tracked.md"])
+def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_path: Path, monkeypatch, indexed_name):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    indexed = _write_handoff(inbox, indexed_name, _PLAIN_HANDOFF)
+    original = indexed.read_bytes()
+    _git(tmp_path, "add", "--", f"inbox/{indexed_name}")
+    handoff = inbox / "tracked.md"
+    if indexed != handoff:
+        indexed.rename(handoff)
+    index_before = _git(tmp_path, "ls-files", "--stage", "-z").stdout
+    status_before = _git(tmp_path, "status", "--porcelain").stdout
+    stat = Path.stat
+    injected = False
+
+    def delete_and_recreate_once(path, *args, **kwargs):
+        nonlocal injected
+        if path == indexed and not injected:
+            injected = True
+            handoff.unlink()
+            try:
+                # Model the indexed spelling resolving to the case alias.
+                return stat(handoff, *args, **kwargs)
+            finally:
+                handoff.write_bytes(original)
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", delete_and_recreate_once)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert injected
+    assert handoff.read_bytes() == original
+    assert _git(tmp_path, "ls-files", "--stage", "-z").stdout == index_before
+    assert _git(tmp_path, "status", "--porcelain").stdout == status_before
+    assert not (inbox / "processed").exists()
+
+
+def test_archive_ignores_missing_indexed_entry(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    missing = _write_handoff(inbox, "missing.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/missing.md")
+    missing.unlink()
+    handoff = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    ingest_mod._archive(handoff, inbox / "processed")
+
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).read_text() == _PLAIN_HANDOFF
+
+
+@pytest.mark.parametrize("discovery", [None, "0"])
+def test_archive_discovers_tracked_handoff_across_filesystem_boundary(tmp_path: Path, monkeypatch, discovery):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    if discovery is None:
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+    else:
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", discovery)
+    run = subprocess.run
+
+    def mounted_inbox(cmd, **kwargs):
+        # Model Git's mount boundary without requiring privileged mounts.
+        if kwargs["env"].get("GIT_DISCOVERY_ACROSS_FILESYSTEM") != "true":
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout=b"", stderr=b"fatal: not a git repository (or any parent up to mount point)"
+            )
+        return run(cmd, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", mounted_inbox)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()

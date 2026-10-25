@@ -190,6 +190,22 @@ def test_infrastructure_only_incomplete_run_is_neutral_with_evidence_ref(tmp_pat
     assert payload["record"]["evidence_ref"] == str(run_json)
 
 
+@pytest.mark.parametrize("with_worker_failure", [False, True], ids=["status-only", "model-output"])
+def test_non_infrastructure_incomplete_run_scores_negative(tmp_path, capsys, with_worker_failure):
+    run_json = _write_run_receipt(tmp_path, run_id="incomplete-run", status="incomplete")
+    if with_worker_failure:
+        _write_worker_results(tmp_path, "incomplete-run", results=[_legacy_model_output_worker()])
+
+    assert (
+        outcome_cmd.capture(target=tmp_path, artifact_id="skill-x", run_receipt="incomplete-run", json_output=True) == 0
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["record"]["signal_value"] == -1
+    assert payload["record"]["source"] == "run"
+    assert payload["record"]["evidence_ref"] == str(run_json)
+
+
 def test_verify_failure_remains_negative_with_verify_source(tmp_path, capsys):
     _write_verify_receipt(tmp_path, run_id="verify-failed", status="failed")
 

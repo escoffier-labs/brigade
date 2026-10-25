@@ -18,7 +18,7 @@ PLANTED_EMAIL = "planted.canary9931@probe-corp-canary.com"
 PLANTED_IP = "192.168.99.70"
 PLANTED_BEARER = "zqXK9tPLANTEDBEARER7731aabbccddeeff0011"
 
-FAKE_SECRET = 'api_key="sk-test-abcdefghijklmnopqrstuv"'
+FAKE_SECRET = 'api_key="sk-test-abcdefghijklmnopqrstuv"'  # content-guard: allow bare-token-prefix
 FAKE_EMAIL = "operator@contoso.example"
 FAKE_IPV4 = "10.0.0.1"
 

@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from brigade import run_events, run_journal, runguard
+from brigade import dirfd, run_events, run_journal, runguard
 from brigade.run_events import _HEX64, _bound
 
 CHECKPOINT_EVENT_TYPE = "run.snapshot.checkpointed"
@@ -44,6 +44,7 @@ _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind", "pairing_key"})
 # the validation logic now treats body_kind as optional.
 _CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
 _CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
+_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX = "checkpoint:fact:"
 _CHECKPOINT_TRUNCATION_KEYS = frozenset({"truncated", "oversized_paths"})
 _CHECKPOINT_ASSET_SUFFIXES = frozenset(
     {
@@ -721,7 +722,7 @@ def _cleanup_temp(
         if parent_fd is None:
             os.unlink(tmp_path)
         else:
-            os.unlink(tmp_path.name, dir_fd=parent_fd)
+            dirfd.unlink_child(parent_fd, tmp_path.name)
     except FileNotFoundError:
         # Preserve Path.unlink(missing_ok=True) semantics while using the
         # same os.unlink boundary on every supported Python version.
@@ -758,9 +759,12 @@ def _abort_with_cleanup(
 
 
 def _descriptor_relative_publish_available() -> bool:
-    """Whether link/unlink can be issued relative to a held directory descriptor."""
-    supports: frozenset[Any] = frozenset(getattr(os, "supports_dir_fd", ()))
-    return os.link in supports and os.unlink in supports
+    """Whether no-replace publication can use a held directory descriptor."""
+    if not dirfd.available():
+        return False
+    # POSIX bound publication links descriptor-relative before unlinking the
+    # temp, so it also needs dir_fd support for os.link.
+    return not dirfd.posix_available() or os.link in os.supports_dir_fd
 
 
 def _bound_checkpoint_dir_fd(cp_dir: Path) -> int | None:
@@ -788,8 +792,9 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
 
     Creates the 0o700 ``recovery-checkpoints`` directory (no-follow mkdir),
     writes to a 0o600 same-directory temp, fsyncs, publishes by atomic
-    no-replace ``os.link``, applies POSIX-guarded directory fsync, and unlinks
-    the temp followed by another directory fsync. On ``EEXIST`` the existing
+    no-replace publication (a held-parent rename when bound, otherwise
+    ``os.link``), applies POSIX-guarded directory fsync, and cleans up the
+    temp followed by another directory fsync. On ``EEXIST`` the existing
     final file is opened through the same no-follow regular single-link fd
     hardening and required to be byte and digest equal (a safe matching
     collision is a no-op that still unlinks the temp and fsyncs the
@@ -826,18 +831,24 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
             tmp_path = Path(tmp_name)
         else:
             tmp_path = cp_dir / f".checkpoint.{uuid4().hex}.tmp"
-            fd = os.open(
+            fd = dirfd.open_child_file(
+                parent_fd,
                 tmp_path.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | getattr(os, "O_BINARY", 0),
                 run_journal._FILE_MODE,
-                dir_fd=parent_fd,
             )
     except OSError as exc:
         raise CheckpointError(_bound("cannot create checkpoint temp"), category="temp-create") from exc
     primary: CheckpointError | None = None
     try:
         try:
-            run_journal._chmod_fd_or_path(fd, tmp_path, run_journal._FILE_MODE)
+            if parent_fd is None:
+                run_journal._chmod_fd_or_path(fd, tmp_path, run_journal._FILE_MODE)
+            elif run_journal._HAS_FCHMOD:
+                os.fchmod(fd, run_journal._FILE_MODE)
+            # Bound exclusive creation already requests POSIX 0600. On NT,
+            # inherit the held private parent's ACL; never resolve tmp_path
+            # again for mode enforcement after opening through parent_fd.
         except run_journal.RunJournalError as exc:
             raise CheckpointError(_bound("checkpoint temp chmod failed"), category="chmod") from exc
         except OSError as exc:
@@ -864,12 +875,16 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
     try:
         if parent_fd is None:
             os.link(tmp_path, final_path)
+        elif dirfd.posix_available():
+            # Non-consuming link: the temp name stays until the new entry is
+            # made durable by the directory fsync below.
+            dirfd.link_child(parent_fd, tmp_path.name, final_path.name)
         else:
-            os.link(
+            dirfd.replace_children(
+                parent_fd,
                 tmp_path.name,
                 final_path.name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
+                replace=False,
             )
     except FileExistsError:
         try:
@@ -917,7 +932,12 @@ def _checkpoint_payload(
     }
     if body_kind is not None:
         payload["body_kind"] = body_kind
-    if pairing_key is not None:
+    # Existing readers interpret payload pairing_key as a dispatch/task key.
+    # Generic request identities live in the checkpoint idempotency key so
+    # its payload remains readable by those readers and the shadow projector.
+    if pairing_key is not None and (
+        paired_event_type in _DISPATCH_FACT_EVENT_TYPES or paired_event_type in run_events._TASK_EVENT_TYPES
+    ):
         payload["pairing_key"] = pairing_key
     return payload
 
@@ -950,6 +970,15 @@ def _checkpoint_idempotency_key(
             paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
             return f"{prefix}:{sha}:{paired_digest}"
         return f"{prefix}:{sha}:{paired[:budget]}"
+
+    if paired_event_type not in _DISPATCH_FACT_EVENT_TYPES and paired_event_type not in run_events._TASK_EVENT_TYPES:
+        # Preserve existing dispatch/task keys, including crash-window retry
+        # identities. New generic keys hash the complete identity rather than
+        # truncating its request digest to fit the envelope's key limit.
+        identity = run_events.canonical_bytes(
+            {"sha256": sha, "paired_event_type": paired, "pairing_key": pairing_key, "body_kind": body_kind}
+        )
+        return f"{_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX}{hashlib.sha256(identity).hexdigest()}"
 
     key = f"{prefix}:{sha}:{paired}:{pairing_key}"
     if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
@@ -1245,6 +1274,63 @@ def _paired_event_derived_status(event: "run_journal.RunEvent") -> str | None:
     return derived if derived is not None else payload_status
 
 
+_CONTROL_SUFFIX_TYPES = frozenset({"control.requested", "control.observed", "control.failed"})
+
+
+def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["run_journal.RunEvent"]) -> None:
+    """Check control semantics separately from the reader's envelope validation.
+
+    A request may precede the latest checkpoint, and an unfinished request is
+    legitimately indeterminate. A terminal receipt must follow its matching
+    request exactly once. Neither acknowledgment nor failure is task completion.
+    """
+    controls = [event for event in suffix if event.event_type in _CONTROL_SUFFIX_TYPES]
+    if not controls:
+        return
+    request_ids = {event.payload.get("request_id") for event in controls}
+    requested: dict[str, run_journal.RunEvent] = {}
+    terminal: set[str] = set()
+    for event in events:
+        if event.event_type not in _CONTROL_SUFFIX_TYPES or event.payload.get("request_id") not in request_ids:
+            continue
+        payload = event.payload
+        request_id = payload.get("request_id")
+        op = payload.get("op")
+        valid = (
+            isinstance(request_id, str)
+            and bool(request_id)
+            and op in {"steer", "interrupt"}
+            and event.idempotency_key == f"{event.event_type}:{request_id}"
+            and all(isinstance(payload[key], str) for key in ("worker", "turn_id") if key in payload)
+        )
+        if not valid:
+            raise CheckpointError("invalid control suffix identity", category="control-suffix")
+        assert isinstance(request_id, str)
+        if event.event_type == "control.requested":
+            text_digest = payload.get("text_digest")
+            if (
+                request_id in requested
+                or not isinstance(text_digest, str)
+                or (text_digest != "" and not _HEX64.fullmatch(text_digest))
+            ):
+                raise CheckpointError("invalid control suffix request", category="control-suffix")
+            requested[request_id] = event
+        else:
+            if event.event_type == "control.observed":
+                detail = payload.get("detail")
+                if not isinstance(detail, str) or not detail or len(detail) > run_events.MAX_PAYLOAD_STR_LEN:
+                    raise CheckpointError("invalid control suffix observation", category="control-suffix")
+            prior = requested.get(request_id)
+            if (
+                prior is None
+                or request_id in terminal
+                or prior.payload["op"] != op
+                or ("worker" in prior.payload and prior.payload["worker"] != payload.get("worker"))
+            ):
+                raise CheckpointError("control suffix terminal has no matching request", category="control-suffix")
+            terminal.add(request_id)
+
+
 def _verify_coverage(
     events: list["run_journal.RunEvent"],
     latest: "run_journal.RunEvent",
@@ -1257,29 +1343,46 @@ def _verify_coverage(
     ``event_type`` equals the checkpoint's ``paired_event_type`` and whose
     derived status equals the status in the validated checkpoint bytes.
     When ``paired_event_type`` is null, the checkpoint covers only itself
-    as the tail. Anything else fails uncovered-tail. ``checkpoint_obj`` is
+    as the tail. Trailing redaction anchors, status-neutral cassette references,
+    and semantically verified control facts do not require checkpoint coverage.
+    Anything else fails uncovered-tail. ``checkpoint_obj`` is
     the parsed validated checkpoint bytes; its ``status`` is the authoritative
     status the paired event must derive to.
     """
     paired_event_type = latest.payload.get("paired_event_type")
     pairing_key = latest.payload.get("pairing_key")
+    generic_identity = latest.idempotency_key.startswith(_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
     tail = events[-1]
-    trailing_redaction_anchors = 0
-    while tail.event_type == "run.redaction.recorded":
-        trailing_redaction_anchors += 1
-        if trailing_redaction_anchors == len(events):
+    trailing_neutral_facts = 0
+    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"} | _CONTROL_SUFFIX_TYPES and not (
+        (pairing_key is not None or generic_identity)
+        and tail.sequence == latest.sequence + 1
+        and tail.event_type == paired_event_type
+    ):
+        trailing_neutral_facts += 1
+        if trailing_neutral_facts == len(events):
             raise CheckpointError(
                 _bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail"
             )
-        tail = events[-1 - trailing_redaction_anchors]
+        tail = events[-1 - trailing_neutral_facts]
+    if trailing_neutral_facts:
+        _verify_control_suffix(events, events[-trailing_neutral_facts:])
     if latest.sequence == tail.sequence:
-        # A dispatch pairing key promises a specific identity-bearing fact.
+        # A pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery
         # must surface the incomplete pair instead of treating the checkpoint
         # as covered.
-        if pairing_key is not None:
+        if pairing_key is not None or generic_identity:
             raise CheckpointError(
-                _bound("dispatch checkpoint pair is incomplete"),
+                _bound(
+                    "task checkpoint pair is incomplete"
+                    if paired_event_type in run_events._TASK_EVENT_TYPES
+                    else (
+                        "dispatch checkpoint pair is incomplete"
+                        if paired_event_type in _DISPATCH_FACT_EVENT_TYPES
+                        else "generic checkpoint pair is incomplete"
+                    )
+                ),
                 category="incomplete-pair",
             )
         # Legacy lifecycle checkpoints remain recoverable at tail after a
@@ -1297,6 +1400,19 @@ def _verify_coverage(
     paired = following[0]
     if paired.event_type != paired_event_type:
         raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    if paired.event_type in run_events._TASK_EVENT_TYPES:
+        if pairing_key is None or pairing_key != paired.request_digest:
+            raise CheckpointError(_bound("checkpoint task pairing identity does not match event"), category="pairing")
+        return
+    if generic_identity:
+        expected_key = _checkpoint_idempotency_key(
+            latest.payload["sha256"],
+            paired_event_type=paired.event_type,
+            body_kind=latest.payload.get("body_kind"),
+            pairing_key=paired.request_digest,
+        )
+        if latest.idempotency_key != expected_key:
+            raise CheckpointError(_bound("checkpoint pairing identity does not match event"), category="pairing")
     if pairing_key is not None:
         seat = paired.payload.get("seat")
         attempt = paired.payload.get("attempt")
@@ -1348,8 +1464,9 @@ def recover_from_checkpoint(
     or exactly one immediately following event at N+1 whose ``event_type``
     equals the checkpoint's ``paired_event_type`` and whose derived status
     equals the status in the validated checkpoint bytes. A null
-    ``paired_event_type`` covers only checkpoint-at-tail. Anything else
-    fails uncovered-tail.
+    ``paired_event_type`` covers only checkpoint-at-tail. Trailing redaction
+    anchors and status-neutral cassette references are allowed after either
+    covered tail. Anything else fails uncovered-tail.
 
     Restore-byte selection (issue #568 slice 6): when the latest checkpoint
     payload carries ``body_kind`` ``"base-stripped"`` and the validated

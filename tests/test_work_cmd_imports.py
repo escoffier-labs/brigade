@@ -484,6 +484,173 @@ def test_work_import_ingest_preserves_identity_after_text_redaction(tmp_path, ca
             assert sensitive.encode() not in path.read_bytes()
 
 
+def test_work_import_ingest_dedupes_legacy_redacted_text_with_raw_acceptance(tmp_path, capsys, monkeypatch):
+    from brigade.work_cmd.ledger import tasks_plans
+
+    _init_git_repo(tmp_path)
+    sensitive = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    acceptance = [f"Notify {sensitive}"]
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps({"text": f"Contact {sensitive}", "kind": "task", "acceptance": acceptance}) + "\n"
+    )
+
+    # Reproduce the old writer through public ingest, including its real proof.
+    with monkeypatch.context() as legacy_writer:
+        legacy_writer.setattr(tasks_plans, "_import_field_redaction", lambda source, origin: None)
+        assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    original = first["imports"][0]
+    assert sensitive not in original["text"]
+    assert original["metadata"]["provenance"]["redaction"]["status"] == "redacted"
+    assert original["acceptance"] == acceptance
+    assert work_cmd.ledger._has_persisted_import_proof(original, target=tmp_path)
+    inbox_before = work_cmd.helpers._imports_path(tmp_path).read_bytes()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 0
+    assert repeated["skipped"] == 1
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["imports"] == [original]
+    assert work_cmd.helpers._imports_path(tmp_path).read_bytes() == inbox_before
+
+
+def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    email = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    address = "10.20.30.40"  # <!-- content-guard: allow private-ipv4 --> synthetic fixture
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the deployment notes",
+                "kind": "task",
+                "acceptance": [f"Notify {email} after the change", f"Host {address} answers health checks"],
+                "metadata": {
+                    "owner": f"Contact {email}",
+                    email: "keyed by an address",
+                    "nested": {"hosts": [f"node at {address}"], address: 1},
+                    "count": 3,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert email not in json.dumps(item)
+    assert address not in json.dumps(item)
+    assert len(item["acceptance"]) == 2
+    assert item["metadata"]["count"] == 3
+    assert item["metadata"]["provenance"]["redaction"]["status"] == "clean"
+    assert item["metadata"]["field_redaction"]["status"] == "redacted"
+    assert item["metadata"]["field_redaction"]["count"] >= 4
+    inbox_directory = tmp_path / ".brigade" / "work" / "imports"
+    for path in inbox_directory.rglob("*"):
+        if path.is_file():
+            assert email.encode() not in path.read_bytes()
+            assert address.encode() not in path.read_bytes()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] == 1
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    ledger_text = (tmp_path / ".brigade" / "work" / "tasks.json").read_text()
+    assert email not in ledger_text
+    assert address not in ledger_text
+
+
+def test_work_import_ingest_preserves_colliding_redacted_metadata_keys(tmp_path, capsys):
+    from brigade import evidence_redaction
+
+    _init_git_repo(tmp_path)
+    first = "first@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    second = "second@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    colliding = {
+        first: f"first value {second}",
+        second: f"second value {first}",
+        "<PRIVATE_EMAIL>": "literal placeholder value",
+        "<PRIVATE_EMAIL>_2": "literal suffix value",
+        "field_redaction": {"note": f"caller verdict {first}"},
+        "field_redaction_2": {"note": f"occupied verdict suffix {second}"},
+    }
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Retain every metadata entry",
+                "kind": "task",
+                "metadata": {**colliding, "nested": dict(reversed(list(colliding.items())))},
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    persisted = json.loads(capsys.readouterr().out)["imports"][0]
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    task = json.loads(task_path.read_text())["tasks"][0]
+
+    expected_values = {
+        "first value <PRIVATE_EMAIL>",
+        "second value <PRIVATE_EMAIL>",
+        "literal placeholder value",
+        "literal suffix value",
+    }
+    for record in (persisted, task):
+        metadata = record["metadata"]
+        assert metadata["field_redaction_3"] == {"note": "caller verdict <PRIVATE_EMAIL>"}
+        assert metadata["field_redaction_2"] == {"note": "occupied verdict suffix <PRIVATE_EMAIL>"}
+        assert metadata["nested"]["field_redaction"] == metadata["field_redaction_3"]
+        assert metadata["nested"]["field_redaction_2"] == metadata["field_redaction_2"]
+        assert evidence_redaction.validate_redaction_record(metadata["field_redaction"]) == []
+        assert metadata["field_redaction"]["status"] == "redacted"
+        assert metadata["field_redaction"]["count"] > 0
+        for mapping in (metadata, metadata["nested"]):
+            retained = {key: value for key, value in mapping.items() if key.startswith("<PRIVATE_EMAIL>")}
+            assert len(retained) == 4
+            assert set(retained.values()) == expected_values
+        assert first not in json.dumps(record)
+        assert second not in json.dumps(record)
+    for path in (tmp_path / ".brigade" / "work" / "imports").rglob("*"):
+        if path.is_file():
+            assert first.encode() not in path.read_bytes()
+            assert second.encode() not in path.read_bytes()
+
+
+def test_work_import_ingest_field_redaction_failure_quarantines_row(tmp_path, capsys, monkeypatch):
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+
+    def failing_apply(text, *, origin, scanner=None):
+        if "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", failing_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps({"text": "Review the rollout", "kind": "task", "acceptance": ["force-scan-failure entry"]}) + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert item["acceptance"] == [evidence_redaction.FAILED_PLACEHOLDER]
+    assert item["metadata"]["field_redaction"]["status"] == "error"
+    assert item["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 2
+
+
 def test_work_import_ingest_keeps_distinct_raw_identities_after_redaction(tmp_path, capsys):
     _init_git_repo(tmp_path)
     import_file = tmp_path / "imports.jsonl"
@@ -4729,9 +4896,9 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
 
     With the inherited-lock inversion gone, the task-ledger lock is taken
     first by every legitimate caller, so holders never wait on inbox locks
-    and the former five-second wait/failure path is removed: a contended
-    acquisition fails closed immediately (typed ``RunLockError``, no spin),
-    and succeeds once the holder releases. The overlapping child therefore
+    and a contended scanner-child acquisition waits only until its bounded
+    deadline before failing closed with a typed ``RunLockError``. It succeeds
+    once the holder releases. The overlapping child therefore
     neither hangs nor breaks exclusion.
     """
     import os
@@ -4742,7 +4909,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
     acquired = tmp_path / "child.writer.acquired.marker"
     parent_holding = tmp_path / "parent.task.held.marker"
     parent_released = tmp_path / "parent.task.released.marker"
-    fast_failed = tmp_path / "child.task.fastfailed.marker"
+    refused = tmp_path / "child.task.refused.marker"
     done = tmp_path / "child.task.done.marker"
     script = (
         "import sys, time\n"
@@ -4750,11 +4917,13 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         f"sys.path.insert(0, {str(src_root)!r})\n"
         "from brigade import runguard\n"
         "from brigade.work_cmd import inbox_lock, ledger\n"
+        # Scale the existing child-only deadline, keeping real lock contention.
+        "ledger.SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS = 0.1\n"
         f"target = Path({str(tmp_path)!r})\n"
         f"acquired = Path({str(acquired)!r})\n"
         f"parent_holding = Path({str(parent_holding)!r})\n"
         f"parent_released = Path({str(parent_released)!r})\n"
-        f"fast_failed = Path({str(fast_failed)!r})\n"
+        f"refused = Path({str(refused)!r})\n"
         f"done = Path({str(done)!r})\n"
         "def wait_for(marker):\n"
         "    while not marker.exists():\n"
@@ -4766,7 +4935,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         "        with ledger._task_ledger_lock(target):\n"
         "            raise AssertionError('contended acquisition must fail')\n"
         "    except runguard.RunLockError:\n"
-        "        fast_failed.write_text('1')\n"
+        "        refused.write_text('1')\n"
         "    wait_for(parent_released)\n"
         "    with ledger._task_ledger_lock(target):\n"
         "        done.write_text('done')\n"
@@ -4784,7 +4953,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         with ledger_mod._task_ledger_lock(tmp_path):
             parent_holding.write_text("1")
             deadline = time.monotonic() + 10
-            while not fast_failed.exists():
+            while not refused.exists():
                 assert time.monotonic() < deadline, "child hung on the task lock instead of failing closed"
                 time.sleep(0.02)
             assert not done.exists(), "child took the task ledger lock while we held it"

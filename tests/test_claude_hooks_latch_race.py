@@ -16,6 +16,7 @@ import signal
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -66,12 +67,13 @@ def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path:
 def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> None:
     from brigade.claude_hooks import session_state
 
-    @contextlib.contextmanager
     def failing_file_lock(*_args, **_kwargs):
         raise RuntimeError("file lock entry failed")
-        yield
 
-    monkeypatch.setattr(inbox_lock, "held_file_lock", failing_file_lock)
+    from brigade import dirfd
+
+    opener = "open_child_lock_file" if os.name == "nt" else "open_child_file"
+    monkeypatch.setattr(dirfd, opener, failing_file_lock)
 
     with pytest.raises(RuntimeError, match="file lock entry failed"):
         with session_state._session_state_lock(tmp_path, "s"):
@@ -79,6 +81,34 @@ def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> Non
 
     state_path = runtime._state_path(tmp_path.expanduser().resolve(), "s")
     assert session_state._session_state_process_lock(state_path).locked() is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX open-file-description lock lifetime")
+def test_session_lock_unlocks_before_closing_even_with_duplicate(tmp_path: Path) -> None:
+    from brigade.claude_hooks import anchored_io
+
+    with anchored_io.session_directory(tmp_path, create=True) as anchor:
+        with anchor.held_lock("state.lock", deadline_seconds=1):
+            assert anchor.lock is not None
+            duplicate = os.dup(anchor.lock[1])
+        try:
+            with anchor.held_lock("state.lock", deadline_seconds=0.05):
+                pass
+        finally:
+            os.close(duplicate)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode contract")
+def test_session_directory_keeps_shared_ancestor_modes(tmp_path: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        runtime.write_session_state(tmp_path, "s", {})
+    finally:
+        os.umask(previous)
+    parent = tmp_path
+    for name in (".brigade", "work", "claude-hooks", "sessions"):
+        parent /= name
+        assert parent.stat().st_mode & 0o777 == (0o700 if name == "sessions" else 0o755)
 
 
 def test_persistent_lock_timeout_still_latches(tmp_path: Path, monkeypatch) -> None:
@@ -178,7 +208,7 @@ def test_clear_consumes_journal_without_truncating(tmp_path: Path) -> None:
 
 
 def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
-    from brigade.claude_hooks import session_state
+    from brigade.claude_hooks import anchored_io, session_state
 
     target = _wired_claude(tmp_path)
     assert session_state._append_timeout_marker(target, "hardlink") == 1
@@ -190,8 +220,10 @@ def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
         if os.name != "nt":
             raise
     else:
-        assert session_state._journal_timeout_count(target, "hardlink") == 0
-        assert session_state._append_timeout_marker(target, "hardlink") == 0
+        with pytest.raises(anchored_io.SessionIntegrityError):
+            session_state._journal_timeout_count(target, "hardlink")
+        with pytest.raises(anchored_io.SessionIntegrityError):
+            session_state._append_timeout_marker(target, "hardlink")
 
     for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES + 5):
         session_state._append_timeout_marker(target, "capped")
@@ -215,8 +247,8 @@ def test_journal_read_is_bounded_and_append_stops_at_byte_cap(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics required")
-def test_journal_refuses_symlink_after_open_identity_check(tmp_path: Path, monkeypatch) -> None:
-    from brigade.claude_hooks import session_state
+def test_journal_refuses_unavailable_nofollow_backend(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import anchored_io, session_state
 
     target = _wired_claude(tmp_path)
     journal = session_state._journal_path(target, "symlink")
@@ -225,12 +257,37 @@ def test_journal_refuses_symlink_after_open_identity_check(tmp_path: Path, monke
     outside.write_bytes(b"outside\n")
     journal.symlink_to(outside)
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
-    # Simulate the path swap after the pre-open refusal check.
-    monkeypatch.setattr(session_state, "_journal_path_is_safe_without_nofollow", lambda _path: True)
-
-    assert session_state._journal_timeout_count(target, "symlink") == 0
-    assert session_state._append_timeout_marker(target, "symlink") == 0
+    with pytest.raises(OSError, match="unavailable") as caught:
+        session_state._journal_timeout_count(target, "symlink")
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+    with pytest.raises(OSError, match="unavailable") as caught:
+        session_state._append_timeout_marker(target, "symlink")
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
     assert outside.read_bytes() == b"outside\n"
+
+
+def test_timeout_followup_integrity_refusal_blocks_without_rebuilding(tmp_path: Path, monkeypatch, capsys) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    runtime.write_session_state(target, "s", {"write_observed": True})
+    before = runtime._state_path(target, "s").read_bytes()
+    journal = session_state._journal_path(target, "s")
+    journal.mkdir()
+
+    def timed_out(*_args, **_kwargs):
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
+
+    monkeypatch.setattr(runtime, "_run_timed_handle_payload", timed_out)
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="Stop", package=PACKAGE_REF, stdin_text=json.dumps(_payload(target, "Stop", session_id="s"))
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["decision"] == "block"
+    assert runtime._state_path(target, "s").read_bytes() == before
 
 
 def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:
@@ -629,16 +686,14 @@ def test_abandoned_overflow_increment_is_recovered_by_next_fold(tmp_path: Path, 
     holder = threading.Thread(target=hold_session_lock)
     holder.start()
     assert acquired.wait(timeout=2)
-    pending_path = session_state._pending_increment_path(target, "s")
     process = mp.get_context("fork").Process(target=_record_hook_timeout_in_fork, args=(target, "s"))
     try:
         process.start()
-        # Sidecar is written immediately before the overflow lock wait. Combined
-        # with a still-live child, this proves we are killing mid-wait rather
-        # than reaping a child that already exhausted its retry and exited.
+        # Wait for the pending marker to be persisted while the writer is still
+        # blocked on the overflow lock, before killing it mid-wait.
         thread_sync.wait_for_predicate(
-            lambda: pending_path.is_file() and process.is_alive(),
-            description="overflow child wrote *.json.timeouts.pending and is still in the lock wait",
+            lambda: session_state._pending_timeout_count(target, "s") >= 1 and process.is_alive(),
+            description="overflow marker is persisted and the writer is still blocked on the lock",
         )
         assert process.is_alive()
         assert process.exitcode is None
@@ -685,22 +740,54 @@ def test_bounded_followup_latches_when_session_lock_times_out(tmp_path: Path, mo
     assert runtime._read_hook_latch(target, "s")[0] is True
 
 
-def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, monkeypatch) -> None:
-    """A known latch stays latched when hook.log append blocks."""
+@pytest.mark.parametrize("deadline_stage", ["before_persistence", "at_log"])
+def test_timeout_followup_does_not_hide_latch_behind_log_stall(
+    tmp_path: Path, monkeypatch, deadline_stage: str
+) -> None:
+    """Deadline expiry reports only a published latch, even with a stalled log."""
     target = _wired_claude(tmp_path)
     first = runtime._record_hook_timeout(target, "s")
     assert first.get("hook_latched") is not True
 
     release_log = threading.Event()
+    log_started = threading.Event()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+    workers: list[threading.Thread] = []
 
     def hang_log(*_args, **_kwargs):
-        release_log.wait(timeout=5)
+        log_started.set()
+        thread_sync.wait_for_event(release_log, description="release stalled hook log")
+
+    def delayed_worker(*, target, name, daemon):
+        def run():
+            worker_started.set()
+            thread_sync.wait_for_event(release_worker, description="release unscheduled follow-up")
+            target()
+
+        worker = threading.Thread(target=run, name=name, daemon=daemon)
+        workers.append(worker)
+        return worker
+
+    def deadline_event():
+        done = threading.Event()
+
+        def expire_deadline(timeout):
+            assert timeout == runtime._TIMEOUT_FOLLOWUP_SECONDS
+            thread_sync.wait_for_event(worker_started, description="follow-up worker scheduled")
+            if deadline_stage == "at_log":
+                release_worker.set()
+                thread_sync.wait_for_event(log_started, description="timeout follow-up reached hook log")
+            assert not done.is_set()
+            return False
+
+        monkeypatch.setattr(done, "wait", expire_deadline)
+        return done
 
     monkeypatch.setattr(envelope, "append_log", hang_log)
-    # The follow-up publishes the latch only after the session-state write
-    # (two fsyncs plus the announce claim). Keep the budget far above that
-    # cost: a 50ms budget raced the state write and returned 'degraded'.
-    monkeypatch.setattr(runtime, "_TIMEOUT_FOLLOWUP_SECONDS", 0.5)
+    # Keep the real bounded executor and persistence. Signal its deadline
+    # independently of runner speed, before publication or at the blocked log.
+    monkeypatch.setattr(runtime, "threading", SimpleNamespace(Event=deadline_event, Thread=delayed_worker))
 
     try:
         outcome = runtime._bounded_timeout_followup(
@@ -709,10 +796,19 @@ def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, m
             "s",
             runtime.HookDegraded("hook operation timed out"),
         )
-        assert outcome == "latched"
+        if deadline_stage == "before_persistence":
+            assert outcome == "degraded"
+            assert runtime._read_hook_latch(target, "s")[0] is False
+            release_worker.set()
+            thread_sync.wait_for_event(log_started, description="abandoned follow-up reached hook log")
+        else:
+            assert outcome == "latched"
         assert runtime._read_hook_latch(target, "s")[0] is True
     finally:
+        release_worker.set()
         release_log.set()
+        for worker in workers:
+            thread_sync.join_thread(worker, description="timeout follow-up after releasing hook log")
 
 
 def test_timeout_followup_claims_announce_in_journal_not_state(tmp_path: Path, monkeypatch) -> None:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, cli, proc, run_checkpoint, run_journal
+from brigade import aboyeur, cli, isolated_exec, proc, run_checkpoint, run_journal
 from brigade import roster as roster_mod
 from brigade import runguard
 from brigade.cli import run as run_cli
@@ -70,7 +70,7 @@ def test_run_detach_spawns_child_with_output_dir_and_log(tmp_path, monkeypatch, 
             assert output_dir.is_dir()
             assert "--detach" not in argv
             assert argv.count("--output-dir") == 1
-            assert kwargs["cwd"] == tmp_path
+            assert kwargs["cwd"] == isolated_exec.trusted_cwd()
             kwargs["stdout"].write("child started\n")
             kwargs["stdout"].flush()
             (output_dir / "run.json").write_text(json.dumps({"status": "started"}) + "\n")
@@ -457,7 +457,7 @@ def test_run_detach_child_records_artifact_identity_in_lock(tmp_path, monkeypatc
         pid = 4321
 
         def __init__(self, argv, **kwargs):
-            assert cli.main(argv[3:]) == 0
+            assert cli.main(argv[argv.index("run") :]) == 0
 
         def poll(self):
             return None

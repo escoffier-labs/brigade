@@ -22,6 +22,7 @@ from typing import Any, Callable, ContextManager, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .. import agents
+from .. import claim_loss_cancellation
 from .. import fleet_session_bootstrap
 from .. import codex_appserver
 from .. import context_eval
@@ -432,6 +433,7 @@ def _call_with_process_registry(
     process_registry: proc.ProcessRegistry | None,
     **kwargs: Any,
 ) -> Any:
+    proc.check_cancellation(process_registry)
     parameters = inspect.signature(function).parameters.values()
     accepts_registry = any(
         parameter.name == "process_registry" or parameter.kind is inspect.Parameter.VAR_KEYWORD
@@ -439,7 +441,8 @@ def _call_with_process_registry(
     )
     if accepts_registry:
         kwargs["process_registry"] = process_registry
-    return function(*args, **kwargs)
+    with claim_loss_cancellation.cancellation_boundary(lambda: proc.check_cancellation(process_registry)):
+        return function(*args, **kwargs)
 
 
 def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:
@@ -924,15 +927,18 @@ def _run_codex_appserver_worker(
     sandbox: str | None,
     registry: run_control.LiveTurnRegistry | None,
     on_event=None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> agents.AgentResult:
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
-    active_turn_id: str | None = None
+    active_registration: run_control.ActiveTurn | None = None
     try:
         try:
+            run_control._validate_assignment_ids(task_id, attempt_id)
             prompt = fleet_session_bootstrap.ensure_prompt(
                 prompt, cli_ref=agent.cli or "codex", model=agent.model, cwd=cwd
             )
-        except fleet_session_bootstrap.PreflightDenial as exc:
+        except (fleet_session_bootstrap.PreflightDenial, run_control.ControlError) as exc:
             return agents.AgentResult(
                 text="",
                 ok=False,
@@ -947,10 +953,14 @@ def _run_codex_appserver_worker(
         thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
 
         def on_turn_start(turn_id: str) -> None:
-            nonlocal active_turn_id
-            active_turn_id = turn_id
+            nonlocal active_registration
             if registry is not None:
-                registry.register(worker, thread, turn_id)
+                if task_id is None and attempt_id is None:
+                    active_registration = registry.register(worker, thread, turn_id)
+                else:
+                    active_registration = registry.register(
+                        worker, thread, turn_id, task_id=task_id, attempt_id=attempt_id
+                    )
 
         try:
             turn_kwargs = {"timeout": timeout, "on_event": on_event, "on_turn_start": on_turn_start}
@@ -975,8 +985,19 @@ def _run_codex_appserver_worker(
             reasoning=agent.reasoning,
         )
     finally:
-        if registry is not None and active_turn_id is not None:
-            registry.unregister(worker, active_turn_id)
+        if registry is not None and active_registration is not None:
+            if active_registration.task_id is None and active_registration.attempt_id is None:
+                registry.unregister(
+                    active_registration.worker, active_registration.turn_id, registration=active_registration
+                )
+            else:
+                registry.unregister(
+                    active_registration.worker,
+                    active_registration.turn_id,
+                    task_id=active_registration.task_id,
+                    attempt_id=active_registration.attempt_id,
+                    registration=active_registration,
+                )
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return agents.AgentResult(
@@ -1229,6 +1250,8 @@ def dispatch(
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
     remote_transport: Any | None = None,
+    codex_transport: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1277,4 +1300,6 @@ def dispatch(
         output_dir=output_dir,
         model_lease=model_lease,
         remote_transport=remote_transport,
+        codex_transport=codex_transport,
+        policy_workspace=policy_workspace,
     )

@@ -1,7 +1,7 @@
 # README coverage map
 
 Migration date: 2026-08-13
-README cells refreshed: 2026-08-27
+README cells refreshed: 2026-10-18
 
 The root README is a short landing page. Every topic that left the previous README has a durable home below. Claims intentionally retired from the front page are listed at the end.
 
@@ -16,7 +16,7 @@ The root README is a short landing page. Every topic that left the previous READ
 | Shell install (`pipx`, `uv tool`, `brigade setup`, quickstart) | [QUICKSTART.md](../QUICKSTART.md), [first 10 minutes](first-10-minutes.md) |
 | User-scope Claude Code work hooks | [agents guide](agents-guide.md#claude-code-user-scope-work-hooks), [agent-assisted setup](agent-assisted-setup.md#claude-code-user-scope-work-hooks) |
 | Update channels (stable vs beta) | [update channels](update-channels.md) |
-| Anonymous once-daily update check and `BRIGADE_NO_UPDATE_CHECK=1` | [update channels](update-channels.md) |
+| Best-effort update check and `BRIGADE_NO_UPDATE_CHECK=1` | [update channels](update-channels.md) |
 | Operator doctor profile, `ready: yes`, and default local footprint | [first 10 minutes](first-10-minutes.md), [new-user quickstart](new-user-quickstart.md), [agents guide](agents-guide.md) |
 | Homegrown setup adoption with `brigade operator adopt plan` | [agent-assisted setup](agent-assisted-setup.md#adapting-a-homegrown-setup), [technical guide](technical-guide.md) |
 | Contributor first-PR path and local checks | [CONTRIBUTING.md](../CONTRIBUTING.md#your-first-pr) |
@@ -46,9 +46,9 @@ The root README is a short landing page. Every topic that left the previous READ
 - One-checkout performance snapshots, source line numbers, and outcome scores that become stale as the repository changes
 - The volatile memory-card count from the origin story
 
-## Stable vs 0.28 beta labeling
+## Stable vs 0.31 beta labeling
 
 | Line | Meaning |
 | --- | --- |
-| Stable v0.27.0 | Published PyPI release `brigade-cli==0.27.0` |
-| Current main / 0.28 beta | Features on origin/main after v0.27.0 and `0.28.0.devYYYYMMDD` wheels. Labeled in README tables and this docs set |
+| Stable v0.30.0 | Published PyPI release `brigade-cli==0.30.0` and npm `@escoffier-labs/brigade@0.30.0` |
+| Current main / 0.31 beta | Features on origin/main after v0.30.0 and `0.31.0.devYYYYMMDD` wheels. Labeled in README tables and this docs set |

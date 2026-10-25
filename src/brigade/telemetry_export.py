@@ -15,15 +15,21 @@ from . import causal_receipt, localio, outcome
 from .outcome_cmd import _fingerprint_cohorts_by_artifact, _record_from_dict
 from .selection import KNOWN_HARNESSES
 
+# Audited upstream pins. The GenAI conventions repository has no release tags,
+# so the OTel pin is a commit. docs/telemetry-mapping.md lists every attribute.
 OTEL_MAPPING = {
     "name": "otel-genai",
     "mapping_version": 1,
-    "upstream_revision": "opentelemetry-semconv-1.43.0",
+    "upstream_repository": "open-telemetry/semantic-conventions-genai",
+    "upstream_revision": "9ffc7e00c639be7712e544e3e54331e885dccf84",
+    "upstream_revision_date": "2026-10-21",
 }
 OPENINFERENCE_MAPPING = {
     "name": "openinference",
-    "mapping_version": 1,
-    "upstream_revision": "audited-2026-07-12",
+    "mapping_version": 2,
+    "upstream_repository": "Arize-ai/openinference",
+    "upstream_revision": "python-openinference-semantic-conventions-v0.1.41",
+    "upstream_revision_date": "2026-10-01",
 }
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _FINGERPRINT_HEX = re.compile(r"^[0-9a-f]{16}$")
@@ -230,6 +236,10 @@ def _run_row(base: dict[str, Any], cli: str, projection: str) -> dict[str, Any]:
         attributes["openinference.span.kind"] = "AGENT"
         if (model := base["effective_model"] or base["requested_model"]) is not None:
             attributes["llm.model_name"] = model
+        if base["requested_model"] is not None:
+            attributes["llm.request.model_name"] = base["requested_model"]
+        if base["effective_model"] is not None:
+            attributes["llm.response.model_name"] = base["effective_model"]
     schema = "brigade.otel_genai_projection.v1" if otel else "brigade.openinference_projection.v1"
     mapping = OTEL_MAPPING if otel else OPENINFERENCE_MAPPING
     return {"schema": schema, "mapping": mapping, **base, "attributes": attributes}

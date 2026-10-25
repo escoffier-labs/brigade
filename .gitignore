@@ -63,7 +63,9 @@ Thumbs.db
 !/scripts/measure_work_store.py
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
+!/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
+!/scripts/windows_pytest_diagnostics.py
 !/scripts/windows_job.py
 !/scripts/verify_lock.py
 !/scripts/verify_parallel.py
@@ -79,6 +81,7 @@ Thumbs.db
 !/scripts/verify_component_manifest_provenance.py
 !/scripts/verify_env.py
 !/scripts/version_sync.py
+!/scripts/sync_plugin_skills.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE

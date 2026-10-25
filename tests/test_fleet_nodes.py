@@ -25,7 +25,7 @@ ADMIN = "admin-token-12345"
 def _serve(tmp_path, *, allow_admin_writes: bool):
     db = tmp_path / "hub" / "fleet.db"
     server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=allow_admin_writes)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     return server, db
 

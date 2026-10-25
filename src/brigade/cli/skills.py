@@ -129,9 +129,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_serve = skills_sub.add_parser("serve-mcp", help="Report the local MCP skills resource contract.")
     p_skills_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
-    p_skills_serve.add_argument(
+    skills_transport = p_skills_serve.add_mutually_exclusive_group()
+    skills_transport.add_argument(
         "--stdio", action="store_true", help="Serve the read-only skills MCP adapter over stdio."
     )
+    skills_transport.add_argument(
+        "--http",
+        action="store_true",
+        help="Serve over loopback Streamable HTTP at /mcp (token from BRIGADE_MCP_HTTP_TOKEN).",
+    )
+    p_skills_serve.add_argument(
+        "--host", default=None, help="With --http: loopback address to bind (127.0.0.1, ::1, or localhost)."
+    )
+    p_skills_serve.add_argument("--port", type=int, default=None, help="With --http: port to bind (default 8932).")
     p_skills_serve.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_publish = skills_sub.add_parser("publish", help="Create a reviewed skill publish proposal.")
     p_skills_publish.add_argument("skill", help="Skill id, path, or directory.")
@@ -309,7 +319,14 @@ def dispatch(args) -> int:
             workspace=args.workspace, skill=args.skill, harness=args.install_target, json_output=args.json
         )
     if args.skills_command == "serve-mcp":
-        return skills_cmd.serve_mcp(target=args.target, json_output=args.json, stdio=args.stdio)
+        return skills_cmd.serve_mcp(
+            target=args.target,
+            json_output=args.json,
+            stdio=args.stdio,
+            http=args.http,
+            host=args.host,
+            port=args.port,
+        )
     if args.skills_command == "publish":
         return skills_cmd.publish(target=args.target, skill=args.skill, scope=args.scope, json_output=args.json)
     if args.skills_command == "pack":

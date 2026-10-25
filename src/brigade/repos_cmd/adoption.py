@@ -11,6 +11,7 @@ from typing import Any
 from .. import __version__, cursor_user_cmd, localio
 from ..claude_hooks import classify as claude_classify
 from ..claude_hooks import runtime as claude_runtime
+from ..claude_hooks.anchored_io import SessionIntegrityError
 from ..config import load_config
 from ..receipts_cmd import _receipt_hash
 from ..selection import WRITER_INBOXES
@@ -257,9 +258,18 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
         "mcp": "not-required",
         "version": "current" if hook_status.get("current") else "unknown",
     }
-    use = _claude_use(target, window_start=window_start)
     classified_state = str(classification.get("state") or "partial")
-    if any(value == "stale" for value in wiring.values()):
+    try:
+        use = _claude_use(target, window_start=window_start)
+    except SessionIntegrityError as exc:
+        issue = fleet._safe_text(f"session directory integrity refused: {exc}", target, entry.repo_id, entry.label)
+        if issue not in issues:
+            issues.append(issue)
+        use = _empty_use()
+        classified_state = "error"
+    if classified_state == "error":
+        state = "partial"
+    elif any(value == "stale" for value in wiring.values()):
         state = "stale"
     elif classified_state == "advisory-only":
         state = "advisory-only"
@@ -306,10 +316,22 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
             issues.append(f"stale {surface}")
 
     hooks_doc, _ = cursor_user_cmd._read_json_object(root / "hooks.json")
-    hook_entries: object = None
-    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
-        hook_entries = hooks_doc["hooks"].get("sessionStart")
-    hook_current = isinstance(hook_entries, list) and cursor_user_cmd._hook_entry(root) in hook_entries
+    hooks = None
+    if hooks_doc is not None:
+        # Cursor loads none of a user document that fails the shared validator,
+        # and a versionless one is not loaded until sync repairs it.
+        document_error, needs_version = cursor_user_cmd.user_hooks_document_status(hooks_doc)
+        if not document_error and not needs_version:
+            hooks = hooks_doc.get("hooks")
+    hook_current = all(
+        cursor_user_cmd.project_presence_hook_installed(target, event)
+        or (
+            isinstance(hooks, dict)
+            and isinstance(hooks.get(event), list)
+            and cursor_user_cmd._hook_entry(root) in hooks[event]
+        )
+        for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
+    )
     if not hook_current:
         missing = missing or not (root / "hooks.json").exists()
         stale = stale or (root / "hooks.json").exists()

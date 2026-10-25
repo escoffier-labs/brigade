@@ -14,16 +14,26 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory = sub.add_parser("memory", help="Inspect local memory maintenance workflows.")
     memory_sub = p_memory.add_subparsers(dest="memory_command", metavar="<memory-command>")
     memory_sub.required = True
-    proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory pair edits.")
+    from .. import memory_reflect
+
+    memory_reflect.register(memory_sub)
+    proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
         command = commands.add_parser(name, help=f"{name.capitalize()} an exact reviewed memory proposal.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "create":
-            command.add_argument("--issue", required=True)
-            command.add_argument("--survivor", required=True)
-            command.add_argument("--relation", choices=("merge", "supersede"), required=True)
+            command.add_argument("--issue", help="Saved contradictory finding for a v1 pair proposal.")
+            command.add_argument("--survivor", help="Surviving card for a v1 pair proposal.")
+            command.add_argument("--relation", choices=("merge", "supersede", "consolidate"), required=True)
+            command.add_argument(
+                "--source", action="append", default=[], help="Canonical v2 source card. Repeat up to eight times."
+            )
+            command.add_argument("--ops-file", type=Path, help="JSON list of typed v2 delta operations.")
+            command.add_argument(
+                "--anchor-blocks", action="store_true", help="Propose stable anchors on claim paragraphs and bullets."
+            )
         else:
             command.add_argument("proposal_id")
         if name in ("create", "review", "reject"):
@@ -298,13 +308,30 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_recall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_serve_mcp = memory_sub.add_parser(
-        "serve-mcp", help="Expose memory cards over a read-only MCP stdio server (card:// scheme)."
+        "serve-mcp", help="Serve Brigade memory over MCP (stdio or loopback HTTP); prints the contract otherwise."
     )
     p_memory_serve_mcp.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose cards to serve."
+        "--target",
+        "-t",
+        type=Path,
+        default=None,
+        help="Repo whose cards form the repo store. Default: nearest repo above the cwd with .brigade/config.json or .brigade/memory-care.toml.",
     )
-    p_memory_serve_mcp.add_argument(
+    serve_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
+    serve_transport.add_argument(
         "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
+    )
+    serve_transport.add_argument(
+        "--http",
+        action="store_true",
+        help="Run a loopback Streamable HTTP server at /mcp (token from BRIGADE_MCP_HTTP_TOKEN).",
+    )
+    p_memory_serve_mcp.add_argument(
+        "--host", default=None, help="With --http: loopback address to bind (127.0.0.1, ::1, or localhost)."
+    )
+    p_memory_serve_mcp.add_argument("--port", type=int, default=None, help="With --http: port to bind (default 8931).")
+    p_memory_serve_mcp.add_argument(
+        "--inbox", default="codex", help="Handoff inbox alias or path for write_handoff in the repo store."
     )
     p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
 
@@ -352,6 +379,10 @@ def dispatch(args) -> int:
     from .. import memory_cmd
     from .. import memory_operations
 
+    if args.memory_command == "reflect":
+        from .. import memory_reflect
+
+        return memory_reflect.dispatch(args)
     if args.memory_command == "proposal":
         from .. import memory_proposals
         import json
@@ -360,6 +391,20 @@ def dispatch(args) -> int:
         values = {"target": args.target}
         if name == "create":
             values.update(issue_id=args.issue, survivor=args.survivor, relation=args.relation, reason=args.reason)
+            if args.relation == "consolidate":
+                from .. import memory_proposal_io as proposal_io
+
+                try:
+                    raw = proposal_io.read_bytes(args.ops_file) if args.ops_file else b"[]"
+                    values.update(
+                        source_paths=args.source, ops=json.loads(raw or b"[]"), anchor_blocks=args.anchor_blocks
+                    )
+                except (OSError, ValueError):
+                    print("error: invalid or unreadable ops file", file=sys.stderr)
+                    return 2
+            elif args.source or args.ops_file or args.anchor_blocks:
+                print("error: typed operations require --relation consolidate", file=sys.stderr)
+                return 2
         else:
             values["proposal_id"] = args.proposal_id
             if name in ("review", "reject", "apply"):
@@ -494,7 +539,15 @@ def dispatch(args) -> int:
             target=args.target, cwd=args.cwd, limit=args.limit, json_output=args.json, query=args.query
         )
     if args.memory_command == "serve-mcp":
-        return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
+        return memory_cmd.serve_mcp(
+            target=args.target,
+            stdio=args.stdio,
+            http=args.http,
+            host=args.host,
+            port=args.port,
+            inbox=args.inbox,
+            json_output=args.json,
+        )
 
     from .. import memory_doctor_cmd
 

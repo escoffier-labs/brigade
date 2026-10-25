@@ -39,7 +39,7 @@ Smallest useful slice: one connector pack that wraps the existing `t3-fleet` cli
 
 Existing pattern: `src/brigade/grokbot_operations_relay.py` for the listener, gate, unit rendering, doctor, and canary.
 
-Cut from scope: hub enrollment, the `t3-fleet` local queue and `tick`, merge automation, Miller bridge changes.
+Cut from scope: hub enrollment, the `t3-fleet` local queue and `tick`, merge automation, Dot bridge changes.
 
 ## Pinned decisions
 
@@ -52,7 +52,7 @@ Cut from scope: hub enrollment, the `t3-fleet` local queue and `tick`, merge aut
 - Wake states: `needs_attention`, `unknown`, `succeeded`, `failed`, `interrupted`. A state change clears `notified_state`, so a second question after a running stretch wakes again.
 - A wake counts as delivered only when every target for the caller returns HTTP 200.
 - The pack never stores or logs prompt text. The ledger keeps the SHA-256 of the composed prompt.
-- `fleet.py` stays free of Grok-specific assumptions (no caller names, wake logic, or Grok headers) because the phase 4 `miller` pack imports it. Grok-specific behavior lives in `tools.py` and `watch.py`.
+- `fleet.py` stays free of Grok-specific assumptions (no caller names, wake logic, or Grok headers) because the phase 4 `dot` pack imports it. Grok-specific behavior lives in `tools.py` and `watch.py`.
 
 ---
 

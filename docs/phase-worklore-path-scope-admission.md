@@ -1,5 +1,7 @@
 # Worklore checkpoint path admission
 
+Status (2026-10-17): shipped in #1701 (64d4c4da6).
+
 Refs #1595. A fenced checkpoint declares its full current repository path scope.
 Admission uses the existing SQLite ownership transaction and immutable events.
 

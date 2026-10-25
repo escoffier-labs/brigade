@@ -310,12 +310,14 @@ def planted(workspace: Path) -> dict[str, Path]:
 @pytest.fixture
 def server(workspace: Path, planted: dict[str, Path]) -> ThreadingHTTPServer:
     httpd = runs_serve.make_server(cwd=workspace, port=0)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     _wait_until_ready(httpd)
     yield httpd
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "Run View accept loop survived shutdown (#1916)"
 
 
 def _host(server: ThreadingHTTPServer) -> str:
@@ -387,7 +389,15 @@ def test_serve_no_open_skips_browser(
     assert opened == []
 
 
-def test_bind_failure_prints_exact_address_error(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_bind_failure_prints_exact_address_error(
+    workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_serve_forever(self: ThreadingHTTPServer) -> None:
+        pytest.fail("occupied port unexpectedly entered serve_forever")
+
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", unexpected_serve_forever)
     blocker = runs_serve.make_server(cwd=workspace, port=0)
     port = blocker.server_address[1]
     try:

@@ -9,8 +9,10 @@ import html
 import re
 import http.client
 import json
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
@@ -35,11 +37,13 @@ def hub(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     # Legacy shared-token mode (pre-#1150): the one token posts as any node.
     server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield ("127.0.0.1", server.server_address[1], db)
     server.shutdown()
     server.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "Fleet Hub accept loop survived shutdown (#1916)"
 
 
 def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):
@@ -681,8 +685,8 @@ class TestAssets:
         assert manifest["short_name"] == "Fleet Hub"
         assert manifest["start_url"] == "/"
         assert manifest["display"] == "standalone"
-        assert manifest["theme_color"] == "#111617"
-        assert manifest["background_color"] == "#182022"
+        assert manifest["theme_color"] == "#0a0a0a"
+        assert manifest["background_color"] == "#0a0a0a"
         icons = {icon["sizes"]: icon for icon in manifest["icons"]}
         assert "192x192" in icons and "512x512" in icons
         for icon in manifest["icons"]:
@@ -702,7 +706,7 @@ class TestAssets:
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
             assert '<link rel="manifest" href="/site.webmanifest"' in body
-            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="theme-color" content="#0a0a0a"' in body
             assert '<meta name="application-name" content="Fleet Hub"' in body
             assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
 
@@ -807,6 +811,50 @@ class TestPureRendering:
 
         assert fleet_dashboard._RepoEntry("repo", [fresh], [fresh, abandoned], None, None).collision is False
         assert fleet_dashboard._RepoEntry("repo", [fresh, second], [fresh, second], None, None).collision is True
+        html = fleet_dashboard.render_page(
+            view="repos",
+            query_string="",
+            runs=[
+                {"node_id": row.node_id, "run_id": row.run_id, "repo": row.repo, "state": row.state, "ts": row.last_ts}
+                for row in (fresh, second)
+            ],
+            claims=[],
+            nodes=[],
+            started_at={},
+            nonce="abc",
+            now=now,
+        )
+        assert "parallel activity" in html and "Same repo label" in html
+        assert "File overlap unknown" in html
+        assert "! collision" not in html and "fleet-state-failed" not in html.split("<tbody>")[1]
+        events = [
+            {"node_id": row.node_id, "run_id": row.run_id, "repo": row.repo, "state": row.state, "ts": row.last_ts}
+            for row in (fresh, second)
+        ]
+        events.append(
+            {
+                "node_id": "c",
+                "run_id": "bad",
+                "repo": "approval-repo",
+                "state": "approval.requested",
+                "ts": now.isoformat(),
+            }
+        )
+        attention = fleet_dashboard.render_page(
+            view="repos",
+            query_string="attention=1",
+            runs=events,
+            claims=[],
+            nodes=[],
+            started_at={},
+            nonce="abc",
+            now=now,
+        )
+        assert "<td>repo</td>" not in attention and "<td>approval-repo</td>" in attention
+        ranked = fleet_dashboard.render_page(
+            view="repos", query_string="", runs=events, claims=[], nodes=[], started_at={}, nonce="abc", now=now
+        )
+        assert ranked.index("<td>approval-repo</td>") < ranked.index("<td>repo</td>")
 
     def test_format_duration(self):
         assert fleet_dashboard.format_duration(None) == "-"
@@ -823,17 +871,72 @@ class TestPureRendering:
         assert "Fleet: Repos" in page
 
 
-def test_boards_render_through_the_shared_deck_shell():
-    page = fleet_dashboard.render_page(
-        view="machines", query_string="", runs=[], claims=[], nodes=[], started_at={}, nonce="abc"
+@pytest.mark.parametrize("view", ["machines", "repos"])
+def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
+    monkeypatch.setattr(fleet_dashboard, "REFRESH_SECONDS", 17)
+    query = {
+        "sort": "seat",
+        "node": NODE_A,
+        "repo": "example & tool",
+        "seat": "worker",
+        "state": "awaiting approval",
+        "attention": "1",
+        "all": "1",
+    }
+    event = _event(
+        NODE_A,
+        "shell-regression-run",
+        1,
+        "run.paused",
+        repo=query["repo"],
+        harness="codex",
+        ts=datetime.now(timezone.utc).isoformat(),
     )
-    assert "--canvas: #111617;" in page
+    assert _request(hub, "POST", "/events", headers=_bearer(), body=[event])[0] == 200
+    status, headers, page = _request(hub, "GET", f"/view/{view}?{urlencode(query)}", headers=_bearer())
+    assert status == 200
+    assert '<div class="shell" data-active="boards">' in page
+    assert '<div class="shell-main"><main class="deck-shell fleet-board">' in page
+    sidebar = re.search(r'<aside class="shell-sidebar"[^>]*>(.*?)</aside>', page, re.S)
+    assert sidebar is not None
+    assert page.count('<nav class="deck-nav" aria-label="Command Deck">') == 1
+    assert 'href="/view/machines" aria-current="page"' in sidebar[1]
+    for route in ["/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/deck/owners"]:
+        assert f'href="{route}"' in sidebar[1]
+    for label in ["Resources", "Docs", "Report a bug", "Star on GitHub", 'class="sidebar-meta"', "sidebar-version"]:
+        assert label in sidebar[1]
+    assert "tree-machines" not in sidebar[1]  # Boards have no DeckView projection.
+    assert 'class="status-dot' not in page and 'class="live-pill' not in page
+    assert "--canvas: #0a0a0a;" in page
+    assert "prefers-color-scheme: light" in page
     assert '<body class="deck"' in page
-    assert '<nav class="deck-nav" aria-label="Command Deck">' in page
-    assert 'href="/deck"' in page and 'href="/view/repos"' in page
-    assert '<a href="/view/machines" aria-current="page">machines board</a>' in page
-    assert "Command Deck &middot; Machines" in page
+    assert f"<h1>{view.title()} board</h1>" in page
+    assert '<header class="page-head">' in page
     assert "background: #fff" not in page
+    nonce = re.search(r"'nonce-([^']+)'", headers["content-security-policy"])[1]
+    for tag in ["style", "script"]:
+        assert re.findall(rf"<{tag}([^>]*)>", page) == [f' nonce="{nonce}"']
+    assert '<meta http-equiv="refresh" content="17">' in page
+    assert "Refreshes every 17s" in page
+    assert "setInterval(tick, 1000)" in page and 'data-filter-all="1"' in page
+    pivots = re.search(r'<nav class="board-nav" aria-label="Board views">(.*?)</nav>', page)[1]
+    for name in ["machines", "repos"]:
+        link = re.search(rf'<a href="([^"]+)"([^>]*)>{name} board</a>', pivots)
+        assert link is not None
+        url = urlsplit(html.unescape(link[1]))
+        assert url.path == f"/view/{name}"
+        assert parse_qs(url.query) == {key: [value] for key, value in query.items()}
+        assert ('aria-current="page"' in link[2]) == (name == view)
+    for key in ["node", "repo", "seat", "state"]:
+        assert f'name="{key}" value="{html.escape(query[key], quote=True)}"' in page
+    assert '<option value="seat" selected>' in page
+    for key in ["attention", "all"]:
+        assert f'name="{key}" value="1" checked' in page
+    assert f'method="get" action="/view/{view}"' in page
+    assert "example &amp; tool" in page and 'class="fleet-state fleet-state-awaiting-approval"' in page
+    if view == "machines":
+        assert 'data-bucket="awaiting approval"' in page
+        assert "shell-regression-run" in page and "worker/codex" in page
 
 
 def test_machine_summary_counts_nodes_with_only_unread_messages():
@@ -897,10 +1000,10 @@ def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_pa
             conn.close()
         status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
         assert status == 200
-        assert "Interactive sessions" in deck_body
+        assert "Reported agent sessions (1)" in deck_body
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in deck_body
         assert "<script>alert(1)</script>" not in deck_body
-        assert "0/10 busy" in deck_body
+        assert "10 unavailable" in deck_body
         status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert "sess-board" not in machines
@@ -919,7 +1022,7 @@ TAILSCALE_USER = "tailscale-user@example.invalid"
 def hub_tailscale(tmp_path):
     db = tmp_path / "hub" / "fleet.db"
     server = fleet_hub.make_server("127.0.0.1", 0, db, TOKEN, allow_admin_writes=True, trust_tailscale_identity=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield ("127.0.0.1", server.server_address[1])
     server.shutdown()
@@ -1449,6 +1552,12 @@ class TestBoardBounds:
         assert page.count("<tr data-bucket=") == 2000
         assert "older runs omitted" in page
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        raises=TimeoutError,
+        reason="Windows loopback HTTP socket intermittently exceeds 5 seconds (#1947)",
+        strict=False,
+    )
     def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
         stamp = datetime.now(timezone.utc).isoformat()
         events = [

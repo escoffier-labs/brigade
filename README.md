@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  Brigade keeps coding-agent work trackable across tools, repos, and sessions: tasks, receipts, shared memory, and synced tools.
+  <strong>Run agents anywhere. Keep one record of the work.</strong><br>
+  Brigade tracks what's ready, who claimed it, and what ran across Claude Code, Codex, cloud agents, and your machines. Your local harnesses stay in sync on MCP servers, skills, and memory.
 </p>
 
 <p align="center">
@@ -16,88 +17,161 @@
 <p align="center">
   <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
-  <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
+  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
   <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Published **v0.27.0** is the stable install (`brigade-cli==0.27.0`). It adds per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.28 beta** line.
+Coding work now runs in several places at once. You drive Claude Code or Codex in a terminal, a background run works another repo, a cloud agent opens a pull request in another tab, and CI checks the result somewhere else. Each tool keeps its own history. When one agent hands work to the next, the handoff is usually a sentence like "tests pass."
+
+Agents did not create this split. Terminals, background jobs, and remote machines have always kept separate records. Running agents in parallel makes each gap cost more.
+
+Brigade keeps one record around the work itself, across harnesses, repos, machines, and cloud seats: which tasks are ready, who claimed them, which commands ran and how they exited, and what the next session should know. It also keeps MCP servers, skills, and memory in sync, so an agent picking up the work in another harness starts with the same setup and context. The record is plain local files, with an optional hub for claims across machines. Agents read and write it through the CLI and MCP. You set policy, budgets, scopes, and gates, and can stop the work at any point.
+
+For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex checks the package and the receipt's real exit code instead of taking the agent's word for it.
+
+The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
+
+**Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). See the [changelog](CHANGELOG.md) for what each release changed.
+
+The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 ## What it does
 
-- **Ready work and claim safety.** Brigade lists unblocked tasks and uses atomic claims so two agents cannot take the same item.
-- **Declared run limits, optional fleet hub, and registered cloud activity.** Brigade enforces declared wall-clock and worker-dispatch ceilings, records named retry and reroute decisions, can report runs, repo claims, and external harness sessions through an operator-owned fleet hub, and reconciles registered cloud work against provider and GitHub state.
-- **Verification receipts.** A check run through Brigade writes the command, the real exit code, and the Git state. Not every Brigade command writes a receipt.
-- **Owner-mediated handoffs and bounded recall.** Handoffs are linted and routed by the memory owner. Safe targeted notes may auto-file, while ambiguous or risky notes wait for review. Session-start recall is capped, and vault project, search, and propose are bounded.
-- **Explicit dry-run-first harness projection.** MCP servers, tools, and skills are previewed before Brigade writes them into a harness.
+- **Ready work and safe claims.** `brigade work ready` lists unblocked tasks. Claims are atomic, so two agents cannot take the same item.
+- **Evidence between agents.** A check run through Brigade records the command, the real exit code, and the Git state. The next agent can inspect the receipt or verify an exported evidence package. Handoffs link that evidence to the work that remains.
+- **Shared memory with an owner.** Agents write handoffs with evidence sections. The memory owner lints and files them under the ingest policy. Safe notes can auto-file, and ambiguous notes enter a review queue. Session-start recall is capped.
+- **One tool catalog across harnesses.** MCP servers, tools, and skills are defined once. Projection plans preview each harness's config before sync writes it.
+- **Cloud agents tracked next to local ones.** Tasks you hand to Codex Cloud, Cursor cloud agents, or Jules are registered with their provider task ID and reconciled against provider and GitHub state, so they show up beside local runs instead of disappearing into another tab.
+- **Optional fleet view.** A self-hosted hub can arbitrate repo claims across machines and show runs, harness sessions, and cloud tasks on one board.
 
-Learning in Brigade is outcome-based skill scoring, promotion, and rollback from captured verification receipts. It is not autonomous reflective memory learning.
+Learning in Brigade means scoring skills against eligible captured receipts, then promoting or rolling them back. Autonomous memory reflection is planned in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+
+<details>
+<summary><b>Examples</b></summary>
+
+**Two agents, one backlog.** Each agent asks for the next ready task. The second claim on the same item fails with exit 13 and names the holder.
+
+```bash
+brigade work ready --parallel-safe          # ready tasks, grouped into waves that do not touch the same files
+brigade work claim --next --actor codex     # take the highest-priority ready task
+```
+
+**"Tests pass" with a receipt.** The agent runs the check through Brigade instead of reporting it from memory.
+
+```bash
+brigade work verify run --target . --command "pytest -q"
+```
+
+The receipt keeps the command, exit code, Git commit, and dirty state, so a reviewer can check the claim without rerunning it.
+
+**Switching harnesses mid-task.** Claude Code ends a session with a handoff. The next Codex session starts from the brief instead of a blank context.
+
+```bash
+brigade handoff lint                        # check the handoff before it is filed
+brigade work brief --target .               # what the next agent sees at session start
+```
+
+**One MCP config for every tool.**
+
+```bash
+brigade mcp plan                            # read-only preview
+brigade mcp sync --write                    # merge into each harness's native config
+```
+
+</details>
 
 ## Install
 
-Install with `pipx install brigade-cli` or `uv tool install brigade-cli`, then follow the [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), or give [first 10 minutes](docs/first-10-minutes.md) and [docs/agents-guide.md](docs/agents-guide.md) to your coding agent.
+If Node.js 22 or newer and npm are installed on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
 
-Stable channel: published v0.27.0. Preview channel: `brigade update --channel beta` for `0.28.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
+```bash
+npm install --global @escoffier-labs/brigade@0.30.0
+brigade setup
+```
+
+To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.30.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.30.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
+
+On other platforms, or to use Python 3.10 or newer directly:
+
+```bash
+pipx install brigade-cli      # or: uv tool install brigade-cli
+brigade setup
+```
+
+Then follow the [install guide](https://brigade.tools/docs/getting-started/install) or [QUICKSTART.md](QUICKSTART.md). To let your coding agent do the setup, hand it [first 10 minutes](docs/first-10-minutes.md) and the [agents guide](docs/agents-guide.md).
+
+If setup fails, run `brigade bug report --summary "What happened and what you expected" --dry-run` in the affected workspace. Review the complete redacted preview before sharing. See [bug reports](docs/technical-guide.md#bug-reports).
+
+For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
+
+## MCP servers
+
+`brigade-cli` includes two MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)).
+
+- `brigade memory serve-mcp --stdio`: memory cards from the repo and user stores, with six tools: `list_cards`, `get_card`, `search_cards`, `memory_status`, `work_brief`, and `write_handoff`. `write_handoff` is the one write tool; it drafts a Memory Handoff and never edits a canonical card ([details](docs/agent-plugin.md#tools)).
+- `brigade skills serve-mcp --stdio`: the reviewed skill registry, read-only, with search, read, lint, compatibility, and install-history tools.
+
+Without a global install, `uvx --from brigade-cli brigade memory serve-mcp --stdio` runs the same server.
+
+<!-- MCP Registry ownership markers; keep each on its own line. -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
 ## How it compares
 
-Brigade overlaps several categories. Most adjacent projects specialize in one layer. Brigade connects those layers around trackable coding-agent work. Where a neighbor is stronger, that cell says so. Dated sources and longer notes: [docs/comparison.md](docs/comparison.md) (2026-08-27).
+Most neighbors go deeper on one layer. Brigade connects work, memory, tool config, and evidence around the same coding-agent task. Where a neighbor is stronger, its cell says so. Sources, dated notes, and projects that left these tables: [docs/comparison.md](docs/comparison.md) (checked 2026-10-18).
 
-Comparison key: <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported · <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Partial · <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented
+Key: <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported · <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Partial · <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented
 
 ### Work and orchestration
 
-| Project | Ready work | Claim safety | Parallel and run control | Task-store boundary | Verification |
+| Project | Ready work | Claim safety | Parallel and run control | Task store | Verification |
 | --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Stable ready set | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Fail-closed local CAS. 0.27: optional hub claims | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> 0.27: per-repo waves, campaign-composed waves, declared limits, named retry/reroute, fleet board | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Local JSON ledger. Optional hub for events/claims, not a task DB | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command receipts |
+| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Ready set + parallel-safe waves | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Fail-closed claims, optional hub | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Waves, campaigns, declared limits | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Local JSON ledger, not a task DB | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command receipts |
 | [Beads](https://github.com/gastownhall/beads) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Built in | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Atomic claim | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Agent workflow + Dolt sync | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Dolt-backed distributed store | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Task history |
-| [Gas Town](https://github.com/gastownhall/gastown) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Beads-backed | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Multi-agent runtime | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Beads ledger | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Operational state |
-| [nWave](https://github.com/nWave-ai/nWave) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Wave artifacts | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> 7 reviewed phases + TDD gates | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Git-tracked artifacts | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Phase validation |
-| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reactive graph | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Application-defined | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Behaviors + runs | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Append-only event log | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Replay, fork, and diff |
+| [Gas Town](https://github.com/gastownhall/gastown) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Beads-backed | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Multi-agent runtime | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Beads ledger | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Refinery merge-queue gates |
+| [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared list with dependencies | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> File-locked self-claim | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Lead + teammates, experimental | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> One Claude Code session | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> TaskCompleted hook can block |
+| [Backlog.md](https://github.com/MrLesk/Backlog.md) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Board + dependencies | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Markdown in Git | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Acceptance criteria |
 
 ### Memory
 
 | Project | Durable memory | Capture and recall | Care and operations | Learning | Provenance |
 | --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared files + cards | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Handoffs. 0.27: bounded recall | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Owner policy. 0.27: Memory Operations, vault project/search/propose | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Outcome score + promote + rollback | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Work receipts + sources |
-| [Mem0 / OpenMemory](https://github.com/mem0ai/mem0) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> User + agent + session | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Automatic + hybrid search | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> History + metadata | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Extraction + retrieval | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Timestamps + entities |
-| [Letta](https://github.com/letta-ai/letta) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Agent state + blocks | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Agent-managed tools | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Editable state | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Persistent agent runtime | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Persistent agent state |
-| [agentmemory](https://github.com/rohitg00/agentmemory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared coding-agent memory | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Hooks + MCP + REST | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Lifecycle + decay | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Searchable memory |
+| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared files + cards | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Linted handoffs + bounded recall | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Owner policy + Memory Operations | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Outcome score, promote, rollback | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Work receipts + sources |
+| [agentmemory](https://github.com/rohitg00/agentmemory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared coding-agent memory | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Hooks + MCP + REST | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Decay, audit, governed delete | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Lessons + reflect | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Write-time origin + citations |
 | [Hindsight](https://github.com/vectorize-io/hindsight) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Facts + experiences + models | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Retain + recall | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reflect + feedback | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reflective memory learning | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Temporal + causal links |
-| [Built-in harness memory](https://code.claude.com/docs/en/memory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Tool-specific | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Rules + auto memories | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Varies by harness | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific |
-| [OpenClaw](https://docs.openclaw.ai/concepts/memory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Plain files + index | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Keyword + optional vector search | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> File-owned memory | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Files + source paths |
+| [Mem0](https://github.com/mem0ai/mem0) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> User + agent + session | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Extraction + hybrid search | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> History + metadata | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Extraction + retrieval | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Timestamps + entities |
+| [Built-in harness memory](https://code.claude.com/docs/en/memory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per tool | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Rules + auto memory | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Varies by harness | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific |
 
 ### Tools and configuration
 
-| Project | MCP | Reviewed rules and skills | Projection behavior | Source of truth | Audit and rollback |
+| Project | MCP | Rules and skills | Projection | Source of truth | Audit and rollback |
 | --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP + tools catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills + adapters | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Dry-run-first, then apply | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Brigade catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Preserve + gate + rollback |
-| [add-mcp](https://github.com/neon-solutions/add-mcp) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP servers | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Maps fields into native files | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Registry + native files | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Warnings for dropped fields |
-| [Rulesync](https://github.com/dyoshikawa/rulesync) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules + skills + hooks | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per-target generation | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rulesync project | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Generated outputs |
-| [config-sync](https://pypi.org/project/aiconfigsync/) | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules for 12 tools | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Generated rule files | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Single config | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Generated outputs |
-| [chezmoi](https://www.chezmoi.io/) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> As files | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> As files | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Templates + apply | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Git-backed source dir | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Diff + templates + merge |
-| [agentsync](https://agentsync.cc/) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Many agent targets | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills + hooks + commands | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Canonical config | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report |
+| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP + tools catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills + harness adapters | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Dry run first, then write | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Brigade catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Preserve, gate, roll back |
+| [Rulesync](https://github.com/dyoshikawa/rulesync) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules, skills, hooks, subagents | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per-target generation | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rulesync project | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Generated outputs |
+| [Ruler](https://github.com/intellectronica/ruler) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules, skills, subagents | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per-agent files | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> `.ruler/` directory | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Gitignore automation, no rollback |
+| [add-mcp](https://github.com/neon-solutions/add-mcp) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP servers | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Maps fields into native files | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Native files + sync | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Warns on dropped fields |
+| [agentsync](https://agentsync.cc/) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Many agent targets | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills, hooks, memory, plugins | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Canonical config | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report |
 
 ### Evidence and operations
 
-| Project | Receipts | Code impact | Agent activity | Cloud state | Learning / replay |
+| Project | Receipts | Code impact | Agent activity | Cloud state | Replay and learning |
 | --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command + Git + optional impact | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Stable impact. 0.27: code-graph views + blast radius | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> 0.27: center activity + fleet board + external harness sessions | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> 0.27: registered cloud status + approved Grok Bot scout feed | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Score + promote + rollback. 0.27: run child/diff/resume |
-| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Event trace | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Reactive behaviors | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Replay, fork, and diff |
-| [CocoIndex](https://github.com/cocoindex-io/cocoindex) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Data lineage | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Incremental recompute |
+| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command + exit code + Git state | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Impact queries + blast radius | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Center, fleet board, harness sessions | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Codex, Cursor, Jules task status | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Score + rollback, run diff/resume |
+| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Event trace | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Reactive behaviors | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Replay, fork, and diff |
 | [Graphiti](https://github.com/getzep/graphiti) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Episode provenance | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Temporal fact updates |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reflective memory learning |
-| [Neo4j Agent Memory](https://github.com/neo4j-labs/agent-memory) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Reasoning + tool traces | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Similar-task retrieval |
+| [Codex Cloud](https://developers.openai.com/codex/cloud) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Changed files + test results | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Task review | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Hosted task workspaces | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented |
 
-"Not documented" means the capability was not found in the project's official README or documentation on the dated source pass. Brigade cells were re-checked on 2026-08-27. Beads and Gas Town stay on the 2026-08-26 pass. Other neighbor cells stay on the 2026-08-13 pass. An event trace, memory history, data lineage, and a command verification receipt answer different questions.
+"Not documented" means the capability was not found in that project's official README or docs on the dated pass. It is not proof of absence.
 
 ## Scope
 
-Brigade is a local file-first control plane for coding agents. Nothing runs until a command or an operator-owned scheduler starts it. Optional serve commands (`brigade center serve`, `brigade runs serve`, `brigade fleet serve`) stay in the foreground until you stop them. Scheduling stays external, except optional operator-owned, target-scoped care registrations (`brigade care install`). The work ledger is machine-local JSON and is not a distributed task database. An optional fleet hub aggregates run events and arbitrates repo claims. The fleet board can show external harness sessions. Local journals stay authoritative. An approved Grok Bot scout feed enqueues labeled GitHub issues only after `--apply`. Ordinary runs have no hard run-budget unless one is declared. When declared, only wall-clock and worker-dispatch ceilings are enforced today. Model, tool, token, and cost dimensions stay observed unless an adapter owns an enforcement boundary. Campaigns aggregate ready work across repos and compose parallel-safe waves at query time from each member's per-repo partition. Center and the fleet board are read-only. External activity observations are best-effort. Cloud registry commands track work that another provider runs. Safe targeted handoffs may auto-file under owner policy. Ambiguous or risky notes wait for review.
+Brigade coordinates agent work through local records and optional long-running services that the operator starts and can stop. The work ledger is machine-local JSON, and the fleet hub coordinates claims and events without replacing local records. Run budgets apply only when declared. Gates mark checkpoints where the operator wants approval. Agent work can continue within its authorized scope between those checkpoints, leaving receipts and journals for inspection. Full boundaries and service lifecycles: [execution model](docs/execution-model.md).
 
-Brigade is not a hosted memory service, automatic release bot, or full autonomous fleet runtime. It does not push to GitHub, publish packages, or send chat messages unless the operator uses an explicit send action. Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade), not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
+Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade), not the archived CNCF Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 
 ## Docs
 
@@ -112,4 +186,4 @@ Brigade is not a hosted memory service, automatic release bot, or full autonomou
 
 MIT. See [LICENSE](LICENSE).
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`.
+Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), npm [`@escoffier-labs/brigade`](https://www.npmjs.com/package/@escoffier-labs/brigade), command `brigade`.

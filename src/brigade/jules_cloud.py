@@ -940,7 +940,12 @@ def launch_agent(
         return LaunchResult(ok=False, reason="uncertain", source_name=source["name"], starting_branch=branch)
 
     session_id = session["id"]
-    bind = fleet_client.bind_cloud(lease_id, provider_task_id=session_id, holder=holder)
+    bind = fleet_client.bind_cloud(
+        lease_id,
+        provider_task_id=session_id,
+        holder=holder,
+        ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS,
+    )
     if not bind.granted:
         # The session exists, but the hub could not bind it. The lease is still
         # held; the operator can inspect and release manually. Do not release here

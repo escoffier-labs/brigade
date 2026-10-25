@@ -8,9 +8,10 @@ import sqlite3
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Iterable, Mapping
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, unquote, urlsplit
 
 from . import toml_compat
+from . import worklore_campaigns as campaigns
 from . import worklore_ownership as ownership
 from . import worklore_store as store
 from .worklore_scope import ScopeAdmissionError
@@ -46,6 +47,11 @@ _STATUS_BY_CODE = {
     "private-data": 400,
     "acceptance-required": 400,
     "import-conflict": 409,
+    "campaign-spec-changed": 409,
+    "campaign-offer-conflict": 409,
+    "campaign-not-authorized": 403,
+    "campaign-ineligible": 409,
+    "campaign-concurrency-limit": 409,
     "adapter-owner-mismatch": 403,
     "execution-mismatch": 403,
     "attempt-forbidden": 403,
@@ -203,6 +209,25 @@ def _dispatch(conn: sqlite3.Connection, request: Request) -> tuple[int, dict[str
             idempotency_key=_idempotency_key(request),
         )
         return 201, {"item": item}
+    if rest == ["campaigns"] and method == "POST":
+        _require_operator(request)
+        result = campaigns.create_campaign(
+            conn,
+            dict(request.body),
+            actor_id=_actor_id(request),
+            actor_type=_actor_type(request),
+            node_id=_event_node_id(request),
+        )
+        return (201 if result["created"] else 200), result
+    if rest == ["campaigns"] and method == "GET":
+        _validate_query(query, {"limit"})
+        return 200, campaigns.list_campaigns(conn, limit=query.get("limit", campaigns.LIST_DEFAULT))
+    if len(rest) == 2 and rest[0] == "campaigns" and method == "GET":
+        _validate_query(query, set())
+        key = unquote(rest[1])
+        if not campaigns.valid_key(key):
+            raise store.WorkloreNotFound("campaign not found")
+        return 200, campaigns.show_campaign(conn, key)
     if rest == ["events"] and method == "GET":
         _validate_query(query, {"work_id", "event_type", "limit", "cursor"})
         return 200, store.list_all_events(
@@ -256,6 +281,9 @@ def _item_route(
     if not tail and method == "GET":
         _validate_query(query, {"links_limit", "links_cursor"})
         item = store.get_item(conn, work_id)
+        campaign = campaigns.member_campaign(conn, work_id)
+        if campaign is not None:
+            item["campaign"] = campaign
         links = store.list_links_page(
             conn,
             work_id,
@@ -352,6 +380,10 @@ def _record_attempt(
         actor_type=_actor_type(request),
         node_id=None if request.is_admin else request.node_id,
         run_id=run_id,
+        is_admin=request.is_admin,
+        is_operator=_is_operator(request),
+        generation=_generation(request),
+        holder_nonce=_header(request, "X-Worklore-Holder"),
     )
     return 200, {"item": item}
 
@@ -394,6 +426,9 @@ def _link_execution(
         actor_id=_actor_id(request),
         actor_type=_actor_type(request),
         is_admin=request.is_admin,
+        is_operator=_is_operator(request),
+        generation=_generation(request),
+        holder_nonce=_header(request, "X-Worklore-Holder"),
     )
     return 201, {"link": link}
 
@@ -471,6 +506,15 @@ def _if_match(request: Request) -> int:
     if not text.isdigit() or len(text) > _MAX_NUMBER_DIGITS:
         raise WorkloreValidationError("If-Match is required", code="if-match-required")
     return int(text)
+
+
+def _generation(request: Request) -> int | None:
+    raw = _header(request, "X-Worklore-Generation")
+    if raw is None:
+        return None
+    if not raw.isascii() or not raw.isdigit() or len(raw) > _MAX_NUMBER_DIGITS:
+        raise WorkloreValidationError("campaign generation header is invalid", code="field-bound")
+    return int(raw)
 
 
 def _optional_if_match(request: Request) -> int | None:

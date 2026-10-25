@@ -4,10 +4,41 @@ import os
 import textwrap
 import re
 import subprocess
+import shutil
+import shlex
+import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow_bash() -> str:
+    if os.name != "nt":
+        bash = shutil.which("bash")
+        if bash is not None:
+            return bash
+        pytest.skip("workflow shell execution requires Bash")
+    # Windows' PATH may resolve bash.exe to the WSL launcher. Use Git for
+    # Windows' shell explicitly, including non-default Git installations.
+    git = shutil.which("git")
+    roots = [Path(git).resolve().parent.parent] if git else []
+    roots.extend(Path(os.environ[key]) / "Git" for key in ("ProgramFiles", "ProgramFiles(x86)") if key in os.environ)
+    if "LOCALAPPDATA" in os.environ:
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Git")
+    for root in roots:
+        bash = root / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    pytest.skip("portable workflow shell execution on Windows requires Git Bash (WSL bash.exe is unsuitable)")
+
+
+def _workflow_bash_command(script: str, *options: str) -> list[str]:
+    # The Ubuntu workflow uses python3. Bind that command to the interpreter
+    # running the test, since Git Bash need not have a python3 executable.
+    python = shlex.quote(Path(sys.executable).as_posix())
+    prelude = f'python3() {{ {python} "$@"; }}\n'
+    return [_workflow_bash(), *options, "-c", prelude + script]
 
 
 def _workflow_job_section(text: str, job_name: str) -> str:
@@ -376,6 +407,64 @@ def test_nightly_windows_observer_preserves_per_file_budgets_and_results():
 
 @pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")
 @pytest.mark.parametrize(
+    ("event", "head_matches", "expected"),
+    [
+        ("pull_request", True, "first-parent"),
+        ("pull_request", False, "error"),
+        ("merge_group", True, "event-base"),
+        ("push", True, "event-base"),
+    ],
+)
+def test_lint_allowlist_base_uses_the_test_merge_first_parent(tmp_path, event, head_matches, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    lint = _workflow_job_section(text, "lint")
+    assert "fetch-depth: 2" in lint.split("      - uses: actions/setup-python", 1)[0]
+    step = _workflow_step_section(text, "lint", "Resolve allowlist base")
+    assert "id: allowlist-base" in step
+    assert "EVENT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before }}" in step
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    (tmp_path / "file.txt").write_text("base\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    stale_base = git("rev-parse", "HEAD")
+    git("switch", "-qc", "feature")
+    (tmp_path / "feature.txt").write_text("feature\n")
+    git("add", ".")
+    git("commit", "-qm", "feature")
+    pr_head = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")
+    (tmp_path / "file.txt").write_text("main moved\n")
+    git("commit", "-qam", "main moved")
+    main_tip = git("rev-parse", "HEAD")
+    git("merge", "-q", "--no-ff", "--no-edit", "feature")
+    output = tmp_path / "github_output"
+    env = {
+        **os.environ,
+        "EVENT_NAME": event,
+        "PR_HEAD_SHA": pr_head if head_matches else stale_base,
+        "EVENT_BASE_SHA": stale_base,
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = subprocess.run(_workflow_bash_command(script), cwd=tmp_path, env=env, capture_output=True, text=True)
+    if expected == "error":
+        assert result.returncode != 0
+        assert "HEAD is not the pull request test merge" in result.stdout
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    want = main_tip if expected == "first-parent" else stale_base
+    assert output.read_text() == f"sha={want}\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")
+@pytest.mark.parametrize(
     ("base", "fetch_status", "expected_commands"),
     [("", 0, []), ("a" * 40, 128, ["git"]), ("a" * 40, 0, ["git", "python"])],
     ids=["missing-base", "failed-fetch", "available-base"],
@@ -386,11 +475,11 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
     assert text.count("--check-allowlist-only") == 1
     step = _workflow_step_section(text, "lint", "Windows allowlist ratchet")
     assert "continue-on-error" not in step
+    assert "BASE_SHA: ${{ steps.allowlist-base.outputs.sha }}" in step
+    assert "github.event.pull_request.base.sha" not in lint
     assert (
-        "BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}"
-        in step
+        lint.index("actions/checkout") < lint.index("Resolve allowlist base") < lint.index("Windows allowlist ratchet")
     )
-    assert lint.index("actions/checkout") < lint.index("Windows allowlist ratchet")
     script = textwrap.dedent(step.split("        run: |\n", 1)[1])
     # Execute the actual workflow shell. Transport stubs log argv only, never
     # implement ratchet policy, which is tested against real Git commits.
@@ -404,7 +493,9 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
         )
         stub.chmod(0o755)
     env = {**os.environ, "BASE_SHA": base, "COMMAND_LOG": str(command_log), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=env, capture_output=True, text=True)
+    result = subprocess.run(
+        _workflow_bash_command(script, "-e", "-o", "pipefail"), env=env, capture_output=True, text=True
+    )
     lines = command_log.read_text().splitlines() if command_log.exists() else []
     assert [line for line in lines if line in {"git", "python"}] == expected_commands
     if expected_commands == ["git", "python"]:
@@ -428,11 +519,41 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
             assert "base SHA is missing" in result.stdout + result.stderr
 
 
+# Pull requests run only the 3.12 shards. Merge groups and pushes to main run
+# every supported Python, so the queue still tests 3.10 and 3.11 before landing.
+SHARD_PYTHON_AXIS = (
+    'python: ${{ fromJSON(github.event_name == \'pull_request\' && \'["3.12"]\' || \'["3.10", "3.11", "3.12"]\') }}'
+)
+
+
+def test_ci_workflow_limits_pull_request_shards_to_python312_only():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    shards = _workflow_job_section(text, "test-shards")
+    axis = re.search(r"^        python: (.+)$", shards, re.MULTILINE)
+    assert axis is not None
+    match = re.fullmatch(
+        r"\$\{\{ fromJSON\(github\.event_name == 'pull_request' && '(.+?)' \|\| '(.+?)'\) \}\}",
+        axis.group(1),
+    )
+    assert match is not None, axis.group(1)
+    pull_request, other_events = (json.loads(group) for group in match.groups())
+    assert pull_request == ["3.12"]
+    assert other_events == ["3.10", "3.11", "3.12"]
+    # The shard name expands per leg, and the required test (X) names keep
+    # the full matrix, so no check reports an unexpanded matrix expression.
+    assert "    if:" not in shards.split("    steps:", 1)[0]
+    protected = _workflow_job_section(text, "test")
+    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    notice = _workflow_step_section(text, "test", "Note Python shards deferred to the merge queue")
+    assert "if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}" in notice
+    assert "::notice::" in notice
+
+
 def test_ci_workflow_runs_four_shards_on_every_supported_python():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     shards = _workflow_job_section(text, "test-shards")
     assert "name: test shard (${{ matrix.python }}, ${{ matrix.shard }})" in shards
-    assert 'python: ["3.10", "3.11", "3.12"]' in shards
+    assert SHARD_PYTHON_AXIS in shards
     assert "shard: [0, 1, 2, 3]" in shards
     assert "fail-fast: false" in shards
     assert "python scripts/ci_pytest_shard.py" in shards
@@ -445,8 +566,9 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     coverage = _workflow_job_section(text, "coverage")
     protected = _workflow_job_section(text, "test")
     assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
-    assert "--cov=brigade --cov-report=\n" in shards
+    assert '--cov="$PWD/src/brigade" --cov-report=\n' in shards
     assert "--cov-report=term" not in shards
+    assert "--cov-branch" not in shards
     assert "uses: actions/upload-artifact@v7" in shards
     assert "include-hidden-files: true" in shards
     assert "uses: actions/download-artifact@v8" in coverage
@@ -468,6 +590,91 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
         '[ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]'
         in protected
     )
+
+
+def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    assert re.search(r"^    if: always\(\)$", gate, re.MULTILINE)
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+    # main's 20 required contexts, including the test/installer/quickstart
+    # matrix names, map to these nine jobs. Keep this snapshot independent
+    # of the workflow so a rename cannot silently remove gate coverage.
+    required_jobs = {
+        "changes",
+        "lint",
+        "test",
+        "component-manifest-provenance",
+        "content-guard",
+        "repo-metadata",
+        "install-from-source",
+        "quickstart-smoke",
+        "windows-native-acceptance",
+    }
+    assert needs == required_jobs | {
+        "test-shards",
+        "coverage",
+        "cosign-integration",
+        "fleet-hub-container",
+        "mesh-compatibility",
+        "mesh-cross-version",
+        "mesh-without-extra",
+    }
+    for name in needs:
+        _workflow_job_section(text, name)
+    assert "actions/checkout" not in gate
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
+def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, changes_result, container_result):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = {name: {"result": "success"} for name in re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)}
+    needs["changes"] = {"result": changes_result, "outputs": {"fleet_hub_container": flag}}
+    needs["fleet-hub-container"] = {"result": container_result}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    expected = changes_result == "success" and (
+        container_result == "success" or (container_result == "skipped" and flag == "false" and event != "merge_group")
+    )
+    assert result.returncode == (0 if expected else 1), result.stdout + result.stderr
+    if not expected:
+        assert "required success, got" in result.stderr, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["failure", "cancelled", "skipped", "missing", "extra"])
+def test_ci_shadow_gate_rejects_bad_results_and_dependency_mismatches(mutation):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    for name in names if mutation != "extra" else ["unexpected-job"]:
+        needs = {job: {"result": "success"} for job in names}
+        needs["changes"]["outputs"] = {"fleet_hub_container": "true"}
+        if mutation == "missing":
+            del needs[name]
+        else:
+            needs[name] = {"result": "success" if mutation == "extra" else mutation}
+        result = subprocess.run(
+            _workflow_bash_command(script),
+            env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME="pull_request"),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 1, (name, mutation, result.stdout, result.stderr)
+        diagnostic = "DAG mismatch:" if mutation in {"missing", "extra"} else "required success, got"
+        assert diagnostic in result.stderr, (name, mutation, result.stdout, result.stderr)
 
 
 def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
@@ -528,11 +735,11 @@ def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips
         FLEET_HUB_RESULT=container_result,
         FLEET_HUB_REQUIRED=required,
     )
-    result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    result = subprocess.run(_workflow_bash_command(shell), env=env, capture_output=True, text=True)
     expected = changes_result == "success" and (
         container_result == "success" or (container_result == "skipped" and required == "false")
     )
-    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+    assert result.returncode == (0 if expected else 1), result.stdout + result.stderr
 
 
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
@@ -558,11 +765,20 @@ def test_ci_workflow_test_shards_installs_grokbot_extra_on_python312():
     assert section.index("      - name: Install\n") < section.index("      - name: Install with grokbot extra\n")
 
 
+def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = _workflow_step_section(text, "test-shards", "Pytest shard with coverage")
+
+    assert "if: matrix.python == '3.12'\n" in step
+    assert "        env:\n          COVERAGE_CORE: sysmon\n" in step
+    assert "COVERAGE_CORE" not in text.replace(step, "")
+
+
 def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     step = _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
 
-    assert "if: matrix.python == '3.12'" in step
+    assert "if: matrix.python == '3.12' && matrix.shard == 0\n" in step
     assert "tests/test_grokbot_mcp.py" in step
     assert "pytest_exit=$?" in step
     assert "[ $pytest_exit -ne 0 ]" in step
@@ -711,7 +927,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "BrigadeCare-ingest-sweep" in text
     assert "/SC MINUTE /MO 30" in text
     assert "brigade care status" in text
-    assert '/RU "%USERNAME%" /IT' in text
+    assert "/RU `$env:USERNAME /IT /F" in text
     assert "Invoke-PrintedSchtasksBatch" in text
     assert "Read-AcceptanceFileText" in text
     assert "runas.exe /trustlevel:0x20000" not in text
@@ -1304,6 +1520,7 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
     assert '"tests/test_skills_state_windows.py"' in probe
     assert '"tests/test_nt_private_storage.py::TestNativePrivateStorage"' in probe
+    assert '"tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles"' in probe
     assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
     assert "self.skipped |= report.skipped" in probe
     assert "sys.exit(1 if guard.skipped else int(result))" in probe
@@ -1360,7 +1577,13 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     jobs = text.split("jobs:\n", 1)[1]
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
-        "trusted-runner-canary"
+        "trusted-runner-canary",
+        "ci-gate",
+        "windows-affected-tests",
+        "pr-tier-shadow",
+        "mesh-compatibility",
+        "mesh-cross-version",
+        "mesh-without-extra",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)
@@ -1380,7 +1603,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
 def test_ci_migration_preserves_complete_matrices():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     for job, axis in (
-        ("test-shards", 'python: ["3.10", "3.11", "3.12"]'),
+        ("test-shards", SHARD_PYTHON_AXIS),
         ("test-shards", "shard: [0, 1, 2, 3]"),
         ("test", 'python: ["3.10", "3.11", "3.12"]'),
         ("cosign-integration", 'cosign: ["v2.6.5", "v3.1.3"]'),
@@ -1455,12 +1678,15 @@ def test_ci_canary_is_one_opt_in_trusted_main_job_with_minimal_permissions():
         assert command in canary
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="trusted-runner-canary exercises the Linux-only self-hosted runner bootstrap"
+)
 def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     canary = _workflow_job_section(text, "trusted-runner-canary")
     shell = textwrap.dedent(canary.split("        run: |\n", 1)[1])
     result = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", shell],
+        _workflow_bash_command(shell, "-euo", "pipefail"),
         cwd=tmp_path,
         env=dict(os.environ, GITHUB_WORKSPACE=str(ROOT), PYTHONPATH=""),
         capture_output=True,
@@ -1469,3 +1695,260 @@ def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "0 failed" in result.stdout
+
+
+def test_windows_affected_job_selects_before_install_and_preserves_driver_policy():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-tests")
+    assert "name: windows-affected-tests" in job
+    assert "if: ${{ github.event_name == 'pull_request' }}" in job
+    assert "runs-on: windows-latest" in job
+    assert "timeout-minutes: 50" in job
+    assert "timeout-minutes: 45" in job
+    assert "fetch-depth: 0" in job
+    assert "persist-credentials: false" in job
+    # Diff from the test merge's first parent. pull_request.base.sha can trail
+    # the base branch and would count other merged pull requests' changes.
+    assert "pull_request.base.sha }}" not in job
+    assert "merge_group.base_sha" not in job
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in job
+    assert "$mergeHead = git rev-parse HEAD^2" in job
+    assert '$mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }' in job
+    assert "$base = git rev-parse HEAD^1" in job
+    assert '"base=$base" >> $env:GITHUB_OUTPUT' in job
+    assert "--base $base --head HEAD" in job
+    assert "BASE_SHA: ${{ steps.selection.outputs.base }}" in job
+    assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
+    assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
+    assert "Skip empty selection" in job
+    for option in (
+        "--files-from",
+        "--record",
+        "--base-ref",
+        "--job-started-at",
+        "--job-limit 2700",
+        "--startup-reserve 120",
+        "--finalize-reserve 300",
+        "--job-timeout 2280",
+        "--serial test_runs_serve.py",
+        "--serial test_aboyeur.py",
+    ):
+        assert option in job
+    assert "if: ${{ always() }}" in job
+    assert "actions/upload-artifact@v7" in job
+    assert "issues: write" not in text
+
+
+def test_windows_nightly_issue_write_permission_is_isolated():
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    observe = _workflow_job_section(text, "windows-pytest")
+    alert = _workflow_job_section(text, "nightly-alert")
+    assert "issues: write" not in observe
+    assert text.count("issues: write") == 1
+    assert "issues: write" in alert
+    assert "needs: windows-pytest" in alert
+    assert "always()" in alert
+    assert "steps.observe.outcome" in observe
+    assert "record.status === 'complete'" in observe
+    assert "['failed', 'timeout'].includes(row.status) && !allowed.has(row.name)" in observe
+    assert "windows-nightly" in alert
+    assert "github.rest.issues.createLabel" in alert
+    assert "github.paginate" in alert
+    assert "state: 'closed'" in alert
+
+
+@pytest.mark.parametrize(
+    "clean,existing,expected",
+    [(False, False, "create"), (False, True, "update"), (True, True, "close"), (True, False, "none")],
+)
+def test_windows_nightly_issue_lifecycle(tmp_path, clean, existing, expected):
+    if not __import__("shutil").which("node"):
+        pytest.skip("Node is required to exercise the github-script lifecycle")
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    alert = _workflow_job_section(text, "nightly-alert")
+    script = textwrap.dedent(alert.split("          script: |\n", 1)[1])
+    harness = """
+    const calls = [];
+    const context = {repo: {owner: 'example', repo: 'project'}, serverUrl: 'https://github.com', runId: 123, sha: 'abc'};
+    const github = {rest: {issues: {
+      getLabel: async () => { throw {status: 404}; },
+      createLabel: async data => calls.push(['label', data]),
+      listForRepo: () => {},
+      create: async data => calls.push(['create', data]),
+      update: async data => calls.push([data.state === 'closed' ? 'close' : 'update', data]),
+      createComment: async data => calls.push(['comment', data]),
+    }}, paginate: async () => EXISTING ? [{number: 9}] : []};
+    (async () => { SCRIPT })().then(() => console.log(JSON.stringify(calls))).catch(e => { console.error(e); process.exit(1); });
+    """.replace("EXISTING", json.dumps(existing)).replace("SCRIPT", script)
+    report = {
+        "clean": clean,
+        "summary": "windows pytest: files=1 regressions=" + str(int(not clean)),
+        "regressed": [] if clean else ["test_new.py"],
+    }
+    result = subprocess.run(
+        ["node", "-e", harness],
+        env={**os.environ, "REPORT": json.dumps(report)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = json.loads(result.stdout)
+    assert calls[0][0] == "label"
+    actions = [call[0] for call in calls[1:]]
+    assert actions == ([] if expected == "none" else ["comment", "close"] if expected == "close" else [expected])
+    if expected != "none":
+        body = calls[1][1]["body"]
+        assert "https://github.com/example/project/actions/runs/123" in body
+        assert "Commit: abc" in body
+        assert report["summary"] in body
+        if not clean:
+            assert "test_new.py" in body
+
+
+@pytest.mark.parametrize(
+    "outcome,status,failed,expected_clean",
+    [
+        ("success", "complete", False, True),
+        ("failure", "complete", True, False),
+        ("failure", "incomplete", False, False),
+        ("skipped", "complete", False, False),
+    ],
+)
+def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expected_clean):
+    if not __import__("shutil").which("node"):
+        pytest.skip("Node is required for the nightly report contract")
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    step = _workflow_step_section(text, "windows-pytest", "Collect nightly report")
+    script = textwrap.dedent(step.split("          script: |\n", 1)[1])
+    record = {
+        "status": status,
+        "results": [
+            {"name": "test_known.py", "status": "failed"},
+            {"name": "test_new.py", "status": "timeout" if failed else "passed"},
+        ],
+    }
+    harness = (
+        """
+    const realRequire = require;
+    const record = RECORD;
+    const summary = 'windows pytest: files=2 regressions=COUNT';
+    const fakeRequire = name => name === 'fs' ? {readFileSync: file => {
+      if (file.endsWith('summary.json')) return JSON.stringify(record);
+      if (file.endsWith('driver.txt')) return 'output\\n' + summary + '\\n';
+      return JSON.stringify({known_failures: ['test_known.py'], known_timeouts: []});
+    }} : realRequire(name);
+    const core = {warning: () => {}, setOutput: (name, value) => console.log(value)};
+    new Function('require', 'core', 'process', SCRIPT)(fakeRequire, core, {env: {RUNNER_TEMP: 'temp', OBSERVE_OUTCOME: __OUTCOME_VALUE__}});
+    """.replace("RECORD", json.dumps(record))
+        .replace("COUNT", str(int(failed)))
+        .replace("SCRIPT", json.dumps(script))
+        .replace("__OUTCOME_VALUE__", json.dumps(outcome))
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=True)
+    report = json.loads(result.stdout)
+    assert report["clean"] is expected_clean
+    assert report["regressed"] == (["test_new.py"] if failed else [])
+    assert report["summary"].startswith("windows pytest: files=2 regressions=")
+
+
+@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version"])
+def test_mesh_install_bounds_match_package_metadata(job):
+    import ast
+
+    metadata = (ROOT / "pyproject.toml").read_text()
+    requirements = []
+    for extra in ("mesh", "dev"):
+        match = re.search(rf"^{extra} = (\[.*\])$", metadata, re.MULTILINE)
+        assert match is not None
+        requirements.append(next(item for item in ast.literal_eval(match[1]) if item.startswith("cryptography")))
+    assert requirements[0] == requirements[1]
+    bounds = re.fullmatch(r"cryptography>=(\d+\.\d+\.\d+),(<\d+)", requirements[0])
+    assert bounds is not None
+    floor, ceiling = bounds.groups()
+    section = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), job)
+    assert f"--only-binary cryptography 'cryptography=={floor}'" in section
+    assert f"--upgrade --only-binary cryptography 'cryptography>={floor},{ceiling}'" in section
+
+
+def test_mesh_jobs_are_protected_and_path_filtered():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+    assert (
+        "mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
+        in changes
+    )
+    mesh_filter = changes.split("            mesh:\n", 1)[1].split("            code_graph:", 1)[0]
+    for path in (
+        "src/brigade/fleet_mesh_*.py",
+        "tests/test_fleet_mesh_*.py",
+        "tests/mesh_hpke_reference.py",
+        "tests/fixtures/mesh/**",
+        "docs/phase-agent-mesh.md",
+        "pyproject.toml",
+    ):
+        assert "'" + path + "'" in mesh_filter
+    gate = _workflow_job_section(text, "ci-gate")
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        assert "needs.changes.outputs.mesh == 'true'" in section
+        assert job in gate
+    compatibility = _workflow_job_section(text, "mesh-compatibility")
+    assert "crypto: [floor, newest]" in compatibility
+    assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility
+    assert "runner.os != 'Linux'" in compatibility
+    assert '"$MESH_PYTHON -m mypy src/brigade/fleet_mesh_crypto.py"' in compatibility
+    assert '"$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_crypto.py"' in compatibility
+    assert "mesh_python=.venv/Scripts/python.exe" in compatibility
+    assert "mesh_python=.venv/bin/python" in compatibility
+    assert "MESH_PYTHON=$mesh_python" in compatibility
+    assert "MESH_ENV: present" in compatibility
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        assert "id: python" in section
+        assert '"${{ steps.python.outputs.python-path }}" -m venv .venv' in section
+        assert not re.search(r'(?m)(?:^\s*(?:run:\s*)?|--command\s+)["\']?(?:python3?|pip3?)["\']?\s', section)
+    cross = _workflow_job_section(text, "mesh-cross-version")
+    assert "MESH_ENV: present" in cross
+    absent = _workflow_job_section(text, "mesh-without-extra")
+    assert ".venv/bin/python -m pip uninstall -y cryptography" in absent
+    assert "MESH_ENV: absent" in absent
+    assert "tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment" in absent
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version", "mesh-without-extra"])
+def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    needs = {name: {"result": "success"} for name in names}
+    needs["changes"]["outputs"] = {"mesh": flag}
+    needs[job] = {"result": "skipped"}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if event == "pull_request" and flag == "false" else 1), result.stdout + result.stderr
+
+
+def test_mesh_actions_are_pinned_to_full_commits():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        actions = re.findall(r"uses: ([^\n]+)", section)
+        assert actions
+        assert all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v[0-9.]+", action) for action in actions)
+
+
+def test_mesh_checkouts_do_not_persist_credentials():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        checkout = re.search(r"uses: actions/checkout@[^\n]+\n((?:        [^\n]*\n)*)", section)
+        assert checkout, job
+        assert "persist-credentials: false" in checkout.group(1), job

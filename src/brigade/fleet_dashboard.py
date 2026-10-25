@@ -7,8 +7,8 @@ the fleet hub. Two pivots over the same event stream:
   (run, repo, seat/harness, state, elapsed, last event) and the claims it
   holds.
 - ``repos`` — one row per observed repo: where it is running, who claims it
-  (owner node, conductor, TTL remaining), its last outcome, and a collision
-  flag when two nodes touch one repo or a run is not on the claim owner.
+  (owner node, conductor, TTL remaining), its last outcome, and neutral
+  parallel activity details when two active nodes report the same repo label.
 
 Everything here is a pure function of the hub's query results, so the tests
 can render without a socket. The page mirrors the ``brigade center serve``
@@ -29,8 +29,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qs, urlencode
 
+from . import fleet_command_deck
 from .fleet_command_deck import is_terminal_state
-from . import ui_theme
 
 REFRESH_SECONDS = 10
 MACHINE_CARD_LIMIT = 200
@@ -435,19 +435,14 @@ def _board_href(query: DashboardQuery, view: str) -> str:
 
 def _nav(query: DashboardQuery) -> str:
     links = [
-        ("/deck", "deck"),
-        ("/deck/repos", "repos"),
-        ("/deck/roster", "roster"),
-        ("/deck/policy", "policy"),
         (_board_href(query, "machines"), "machines board"),
         (_board_href(query, "repos"), "repos board"),
     ]
     items = []
     for href, label in links:
-        is_board = label.endswith("board")
-        current = ' aria-current="page"' if is_board and label.startswith(query.view) else ""
+        current = ' aria-current="page"' if label.startswith(query.view) else ""
         items.append(f'<a href="{esc(href)}"{current}>{esc(label)}</a>')
-    return f'<nav class="deck-nav" aria-label="Command Deck">{" ".join(items)}</nav>'
+    return f'<nav class="board-nav" aria-label="Board views">{" ".join(items)}</nav>'
 
 
 def _controls(query: DashboardQuery) -> str:
@@ -692,7 +687,7 @@ def _machine_board(
 class _RepoEntry:
     repo: str
     live: list[RunRow]  # rows shown after filtering
-    all_live: list[RunRow]  # every live run, so a collision survives a filter
+    all_live: list[RunRow]  # every active run, so parallel context survives a filter
     claim: ClaimRow | None
     last_outcome: RunRow | None
 
@@ -703,8 +698,6 @@ class _RepoEntry:
 
     @property
     def rank(self) -> int:
-        if self.collision:
-            return -1
         return min((_rank(row) for row in self.live), default=_IDLE_RANK)
 
 
@@ -742,10 +735,7 @@ def _repo_entries(all_rows: list[RunRow], claims: list[ClaimRow], query: Dashboa
         if query.node and not live and not (claim and _contains(claim.owner_node, query.node)):
             continue
         if narrowed and not live:
-            if not (query.attention_only and entry.collision):
-                continue
-            # The collision itself is the attention item: show the runs that make it one.
-            entry.live = all_live
+            continue
         entries.append(entry)
     return entries
 
@@ -785,7 +775,10 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
         else:
             outcome = esc("-")
         flags = (
-            f'<span class="fleet-state fleet-state-failed">{esc("! collision")}</span>' if entry.collision else esc("-")
+            "<details><summary>parallel activity</summary>"
+            "<p>Same repo label on multiple machines. File overlap unknown.</p></details>"
+            if entry.collision
+            else esc("-")
         )
         body.append(
             f'<tr data-collision="{"1" if entry.collision else "0"}">'
@@ -879,12 +872,11 @@ def render_page(
     heading = "Machines" if query.view != "repos" else "Repos"
     nav = _nav(query)
     body = (
-        '<main class="deck-shell">'
-        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        f"<h1>Command Deck &middot; {esc(heading)}</h1>"
-        f'<p class="station-meta">{esc(f"data as of {stamp}, refreshes every {REFRESH_SECONDS}s")}, '
-        f'<a href="{esc(_href(query))}">{esc("refresh")}</a></p></div>'
-        f'<p class="header-meta">{esc(stamp)}</p></header>'
+        '<main class="deck-shell fleet-board">'
+        f'<header class="page-head"><div><h1>{esc(heading)} board</h1>'
+        f'<p class="page-sub">Refreshes every {REFRESH_SECONDS}s</p></div>'
+        f'<p class="header-meta">Updated {esc(stamp)} '
+        f'<a class="refresh-link" href="{esc(_href(query))}">Refresh</a></p></header>'
         f"{nav}"
         f"{_summary(all_rows, node_ids, claim_rows)}{_legend()}{_controls(query)}"
         f'<label class="fleet-quick-filter">{esc("filter rows")} '
@@ -892,46 +884,47 @@ def render_page(
         f"{board}{more}"
         "</main>"
     )
-    return _document(f"{title} - Brigade Fleet", nonce, body, stamp=stamp)
+    return _document(f"{title} - Brigade Fleet", nonce, body, now=current)
 
 
 _BOARD_CSS = """
-.page-summary { margin: 16px 0 8px; font-weight: 600; color: var(--ink); }
-.state-legend { display: flex; flex-wrap: wrap; gap: 8px 12px; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
-.legend-entry { white-space: nowrap; }
-.fleet-controls { display: flex; flex-wrap: wrap; gap: 12px 16px; align-items: end; margin-bottom: 12px; font-size: 12px; color: var(--muted); }
-.fleet-controls label { display: grid; gap: 6px; min-width: 0; text-transform: uppercase; }
-.fleet-controls input, .fleet-controls select { max-width: 100%; min-width: 0; text-transform: none; }
-.fleet-controls input[type="search"], .fleet-controls select { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
-.fleet-controls button { min-height: 40px; padding: 0 14px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
-.fleet-quick { color: var(--muted); }
-.fleet-quick-filter { display: grid; gap: 6px; margin-bottom: 16px; font-size: 12px; color: var(--muted); }
-.fleet-quick-filter input { min-height: 36px; padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
-.machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 16px; margin-bottom: 16px; }
-.machine-card { min-width: 0; padding: 16px; border: 1px solid var(--line-quiet); background: var(--surface); }
-.machine-card-header { display: flex; gap: 12px; align-items: center; margin-bottom: 12px; }
-.machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
-.machine-card-meta { min-width: 0; flex: 1; }
-.machine-card-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-.machine-card-line { color: var(--muted); font-size: 12px; }
-.state-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
-.state-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; color: var(--muted); }
-.fleet-holds { font-size: 12px; color: var(--muted); margin-bottom: 12px; }
-.fleet-holds ul { margin: 0; padding-left: 1.2rem; }
-table.data-table { table-layout: auto; }
-table.data-table th:nth-child(n) { width: auto; }
-.fleet-run-id, .fleet-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
-.fleet-where { margin: 0; padding-left: 1.1rem; }
-.fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
-.fleet-execution-context { display: block; color: var(--muted); }
-.fleet-state-running { border-color: var(--signal); color: var(--signal); }
-.fleet-state-succeeded { border-color: var(--ok); color: var(--ok); }
-.fleet-state-awaiting-approval { border-color: var(--signal); background: var(--signal-quiet); }
-.fleet-state-failed { border-color: var(--bad); color: var(--bad); }
-.fleet-state-stale { border-style: dashed; border-color: var(--bad); }
-.fleet-state-queued, .fleet-state-interrupted { border-style: dashed; }
-.machine-empty { margin: 0; color: var(--muted); font-size: 12px; }
-.fleet-more { margin: 16px 0 0; font-size: 12px; }
+.fleet-board .page-summary { margin: var(--space-4) 0 var(--space-2); font-weight: 600; color: var(--ink); }
+.fleet-board .state-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
+.fleet-board .legend-entry { white-space: nowrap; }
+.fleet-board .fleet-controls { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); align-items: end; margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
+.fleet-board .fleet-controls label { display: grid; gap: 6px; min-width: 0; }
+.fleet-board .fleet-controls input, .fleet-board .fleet-controls select { max-width: 100%; min-width: 0; border-radius: var(--radius-control); text-transform: none; }
+.fleet-board .fleet-controls input[type="search"], .fleet-board .fleet-controls select { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
+.fleet-board .fleet-controls button { min-height: var(--space-8); padding: 0 14px; font: inherit; font-weight: 500; cursor: pointer; }
+.fleet-board .fleet-quick { color: var(--muted); }
+.fleet-board .fleet-quick-filter { display: grid; gap: 6px; margin-bottom: var(--space-4); font-size: 12px; color: var(--muted); }
+.fleet-board .fleet-quick-filter input { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
+.fleet-board .machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(840px, 100%), 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }
+.fleet-board .machine-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
+.fleet-board .machine-card-header { display: flex; gap: var(--space-3); align-items: center; margin-bottom: var(--space-3); }
+.fleet-board .machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
+.fleet-board .machine-card-meta { min-width: 0; flex: 1; }
+.fleet-board .machine-card-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); font-family: var(--font-mono); }
+.fleet-board .machine-card-line { color: var(--muted); font-size: 12px; }
+.fleet-board .state-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--space-2); }
+.fleet-board .state-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; color: var(--muted); }
+.fleet-board .fleet-holds { font-size: 12px; color: var(--muted); margin-bottom: var(--space-3); }
+.fleet-board .fleet-holds ul { margin: 0; padding-left: 1.2rem; }
+.fleet-board table.data-table { table-layout: auto; }
+.fleet-board .machine-card table.data-table, .fleet-board #repo-board { min-width: 800px; }
+.fleet-board table.data-table th:nth-child(n) { width: auto; overflow-wrap: normal; white-space: nowrap; }
+.fleet-board .fleet-run-id, .fleet-board .fleet-node { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
+.fleet-board .fleet-where { margin: 0; padding-left: 1.1rem; }
+.fleet-board .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
+.fleet-board .fleet-execution-context { display: block; color: var(--muted); }
+.fleet-board .fleet-state-running { border-color: var(--signal); color: var(--signal); }
+.fleet-board .fleet-state-succeeded { border-color: var(--ok); color: var(--ok); }
+.fleet-board .fleet-state-awaiting-approval { border-color: var(--signal); background: var(--signal-quiet); }
+.fleet-board .fleet-state-failed { border-color: var(--bad); color: var(--bad); }
+.fleet-board .fleet-state-stale { border-style: dashed; border-color: var(--bad); }
+.fleet-board .fleet-state-queued, .fleet-board .fleet-state-interrupted { border-style: dashed; }
+.fleet-board .machine-empty { margin: 0; color: var(--muted); font-size: 12px; }
+.fleet-board .fleet-more { margin: var(--space-4) 0 0; font-size: 12px; }
 """
 
 _SCRIPT = """(function () {
@@ -963,12 +956,13 @@ _SCRIPT = """(function () {
 })();"""
 
 
-def _document(title: str, nonce: str, body: str, *, stamp: str) -> str:
-    return ui_theme.document(
-        title,
-        nonce,
+def _document(title: str, nonce: str, body: str, *, now: datetime) -> str:
+    return fleet_command_deck._document(
         body,
-        as_of=stamp,
+        title=title,
+        nonce=nonce,
+        now=now,
+        active="boards",
         refresh_seconds=REFRESH_SECONDS,
         extra_css=_BOARD_CSS,
         script=_SCRIPT,

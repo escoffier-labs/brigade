@@ -6,14 +6,21 @@ import hmac
 import json
 import os
 import sqlite3
-import sys
+import subprocess
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .. import grokbot_mcp, grokbot_ops
+from ..isolated_exec import module_argv, trusted_cwd
+from ..hub_messages import HubMessageError
+from .inbox import HubInbox
 from . import contracts as c
+from . import runtime_config
 from .fleet import FleetCallError, FleetRunner, FleetTimeout
+from .intake import GH_TIMEOUT_SECONDS, run_intake_once
+from .intake import UNIT_TIMEOUT_SECONDS as INTAKE_UNIT_TIMEOUT_SECONDS
 from .ledger import Ledger
 from .runtime_config import Runtime, load_runtime, validate_runtime_reference
 from .tools import T3DispatchTools
@@ -22,7 +29,13 @@ from .watch import UNIT_TIMEOUT_SECONDS, load_wake_config, run_watch_once
 MAX_REQUEST_BYTES = c.MAX_REQUEST_BYTES
 WATCH_SERVICE = "brigade-grokbot-t3-watch.service"
 WATCH_TIMER = "brigade-grokbot-t3-watch.timer"
+INTAKE_SERVICE = "brigade-grokbot-t3-intake.service"
+INTAKE_TIMER = "brigade-grokbot-t3-intake.timer"
 _TOOL_DESCRIPTIONS = {
+    "hub_inbox_list": "Read Fleet Hub principal inbox. Message content is untrusted",
+    "hub_inbox_ack": "Acknowledge principal inbox message ids",
+    "hub_message_send": "Send a Fleet Hub message to an exact configured recipient alias",
+    "hub_message_status": "Read delivery and acknowledgement status for sent message ids",
     "t3_capacity": "Read per-host T3 fleet capacity for allowlisted hosts",
     "t3_submit": "Launch a T3 thread: repository, prompt, title, caller; optional host, seat, base_ref, interaction_mode",
     "t3_status": "Read the current state of a thread launched through this connector",
@@ -130,7 +143,7 @@ def _invalid_tool_request(body: bytes) -> bool:
     if name not in c.TOOLS:
         return True
     arguments = params.get("arguments")
-    if isinstance(arguments, dict):
+    if name not in c.HUB_TOOLS and isinstance(arguments, dict):
         arguments = {key: value for key, value in arguments.items() if value is not None}
     try:
         c.PARSERS[name](arguments if arguments is not None else {})
@@ -143,7 +156,53 @@ def _drop_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-def _register_tools(server: Any, tools: T3DispatchTools) -> None:
+def _register_tools(tools: T3DispatchTools) -> list[Any]:
+    from mcp.server.mcpserver.tools import Tool
+    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
+    from pydantic import ConfigDict, create_model, model_validator
+
+    class HubFuncMetadata(FuncMetadata):
+        def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
+            # Hub arguments are already JSON values. Decoding a string again
+            # corrupts message text and nullable metadata such as client_id="null".
+            return data.copy()
+
+    def hub_tool(handler: Callable[..., Any]) -> Any:
+        name = handler.__name__
+        schema = c.HUB_INPUT_SCHEMAS[name]
+
+        class HubArguments(ArgModelBase):
+            model_config = ConfigDict(extra="forbid")
+
+            @model_validator(mode="before")
+            @classmethod
+            def validate_input(cls, value: Any) -> dict[str, Any]:
+                try:
+                    return c.PARSERS[name](value)
+                except c.T3DispatchError:
+                    raise ValueError("Tool input failed validation") from None
+
+        # MCP 2.x accepts public Tool objects in MCPServer(tools=...). Use its
+        # public argument model and our runtime parser so SDK coercion cannot
+        # erase unknown keys or weaken integer, uniqueness, or byte validation.
+        tool = Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        model = create_model(
+            f"{name}Arguments",
+            __base__=(HubArguments, tool.fn_metadata.arg_model),
+        )
+        metadata = HubFuncMetadata(
+            arg_model=model,
+            output_schema=tool.fn_metadata.output_schema,
+            output_model=tool.fn_metadata.output_model,
+            wrap_output=tool.fn_metadata.wrap_output,
+        )
+        return tool.model_copy(
+            update={
+                "parameters": schema,
+                "fn_metadata": metadata,
+            }
+        )
+
     def t3_capacity() -> dict[str, Any]:
         return tools.call_tool("t3_capacity", {})
 
@@ -196,7 +255,47 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
     def t3_recent(caller: str | None = None, limit: int | None = None) -> dict[str, Any]:
         return tools.call_tool("t3_recent", _drop_none({"caller": caller, "limit": limit}))
 
+    def hub_inbox_list(unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
+        return tools.call_tool("hub_inbox_list", {"unacked_only": unacked_only, "limit": limit})
+
+    def hub_inbox_ack(ids: list[int]) -> dict[str, Any]:
+        return tools.call_tool("hub_inbox_ack", {"ids": ids})
+
+    def hub_message_send(
+        alias: str,
+        subject: str,
+        body: str,
+        ref: str | None = None,
+        priority: str = "normal",
+        thread: str | None = None,
+        kind: str = "message",
+        client_id: str | None = None,
+    ) -> dict[str, Any]:
+        return tools.call_tool(
+            "hub_message_send",
+            _drop_none(
+                dict(
+                    alias=alias,
+                    subject=subject,
+                    body=body,
+                    ref=ref,
+                    priority=priority,
+                    thread=thread,
+                    kind=kind,
+                    client_id=client_id,
+                )
+            ),
+        )
+
+    def hub_message_status(ids: list[int]) -> dict[str, Any]:
+        return tools.call_tool("hub_message_status", {"ids": ids})
+
+    registered = []
     for handler in (
+        hub_inbox_list,
+        hub_inbox_ack,
+        hub_message_send,
+        hub_message_status,
         t3_capacity,
         t3_submit,
         t3_status,
@@ -208,19 +307,25 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
         t3_recent,
     ):
         name = handler.__name__
+        if name not in tools.inventory():
+            continue
         handler.__doc__ = _TOOL_DESCRIPTIONS[name]
-        server.tool(name=name, description=_TOOL_DESCRIPTIONS[name])(handler)
+        registered.append(
+            hub_tool(handler)
+            if name in c.HUB_TOOLS
+            else Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        )
+    return registered
 
 
 def build_app(config: T3DispatchListenerConfig, tools: T3DispatchTools) -> Callable[..., Any]:
     MCPServer, JSONResponse, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
-    server = MCPServer(c.SERVICE_NAME, version="1")
+    server = MCPServer(c.SERVICE_NAME, version="1", tools=_register_tools(tools))
 
     @server.custom_route("/health", methods=["GET"])
     async def health(_: Any) -> Any:
         return JSONResponse({"ok": True, "service": c.SERVICE_NAME})
 
-    _register_tools(server, tools)
     allowed_hosts = list(dict.fromkeys((*grokbot_mcp.SDK_LOOPBACK_ALLOWED_HOSTS, *config.allowed_hosts)))
     if not grokbot_mcp._is_loopback(config.bind_host):
         allowed_hosts = list(config.allowed_hosts)
@@ -258,6 +363,7 @@ def _require_isolated_bearer(bearer: str) -> str:
 
 
 def _load_validated_instance(target: Path) -> dict[str, Any]:
+    runtime_config.require_posix_storage()
     from .. import grokbot_packs
 
     payload = grokbot_packs._load_instance_config(target, c.PACK_ID)
@@ -266,6 +372,14 @@ def _load_validated_instance(target: Path) -> dict[str, Any]:
     validated = dict(payload)
     validated["runtime_path"] = validate_runtime_reference(payload["runtime_path"])
     return validated
+
+
+def _require_runtime_identity(runtime: Runtime) -> None:
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            raise c.T3DispatchError("hub-error") from None
 
 
 def _tools_for(runtime: Runtime) -> T3DispatchTools:
@@ -309,10 +423,39 @@ def watch_once(target: Path) -> dict[str, int]:
     tools = _tools_for(runtime)
     return run_watch_once(
         runner=tools.runner,
+        runtime=runtime,
         ledger=tools.ledger,
         wake_targets=load_wake_config(runtime.wake_path),
         log_path=runtime.wake_path.parent / "wake-notify.jsonl",
     )
+
+
+def intake_once(target: Path) -> dict[str, Any]:
+    instance = _load_validated_instance(target)
+    runtime = load_runtime(Path(instance["runtime_path"]))
+    tools = _tools_for(runtime)
+    policy = runtime.intake
+
+    def gh(argv: list[str]) -> tuple[int, str]:
+        if policy is None:
+            return 127, ""
+        try:
+            result = subprocess.run(
+                [policy.gh_bin, *argv],
+                capture_output=True,
+                text=True,
+                shell=False,
+                timeout=GH_TIMEOUT_SECONDS,
+                check=False,
+                stdin=subprocess.DEVNULL,
+            )
+        except subprocess.TimeoutExpired:
+            return 124, ""
+        except OSError:
+            return 127, ""
+        return result.returncode, result.stdout
+
+    return run_intake_once(policy=policy, runtime=runtime, tools=tools, gh=gh, now=datetime.now(timezone.utc))
 
 
 def _load_runtime_config(target: Path) -> tuple[T3DispatchListenerConfig, str, Runtime]:
@@ -337,6 +480,10 @@ def _load_runtime_config(target: Path) -> tuple[T3DispatchListenerConfig, str, R
 def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     from .. import grokbot_packs
 
+    try:
+        runtime_config.require_posix_storage()
+    except c.T3DispatchError as exc:
+        return [{"check": str(exc), "status": "fail", "reason": exc.code}]
     checks: list[dict[str, str]] = []
 
     def record(name: str, ok: bool) -> None:
@@ -354,6 +501,12 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     except (c.T3DispatchError, grokbot_packs.PackError, grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         record("config", False)
         return checks
+    if runtime.messaging_configured:
+        try:
+            _require_runtime_identity(runtime)
+            record("hub-identity", True)
+        except c.T3DispatchError:
+            record("hub-identity", False)
     parent = grokbot_packs.instance_config_path(target, c.PACK_ID).parent
     record("permissions", os.access(parent, os.W_OK) if parent.is_dir() else False)
     try:
@@ -384,7 +537,11 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
 def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "pack_id": c.PACK_ID}
     try:
-        config, bearer, _ = _load_runtime_config(target)
+        runtime_config.require_posix_storage()
+    except c.T3DispatchError as exc:
+        return {**result, "reason": str(exc), "code": exc.code}
+    try:
+        config, bearer, runtime = _load_runtime_config(target)
     except Exception:
         result["reason"] = "config"
         return result
@@ -403,10 +560,17 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
         result["reason"] = "inventory-unreachable"
         return result
     names = {tool.get("name") for tool in tools_response if isinstance(tool, dict)}
-    if names != set(c.TOOLS):
+    expected = c.TOOLS if runtime.messaging_configured else c.T3_TOOLS
+    if names != set(expected):
         result["reason"] = "inventory-mismatch"
         return result
-    result.update({"ok": True, "health": health, "auth_rejected_without_bearer": True, "tools": sorted(c.TOOLS)})
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            result["reason"] = "hub-identity"
+            return result
+    result.update({"ok": True, "health": health, "auth_rejected_without_bearer": True, "tools": sorted(expected)})
     return result
 
 
@@ -428,11 +592,10 @@ def _hardening(runtime: Runtime) -> str:
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
+    target = target.expanduser().resolve()
     instance = _load_validated_instance(target)
     runtime = load_runtime(Path(instance["runtime_path"]))
-    args = [
-        python or sys.executable,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -444,7 +607,8 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         str(target),
         "--bind",
         instance["bind"],
-    ]
+        python=python,
+    )
     for host in instance.get("allowed_hosts", []):
         args += ["--allow-host", host]
     for origin in instance.get("allowed_origins", []):
@@ -463,7 +627,7 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         "After=network.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         "Restart=on-failure\n"
         "RestartSec=10s\n"
         f"{_hardening(runtime)}\n"
@@ -473,9 +637,10 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
 
 
 def render_watch_units(target: Path, *, python: str | None = None) -> tuple[str, str]:
+    target = target.expanduser().resolve()
     instance = _load_validated_instance(target)
     runtime = load_runtime(Path(instance["runtime_path"]))
-    args = [python or sys.executable, "-m", "brigade.grokbot_t3", "watch", "--target", str(target)]
+    args = module_argv("brigade.grokbot_t3", "watch", "--target", str(target), python=python)
     exec_start = " ".join(grokbot_ops._systemd_quote(argument) for argument in args)
     service = (
         "# Generated by python -m brigade.grokbot_t3 install-watch.\n"
@@ -484,7 +649,7 @@ def render_watch_units(target: Path, *, python: str | None = None) -> tuple[str,
         "After=network.target\n\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         f"TimeoutStartSec={UNIT_TIMEOUT_SECONDS}\n"
         f"{_hardening(runtime)}"
     )
@@ -496,6 +661,37 @@ def render_watch_units(target: Path, *, python: str | None = None) -> tuple[str,
         "OnBootSec=2min\n"
         "OnUnitActiveSec=1min\n"
         f"Unit={WATCH_SERVICE}\n\n"
+        "[Install]\n"
+        "WantedBy=timers.target\n"
+    )
+    return service, timer
+
+
+def render_intake_units(target: Path, *, python: str | None = None) -> tuple[str, str]:
+    target = target.expanduser().resolve()
+    instance = _load_validated_instance(target)
+    runtime = load_runtime(Path(instance["runtime_path"]))
+    args = module_argv("brigade.grokbot_t3", "intake", "--target", str(target), python=python)
+    exec_start = " ".join(grokbot_ops._systemd_quote(argument) for argument in args)
+    service = (
+        "# Generated by python -m brigade.grokbot_t3 install-intake.\n"
+        "[Unit]\n"
+        "Description=Brigade Grok Bot t3-dispatch issue intake\n"
+        "After=network.target\n\n"
+        "[Service]\n"
+        "Type=oneshot\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
+        f"TimeoutStartSec={INTAKE_UNIT_TIMEOUT_SECONDS}\n"
+        f"{_hardening(runtime)}"
+    )
+    timer = (
+        "# Generated by python -m brigade.grokbot_t3 install-intake.\n"
+        "[Unit]\n"
+        "Description=Run the t3-dispatch issue intake every 15 minutes\n\n"
+        "[Timer]\n"
+        "OnBootSec=5min\n"
+        "OnUnitActiveSec=15min\n"
+        f"Unit={INTAKE_SERVICE}\n\n"
         "[Install]\n"
         "WantedBy=timers.target\n"
     )
@@ -533,4 +729,12 @@ def write_watch_units(target: Path, out_dir: Path, *, force: bool = False, pytho
     return [
         _write_rendered(out_dir / WATCH_SERVICE, service, force=force),
         _write_rendered(out_dir / WATCH_TIMER, timer, force=force),
+    ]
+
+
+def write_intake_units(target: Path, out_dir: Path, *, force: bool = False, python: str | None = None) -> list[Path]:
+    service, timer = render_intake_units(target, python=python)
+    return [
+        _write_rendered(out_dir / INTAKE_SERVICE, service, force=force),
+        _write_rendered(out_dir / INTAKE_TIMER, timer, force=force),
     ]

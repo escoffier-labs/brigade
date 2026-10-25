@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from brigade.grokbot_fleet import actions as actions_mod
+from brigade.grokbot_fleet import ledger as ledger_mod
 from brigade.grokbot_fleet.actions import FleetActionStore, write_fleet_approval_file
 from brigade.grokbot_fleet.contracts import ERROR_MESSAGES, FleetError
 from brigade.grokbot_fleet.ledger import FleetLedger
@@ -97,6 +99,54 @@ class _Store:
         self.claim_cleanup = None
 
 
+class _MemoryLedger(FleetLedger):
+    """Tool-contract storage double; never claims native private-file support."""
+
+    def __init__(self, path):
+        super().__init__(path)
+        self.document = {"version": 1, "hosts": {}, "services": {}, "findings": []}
+
+    def _ensure_state_dir(self):
+        pass
+
+    def _load_document(self):
+        return copy.deepcopy(self.document)
+
+    def _persist(self, document):
+        self.document = copy.deepcopy(document)
+
+
+def _assert_unavailable_private_store(tmp_path):
+    """Unsupported platforms must refuse private storage before filesystem I/O."""
+    if actions_mod.SECURE_OWNER_READ_AVAILABLE and actions_mod.SECURE_OWNER_WRITE_AVAILABLE:
+        return False
+
+    store = FleetActionStore(action_state_path=str(tmp_path / "actions"), approval_dir=str(tmp_path / "approvals"))
+
+    def unexpected_io(*args, **kwargs):
+        raise AssertionError("private storage touched the filesystem before refusing")
+
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(Path, "lstat", unexpected_io)
+        patched.setattr(Path, "mkdir", unexpected_io)
+        patched.setattr(os, "open", unexpected_io)
+        with pytest.raises(FleetError) as write:
+            store.ready()
+        assert write.value.code == "secure-owner-write-unavailable"
+        with pytest.raises(FleetError) as read:
+            store.read_proposal("a" * 32)
+        assert read.value.code == "unavailable"
+        assert read.value.message == "secure-owner-read-unavailable"
+        if not ledger_mod.SECURE_OWNER_READ_AVAILABLE:
+            with pytest.raises(FleetError) as ledger_read:
+                FleetLedger(str(tmp_path / "ledger.json")).ready()
+            assert ledger_read.value.code == "unavailable"
+            assert ledger_read.value.message == "secure-owner-read-unavailable"
+    assert not (tmp_path / "actions").exists()
+    assert not (tmp_path / "approvals").exists()
+    return True
+
+
 class _Executor:
     def __init__(self, health="unhealthy", revision="c" * 64):
         self.health = health
@@ -128,7 +178,7 @@ def _host_raw(alias: str, **overrides):
 
 def _tools(tmp_path, *, fail_aliases=(), store=None, executor=None):
     registry = project_fleet_public_registry(parse_fleet_private_runtime(RUNTIME))
-    ledger = FleetLedger(str(tmp_path / "ledger.json"))
+    ledger = _MemoryLedger(str(tmp_path / "ledger.json"))
     ledger.ready()
 
     def observe_host_raw(target, probe_id):
@@ -258,6 +308,8 @@ def test_unsupported_findings_propose_without_execution(tmp_path):
 
 
 def test_repeated_rejected_execution_does_not_unbounded_receipts(tmp_path: Path):
+    if _assert_unavailable_private_store(tmp_path):
+        return
     actions = tmp_path / "actions"
     approvals = tmp_path / "approvals"
     actions.mkdir(mode=0o700)
@@ -319,6 +371,8 @@ def test_execute_remediation_denies_saturated_live_receipts_before_claim_or_rest
 ):
     monkeypatch.setattr(actions_mod, "MAX_RECEIPTS", 3)
     monkeypatch.setattr(actions_mod, "MAX_RECEIPT_BYTES", 262_144)
+    if _assert_unavailable_private_store(tmp_path):
+        return
     actions = tmp_path / "actions"
     approvals = tmp_path / "approvals"
     actions.mkdir(mode=0o700)
@@ -364,6 +418,8 @@ def test_execute_remediation_denies_saturated_live_receipts_before_claim_or_rest
 def test_execute_remediation_releases_stale_reservation_capacity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(actions_mod, "MAX_RECEIPTS", 3)
     monkeypatch.setattr(actions_mod, "MAX_RECEIPT_BYTES", 262_144)
+    if _assert_unavailable_private_store(tmp_path):
+        return
     actions = tmp_path / "actions"
     approvals = tmp_path / "approvals"
     actions.mkdir(mode=0o700)
@@ -413,6 +469,8 @@ def test_execute_remediation_releases_stale_reservation_capacity(tmp_path: Path,
 def test_replay_loser_cannot_drop_winner_reservation_and_winner_commits_after_one_restart(
     tmp_path: Path,
 ):
+    if _assert_unavailable_private_store(tmp_path):
+        return
     actions = tmp_path / "actions"
     approvals = tmp_path / "approvals"
     actions.mkdir(mode=0o700)
@@ -446,3 +504,13 @@ def test_replay_loser_cannot_drop_winner_reservation_and_winner_commits_after_on
     assert executor.restarted == 0
     assert list((actions / "consumed").glob("*.json")) == []
     assert list((actions / "reservations").glob("*.json")) == []
+
+
+@pytest.mark.parametrize("storage_available", [False, True])
+def test_private_store_fixture_preserves_capability_refusal(tmp_path, monkeypatch, storage_available):
+    monkeypatch.setattr(actions_mod, "SECURE_OWNER_READ_AVAILABLE", storage_available)
+    monkeypatch.setattr(actions_mod, "SECURE_OWNER_WRITE_AVAILABLE", storage_available)
+    monkeypatch.setattr(ledger_mod, "SECURE_OWNER_READ_AVAILABLE", storage_available)
+    monkeypatch.setattr(ledger_mod, "SECURE_OWNER_WRITE_AVAILABLE", storage_available)
+    assert _assert_unavailable_private_store(tmp_path) is (not storage_available)
+    assert list(tmp_path.iterdir()) == []

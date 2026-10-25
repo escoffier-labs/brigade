@@ -98,13 +98,14 @@ Format: trigger, then the rule, then what to do instead.
 
 ## Orientation
 
-- The CLI entry point is `brigade.cli:main` (`[project.scripts]` in `pyproject.toml`).
+- The process entry point is `brigade.cli:process_main` (`[project.scripts]` in `pyproject.toml`). `brigade.cli:main` remains the integer-returning library API.
   Command families live in `src/brigade/cli/` — one module per group (e.g. `doctor.py`,
   `operator.py`, `init.py`, `work/`); `__init__.py` builds the parser and dispatches
   to each module's `register`/`dispatch`.
 - New harness adapter? Follow the step list in `CONTRIBUTING.md` (manifest,
-  templates, `KNOWN_HARNESSES`, CI matrix, README table).
-- Doctor checks return `OK`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or
+  templates, `KNOWN_HARNESSES`, CI matrix, the writer harness table in
+  `docs/overview.md`, and the harness list in `docs/technical-guide.md`).
+- Doctor checks return `OK`, `INFO`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or
   `MANUAL` for optional wiring; `FAIL` means the profile is broken.
 - `docs/plans/` and `docs/specs/` are gitignored scratch space; reviewed plans
   live at tracked `docs/phase-*.md` paths.

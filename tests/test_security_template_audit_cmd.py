@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from brigade import cli, release_cmd, security_cmd
 
@@ -18,10 +19,10 @@ def test_security_template_audit_covers_templates_docs_and_allowlisted_examples(
     payload = json.loads(capsys.readouterr().out)
     assert payload["finding_count"] == 0
     assert {
-        "src/brigade/templates/workspace/AGENTS.md",
-        "src/brigade/templates/codex/skills/demo/SKILL.md",
-        "docs/template.md",
-    } <= set(payload["scanned_files"])
+        Path("src/brigade/templates/workspace/AGENTS.md"),
+        Path("src/brigade/templates/codex/skills/demo/SKILL.md"),
+        Path("docs/template.md"),
+    } <= {Path(name) for name in payload["scanned_files"]}
 
 
 def test_security_template_audit_flags_private_values_and_integrates_with_release(tmp_path, capsys):
@@ -33,7 +34,9 @@ def test_security_template_audit_flags_private_values_and_integrates_with_releas
     docs.mkdir()
     (workspace / "AGENTS.md").write_text("Private path /home/private/operator should not ship.\n")
     (harness / "config.md").write_text("api_key=abcd1234abcd1234\n")
-    (docs / "bad.md").write_text("Callback https://service.internal/hook should not ship.\n")
+    (docs / "bad.md").write_text(
+        "Callback https://service.internal/hook should not ship.\n"  # content-guard: allow private-hostname
+    )
 
     assert security_cmd.template_audit(target=tmp_path, json_output=True) == 0
     audit = json.loads(capsys.readouterr().out)

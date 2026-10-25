@@ -31,23 +31,68 @@ def _spool() -> Path:
     return fleet_client.spool_path(fleet_client.resolve_node_id())
 
 
+@pytest.mark.parametrize("existing_directory", [True, False])
+def test_spool_creation_handles_access_denied_on_existing_ancestor(tmp_path, monkeypatch, existing_directory):
+    """Windows mkdir may deny an existing drive root, even for user-local spools."""
+    ancestor = tmp_path / "ancestor"
+    if existing_directory:
+        ancestor.mkdir()
+    else:
+        ancestor.touch()
+    path = ancestor / "LocalAppData" / "brigade" / "fleet-spool" / "node.jsonl"
+    mkdir = Path.mkdir
+
+    def windows_mkdir(directory, *args, **kwargs):
+        if directory == ancestor:
+            raise PermissionError("Access is denied")
+        return mkdir(directory, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", windows_mkdir)
+    if existing_directory:
+        with fleet_client._spool_lock(path) as fd:
+            assert fleet_client._spool_append_locked(path, {"run_id": "offline"}, dir_fd=fd)
+        assert fleet_client._read_spool(path) == [{"run_id": "offline"}]
+    else:
+        with pytest.raises(fleet_client.FleetClientError, match="could not be persisted"):
+            with fleet_client._spool_lock(path):
+                pass
+        assert not path.exists()
+
+
 class TestProxyDisabledTransport:
     def test_hub_traffic_ignores_proxy_environment(self, monkeypatch):
         """A configured proxy never receives hub traffic or the bearer token."""
         import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         from brigade import fleet_hub
 
+        proxy_requests = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def do_GET(self):
+                proxy_requests.append(self.path)
+                self.send_error(502)
+
+            do_POST = do_GET
+
+            def log_message(self, *_args):
+                pass
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        proxy_thread.start()
         db = Path(tempfile.mkdtemp()) / "fleet.db"
         token = "test-token-12345"
         server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            # A blackholed proxy would break this delivery if it were used.
-            monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
-            monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-            monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+            monkeypatch.delenv("NO_PROXY", raising=False)
+            monkeypatch.delenv("no_proxy", raising=False)
+            proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                monkeypatch.setenv(name, proxy_url)
             url = f"http://127.0.0.1:{server.server_address[1]}"
             fleet_client._post_events_blocking(
                 url,
@@ -68,9 +113,14 @@ class TestProxyDisabledTransport:
             with fleet_client._hub_open(request, timeout=5) as response:
                 payload = json.loads(response.read())
             assert [r["run_id"] for r in payload["runs"]] == ["run-1"]
+            assert proxy_requests == []
         finally:
             server.shutdown()
             server.server_close()
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
+            proxy_thread.join(timeout=5)
 
     def test_events_go_through_the_hub_opener(self, monkeypatch):
         opened = []
@@ -454,3 +504,214 @@ class TestSpoolPathFallbackWithoutDirFd:
         monkeypatch.setattr(fleet_client, "_ensure_private_dir", fail_spool_setup)
         with pytest.raises(KeyboardInterrupt):
             fleet_client.report_event({"run_id": "r1", "state": "run.started"})
+
+
+def _hold_spool_lock(path, connection):
+    with fleet_client._spool_lock(Path(path)):
+        connection.send("locked")
+        connection.recv()
+    connection.close()
+
+
+def test_spool_lock_timeout_bounds_thread_contention(tmp_path):
+    import threading
+    import time
+
+    path = tmp_path / "spool" / "node.jsonl"
+    ready, release = threading.Event(), threading.Event()
+
+    def hold():
+        with fleet_client._spool_lock(path):
+            ready.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert ready.wait(5)
+        started = time.monotonic()
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=0.04):
+                pytest.fail("entered held lock")
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        holder.join(5)
+    assert not holder.is_alive()
+    with fleet_client._spool_lock(path, timeout=0):
+        pass
+
+
+def test_spool_lock_timeout_bounds_process_contention_and_closes_descriptors(tmp_path, monkeypatch):
+    import multiprocessing
+
+    path = tmp_path / "spool" / "node.jsonl"
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    holder = context.Process(target=_hold_spool_lock, args=(str(path), child))
+    holder.start()
+    descriptors = []
+    real_open = fleet_client.os.open
+
+    def record_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        descriptors.append(fd)
+        return fd
+
+    try:
+        assert parent.poll(10) and parent.recv() == "locked"
+        monkeypatch.setattr(fleet_client.os, "open", record_open)
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=0.04):
+                pytest.fail("entered held process lock")
+        assert descriptors
+        for fd in set(descriptors):
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert fleet_client._SPOOL_PROCESS_LOCK.acquire(blocking=False)
+        fleet_client._SPOOL_PROCESS_LOCK.release()
+    finally:
+        parent.send("release")
+        holder.join(10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(5)
+        parent.close()
+        child.close()
+    assert holder.exitcode == 0
+    with fleet_client._spool_lock(path, timeout=0):
+        pass
+
+
+@pytest.mark.parametrize("timeout", [-1, float("nan"), float("inf"), True, "1"])
+def test_spool_lock_rejects_invalid_timeout_before_storage(tmp_path, timeout):
+    path = tmp_path / "new" / "node.jsonl"
+    with pytest.raises(fleet_client.FleetClientError, match="^invalid fleet spool lock timeout$"):
+        with fleet_client._spool_lock(path, timeout=timeout):
+            pytest.fail("accepted invalid timeout")
+    assert not path.parent.exists()
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 0.12])
+def test_spool_lock_windows_flags_and_bounded_retries(tmp_path, monkeypatch, timeout):
+    import errno
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    calls, sleeps = [], []
+    windows = SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, LK_UNLCK=3)
+
+    def locking(fd, mode, size):
+        calls.append((mode, size))
+        if mode == windows.LK_UNLCK:
+            return
+        if timeout is None and len(calls) > 1:
+            return
+        raise OSError(errno.EACCES, "busy")
+
+    def sleep(seconds):
+        assert 0 < seconds <= 0.05
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    windows.locking = locking
+    monkeypatch.setattr(fleet_client, "fcntl", None)
+    monkeypatch.setattr(fleet_client, "msvcrt", windows)
+    monkeypatch.setattr(fleet_client, "_ensure_private_dir", lambda path: None)
+    monkeypatch.setattr(fleet_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(fleet_client.time, "sleep", sleep)
+    path = tmp_path / "node.jsonl"
+    if timeout is None:
+        with fleet_client._spool_lock(path):
+            pass
+        assert calls == [(windows.LK_LOCK, 1), (windows.LK_LOCK, 1), (windows.LK_UNLCK, 1)]
+        assert sleeps == []
+    else:
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=timeout):
+                pytest.fail("entered held Windows lock")
+        assert all(mode == windows.LK_NBLCK and size == 1 for mode, size in calls)
+        assert clock[0] == pytest.approx(timeout)
+        assert fleet_client._SPOOL_PROCESS_LOCK.acquire(blocking=False)
+        fleet_client._SPOOL_PROCESS_LOCK.release()
+
+
+def test_spool_lock_windows_bounded_success_unlocks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    windows = SimpleNamespace(LK_NBLCK=2, LK_UNLCK=3, locking=lambda fd, mode, size: calls.append((mode, size)))
+    monkeypatch.setattr(fleet_client, "fcntl", None)
+    monkeypatch.setattr(fleet_client, "msvcrt", windows)
+    monkeypatch.setattr(fleet_client, "_ensure_private_dir", lambda path: None)
+    with fleet_client._spool_lock(tmp_path / "node.jsonl", timeout=0):
+        pass
+    assert calls == [(windows.LK_NBLCK, 1), (windows.LK_UNLCK, 1)]
+
+
+_INSPECT_SETTINGS = {"node_id": "fake-node", "hub_url": "https://hub.example.invalid", "token": "fake-token"}
+
+
+def _inspect_with(monkeypatch, payload):
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", lambda url, token, body, *, timeout: (200, payload))
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    return fleet_client.inspect_claim("fake-target", **_INSPECT_SETTINGS)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inspected": True},
+        *({"inspected": True, "claim": value} for value in ([], "", "x", True, False, 0, 1, [{"owner_node": "n"}])),
+        *(
+            {"inspected": True, "claim": claim}
+            for claim in ({}, {"target": "t"}, {"owner_node": None}, {"owner_node": 5}, {"owner_node": ""})
+        ),
+    ],
+)
+def test_malformed_inspect_response_is_retryable_hub_unavailable(monkeypatch, payload):
+    decision = _inspect_with(monkeypatch, payload)
+    assert decision.granted is False
+    assert decision.reason == "hub-unavailable"
+    assert decision.claim is None
+
+
+@pytest.mark.parametrize(
+    "owner_node",
+    ["unknown", " ", "bad id", "a\x00b", "a\x1fb", "a\x7fb", "node\n", "-lead", ".lead", "_lead", "x" * 129, "né"],
+)
+def test_invalid_inspect_owner_is_retryable_hub_unavailable(monkeypatch, owner_node):
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": {"owner_node": owner_node}})
+    assert decision.granted is False
+    assert decision.reason == "hub-unavailable"
+    assert decision.claim is None
+
+
+@pytest.mark.parametrize("owner_node", ["a", "fake-node", "Node_1.x-2", "x" * 128])
+def test_valid_inspect_owner_is_granted(monkeypatch, owner_node):
+    claim = {"owner_node": owner_node}
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": claim})
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [None, {"owner_node": "other-node"}, {"owner_node": "fake-node"}, {"target": "t", "owner_node": "n"}],
+)
+def test_wellformed_inspect_response_is_granted(monkeypatch, claim):
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": claim})
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+
+
+def test_owned_inspect_response_passes_through_lock_run_dir_and_generation(monkeypatch):
+    claim = {"owner_node": "fake-node", "generation": 3}
+    decision = _inspect_with(
+        monkeypatch,
+        {"inspected": True, "claim": claim, "owned": True, "generation": 3, "lock_run_dir": "/fake/run"},
+    )
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+    assert decision.lock_run_dir == "/fake/run"
+    assert decision.generation == 3

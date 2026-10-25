@@ -1,6 +1,8 @@
 import os
 import sys
 from pathlib import Path
+from tempfile import mkdtemp
+from time import monotonic
 
 import pytest
 
@@ -10,6 +12,24 @@ from tests.support import PRIVATE_DIRECTORY_MODE
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@pytest.fixture(autouse=True)
+def _drain_orphan_claim_releases(monkeypatch, request):
+    """Stop cleanup before test configuration and transport patches disappear."""
+    from brigade import fleet_claim_lifecycle, fleet_client
+
+    yield
+    with fleet_claim_lifecycle._ORPHAN_RELEASE_LOCK:
+        pending = list(fleet_claim_lifecycle._ORPHAN_RELEASES.items())
+    for _, stop in pending:
+        stop.set()
+    deadline = monotonic() + 2 * fleet_client.CLAIM_TIMEOUT_SECONDS + 1
+    for worker, _ in pending:
+        worker.join(max(0, deadline - monotonic()))
+    if pending:
+        request.node.user_properties.append(("orphan_release_threads_stopped", len(pending)))
+    assert not any(worker.is_alive() for worker, _ in pending), "orphan claim cleanup survived test teardown"
 
 
 @pytest.fixture(autouse=True)
@@ -83,14 +103,26 @@ def _seat_health_probe_reports_healthy(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_hermes_home(tmp_path_factory, monkeypatch):
+def _isolate_hermes_home(_isolation_temp_root, monkeypatch):
     """Point HERMES_HOME at a dedicated temp dir (outside the test's tmp_path so
     it never pollutes workspace assertions) so hermes-harness skill installs
     never touch the real ~/.hermes. The dir exists, so the 'Hermes is installed'
     gate passes for tests that exercise hermes installs; tests that need the
     absent-Hermes case re-point HERMES_HOME in their own body."""
-    home = tmp_path_factory.mktemp("hermes_home")
+    home = Path(mkdtemp(prefix="hermes_home-", dir=_isolation_temp_root))
     monkeypatch.setenv("HERMES_HOME", str(home))
+
+
+@pytest.fixture(scope="session")
+def _isolation_temp_root(tmp_path_factory):
+    """Keep private isolation dirs in one pytest-owned, retained parent.
+
+    Random names avoid numbered allocation scans as the suite grows. Keeping
+    this parent under the base temp preserves pytest cleanup and Git ceilings.
+    """
+    root = tmp_path_factory.getbasetemp() / "isolated-homes"
+    root.mkdir(mode=PRIVATE_DIRECTORY_MODE)
+    return root
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +157,7 @@ def _no_update_check_for_suite(monkeypatch):
     Tests that exercise the notify path opt back in by deleting the variable.
     """
     monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
+    monkeypatch.setenv("BRIGADE_TELEMETRY", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -203,7 +236,7 @@ def _guard_agent_cli_spawns(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
+def _isolate_user_brigade_dir(_isolation_temp_root, monkeypatch):
     """Redirect user-level ``~/.brigade`` sticky state away from the real home.
 
     Authority signed-markers default to ``$HOME/.brigade`` (``BRIGADE_USER_DIR``).
@@ -214,7 +247,7 @@ def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     default location instead of a ``user_brigade`` temp that accidentally
     omits that component.
     """
-    home = tmp_path_factory.mktemp("operator_home")
+    home = Path(mkdtemp(prefix="operator_home-", dir=_isolation_temp_root))
     user_dir = home / ".brigade"
     user_dir.mkdir(mode=PRIVATE_DIRECTORY_MODE)
     set_home(monkeypatch, home)
@@ -256,7 +289,7 @@ def _isolate_fleet_workspace_walk(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
+def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     """Default to the bare-host baseline: no managed tool resolves.
 
     Managed-tool resolution goes through ``component_bins.resolve``, which
@@ -285,8 +318,8 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     # Point the managed-component data root at a temp dir so nothing in the
     # suite (component_bins.managed_path, doctor's components check) reads the
     # developer's real installed.json or managed bin dir.
-    data_root = tmp_path_factory.mktemp("component_data")
-    config_root = tmp_path_factory.mktemp("component_config")
+    data_root = Path(mkdtemp(prefix="component_data-", dir=_isolation_temp_root))
+    config_root = Path(mkdtemp(prefix="component_config-", dir=_isolation_temp_root))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("LOCALAPPDATA", str(data_root))
@@ -317,3 +350,87 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
 
     monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)
     monkeypatch.setattr(managed.proc, "which", lambda cmd: None)
+
+
+def _private_test_root(tmp_path):
+    """Pick a parent whose ancestors pass Dot's private-directory walk.
+
+    The walk rejects any group- or world-writable ancestor unless it is
+    root-owned and sticky. A developer TMPDIR such as a 0775 home temp
+    directory fails that rule, so prefer a root-owned sticky /tmp when present.
+    """
+    import os
+    import stat
+    import tempfile
+    from pathlib import Path
+
+    root = Path("/tmp")
+    try:
+        info = os.lstat(root)
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
+        return Path(tempfile.mkdtemp(prefix="dot-test-", dir=root))
+    tmp_path.chmod(0o700)
+    return tmp_path
+
+
+@pytest.fixture
+def dot_private_dir(tmp_path):
+    """An owner-only parent directory plus a not-yet-created Dot state path inside it."""
+    import shutil
+
+    base = _private_test_root(tmp_path)
+    parent = base / "private-parent"
+    parent.mkdir(mode=0o700)
+    try:
+        yield parent / "state"
+    finally:
+        if base != tmp_path:
+            shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture
+def t3_ledger_storage(monkeypatch):
+    """Exercise real SQLite transitions without claiming POSIX filesystem security on NT."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import ledger
+
+        monkeypatch.setattr(ledger, "_prepare_storage", lambda path: path.parent.mkdir(parents=True, exist_ok=True))
+
+
+@pytest.fixture
+def t3_owner_reads(monkeypatch):
+    """Isolate owner-file authorization from parsing and orchestration unit tests on NT."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import runtime_config, watch
+
+        def read(path, *, max_bytes):
+            with path.open("rb") as stream:
+                return stream.read(max_bytes + 1)
+
+        monkeypatch.setattr(runtime_config, "read_owner_file", read)
+        monkeypatch.setattr(watch, "read_owner_file", read)
+
+
+@pytest.fixture
+def t3_watch_log(monkeypatch):
+    """Keep watcher delivery and retry assertions independent of POSIX log opens."""
+    if sys.platform == "win32":
+        import json
+        from brigade.grokbot_t3 import watch
+
+        def append(path, record):
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+
+        monkeypatch.setattr(watch, "_append_log", append)
+
+
+@pytest.fixture
+def t3_platform_admission(monkeypatch):
+    """Control-flow unit tests supply storage doubles instead of testing platform admission."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import runtime_config
+
+        monkeypatch.setattr(runtime_config, "require_posix_storage", lambda: None)

@@ -26,7 +26,7 @@ def reporter(tmp_path, monkeypatch):
     return sent, tmp_path / "spool" / "events.jsonl"
 
 
-@pytest.mark.parametrize("version", [31, 32])
+@pytest.mark.parametrize("version", [31, 32, fleet_hub.SCHEMA_VERSION])
 def test_missing_additive_context_is_repaired_and_second_open_is_read_only(tmp_path, version):
     db = tmp_path / "hub.db"
     conn = fleet_hub.init_db(db)
@@ -36,7 +36,7 @@ def test_missing_additive_context_is_repaired_and_second_open_is_read_only(tmp_p
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert "context" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
     # A fully repaired database must retain the no-write-lock startup path.
     conn.execute("BEGIN IMMEDIATE")

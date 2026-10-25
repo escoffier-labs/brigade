@@ -706,3 +706,90 @@ no-card
             ),
         )
     return path
+
+
+# Set by an outer caller (the model trial drain) that owns SIGTERM for the whole process.
+# While set, a terminal SIGTERM handler asks it first: True means the signal was taken as a
+# drain request, so the run records nothing and keeps going. None keeps the default behavior.
+_sigterm_deferral: Callable[[], bool] | None = None
+
+
+@contextmanager
+def defer_terminal_sigterm(request: Callable[[], bool]) -> Iterator[None]:
+    """Let ``request`` claim SIGTERM before any terminal handler records and exits the run."""
+
+    global _sigterm_deferral
+    previous = _sigterm_deferral
+    _sigterm_deferral = request
+    try:
+        yield
+    finally:
+        _sigterm_deferral = previous
+
+
+@contextmanager
+def terminal_sigterm_handler(
+    output_dir: Path | None,
+    *,
+    seat: str | None,
+    before_record: Callable[[], None] | None = None,
+    should_record: Callable[[], bool] | None = None,
+) -> Iterator[None]:
+    """Terminalize SIGTERM while preserving the conventional 128+signal exit."""
+
+    if output_dir is None or threading.current_thread() is not threading.main_thread():
+        yield
+        return
+
+    output_dir = output_dir.expanduser()
+    previous = signal.getsignal(signal.SIGTERM)
+
+    def handle_sigterm(signum: int, frame: object) -> None:  # noqa: ARG001
+        deferral = _sigterm_deferral
+        if deferral is not None and deferral():
+            return
+        if should_record is not None and not should_record():
+            raise SystemExit(128 + signum)
+        if before_record is not None:
+            before_record()
+        run_path = output_dir / "run.json"
+        if run_path.is_file():
+            active_seats: tuple[str, ...] = ()
+            active_seat = seat
+            try:
+                payload = json.loads(run_path.read_text())
+            except (OSError, json.JSONDecodeError) as exc:
+                runguard.raise_if_retained_run_lock(exc)
+                payload = None
+            if isinstance(payload, dict):
+                stored_active = payload.get("active_seats")
+                if isinstance(stored_active, list):
+                    active_seats = tuple(value for value in stored_active if isinstance(value, str) and value)
+                    if len(active_seats) == 1:
+                        active_seat = active_seats[0]
+                    elif active_seats:
+                        active_seat = None
+                if not active_seats:
+                    phase_owner = payload.get("phase_owner")
+                    if isinstance(phase_owner, str) and phase_owner:
+                        active_seat = phase_owner
+                    else:
+                        stored_worker = payload.get("worker")
+                        if isinstance(stored_worker, str) and stored_worker:
+                            active_seat = stored_worker
+            artifacts.record_run_termination(
+                output_dir,
+                status="canceled",
+                failure_phase=None,
+                failure_kind="signal",
+                detail="run terminated by SIGTERM",
+                seat=active_seat,
+                active_seats=active_seats,
+            )
+        raise SystemExit(128 + signum)
+
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)

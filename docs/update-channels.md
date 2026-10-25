@@ -11,7 +11,7 @@ or native components, then publishes its state only after both commands succeed.
 | Machine profile | Channel | Use |
 | --- | --- | --- |
 | Production or operator | `stable` | Default. Pins the latest published non-prerelease Brigade release. |
-| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigade-cli==0.28.0.devYYYYMMDD` wheel from PyPI. |
+| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigade-cli==0.31.0.devYYYYMMDD` wheel from PyPI. |
 
 Daily development wheels are built from `main` on a schedule and published as PyPI
 prereleases with versions of the form `X.Y.Z.devYYYYMMDD` (for example
@@ -32,9 +32,9 @@ The same pin works with `pip install 'brigade-cli==0.28.0.dev20260907'`. Bare
 release only; prerelease wheels are never selected as `latest`.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
-selects the newest non-yanked exact `0.28.0.devYYYYMMDD` wheel for the `0.28`
+selects the newest non-yanked exact `0.31.0.devYYYYMMDD` wheel for the `0.31`
 preview line from PyPI release records (never from `info.version`, which stays
-on the latest stable release such as `0.27.0`), ignores yanked uploads, unrelated
+on the latest stable release such as `0.30.0`), ignores yanked uploads, unrelated
 preview lines, unrelated prereleases, Git refs, and native release assets, and
 force-reinstalls that pin into the existing user-global pipx Brigade environment
 (one active CLI environment; no second installer). A machine already owned by the
@@ -53,7 +53,7 @@ publication semantics unchanged.
 
 ## State, lock, and native components
 
-The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.28.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
+The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.31.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
 
 Prior beta state that recorded a full Git `main` SHA is migrated on the next
 successful `brigade update --channel beta` to the selected wheel version and
@@ -65,7 +65,7 @@ Stable resolves `releases/latest` once, verifies the exact `component-manifest-v
 The daily wheel channel does not change that beta/pre-pin native contract. Its build stamps only the
 wheel's Python distribution and runtime version; bundled template and component pins remain the
 committed stable values. Operators who use `brigade update --channel beta` receive the
-selected `0.28.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
+selected `0.31.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
 
 The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
 
@@ -88,8 +88,13 @@ that cadence:
 
 How it learns about new releases: a detached background process may send one
 HTTPS GET to `https://check.brigade.tools/v1/version`. The request has no query
-parameters or body. Its User-Agent carries the Brigade version and OS name.
-When that header exactly matches the Brigade CLI format, the Worker records a
+parameters or body. Its User-Agent carries the Brigade version and OS name,
+with the same bytes as earlier clients. A separate `X-Brigade-Channel` header carries a closed label:
+`pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin`. The current Worker ignores
+that header. Channel recording requires the separate Worker update to ship.
+See [Python CLI telemetry](telemetry.md) for channel detection and
+the complete field list.
+When the User-Agent exactly matches the Brigade CLI format, the Worker records a
 daily version observation: ISO week and UTC day, version, first and last UTC
 timestamps, request count, and an `internal` classification for configured
 operator egress. It derives the source value from a salted SHA-256 hash of the
@@ -105,7 +110,13 @@ days.
 The stderr notice is skipped when stderr is not a TTY, when `CI` is set, or
 when the command failed. The background cache refresh can still run with piped
 stderr so `work brief` can surface available updates. It is skipped when `CI`
-or `BRIGADE_NO_UPDATE_CHECK` is set.
+or `BRIGADE_NO_UPDATE_CHECK` is set. npm installs now refresh the version cache
+but suppress both the stderr notice and cached work-brief hint.
+
+Set `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` to keep version retrieval without
+a counted observation. The request then uses a generic `Python-urllib`
+User-Agent and omits the channel header. The Worker records nothing for this
+User-Agent. `BRIGADE_TELEMETRY=off` and `false` also disable counting.
 
 To disable this automatic update check and its cache refresh:
 

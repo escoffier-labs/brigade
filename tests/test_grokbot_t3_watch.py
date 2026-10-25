@@ -23,7 +23,7 @@ def _owner_file(path, text):
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, t3_ledger_storage, t3_owner_reads, t3_watch_log):
     key = _owner_file(tmp_path / "builder.key", "wake-key-value\n")
     wake = _owner_file(
         tmp_path / "wake.json",
@@ -185,9 +185,9 @@ def test_unknown_caller_uses_default_and_status_failure_counts(setup):
         {"Builder": []},
     ],
 )
-def test_rejects_bad_wake_config(tmp_path, targets):
+def test_rejects_bad_wake_config(tmp_path, targets, t3_owner_reads):
     # Keep the default valid so each case still reaches its own invalid field.
-    targets = {"default": [{"url": "https://example.com/wake", "key_file": "/srv/keys/wake"}], **targets}
+    targets = {"default": [{"url": "https://example.com/wake", "key_file": str(tmp_path / "wake.key")}], **targets}
     path = _owner_file(tmp_path / "wake.json", json.dumps({"schema": watch.WAKE_SCHEMA, "targets": targets}))
     with pytest.raises(c.T3DispatchError):
         watch.load_wake_config(path)
@@ -234,13 +234,13 @@ def test_post_wake_refuses_redirect_and_proxy(monkeypatch):
         server.server_close()
 
 
-def test_wake_config_requires_default_target(tmp_path):
+def test_wake_config_requires_default_target(tmp_path, t3_owner_reads):
     path = _owner_file(
         tmp_path / "wake.json",
         json.dumps(
             {
                 "schema": watch.WAKE_SCHEMA,
-                "targets": {"Builder": [{"url": "https://example.com/wake", "key_file": "/srv/keys/wake"}]},
+                "targets": {"Builder": [{"url": "https://example.com/wake", "key_file": str(tmp_path / "wake.key")}]},
             }
         ),
     )
@@ -625,3 +625,85 @@ def test_pass_budget_leaves_room_for_the_slowest_row():
     # A row that starts just inside the budget may still make a status call and post to every target.
     slowest_row = CALL_TIMEOUT + watch.MAX_TARGETS * watch.POST_TIMEOUT
     assert watch.PASS_BUDGET_SECONDS + slowest_row < watch.UNIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "elapsed,enabled,expected_timeout,failed",
+    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, 1, 0)],
+)
+def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
+    setup, monkeypatch, elapsed, enabled, expected_timeout, failed
+):
+    from types import SimpleNamespace
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    runtime = SimpleNamespace(enabled=enabled, hub_token_file=tmp_path / "principal.token", messaging_configured=True)
+    _owner_file(runtime.hub_token_file, "x" * 64)
+    from brigade import fleet_client, fleet_client_messages as messages
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-id")
+
+    def request(endpoint, credential, body, **kwargs):
+        assert body == {"action": "identity"}
+        return 200, {"principal": "agent:grokbot"}
+
+    monkeypatch.setattr(messages, "_request", request)
+    monkeypatch.setattr(watch, "_wake_hub_inbox", lambda **kwargs: None)
+    post = Post([])
+    flushed = []
+
+    def flush(action, **kwargs):
+        assert action == "flush_credential"
+        assert len(post.calls) == 1
+        flushed.append(kwargs)
+
+    monkeypatch.setattr(watch, "call_message", flush)
+    ticks = iter([0, 0, elapsed])
+    summary = watch.run_watch_once(
+        runner=Runner({}),
+        runtime=runtime,
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        post=post,
+        monotonic=lambda: next(ticks),
+    )
+    assert summary["woken"] == 1 and summary["failed"] == failed
+    if expected_timeout is None:
+        assert flushed == []
+    else:
+        assert len(flushed) == 1
+        assert flushed[0]["token_file"] == str(runtime.hub_token_file)
+        assert flushed[0]["authority"].token_file == str(runtime.hub_token_file)
+        assert flushed[0]["lock_timeout"] == pytest.approx(expected_timeout)
+        assert flushed[0]["warn_inactive"] is False
+
+
+@pytest.mark.parametrize("configured", [False, None])
+def test_disabled_messaging_makes_zero_background_hub_calls(setup, monkeypatch, configured):
+    from types import SimpleNamespace
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    runtime = SimpleNamespace(
+        enabled=True, hub_token_file=tmp_path / "principal.token", messaging_configured=configured
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled messaging touched Hub")
+
+    monkeypatch.setattr(watch, "HubInbox", forbidden)
+    monkeypatch.setattr(watch, "call_message", forbidden)
+    post = Post([])
+    summary = watch.run_watch_once(
+        runner=Runner({}),
+        runtime=runtime,
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "wake.jsonl",
+        post=post,
+    )
+    assert summary == {"checked": 0, "woken": 1, "failed": 0}
+    assert len(post.calls) == 1

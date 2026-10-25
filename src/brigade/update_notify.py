@@ -2,9 +2,10 @@
 
 Notices come only from the on-disk cache; the network refresh runs in a
 detached child process so no user command ever waits on it. The endpoint
-request carries no parameters and no install id - the User-Agent (version +
-OS) plus the request itself is the entire signal. BRIGADE_NO_UPDATE_CHECK
-disables both the notice and all network activity.
+request carries no parameters and no install id. The User-Agent (version +
+OS) and a closed install-channel header are the signal. Privacy opt-outs use
+a generic agent without the channel. BRIGADE_NO_UPDATE_CHECK disables the
+notice and automatic request.
 
 The stderr notice is TTY-only (interactive shells). The background cache
 refresh runs even when stderr is piped so agent harness installs populate
@@ -25,7 +26,8 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from . import __version__, component_paths, localio
+from . import __version__, component_paths, distribution, localio, telemetry_usage
+from .isolated_exec import module_argv, trusted_cwd
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -62,7 +64,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
     """
     try:
         environment = os.environ if env is None else env
-        if environment.get("BRIGADE_NO_UPDATE_CHECK"):
+        if distribution.is_npm() or environment.get("BRIGADE_NO_UPDATE_CHECK"):
             return None
 
         path = cache_path(environment)
@@ -83,7 +85,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
 
 
 def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
-    if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+    if distribution.is_npm() or env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
         return True
     if exit_code != 0:
         return True
@@ -101,15 +103,17 @@ def _refresh_gated(argv: list[str], env: Mapping[str, str]) -> bool:
     return False
 
 
-def _spawn_refresh() -> None:
+def _spawn_refresh(env: Mapping[str, str]) -> None:
     detach: dict[str, Any] = (
         {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
     )
     subprocess.Popen(
-        [sys.executable, "-m", "brigade", "update", "--notify-refresh"],
+        module_argv("brigade", "update", "--notify-refresh"),
+        cwd=trusted_cwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env={**env, "BRIGADE_INSTALL_CHANNEL": telemetry_usage.install_channel(env)},
         **detach,
     )
 
@@ -135,7 +139,7 @@ def maybe_notify(
         environment = os.environ if env is None else env
         err = sys.stderr if stderr is None else stderr
         current_time = time.time() if now is None else now
-        spawn_refresh = _spawn_refresh if spawn is None else spawn
+        spawn_refresh = (lambda: _spawn_refresh(environment)) if spawn is None else spawn
         command_argv = list(argv)
 
         if _refresh_gated(command_argv, environment):
@@ -183,10 +187,15 @@ def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = Non
     state = localio.read_json_dict(path) or {}
     state["checked_at"] = current_time
     try:
-        request = urllib.request.Request(
-            CHECK_URL,
-            headers={"User-Agent": f"brigade-cli/{__version__} ({platform.system()})"},
+        headers = (
+            {"User-Agent": "Python-urllib"}
+            if telemetry_usage.uncounted(environment)
+            else {
+                "User-Agent": f"brigade-cli/{__version__} ({platform.system()})",
+                "X-Brigade-Channel": telemetry_usage.install_channel(environment),
+            }
         )
+        request = urllib.request.Request(CHECK_URL, headers=headers)
         with urllib.request.urlopen(request, timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
         latest = payload.get("latest") if isinstance(payload, dict) else None

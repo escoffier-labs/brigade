@@ -1,6 +1,6 @@
 # Brigade Tool Catalog
 
-`brigade tools` describes local callable tools, slash commands, skills, superpowers, scripts, and MCP configs across agent harnesses. It inspects local files, reports health, can explicitly write reviewed harness projection files, and can explicitly supervise local runtimes for approved script calls. It does not start MCP servers, fetch schemas, store auth, install schedulers, or auto-start runtimes. (Runtime MCP server configs are a separate concern, managed explicitly by `brigade mcp` - see [mcp-sync.md](mcp-sync.md).)
+`brigade tools` describes local callable tools, slash commands, skills, superpowers, scripts, and MCP configs across agent harnesses. It inspects local files, reports health, can explicitly write reviewed harness projection files, and can explicitly supervise local runtimes for approved script calls. It does not connect to remote MCP servers, fetch schemas, store auth, install schedulers, or auto-start runtimes. Approved local MCP calls launch a stdio child explicitly through `call run`. (Runtime MCP server configs are a separate concern, managed explicitly by `brigade mcp` - see [mcp-sync.md](mcp-sync.md).)
 
 ![Tool catalog separates discovery, projection, and execution](assets/tool-catalog-flow.svg)
 
@@ -74,7 +74,7 @@ brigade tools doctor --json
 brigade tools import-issues
 ```
 
-`defaults` merges the current Brigade built-in portable tools into the local catalog without deleting custom entries. `list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `parity status` and `parity closeout` review projection parity without writing projections. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
+`defaults` merges the current Brigade built-in portable tools into the local catalog without deleting custom entries. `list`, `show`, and `search` inspect configured entries. `describe` and `contracts` inspect schema-backed call contracts. `call plan` validates arguments and returns a safe call plan without executing anything. `call queue` stores a plan for local review, and `call approve`, `reject`, and `hold` update review status only. `call run` explicitly executes approved script or local MCP calls and writes local receipts. `run list`, `show`, and `latest` inspect receipts, and `run replay` queues a pending replay candidate without executing it. `checkpoint` commands review and explicitly resume local pause records. `runtime` commands explicitly manage local runtimes. `policy` commands inspect host-local execution gates and env label bindings. `parity status` and `parity closeout` review projection parity without writing projections. `plan` previews projection writes without touching files. `apply` is the only command that writes projections, and it requires either one tool id or `--all`. `doctor` reports catalog health issues. `import-issues` writes those issues into the normal work import inbox as `tool-catalog` task imports with stable source fingerprints.
 
 ## Config Shape
 
@@ -147,7 +147,7 @@ Fields:
 - `health_path`: optional local health summary file used for stale-health checks.
 - `fingerprint`: optional source fingerprint when the source file is generated elsewhere.
 
-Supported harness labels are local conventions. Brigade recognizes Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, OpenClaw, MCP, and scripts through the labels `claude`, `codex`, `opencode`, `antigravity`, `pi`, `cursor`, `hermes`, `openclaw`, `mcp`, and `scripts`.
+Supported harness labels are local conventions. Brigade recognizes `claude`, `codex`, `opencode`, `antigravity`, `pi`, `cursor`, `aider`, `goose`, `continue`, `copilot`, `qwen`, `kimi`, `adal`, `openhands`, `grok`, `amp`, `crush`, `hermes`, `openclaw`, `mcp`, and `scripts`.
 
 ## CandidateSetGate
 
@@ -341,7 +341,7 @@ Equivalent valid plans dedupe while pending or approved. Rejected calls can be r
 
 `brigade tools call run <call-id>` executes exactly one approved call. `brigade tools call run --next` runs the oldest approved call. Execution is intentionally narrow:
 
-- only `script` family calls run
+- only `script` and local `mcp` family calls run
 - the call must be `approved`
 - blockers must be empty
 - approval, args, contract, source, and projection fingerprints must still match

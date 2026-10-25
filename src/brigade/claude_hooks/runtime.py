@@ -19,8 +19,9 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
+from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
-from . import compaction_marker, envelope, heartbeat, presence
+from . import anchored_io, compaction_marker, dependencies, envelope, fleet_inbox, heartbeat, presence
 from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -37,6 +38,7 @@ from .session_state import (
 )
 
 BRIEF_TIMEOUT_SECONDS = 10
+_monotonic = time.monotonic
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
 # Inner lock acquire only. Must stay strictly below the 0.5s outer follow-up
@@ -58,9 +60,6 @@ _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
 _HOOK_PIN_ENV = "BRIGADE_HOOK_PIN_TARGET"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
 _HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
-_HOOK_WORKER_COMMAND = (
-    "import json, os, sys, time; from brigade.claude_hooks.runtime import _hook_worker_main; _hook_worker_main()"
-)
 
 
 class HookDegraded(Exception):
@@ -165,11 +164,11 @@ def _task_epoch_for_event(event: str, payload: dict[str, Any], session_id: str) 
 
 
 def read_session_state(target: Path, session_id: str) -> dict[str, Any] | None:
-    return localio.read_json_dict(_state_path(target.expanduser().resolve(), session_id))
+    return anchored_io.read_json(target, _state_path(target, session_id).name)
 
 
 def write_session_state(target: Path, session_id: str, payload: dict[str, Any]) -> None:
-    localio.write_json(_state_path(target.expanduser().resolve(), session_id), payload)
+    anchored_io.write_json(target, _state_path(target, session_id).name, payload)
 
 
 def iter_session_states(
@@ -178,26 +177,7 @@ def iter_session_states(
     modified_since: datetime | None = None,
     limit: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    root = _sessions_root(target.expanduser().resolve())
-    if not root.is_dir():
-        return
-    candidates: list[tuple[float, Path]] = []
-    threshold = modified_since.timestamp() if modified_since is not None else None
-    for path in root.glob("*.json"):
-        try:
-            modified = path.stat().st_mtime
-        except OSError:
-            continue
-        if threshold is not None and modified < threshold:
-            continue
-        candidates.append((modified, path))
-    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
-    if limit is not None:
-        candidates = candidates[: max(limit, 0)]
-    for _, path in candidates:
-        state = localio.read_json_dict(path)
-        if isinstance(state, dict):
-            yield state
+    yield from anchored_io.iter_states(target, modified_since=modified_since, limit=limit)
 
 
 def _advance_quote_state(text: str, quote: str | None) -> str | None:
@@ -731,8 +711,8 @@ def _stop_targets(payload: dict[str, Any], session_id: str, *, task_epoch: str |
 def _run_brief(target: Path) -> str:
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "brigade", "work", "brief", "--target", str(target)],
-            cwd=target,
+            module_argv("brigade", "work", "brief", "--target", str(target)),
+            cwd=trusted_cwd(),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -1971,6 +1951,7 @@ def _normalize_state(
         normalized["started_at"] = started.isoformat()
     normalized["briefed"] = payload.get("briefed") is True
     normalized["write_observed"] = payload.get("write_observed") is True
+    dependencies.restore(normalized, payload)
     pending_fp = payload.get("pending_bash_fingerprint")
     if isinstance(pending_fp, str) and pending_fp:
         normalized["pending_bash_fingerprint"] = pending_fp
@@ -2071,11 +2052,12 @@ def _additional_context(
     *,
     target: Path,
     session_id: str,
+    task_epoch: str | None = None,
     records: list[str] | None = None,
 ) -> dict[str, Any]:
     max_chars, max_items = envelope.resolve_caps()
     payload_records = records if records is not None else [text]
-    return envelope.additional_context_envelope(
+    result = envelope.additional_context_envelope(
         event,
         payload_records,
         target=target,
@@ -2083,6 +2065,17 @@ def _additional_context(
         max_chars=max_chars,
         max_items=max_items,
     )
+    shown = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    files = dependencies.injected_brief_files(shown) if event in {"SessionStart", "UserPromptSubmit"} else []
+    if files:
+        state = read_session_state(target, session_id) or {}
+        if state.get("task_epoch") == task_epoch:
+            # The locked patch writer validates and merges persisted paths.
+            state["brief_files"] = files
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("brief_files",)
+            )
+    return result
 
 
 def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -2168,6 +2161,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
+    task_epoch = _current_task_epoch(session_id)
     workspace = compaction_marker.cheap_workspace_root(payload.get("cwd"))
     if workspace is None:
         return None
@@ -2192,6 +2186,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
             brief_text,
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=_restore_brief_records(brief_text),
         )
         return _attach_claim(result, claim)
@@ -2201,7 +2196,22 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    started = _monotonic()
     pin = pin if pin is not None else _hook_pin_from_env()
+    result = _handle_event(event, payload, pin=pin)
+    # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
+    # It only gets what the event left of the hook budget, so a slow brief still
+    # returns its claim path to the parent before the outer timeout kills the worker.
+    return fleet_inbox.attach(
+        event,
+        payload,
+        result,
+        wired=lambda: effective_hook_target(payload, pin=pin) is not None,
+        budget=_hook_timeout_seconds() - (_monotonic() - started),
+    )
+
+
+def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
     if event == "PreCompact":
         return _handle_pre_compact(payload, pin=pin)
     if event == "UserPromptSubmit":
@@ -2244,7 +2254,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text = _run_brief(target)
             recall_text = _run_recall(target, payload)
             state["briefed"] = True
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("briefed",)
+            )
             records = _restore_brief_records(brief_text)
             if recall_text.strip():
                 records.extend(_brief_records(recall_text))
@@ -2254,6 +2266,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 combined,
                 target=target,
                 session_id=session_id,
+                task_epoch=task_epoch,
                 records=records,
             )
         if state.get("briefed"):
@@ -2261,7 +2274,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         brief_text = _run_brief(target)
         recall_text = _run_recall(target, payload)
         state["briefed"] = True
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=("briefed",))
         records = _brief_records(brief_text)
         if recall_text.strip():
             records.extend(_brief_records(recall_text))
@@ -2270,6 +2283,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}",
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=records,
         )
 
@@ -2280,8 +2294,13 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             # Heartbeat so a concurrent session can attribute the coming write
             # to this session instead of a shared worktree delta (#959).
             state["pending_write_at"] = localio.utc_now_iso()
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-            return None
+            check_id = dependencies.record_write(target, state, payload)
+            if not _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("pending_write_at", "dependency_checks")
+            ):
+                return None
+            warning = dependencies.warning_for_check(state, check_id)
+            return _additional_context(event, warning, target=target, session_id=session_id) if warning else None
         if tool_name != "Bash":
             return None
         raw_tool_input = payload.get("tool_input")
@@ -2333,8 +2352,16 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         command = post_tool_input.get("command")
         if tool_name == "Read":
             skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
-            if _record_exercised_artifact(state, skill_id):
-                _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            read_recorded = dependencies.record_read(target, state, payload)
+            artifact_recorded = _record_exercised_artifact(state, skill_id)
+            if artifact_recorded or read_recorded:
+                fields: tuple[str, ...] = ("read_files",) if read_recorded else ()
+                if read_recorded:
+                    # Only this read refreshes recency in the locked merge.
+                    state["read_files"] = state["read_files"][-1:]
+                if artifact_recorded:
+                    fields += ("exercised_artifact_id", "exercised_artifact_kind")
+                _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
             if _is_routed_verify(command):
@@ -2665,6 +2692,28 @@ def _hook_run_body(
     pin_target: Path | None,
     on_prologue: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    """Keep integrity refusals distinct across both worker transports."""
+    try:
+        return _hook_run_body_unchecked(event, payload, pin_target=pin_target, on_prologue=on_prologue)
+    except anchored_io.SessionIntegrityError:
+        # Return a normal worker outcome so Windows serialization cannot turn
+        # this refusal into a generic fail-open exception in the parent.
+        return {
+            "kind": "ok",
+            "result": anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True),
+            "log_target": None,
+            "claim_path": None,
+            "session_id": _session_id_from_payload(payload),
+        }
+
+
+def _hook_run_body_unchecked(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin_target: Path | None,
+    on_prologue: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """Run every filesystem-touching ``hook_run`` step.
 
     The parent process must not call this. Pin resolution, target discovery,
@@ -2939,12 +2988,13 @@ def _subprocess_timed_hook_run(
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
     if pin_target is not None:
-        env[_HOOK_PIN_ENV] = str(pin_target)
+        env[_HOOK_PIN_ENV] = str(pin_target.expanduser().absolute())
     else:
         env.pop(_HOOK_PIN_ENV, None)
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", _HOOK_WORKER_COMMAND],
+            module_argv("brigade.claude_hooks.worker"),
+            cwd=trusted_cwd(),
             input=raw,
             capture_output=True,
             text=True,
@@ -3147,6 +3197,7 @@ def hook_run(
     log_target: Path | None = None
     session_id = "unknown"
     result: dict[str, Any] | None = None
+    payload: dict[str, Any] = {}
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         session_id = _session_id_from_payload(payload)
@@ -3169,6 +3220,11 @@ def hook_run(
         followup_target = exc.log_target if exc.log_target is not None else log_target
         if followup_target is not None and _is_timeout_degraded(exc):
             followup = _bounded_timeout_followup(event, followup_target, session_id, exc)
+            if followup == "integrity_refused":
+                envelope.emit_stdout(
+                    anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True)
+                )
+                return 0
             if followup == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))
                 return 0

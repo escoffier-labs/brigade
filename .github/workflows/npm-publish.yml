@@ -1,0 +1,331 @@
+name: Stable npm publication
+
+on:
+  workflow_dispatch:
+    inputs:
+      expected_sha:
+        description: Exact reviewed npm promotion commit on main
+        required: true
+        type: string
+      release_tag:
+        description: Qualified Python release tag
+        required: true
+        default: v0.30.0
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: stable-npm-publication-0.30.0
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Require exact main dispatch and stable release tag
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$RELEASE_TAG" = v0.30.0
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = 02270bc7ffd92640cd8debf39711eca7c8678fc0
+          test -z "$(git status --porcelain --untracked-files=all)"
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Verify real source provenance cryptography
+        shell: bash
+        run: >-
+          PYTHONPATH=src python -m brigade work verify run --target .
+          --argv-json '["node","--test","npm/feasibility/provenance.test.cjs"]'
+          --timeout 300 --capture brigade-work
+      - name: Build six stable payload archives once from clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 600 --capture brigade-work
+      - name: Verify stable payload and packaging identities against clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Verify release-generated manifest attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json" --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml
+      # Retained artifacts in this public repository are public, not confidential.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stable-npm-release-archives
+          path: |
+            ${{ runner.temp }}/npm-artifacts/*.tgz
+            ${{ runner.temp }}/npm-artifacts/artifacts.json
+            ${{ runner.temp }}/npm-artifacts/runtime.json
+          retention-days: 14
+          if-no-files-found: error
+      - name: Upload bounded package verification receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stable-npm-release-package-receipts
+          path: |
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  acceptance:
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, platform: linux-x64}
+          - {os: ubuntu-24.04-arm, platform: linux-arm64}
+          - {os: windows-2022, platform: win32-x64}
+          - {os: macos-15-intel, platform: darwin-x64}
+          - {os: macos-15, platform: darwin-arm64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: stable-npm-release-archives
+          path: ${{ runner.temp }}/npm-artifacts
+      - name: Verify stable payload and packaging identities against clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'npm-receipts/acceptance.json').read_text())
+          assert result['status'] == result['cancellationGate'] == 'passed'
+          assert result['platform'] == result['expectedPlatform']
+          assert result['acceptanceMode'] == 'native-default'
+          assert result['nodeVersion'] == 'v24.22.0'
+          assert result['npmVersion'] == '11.19.1'
+          if result['platform'] != 'win32-x64':
+              assert len(result['cancellationModes']) == 6
+              assert {m['signal'] for m in result['cancellationModes']} == {'SIGINT', 'SIGTERM', 'SIGHUP'}
+              assert {m['scope'] for m in result['cancellationModes']} == {'pid', 'group'}
+          assert result['pathExcludesPythonAndUv'] and result['pathEntries'] == []
+          if result['platform'] == 'win32-x64':
+              print('Windows forced taskkill tree proof is separate; console Ctrl+C remains unproved.')
+          PYCODE
+      - name: Upload bounded native acceptance receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stable-npm-release-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/npm-receipts/acceptance.json
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  publish:
+    needs: [build, acceptance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: stable-npm-release-archives
+          path: ${{ runner.temp }}/npm-artifacts
+      - name: Bind original archives to exact main source before registry writes
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$RELEASE_TAG" = v0.30.0
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Publish original companions then launcher with mandatory provenance
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/publish.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 6300 --capture brigade-work
+      - name: Retain publisher verification receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stable-npm-publisher-receipts
+          path: |
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  registry-acceptance:
+    needs: publish
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, platform: linux-x64}
+          - {os: ubuntu-24.04-arm, platform: linux-arm64}
+          - {os: windows-2022, platform: win32-x64}
+          - {os: macos-15-intel, platform: darwin-x64}
+          - {os: macos-15, platform: darwin-arm64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: stable-npm-release-archives
+          path: ${{ runner.temp }}/npm-artifacts
+      - name: Verify stable payload and packaging identities against clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}","--registry-spec","@escoffier-labs/brigade@0.30.0"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'npm-receipts/acceptance.json').read_text())
+          assert result['status'] == result['cancellationGate'] == 'passed'
+          assert result['platform'] == result['expectedPlatform']
+          assert result['acceptanceMode'] == 'native-default'
+          assert result['nodeVersion'] == 'v24.22.0'
+          assert result['npmVersion'] == '11.19.1'
+          assert result['distributionMode'] == 'registry'
+          assert any(c['name'] == 'npm-audit-signatures' for c in result['checks'])
+          if result['platform'] != 'win32-x64':
+              assert len(result['cancellationModes']) == 6
+              assert {m['signal'] for m in result['cancellationModes']} == {'SIGINT', 'SIGTERM', 'SIGHUP'}
+              assert {m['scope'] for m in result['cancellationModes']} == {'pid', 'group'}
+          assert result['pathExcludesPythonAndUv'] and result['pathEntries'] == []
+          if result['platform'] == 'win32-x64':
+              print('Windows forced taskkill tree proof is separate; console Ctrl+C remains unproved.')
+          PYCODE
+      - name: Upload bounded native acceptance receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: stable-npm-registry-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/npm-receipts/acceptance.json
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  release-gate:
+    if: always()
+    needs: [build, acceptance, publish, registry-acceptance]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require original artifacts and every native acceptance gate
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
+          PUBLISH_RESULT: ${{ needs.publish.result }}
+          REGISTRY_RESULT: ${{ needs.registry-acceptance.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$ACCEPTANCE_RESULT" = success
+          test "$PUBLISH_RESULT" = success
+          test "$REGISTRY_RESULT" = success

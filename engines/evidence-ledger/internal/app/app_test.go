@@ -289,12 +289,12 @@ func TestCommandTableDispatchesEveryTopLevelCommand(t *testing.T) {
 }
 
 func TestFlagHelpersPreserveWrapperPassthrough(t *testing.T) {
-	args := []string{"--json", "--dry-run", "--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--", "--json"}
+	args := []string{"--json", "--dry-run", "--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--", "--json", "--help"}
 	asJSON, dryRun, pass := splitWrapperFlags(args)
 	if !asJSON || !dryRun {
 		t.Fatalf("splitWrapperFlags json=%v dryRun=%v, want both true", asJSON, dryRun)
 	}
-	wantPass := []string{"--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--"}
+	wantPass := []string{"--repo", "OWNER/NAME", "--unknown=value", "--dry-run=false", "--", "--json", "--help"}
 	if fmt.Sprint(pass) != fmt.Sprint(wantPass) {
 		t.Fatalf("pass-through args = %#v, want %#v", pass, wantPass)
 	}
@@ -986,6 +986,47 @@ printf '{"source":"%s","path":"%s","records":1,"files":1,"warnings":[],"generate
 	scans := runJSON(t, "scans", "list", "--source", "docs", "--json")
 	if len(scans["scans"].([]any)) != 1 {
 		t.Fatalf("crawl docs scan manifest missing: %v", scans)
+	}
+}
+
+func TestCrawlDocsAcceptsDashPrefixedPathAfterTerminator(t *testing.T) {
+	withTempHome(t)
+	runOK(t, "init")
+	sourceharvestDir := t.TempDir()
+	script := filepath.Join(sourceharvestDir, "sourceharvest")
+	body := `#!/bin/sh
+mode="$1"
+shift
+source=''
+collection=''
+out=''
+json=''
+path=''
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --source) source="$2"; shift 2 ;;
+    --collection) collection="$2"; shift 2 ;;
+    --out) out="$2"; shift 2 ;;
+    --json) json=true; shift ;;
+    --) shift; path="$1"; shift; break ;;
+    *) echo "unexpected argument before terminator: $1" >&2; exit 2 ;;
+  esac
+done
+if [ "$mode" != "markdown" ] || [ "$source" != "docs" ] || [ "$collection" != "docs:--help" ] || [ "$out" != "-" ] || [ "$json" != "true" ] || [ "$path" != "--help" ] || [ "$#" -ne 0 ]; then
+  echo "unexpected sourceharvest args: mode=$mode source=$source collection=$collection out=$out json=$json path=$path remaining=$*" >&2
+  exit 3
+fi
+printf '%s\n' '{"schema":"miseledger.adapter.v1","source":{"kind":"docs","name":"SourceHarvest Fixture"},"collection":{"external_id":"docs:--help","kind":"docs","name":"docs"},"item":{"external_id":"docs:item:dash-help","kind":"note","created_at":"2026-06-03T00:00:00Z","text":"Dash-prefixed path fixture evidence","tags":["docs"]},"actor":{"external_id":"docs:system:fixture","type":"system","name":"fixture"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"markdown","hash":"sha256:test","path":"--help","ordinal":1}}'
+`
+	if err := os.WriteFile(script, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Setenv("PATH", sourceharvestDir+string(os.PathListSeparator)+oldPath)
+
+	code, stdout, stderr := run("crawl", "docs", "--", "--help")
+	if code != 0 || !strings.Contains(stdout, "imported=1") {
+		t.Fatalf("crawl docs -- --help exit %d, stdout %q, stderr %q", code, stdout, stderr)
 	}
 }
 

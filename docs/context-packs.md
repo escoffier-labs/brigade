@@ -1,6 +1,6 @@
 # Context Packs
 
-`brigade context` builds local context engineering packs for task, repo, release, and tool-use scenarios.
+`brigade context` builds local context engineering packs for task, repo, release, and tool-use scenarios. Enable the extras surface with `brigade extras on` or `BRIGADE_EXTRAS=1`.
 
 Commands:
 
@@ -37,7 +37,7 @@ Default exclusions include raw chat exports, secret-looking values, private infr
 
 Sync planning never writes harness context files. A future explicit apply command would be required before any configured destination is mutated.
 
-`brigade context doctor` reports stale context packs, missing source references, task acceptance criteria that changed after pack build, stale tool references, and sync-plan blockers. `brigade context import-issues` routes those issues into the work inbox as `source: context-pack` tasks with stable fingerprints and dismiss-until-changed behavior.
+`brigade context doctor` reports stale context packs, missing source references, task acceptance criteria that changed after pack build, stale tool references, generator or source fingerprint drift, changed dependent receipts, and sync-plan blockers. `brigade context import-issues` routes those issues into the work inbox as `source: context-pack` tasks with stable fingerprints and dismiss-until-changed behavior.
 
 `brigade context archive` moves a local pack into `.brigade/context/archive/`. It does not delete source files, write harness context files, edit memory, or run tools.
 

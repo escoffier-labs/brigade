@@ -1,16 +1,19 @@
 # Scheduled Memory Care
 
-The schedule belongs to the operator. Brigade only runs when invoked. Copy one
-of the recipes below into your own crontab, user timer, or CI job after
+The operator chooses when scheduled care runs and which runbooks it may execute.
+Each runbook run records step exit codes and log paths for later inspection. Copy
+one of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
-systemd user timers on Linux or launchd agents on macOS and reports an
-unsupported scheduler elsewhere. Use the manual crontab recipes on this page
+systemd user timers on Linux or launchd agents on macOS. On Windows it prints
+a Task Scheduler plan without creating tasks and exits 3. Other platforms report
+an unsupported scheduler. Use the manual crontab recipes on this page
 when cron is your trigger.
-Every registration is namespaced by a hash of the absolute target path, so
+Systemd and launchd registrations are namespaced by a hash of the absolute target path, so
 status and uninstall operate only on that target. Uninstalling a missing
-registration is a clear no-op. Brigade still does not own a daemon or
-background supervisor.
+registration is a clear no-op. These care registrations use the host scheduler.
+Brigade also has operator-started long-running fleet and MCP services, described
+in the [execution model](execution-model.md).
 
 Prerequisites:
 
@@ -88,6 +91,49 @@ with a nonblank `--reason`. After the timer fires, `brigade care status`
 should show a completed receipt when the queue is empty (or an explicit defer
 was chosen).
 
+### Run patrol
+
+`run-patrol` is an optional care entry on systemd and launchd. Its default
+schedule is every 10 minutes. Install one timer with:
+
+```bash
+brigade care install --target . --entry run-patrol --schedule 'run-patrol=*:0/10'
+brigade care status --target . --entry run-patrol --json
+```
+
+The schedule above uses systemd syntax. For launchd use
+`--schedule 'run-patrol=*/10 * * * *'`. On Windows the same entry prints a
+Task Scheduler plan with `/SC MINUTE /MO 10` and exits 3, like the other entries.
+
+Installation writes `.brigade/runbooks/run-patrol.json` only when run-patrol is
+selected. It contains one report-only
+step:
+
+```bash
+brigade runs patrol --target . --json --receipt --fail-on stalled,zombie,dead
+```
+
+To enable repairs, review the generated runbook and add an explicit
+`--apply reap,release-claim` to its step. `escalate` can also be selected.
+`finalize-intent` is not implemented. Reinstall preserves an existing runbook.
+Patrol retains the newest 144 receipts for at most 7 days, including under
+`--apply`. Compact action fences survive pruning in
+`.brigade/patrol/.action-fences/`, with one file per lane. Apply reads only the
+scanned lanes' fence files and at most the newest 144 receipts. Its first
+retention sweep also migrates the legacy `.action-fences.json` archive. Fences
+retain the lifetime escalation cap and have no shared size ceiling across lanes.
+Care status checks at most the newest 10 patrol receipt candidates and includes the latest valid patrol
+receipt and the latest runbook receipt.
+Two consecutive failed runbook receipts use care's existing repeated-failure
+reporting in work brief and Center. A selected patrol finding returns 1 and
+therefore fails that scheduled runbook step.
+
+The crontab backend keeps one atomic managed block. `care install --backend
+crontab` without `--entry` includes run-patrol in that block. `--entry
+run-patrol` still refuses crontab. Systemd and launchd default installs retain
+the existing five-recipe set until run-patrol is explicitly selected.
+Existing CARE crontab blocks show as stale after upgrading, and `brigade care install --target .` refreshes the managed block.
+
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
 ## Scheduler wiring
@@ -105,16 +151,16 @@ Put that directory on `PATH` in every scheduled invocation.
 Crontab header (once per crontab file):
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
 systemd `[Service]` block (on every Brigade unit):
 
 ```ini
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-Replace `/home/you` with your account home directory. Cron cannot expand `$HOME`.
+Replace `/ABSOLUTE_ACCOUNT_HOME` with your account's real absolute home directory before installing these entries. The placeholder is not a shell variable; cron cannot expand `$HOME` in these assignments.
 
 ### systemd user timers
 
@@ -202,7 +248,7 @@ On a workspace with several enabled producers, `brigade work scanners run --due 
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 15 6 * * * cd "WORKSPACE" && brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .
 ```
 
@@ -217,7 +263,7 @@ Description=Brigade daily memory care pass
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/sh -c 'brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .'
 ```
 
@@ -290,7 +336,7 @@ Run this on a shorter cadence when writer harnesses produce handoffs throughout 
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 */30 * * * * cd "WORKSPACE" && brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .
 ```
 
@@ -305,7 +351,7 @@ Description=Brigade handoff ingest sweep
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/sh -c 'brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .'
 ```
 
@@ -380,7 +426,7 @@ Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipt
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
 30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target .
 ```
@@ -402,7 +448,7 @@ Description=Brigade weekly outcome rank
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade outcome rank --target .
 ```
 
@@ -429,7 +475,7 @@ Description=Brigade weekly outcome reconcile
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade outcome reconcile --target .
 ```
 
@@ -532,7 +578,7 @@ brigade center report build --target .
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 8 * * * cd "WORKSPACE" && brigade runbook run --approved ".brigade/memory-care/runbooks/daily-observability.json" --target .
 ```
 
@@ -547,7 +593,7 @@ Description=Brigade daily observability pass
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade runbook run --approved .brigade/memory-care/runbooks/daily-observability.json --target .
 ```
 
@@ -634,7 +680,7 @@ brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --appr
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 4 * * * cd "WORKSPACE" && brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
@@ -649,7 +695,7 @@ Description=Brigade nightly maintenance runbook
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 

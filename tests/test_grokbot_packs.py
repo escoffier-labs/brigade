@@ -19,6 +19,8 @@ QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
 PACK_IDS = (
     "backup-steward",
     "cerebro-memory",
+    "dot",
+    "duet",
     "fleet-steward",
     "implementation-worker",
     "n8n-operator",
@@ -81,6 +83,10 @@ OPERATIONS_RELAY_TOOLS = (
     "submit_automation_finding",
 )
 T3_DISPATCH_TOOLS = (
+    "hub_inbox_ack",
+    "hub_inbox_list",
+    "hub_message_send",
+    "hub_message_status",
     "t3_answer",
     "t3_approve",
     "t3_capacity",
@@ -172,6 +178,20 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8777"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "dot":
+            from brigade import dot
+
+            assert pack["kind"] == "connector"
+            assert set(shown["tools"]) == dot.TOOLS
+            assert shown["default_bind"] == "127.0.0.1:8779"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "duet":
+            from brigade import dot
+
+            assert pack["kind"] == "connector"
+            assert set(shown["tools"]) == dot.DUET_TOOLS
+            assert shown["default_bind"] == "127.0.0.1:8780"
             assert shown["public_route"] == ""
         elif pack["id"] == "t3-dispatch":
             assert pack["kind"] == "connector"
@@ -1821,3 +1841,100 @@ def test_t3_dispatch_setup_requires_runtime_path(tmp_path, monkeypatch):
     config = json.loads(grokbot_packs.instance_config_path(tmp_path, "t3-dispatch").read_text())
     assert config["runtime_path"] == str(runtime)
     assert config["allowed_hosts"] == ["t3-dispatch.brigade.tools"]
+
+
+@pytest.fixture
+def dot_runtime(dot_private_dir):
+    from tests.test_dot_runtime import _document, _write_private
+
+    runtime = dot_private_dir.parent / "runtime.json"
+    _write_private(runtime, json.dumps(_document()).encode())
+    return runtime
+
+
+def test_dot_setup_has_runtime_without_bearer(tmp_path, dot_runtime, monkeypatch):
+    payloads = []
+    validate = grokbot_packs._validate_instance_config
+
+    def capture(payload, pack_id):
+        payloads.append(dict(payload))
+        return validate(payload, pack_id)
+
+    monkeypatch.setattr(grokbot_packs, "_validate_instance_config", capture)
+    grokbot_packs.preview_setup(tmp_path, "dot", runtime_path=dot_runtime)
+    assert payloads[-1]["runtime_path"] == str(dot_runtime)
+    assert "bearer" not in payloads[-1]
+    assert not grokbot_packs.instance_config_path(tmp_path, "dot").exists()
+    grokbot_packs.apply_setup(tmp_path, "dot", runtime_path=dot_runtime)
+    config = grokbot_packs._load_instance_config(tmp_path, "dot")
+    assert "bearer" not in config
+    assert config["runtime_path"] == str(dot_runtime)
+    config["bearer"] = {"kind": "env", "name": "TEST_BEARER"}
+    grokbot_packs.instance_config_path(tmp_path, "dot").write_text(json.dumps(config))
+    with _reject("unexpected-key"):
+        grokbot_packs._load_instance_config(tmp_path, "dot")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"bearer_file": Path("/run/example.token")},
+        {"bearer_env": "TEST_BEARER"},
+        {"bearer": {"kind": "env", "name": "TEST_BEARER"}},
+        {"workdir": "/srv/example"},
+        {"ledger_path": "/srv/example/ledger"},
+        {"owner_workspace": "/srv/example"},
+    ],
+)
+def test_dot_setup_rejects_unexpected_fields(tmp_path, dot_runtime, kwargs):
+    with _reject("unexpected-key"):
+        grokbot_packs.preview_setup(tmp_path, "dot", runtime_path=dot_runtime, **kwargs)
+
+
+def test_dot_setup_validates_runtime(tmp_path):
+    with _reject("missing-path-reference"):
+        grokbot_packs.preview_setup(tmp_path, "dot")
+    with _reject("unsafe-path"):
+        grokbot_packs.preview_setup(tmp_path, "dot", runtime_path="relative.json")
+
+
+def test_dot_lifecycle_delegates(tmp_path, monkeypatch):
+    from brigade import dot
+
+    calls = []
+
+    def doctor(target):
+        calls.append(("doctor", target))
+        return [{"check": "dot", "status": "ok"}]
+
+    def canary(target):
+        calls.append(("canary", target))
+        return {"ok": True, "pack_id": "dot"}
+
+    def render(target, *, python):
+        calls.append(("render", target, python))
+        return "dot unit"
+
+    def write(target, out_dir, *, force):
+        calls.append(("write", target, out_dir, force))
+        return out_dir / "brigade-dot.service"
+
+    monkeypatch.setattr(dot, "doctor", doctor)
+    monkeypatch.setattr(dot, "canary", canary)
+    monkeypatch.setattr(dot, "render_unit", render)
+    monkeypatch.setattr(dot, "write_unit", write)
+    assert {"check": "dot", "status": "ok"} in grokbot_packs.doctor(tmp_path, "dot")
+    assert grokbot_packs.canary(tmp_path, "dot") == {"ok": True, "pack_id": "dot"}
+    assert grokbot_packs.render_install_service(tmp_path, "dot") == "dot unit"
+    assert (
+        grokbot_packs.apply_install_service(tmp_path, "dot", out_dir=tmp_path, force=True)["unit"]
+        == "brigade-dot.service"
+    )
+    import sys
+
+    assert calls == [
+        ("doctor", tmp_path),
+        ("canary", tmp_path),
+        ("render", tmp_path, sys.executable),
+        ("write", tmp_path, tmp_path, True),
+    ]

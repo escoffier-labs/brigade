@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brigade-cli"
-version = "0.28.0"
-description = "Your agents run loops. Brigade keeps the receipts. Local control plane for multi-agent coding: share MCP/tools/memory, remember via handoffs, prove with file receipts, improve by promoting skills only on real exit codes. Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence, code graph, pantry, skills. pipx install brigade-cli."
+version = "0.31.0"
+description = "Run coding agents anywhere and keep one record of the work, with MCP servers, tools, skills, and memory in sync across your harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "miseledger", "graphtrail", "agentpantry", "code-graph", "evidence-ledger"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "code-graph", "evidence-ledger", "mcp-server", "agent-skills"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -25,9 +25,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov>=5", "pytest-xdist>=3.6", "ruff>=0.15", "mypy>=1.11"]
-grokbot = ["mcp>=2,<3"]
-research = ["playwright>=1.40"]
+mesh = ["cryptography>=50.0.2,<52"]
+dev = ["cryptography>=50.0.2,<52", "pytest>=7", "pytest-cov>=7.1.0", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
+grokbot = ["mcp>=2,<3", "pyjwt[crypto]>=2"]
+research = ["playwright>=1.64.0"]
 
 [project.urls]
 Homepage = "https://brigade.tools"
@@ -44,12 +45,15 @@ CookbookSource = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"
 ContentGuard = "https://github.com/escoffier-labs/content-guard"
 AgentPantry = "https://github.com/escoffier-labs/agentpantry"
-MiseLedger = "https://brigade.tools/miseledger"
-GraphTrail = "https://brigade.tools/graphtrail"
+EvidenceMemory = "https://brigade.tools/evidence-memory"
+CodeIntelligence = "https://brigade.tools/code-intelligence"
 Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
-brigade = "brigade.cli:main"
+brigade = "brigade.cli:process_main"
+# Same entry point under the package name, so `uvx brigade-cli ...` works (the MCP
+# registry launches PyPI servers as `uvx <package> <args>`).
+brigade-cli = "brigade.cli:process_main"
 brigade-hook = "brigade.claude_hooks.entry:main"
 
 [tool.setuptools.packages.find]
@@ -66,6 +70,9 @@ markers = [
     "allow_agent_cli: test legitimately launches an agent CLI binary (codex, claude, cursor-agent, opencode, gemini, agy, grok) through a fake on PATH",
     "real_codex_cloud: test exercises the real codex_cloud.list_tasks with its own fake proc.run",
 ]
+
+[tool.coverage.run]
+patch = ["subprocess"]
 
 [tool.ruff]
 line-length = 120

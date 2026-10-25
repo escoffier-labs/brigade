@@ -20,12 +20,14 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
-from . import fleet_claim_display
+from . import fleet_claim_display, fleet_admin_stats_http
 from . import (
     fleet_command_deck,
     fleet_dashboard,
+    fleet_deck_alerts,
     fleet_hub_grokbot,
     fleet_hub_messages,
+    fleet_hub_identity,
     fleet_hub_sessions,
     worklore_http,
 )
@@ -35,11 +37,16 @@ from . import fleet_hub_policy_api
 from . import fleet_hub_roster_page
 from . import fleet_hub_routing
 from . import fleet_hub_status
+from . import fleet_hub_event_bounds as request_bounds
+from .fleet_hub_claim_cardinality import ClaimCardinalityError
+from .fleet_hub_http_reject import RejectedUploadMixin
 from . import fleet_model_inventory
+from . import fleet_owners
+from . import fleet_owners_page
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
-from .fleet_hub_claims import ClaimFenceError, ClaimTargetError
+from .fleet_hub_claims import ClaimFenceError, ClaimTargetError, status as claim_fencing_status
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -218,7 +225,7 @@ def make_handler(
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
-    class _Handler(BaseHTTPRequestHandler):
+    class _Handler(RejectedUploadMixin):
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
@@ -421,7 +428,7 @@ def make_handler(
                             raise enrollment.EnrollmentError()
                         return result
 
-                    raw = json.loads(body.decode("utf-8"), object_pairs_hook=unique)
+                    raw = request_bounds.bounded_json_loads(body, object_pairs_hook=unique)
                     if not isinstance(raw, dict):
                         raise enrollment.EnrollmentError()
                     if path == "/dashboard/enrollment":
@@ -492,22 +499,13 @@ def make_handler(
             return None
 
         def _read_worklore_body(self, path: str) -> dict[str, Any] | None:
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                self._send_json(400, {"error": "bad Content-Length"})
-                return None
-            limit = 1048576 if path == "/work/imports" else 262144
-            if self.command == "DELETE" and length == 0:
-                return {}
-            if length <= 0 or length > limit:
-                self._send_json(400, {"error": "missing or oversized body"})
-                return None
-            raw = self.rfile.read(length)
-            try:
-                parsed = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
+            limit = (
+                request_bounds.WORKLORE_IMPORT_BODY_BYTES
+                if path == "/work/imports"
+                else request_bounds.WORKLORE_BODY_BYTES
+            )
+            parsed = self._read_json_body(limit, empty_delete=self.command == "DELETE")
+            if parsed is None:
                 return None
             if not isinstance(parsed, dict):
                 self._send_json(400, {"error": "body is not valid JSON"})
@@ -559,6 +557,14 @@ def make_handler(
             self._send_json(status, payload)
             return True
 
+        def _read_json_body(self, limit: int = MAX_BODY_BYTES, *, empty_delete: bool = False) -> Any:
+            try:
+                return request_bounds.read_json_body(self, limit=limit, empty_delete=empty_delete)
+            except request_bounds.RequestBoundsError as exc:
+                self.close_connection = True
+                self._send_json(exc.status, {"error": str(exc)})
+                return None
+
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
@@ -576,6 +582,7 @@ def make_handler(
             *,
             content_type: str = "text/html; charset=utf-8",
             nonce: str | None = None,
+            referrer_policy: str = "no-referrer",
             extra_headers: dict[str, str] | None = None,
         ) -> None:
             """Dashboard response with the same security headers as ``center serve``."""
@@ -590,7 +597,7 @@ def make_handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Security-Policy", csp)
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", referrer_policy)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Vary", "Cookie")
             for key, value in (extra_headers or {}).items():
@@ -737,7 +744,7 @@ def make_handler(
                     else ({}, False)
                 )
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -900,7 +907,8 @@ def make_handler(
             ignored, never reflected. Renders from the startup-frozen config."""
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
-            if path not in ("/", "/deck") and not repos_page:
+            alerts_page = path == "/deck/alerts"
+            if path not in ("/", "/deck") and not (repos_page or alerts_page):
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
@@ -978,28 +986,36 @@ def make_handler(
                     except (FleetHubError, sqlite3.Error, KeyError, ValueError) as exc:
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
+                from .fleet_action_targets import linked_subjects
+
+                view = fleet_command_deck.build_view(
+                    frozen_deck,
+                    live_runs=live_runs,
+                    claims=claims,
+                    enrolled_labels=enrolled_labels,
+                    last_heard=last_heard,
+                    outcomes=outcomes,
+                    failed_outcomes=failed_outcomes,
+                    observers=observers,
+                    now=now,
+                    cloud_workers=cloud_workers,
+                    interactive_sessions=interactive_sessions,
+                    control_plane=control_plane,
+                )
+                from .fleet_deck_overview import page_alerts
+
+                try:
+                    action_sources = linked_subjects(conn, [a.source_ref for a in page_alerts(view, now)])
+                except (FleetHubError, KeyError, TypeError, ValueError):
+                    action_sources = frozenset()
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             finally:
                 conn.close()
-            view = fleet_command_deck.build_view(
-                frozen_deck,
-                live_runs=live_runs,
-                claims=claims,
-                enrolled_labels=enrolled_labels,
-                last_heard=last_heard,
-                outcomes=outcomes,
-                failed_outcomes=failed_outcomes,
-                observers=observers,
-                now=now,
-                cloud_workers=cloud_workers,
-                interactive_sessions=interactive_sessions,
-                control_plane=control_plane,
-            )
             nonce = secrets.token_urlsafe(16)
             if repos_page:
                 page = fleet_repo_policy_page.render(
@@ -1010,9 +1026,13 @@ def make_handler(
                     nonce=nonce,
                     now=now,
                 )
+            elif alerts_page:
+                page = fleet_deck_alerts.render_alerts_page(
+                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
+                )
             else:
                 page = fleet_command_deck.render_deck(
-                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled()
+                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
                 )
             self._send_html(200, page, nonce=nonce)
 
@@ -1097,6 +1117,32 @@ def make_handler(
                 page, nonce=nonce, now=datetime.now(timezone.utc), stale_after_seconds=frozen_deck.stale_after_seconds
             )
             self._send_html(200, body, nonce=nonce)
+
+        def _serve_owners_page(self, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            authorized, editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401, "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n", content_type=plain
+                )
+                return
+            if query:
+                self._send_html(400, "Invalid owners page query.\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+                try:
+                    conn.execute("PRAGMA query_only=ON")
+                    # Grok Bot job rows are admin-only, as on /cloud and /grokbot.
+                    view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=editable)
+                finally:
+                    conn.close()
+            except (FleetHubError, sqlite3.Error):
+                self._send_html(500, "Ownership view unavailable.\n", content_type=plain)
+                return
+            nonce = secrets.token_urlsafe(16)
+            page = fleet_owners_page.render(view, nonce=nonce, now=datetime.now(timezone.utc))
+            self._send_html(200, page, nonce=nonce)
 
         def _serve_work(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
@@ -1418,6 +1464,16 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path in ("/deck/ci", "/ci", "/ci/work"):
+                from .fleet_ci_http import route
+
+                route(self, Path(db_path), method="GET")
+                return
+            if path.startswith("/deck/actions/"):
+                from . import fleet_action_http
+
+                fleet_action_http.route(self, Path(db_path), token)
+                return
             if path == "/enroll":
                 self._serve_enrollment(query)
                 return
@@ -1426,6 +1482,20 @@ def make_handler(
                 return
             if path in _ASSET_ROUTES:
                 self._serve_asset(path)
+                return
+            if path == "/mesh/identity":
+                try:
+                    conn = open_db(Path(db_path))
+                    try:
+                        value = fleet_hub_identity.identity(conn)
+                    finally:
+                        conn.close()
+                    self._send_json(
+                        200 if value is not None else 404,
+                        value if value is not None else {"error": "identity not found"},
+                    )
+                except (FleetHubError, sqlite3.Error) as exc:
+                    self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
@@ -1442,6 +1512,12 @@ def make_handler(
             if path == "/deck/work":
                 self._serve_work(query)
                 return
+            if path == "/deck/stats":
+                fleet_admin_stats_http.serve(self, Path(db_path), query)
+                return
+            if path == "/deck/owners":
+                self._serve_owners_page(query)
+                return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)
                 return
@@ -1456,6 +1532,7 @@ def make_handler(
                 "/models",
                 "/preference",
                 "/sessions",
+                "/owners",
                 "/policy",
                 "/policy/status",
                 "/policy/inventory",
@@ -1489,11 +1566,12 @@ def make_handler(
                         payload = {"nodes": list_nodes(conn)}
                     elif path == "/status":
                         payload = {
+                            "claim_fencing": claim_fencing_status(conn),
                             "runs": latest_status(
                                 conn,
                                 include_all=include_all,
                                 stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                            )
+                            ),
                         }
                     elif path == "/cloud":
                         if parse_qs(query).get("view", [""])[0] == "capabilities":
@@ -1514,6 +1592,10 @@ def make_handler(
                         payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
                     elif path == "/sessions":
                         payload = {"sessions": list_sessions(conn, include_all=include_all)}
+                    elif path == "/owners":
+                        conn.execute("PRAGMA query_only=ON")
+                        view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=is_admin)
+                        payload = fleet_owners.view_payload(view)
                     elif path == "/policy/status":
                         payload = fleet_hub_policy_api.read_status(conn)
                     elif path == "/policy/inventory":
@@ -1537,7 +1619,7 @@ def make_handler(
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except ClaimFenceError as exc:
-                    self._send_json(503, {"error": str(exc)})
+                    self._send_json(503, {"error": str(exc), "reason": exc.reason})
                     return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
@@ -1574,19 +1656,8 @@ def make_handler(
                 if not is_admin:
                     self._send_json(403, {"error": "the admin token is required to set run preference"})
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
-                    return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
+                parsed = self._read_json_body(MAX_BODY_BYTES)
+                if parsed is None:
                     return
                 body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
                 stored = set_run_preference(conn, body, updated_by="admin")
@@ -1619,6 +1690,16 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path in ("/ci", "/ci/refresh"):
+                from .fleet_ci_http import route
+
+                route(self, Path(db_path), method="POST")
+                return
+            if path.startswith("/deck/actions/") or path == "/actions":
+                from . import fleet_action_http
+
+                fleet_action_http.route(self, Path(db_path), token)
+                return
             if path == "/enroll":
                 self._post_enrollment(query)
                 return
@@ -1630,6 +1711,9 @@ def make_handler(
                 return
             if path == "/deck/policy":
                 self._post_policy_page()
+                return
+            if path == "/stats":
+                fleet_admin_stats_http.post(self, Path(db_path), query)
                 return
             if path.startswith("/work/"):
                 self._handle_worklore()
@@ -1645,6 +1729,8 @@ def make_handler(
                 "/policy",
                 "/messages",
                 "/message-principals",
+                "/mesh/identity",
+                "/mesh/statements",
             ):
                 self._send_json(404, {"error": "not found"})
                 return
@@ -1673,7 +1759,11 @@ def make_handler(
                 if caller is None:
                     return
                 is_admin, caller_node = caller
-                if path == "/nodes":
+                if path in ("/mesh/identity", "/mesh/statements"):
+                    if not is_admin:
+                        self._send_json(403, {"error": "the admin token is required for mesh uploads"})
+                        return
+                elif path == "/nodes":
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
@@ -1694,28 +1784,28 @@ def make_handler(
                         },
                     )
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
+                parsed = self._read_json_body(MAX_BODY_BYTES)
+                if parsed is None:
                     return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
-                    return
-                if path == "/events":
+                if path == "/mesh/identity":
+                    status, body_payload = 200, fleet_hub_identity.upload_identity(conn, parsed)
+                elif path == "/mesh/statements":
+                    status, body_payload = 200, fleet_hub_identity.upload_statement(conn, parsed)
+                elif path == "/events":
                     status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
                 elif path == "/claims":
                     status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
                 elif path == "/sessions":
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
                 elif path == "/messages":
-                    status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
+                    status, body_payload = fleet_hub_messages.handle(
+                        conn,
+                        parsed,
+                        caller=caller_node,
+                        open_conn=lambda: open_db(Path(db_path)),
+                        source_ip=self.client_address[0],
+                        authenticated_generation=_hub.hash_node_token(self._bearer() or ""),
+                    )
                 elif path == "/message-principals":
                     status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
                 elif path == "/cloud":
@@ -1794,11 +1884,14 @@ def make_handler(
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
+            except ClaimCardinalityError as exc:
+                self._send_json(409, exc.payload())
+                return
             except ClaimTargetError as exc:
-                self._send_json(422, exc.payload())
+                self._send_json(exc.status, exc.payload())
                 return
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(409, {"error": str(exc), "reason": exc.reason, "owner": {}})
                 return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
@@ -1831,7 +1924,10 @@ def make_handler(
                 self._send_json(403, {"error": str(exc), "code": exc.code})
                 return
             except fleet_hub_messages.MessageError as exc:
-                self._send_json(400, {"error": str(exc)})
+                payload = {"error": str(exc)}
+                if exc.code is not None:
+                    payload["code"] = exc.code
+                self._send_json(400, payload)
                 return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})

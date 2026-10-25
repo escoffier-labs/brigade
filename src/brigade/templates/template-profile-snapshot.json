@@ -1,5 +1,5 @@
 {
-  "brigade_version": "0.28.0",
+  "brigade_version": "0.31.0",
   "profiles": {
     "repo-claude": {
       "description": "Minimal repo install with Claude Code bridge.",
@@ -564,13 +564,13 @@
         "byte_size": 872,
         "dst": ".brigade/policies/personal.json",
         "rendered": false,
-        "sha256": "7fcb40db5555924fd6bbd16f6010f404faed5f7218fe86419f9e25f7afff8a56"
+        "sha256": "a0c3d727890ffc6a467d6b90f4c6fb523a6df7f445c4f60f37a01571525fc1e1"
       },
       {
         "byte_size": 754,
         "dst": ".brigade/policies/public-repo.json",
         "rendered": false,
-        "sha256": "09349124710b38fa7f1823d666a4c97df473b8992cd2cb503f4747c19e6a972a"
+        "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
         "byte_size": 1424,
@@ -579,10 +579,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 4847,
+        "byte_size": 4850,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+        "sha256": "1f34736aae498024c8793ee5deea765ce3ef1c910b4d704656749ade4aea78e1"
       },
       {
         "byte_size": 2216,
@@ -594,7 +594,7 @@
         "byte_size": 6331,
         "dst": "SAFETY_RULES.md",
         "rendered": true,
-        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+        "sha256": "bf8d53179230c0229f4311e1fe0a8a41e0f25c3653f03be27ade03f7f426a4d5"
       }
     ],
     "repo-claude-full": [
@@ -608,13 +608,13 @@
         "byte_size": 872,
         "dst": ".brigade/policies/personal.json",
         "rendered": false,
-        "sha256": "7fcb40db5555924fd6bbd16f6010f404faed5f7218fe86419f9e25f7afff8a56"
+        "sha256": "a0c3d727890ffc6a467d6b90f4c6fb523a6df7f445c4f60f37a01571525fc1e1"
       },
       {
         "byte_size": 754,
         "dst": ".brigade/policies/public-repo.json",
         "rendered": false,
-        "sha256": "09349124710b38fa7f1823d666a4c97df473b8992cd2cb503f4747c19e6a972a"
+        "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
         "byte_size": 1424,
@@ -623,10 +623,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 4847,
+        "byte_size": 4850,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+        "sha256": "1f34736aae498024c8793ee5deea765ce3ef1c910b4d704656749ade4aea78e1"
       },
       {
         "byte_size": 2216,
@@ -644,13 +644,13 @@
         "byte_size": 6331,
         "dst": "SAFETY_RULES.md",
         "rendered": true,
-        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+        "sha256": "bf8d53179230c0229f4311e1fe0a8a41e0f25c3653f03be27ade03f7f426a4d5"
       },
       {
-        "byte_size": 8148,
+        "byte_size": 10467,
         "dst": "hooks/pre-push",
         "rendered": false,
-        "sha256": "556efbc045adef273a9ff3c03bc703e35a326f95a6d90157bc6173437924bd99"
+        "sha256": "c3e14db1c06208f02324d7ca342b1622dc6ad54b593df71f296f1d6c5325e89c"
       },
       {
         "byte_size": 1121,
@@ -670,7 +670,7 @@
         "byte_size": 3414,
         "dst": ".brigade/chat-memory-sweep.example.json",
         "rendered": false,
-        "sha256": "a7f273b53db438b8671b75d19c614ceaeed5c6320d0e56ec8e4eecfacd56349d"
+        "sha256": "c06f4555a0c83196253ba661fdf82418414bd3cf2d172789e086fb6183ff4229"
       },
       {
         "byte_size": 1108,
@@ -682,19 +682,19 @@
         "byte_size": 511,
         "dst": ".brigade/memory-care.example.json",
         "rendered": false,
-        "sha256": "c06c1d689b1b594304c961d51e23041acb7a690e9d3c524362c4f9f589f7c70a"
+        "sha256": "e6f2303f8668f3783488a0d7b167ce7dc01b08392da34886670dfe42135624c8"
       },
       {
         "byte_size": 872,
         "dst": ".brigade/policies/personal.json",
         "rendered": false,
-        "sha256": "7fcb40db5555924fd6bbd16f6010f404faed5f7218fe86419f9e25f7afff8a56"
+        "sha256": "a0c3d727890ffc6a467d6b90f4c6fb523a6df7f445c4f60f37a01571525fc1e1"
       },
       {
         "byte_size": 754,
         "dst": ".brigade/policies/public-repo.json",
         "rendered": false,
-        "sha256": "09349124710b38fa7f1823d666a4c97df473b8992cd2cb503f4747c19e6a972a"
+        "sha256": "ce4f1abf5735263eb6a33fa46dbece8e4e885c457120df70fff3cebe6ca3a9c3"
       },
       {
         "byte_size": 1424,
@@ -709,10 +709,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 10922,
+        "byte_size": 10925,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "2fb3c607a95a24be46aece389e0ba561997b29c7a0828052095aa0dd2cf514cf"
+        "sha256": "770089a02a97530b1f29716ad68088ed85a0e0f2bff170f1ae0fa4e2ac63d031"
       },
       {
         "byte_size": 3226,
@@ -748,7 +748,7 @@
         "byte_size": 6331,
         "dst": "SAFETY_RULES.md",
         "rendered": true,
-        "sha256": "d133ba8fdb2a580d44b896aaaf744c9d1516ce8b2019fbc1aab8a3a351000bcc"
+        "sha256": "bf8d53179230c0229f4311e1fe0a8a41e0f25c3653f03be27ade03f7f426a4d5"
       },
       {
         "byte_size": 5122,
@@ -769,10 +769,10 @@
         "sha256": "76d5b8da982a7907d78967456ce2ad6c86069e8e55578c861ed3d7aab8d1a9ae"
       },
       {
-        "byte_size": 8148,
+        "byte_size": 10467,
         "dst": "hooks/pre-push",
         "rendered": false,
-        "sha256": "556efbc045adef273a9ff3c03bc703e35a326f95a6d90157bc6173437924bd99"
+        "sha256": "c3e14db1c06208f02324d7ca342b1622dc6ad54b593df71f296f1d6c5325e89c"
       },
       {
         "byte_size": 5259,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 from .. import __version__
 
@@ -26,6 +27,7 @@ from .. import extras as _extras_mod
 from . import (
     init as _init_group,
     doctor as _doctor_group,
+    bug as _bug_group,
     version as _version_group,
     status as _status_group,
     profiles as _profiles_group,
@@ -146,6 +148,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _init_group.register(sub)
     _doctor_group.register(sub)
+    _bug_group.register(sub)
     _version_group.register(sub)
     _status_group.register(sub)
     _profiles_group.register(sub)
@@ -251,7 +254,29 @@ def main(argv=None) -> int:
     if func is None:
         parser.error(f"unknown command: {args.command}")
         return 2
-    exit_code = func(args)
+    from .. import bug_last_error
+
+    command = bug_last_error.command_path(parser, parse_argv)
+    try:
+        exit_code = func(args)
+    except SystemExit as exc:
+        usage_error = exc.code == 2 and any(
+            frame.f_code is argparse.ArgumentParser.error.__code__ for frame, _ in traceback.walk_tb(exc.__traceback__)
+        )
+        if exc.code not in (None, 0) and command != "bug report" and not usage_error:
+            bug_last_error.record(command, exc.code if isinstance(exc.code, int) else 1, exc, args=args)
+        raise
+    except Exception as exc:
+        if command != "bug report":
+            bug_last_error.record(command, 1, exc, args=args)
+        raise
+    if command == "bug report":
+        return exit_code
+    if exit_code:
+        bug_last_error.record(command, exit_code, args=args)
+    if args.command == "work" and args.work_command in {"presence-hook", "hook-run"}:
+        # Agent hooks must never print update notices or launch cache refreshes.
+        return exit_code
     try:
         from .. import update_notify
 
@@ -261,5 +286,19 @@ def main(argv=None) -> int:
     return exit_code
 
 
+def process_main() -> None:
+    """Own process-only exit. Final shutdown callbacks must not spawn children."""
+    from ..work_cmd.verify_runtime import _verify_process_signals
+
+    with _verify_process_signals() as owner:
+        exit_code = main()
+        if owner.handlers:
+            for stream in (sys.stdout, sys.stderr):
+                if stream is not None:
+                    stream.flush()
+        owner.finish()
+    raise SystemExit(exit_code)
+
+
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    process_main()

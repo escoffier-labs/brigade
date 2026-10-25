@@ -1,5 +1,7 @@
 import os
 import signal
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -27,16 +29,8 @@ class _MockProcess:
             pass
 
 
-def _collect_descendants(root_pid: int) -> set[int]:
-    """Return PIDs of all running descendants of root_pid by walking /proc/pid/stat."""
-    if os.name != "posix":
-        return set()
-
+def _proc_ppid_map(proc_dir: Path) -> dict[int, int]:
     ppid_map: dict[int, int] = {}
-    proc_dir = Path("/proc")
-    if not proc_dir.is_dir():
-        return set()
-
     for proc_path in proc_dir.iterdir():
         if not proc_path.name.isdigit():
             continue
@@ -51,6 +45,51 @@ def _collect_descendants(root_pid: int) -> set[int]:
                     ppid_map[pid] = ppid
         except (OSError, ValueError):
             continue
+
+    return ppid_map
+
+
+def _darwin_ppid_map() -> dict[int, int]:
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-A", "-o", "pid=", "-o", "ppid="],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            env={"LC_ALL": "C"},
+            timeout=2.0,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    if result.returncode != 0:
+        return {}
+    ppid_map: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            continue
+        try:
+            pid, ppid = (int(part, 10) for part in parts)
+        except ValueError:
+            continue
+        ppid_map[pid] = ppid
+    return ppid_map
+
+
+def _collect_descendants(root_pid: int) -> set[int]:
+    """Return running descendants from Darwin ps or the POSIX /proc snapshot."""
+    if os.name != "posix":
+        return set()
+
+    if sys.platform == "darwin":
+        ppid_map = _darwin_ppid_map()
+    else:
+        proc_dir = Path("/proc")
+        if not proc_dir.is_dir():
+            return set()
+        ppid_map = _proc_ppid_map(proc_dir)
 
     descendants: set[int] = set()
     current_generation = {root_pid}

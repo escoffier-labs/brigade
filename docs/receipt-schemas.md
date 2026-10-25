@@ -2,7 +2,50 @@
 
 Machine-readable contracts for the three sanctioned receipt families audited in
 [#506](receipt-schema-audit.md). These are documentation contracts, not runtime
-JSON Schema files.
+JSON Schema files. Version constants and document writers live in
+[`receipt_schema.py`](../src/brigade/receipt_schema.py), with worker and synthesis
+field serialization in [`run_receipts.py`](../src/brigade/run_receipts.py). Verify
+and closeout writers live in
+[`work_cmd/verification.py`](../src/brigade/work_cmd/verification.py).
+
+## Worker cassette sidecars
+
+`run.record` defaults to `metadata-only`, which creates no private cassette body.
+Private bodies require an explicit `auto` opt-in. `off` disables cassette
+recording. Default-on private capture remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+require explicit `auto` recording to retain private result bodies.
+
+`brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
+under `events/cassettes/<sha256>.json`. When a lifecycle journal exists, each
+recorded worker dispatch adds one `run.cassette.recorded` event with exactly `path`, `sha256`, `media_type`,
+`byte_size`, and `privacy_class`. The reference points to a `public-metadata`
+manifest containing a request key, coordinator and exact-prompt digests, an
+observation marker, and classified artifact references. `private` artifacts
+contain `run_receipts.agent_result_payload`. `scrubbed` artifacts contain result
+counts, digests, exit metadata, and an optional `worker_events` notification
+projection and its digest. Prompts and raw notification streams are excluded.
+Runs without a lifecycle journal retain manifests in that directory for discovery.
+Preflight rejections before prompt construction or request-envelope admission
+are not dispatched workers and create no cassette entry. Optional references, including stop facts, stop at
+1536 journal events to reserve 512 of the 2048 slots for lifecycle facts.
+Unavailable projections use `projection_status: "unavailable"` without stopping
+result recording. Unresolved seat secrets produce a `not-observed` entry with
+reason `env-resolution-unavailable` and no result body.
+Storage and classification failures publish a bounded public `stopped` marker when possible.
+Redaction deletes sidecars and replaces affected references with the closed
+redaction tombstone. All cassette references are tombstoned even when the
+requested redaction range is narrower, while the redaction record still reports
+only that range. Range accounting remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+Purge rejects live owners and uses the workspace lock and publication fences.
+Offline purge and retention may leave references without bodies.
+These sidecars do not participate in lifecycle projection or audit authority.
+Recovery permits trailing cassette references and stop markers after a covered
+checkpoint pair. They cannot cover an earlier uncheckpointed lifecycle event.
+Run exports exclude `events/cassettes/` from the initial staging copy and retain
+the stripping guard. Archive builds refuse cassette bodies.
 
 ## Evolution rules (all families)
 
@@ -155,7 +198,7 @@ receipts or routing authority.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `command` | string | Display command |
-| `argv` | array of string | no | Resolved argv |
+| `argv` | array of string | Resolved argv |
 | `env` | array of string | Sorted `KEY=value` pairs |
 | `status` | string | `completed`, `failed`, `timed_out`, `rejected`, `interrupted` |
 | `exit_code` | integer \| null | Child exit status. `null` when interrupted or timed out without one. Rejected commands use `2` |
@@ -223,9 +266,9 @@ directory with the same files and file hashes as the source.
 | `created_at` | string | yes | ISO-8601 |
 | `session` | object | yes | Session summary |
 | `session_path` | string | yes | |
-| `task` | object \| null | | Task summary |
+| `task` | object \| null | yes | Task summary, or `null` when absent |
 | `acceptance_criteria` | array | yes | |
-| `verification` | object \| null | | Latest verify receipt ref |
+| `verification` | object \| null | yes | Latest verify receipt ref, or `null` when absent |
 | `scanner_sweep` | object | yes | |
 | `code_review` | object | yes | |
 | `handoff_drafts` | object | yes | |
@@ -691,6 +734,7 @@ transport env path. See `docs/skill-registry.md`.
 | `schema` | string | yes | Always `brigade.worker_results.v1` |
 | `schema_version` | integer | yes (new writes) | `1` |
 | `results` | array of object | yes | Worker result entries (below) |
+| `producer_run_id` | string | no | Containing orchestrator run id when supplied by the producer or `BRIGADE_RUN_ID` |
 | `ground_truth` | object | no | No-op / ground-truth metadata when present |
 
 **Worker result entry** (`run_receipts.worker_payload`)
@@ -706,6 +750,12 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_phase` | string | Optional failure phase |
 | `failure_kind` | string | Optional failure kind |
 | `transport_warning` | object | Optional transport warning metadata |
+| `failure` | object | Optional normalized `brigade.worker_failure.v1` on failed workers |
+| `cloud_environment` | object | Optional cloud execution metadata |
+| `metadata_provenance` | object | Optional allowlisted model and adapter-version observations with `observed_at` and `fields` |
+| `output_truncated` | boolean | Present and `true` when output was truncated |
+| `output_bytes`, `output_cap_bytes` | integer | Original output size and capture cap when truncated |
+| `provenance` | object | Optional worker-result provenance envelope |
 | `thread_id` | string | App-server thread id when resumable |
 | `status` | string | App-server turn status (with `thread_id`) |
 | `exit_code` | integer | Optional child exit code |
@@ -742,6 +792,7 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_kind` | string \| null | Failure kind when applicable |
 | `session_id` | string \| null | Session id when applicable |
 | `selected` | boolean | Whether this attempt was selected |
+| `failure` | object | Optional normalized `brigade.worker_failure.v1` for an unsuccessful or failure-stamped attempt |
 | `stdout_log`, `stderr_log` | string | Optional log paths |
 
 ---
@@ -771,6 +822,8 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_phase` | string | Optional failure phase |
 | `failure_kind` | string | Optional failure kind |
 | `transport_warning` | object | Optional transport warning metadata |
+| `cloud_environment` | object | Optional cloud execution metadata |
+| `metadata_provenance` | object | Optional allowlisted model and adapter-version observations with `observed_at` and `fields` |
 | `exit_code` | integer | Optional child exit code |
 | `timed_out` | boolean | Present when exit metadata or timeout applies |
 | `stdout_log`, `stderr_log` | string | Optional log paths |
@@ -1021,6 +1074,22 @@ It is not a second provenance envelope. Compact JSON is capped at 65536 bytes.
 | `schema_version` | integer | yes | `1` |
 | `id` | string | yes | Safe identity label. Matches `parent_manifest.id` |
 | `parents` | array | yes | Same parent-object schema as the causal receipt |
+
+`brigade receipts lineage <kind>:<id> [--target .] [--json]` reads these
+artifacts and walks recorded causal parents without modifying them. JSON uses
+`brigade.receipts_lineage.v1` with `schema_version: 1`, the requested subject,
+bounded hops, and optional `message`, `truncated`, or child-run `run_lineage`.
+Each hop exposes only its source, relation, parent identity, link, status, and
+bounded diagnostic. Status is `ok`, `broken`, or `digest_mismatch`. Legacy
+artifacts without `causal_receipt` report `no lineage recorded`.
+Handoff lookup uses writer inboxes and configured dogfood or run handoff inboxes.
+Outcome lookup streams the ledger with a 1 MiB limit per row. Worker results
+without a companion receipt resolve as leaves from their recorded worker identity,
+with a 64 MiB limit on `worker-results.json`.
+Worker lookup scans the first 500 results and marks the report `truncated`
+when more results exist. Receipts must match the requested subject kind and ID.
+Verify receipts and parent manifests use their IDs for direct lookup.
+Text output includes diagnostics and a notice when a walk limit is reached.
 
 ## Run View read contracts (#631)
 
@@ -1292,10 +1361,12 @@ precede every merge or ship event even if its signed `decidedAt` was backdated.
 Projector version 7 makes existing `run.json` snapshots stale input for
 `run_shadow`. Regenerate the shadow after the projection is refreshed.
 
-Approval v1 remains verification-only compatibility. Verification reports
-`binding: receipt` because its subjects contain verify receipt digests. That
-binding is not portable Test Result evidence and cannot satisfy a future
-agent-change evidence index.
+Approval v1 remains a compatibility profile. Verification reports
+`binding: receipt` because its subjects contain verify receipt digests rather
+than portable Test Result payload digests. The agent-change verifier accepts
+current v1 approvals after strict artifact and journal-event validation and
+reverification of requester evidence
+([approval-reference verifier](../src/brigade/agent_change_approval_verify.py)).
 
 #### `human-approval/v2` portable evidence profile
 
@@ -1392,15 +1463,14 @@ time, and nonce. It does not include task text, workspace paths, argv,
 environment values, or command output. Requester principal and key id are
 projected into `run.json` for separation-of-duties evaluation.
 
-Approval v1 keeps its current compatibility behavior and may use those
-projected fields when present. A future approval v2 must not trust the
-projection alone. Before using requester identity for segregation of duties,
-it must load the referenced request envelope, verify its SSHSIG signature
-against the target's `allowed_signers` policy and optional KRL, recompute the
-canonical statement digest, and require that digest to match the paired
-`request.signed` event. This requirement applies only to the SSHSIG request
-profile. It does not route request verification through the separate cosign
-profile.
+Approval v1 keeps its compatibility behavior and may use those projected
+fields when present. Approval v2 uses
+[`verify_recorded_request`](../src/brigade/approval_v2.py) to load the referenced
+request envelope, verify its SSHSIG signature against the target's
+`allowed_signers` policy and optional KRL, recompute the canonical statement
+digest, and require that digest to match the paired `request.signed` event.
+This applies only to the SSHSIG request profile. Request verification does not
+use the separate cosign profile.
 
 ---
 
@@ -1600,7 +1670,10 @@ are non-success for consumers.
 **Envelope:** DSSE over an in-toto Statement v1, signed with
 `brigade.sshsig-dsse.v1` and written to `<run-dir>/linkage/<commit-sha>.json`.
 
-Predicate carried by the commit-linkage statement.
+Predicate carried by the commit-linkage statement. The
+[`build_statement` writer](../src/brigade/commit_linkage.py) defines these fields,
+and [`commit_linkage_verify.py`](../src/brigade/commit_linkage_verify.py) checks
+the local tree and run bindings.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -1608,12 +1681,12 @@ Predicate carried by the commit-linkage statement.
 | `run` | object | yes | `{"id", "journalChainHead"}` |
 | `attestedTree` | object | yes | `{"gitTree": <tree-sha>}` |
 | `commitTree` | object | yes | `{"gitTree": <tree-sha>}` |
-| `commitParents` | array of object | yes | `{"gitCommit": <sha>}` in order |
-| `commitKind` | string | yes | `root`, `linear`, or `merge` |
+| `commitParents` | array of object \| object | yes | `{"gitCommit": <sha>}` entries in order, or `{"status": "unknown"}` at a shallow boundary |
+| `commitKind` | string | yes | `root`, `linear`, `merge`, or `unknown` when parents are unknown |
 | `comparison` | object | yes | See below |
 | `equivalence` | string | yes | `exact`, `normalized`, or `none` |
 | `git` | object | yes | `{"objectFormat", "shallow"}` |
-| `baseline` | object | no | Present when `run.json` has a `baseline_commit` |
+| `baseline` | object | yes | Baseline relationship observations, including when the baseline is unknown |
 | `references` | object | yes | `{"status": "absent"}` or agent-change index reference |
 | `trailers` | object | yes | Trailer observations |
 | `forgeEvidence` | object | yes | `{"status": "not-included"}` |
@@ -1646,8 +1719,8 @@ Predicate carried by the commit-linkage statement.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `gitCommit` | string | The run's baseline commit |
-| `baselineRelation` | string | `same-as-parent`, `ancestor-of-parent`, `unrelated`, `unknown`, or `unavailable` |
+| `gitCommit` | string | The run's baseline commit. Omitted when unavailable |
+| `baselineRelation` | string | `same-as-parent`, `ancestor-of-parent`, `unrelated`, or `unknown` |
 | `baselineMoved` | boolean \| null | Whether the first parent is not the baseline |
 
 **`references` object**
@@ -1711,3 +1784,28 @@ Machine-readable audit observations produced by the commit-linkage verifier.
 - `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)
 - `brigade runs export` / `import` / `validate-archive`: portable `brigade.work-run` archives
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts
+
+`brigade outcome doctor` includes `status_projection` in text and JSON output.
+The report contains `reproducible`, rebuilt and persisted counts, `drift`, `drift_count`,
+`legacy`, `status_valid`, `skipped_receipts`, and up to ten `skipped_receipt_names`.
+`status_valid` is false when an existing status file cannot be read as a JSON
+object with an `artifacts` object whose entries are objects. A missing status
+file represents an empty map. Invalid status files are non-reproducible and
+are never marked as legacy.
+`reproducible` is false when drift exists, decision receipts are skipped, or a
+non-empty `status.json` has no decision receipts to reproduce it. In that last
+case, `legacy` is true and per-artifact drift is suppressed because the older
+ledger has no decision log.
+
+`rebuild-status` keeps its existing comparison behavior, ignores skipped
+receipts and the legacy marker, and can disagree with doctor's full report.
+
+Projection drift kinds are `only-in-status` (persisted entry has no receipt),
+`missing-from-status` (receipt fold has no persisted entry), and `mismatch`
+(both entries exist but differ). Malformed or partial receipt files are skipped
+from the fold, counted in `skipped_receipts`, and named with a ten-file output
+limit. Required transition fields must be non-empty strings, and `created_at`
+must parse as an ISO 8601 timestamp. The report is advisory. `outcome doctor`
+keeps its existing exit status.
+Doctor prints at most ten drift entries in text mode followed by the remaining
+count. JSON includes every drift entry and the total in `drift_count`.

@@ -975,6 +975,10 @@ def mark(name, value):
     temporary = markers / (name + ".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
     temporary.replace(markers / name)
+    # A renamed file can become visible before Windows closes the rename
+    # handle. Publish readiness only after replace returns, so the parent
+    # never reads through that transient sharing denial.
+    (markers / (name + ".ready")).mkdir()
 
 def wait_for(name):
     deadline = time.monotonic() + 30
@@ -1036,7 +1040,7 @@ def _await_marker(markers, child, *names):
     """Bounded file-barrier poll that fails fast if the child exits first."""
     deadline = time.monotonic() + 20
     while True:
-        found = [name for name in names if (markers / name).exists()]
+        found = [name for name in names if (markers / (name + ".ready")).is_dir()]
         if found:
             return found[0], json.loads((markers / found[0]).read_text(encoding="utf-8"))
         if child.poll() is not None:
@@ -1657,6 +1661,10 @@ def mark(name, value):
     temporary = markers / (name + ".tmp")
     temporary.write_text(json.dumps(value), encoding="utf-8")
     temporary.replace(markers / name)
+    # A renamed file can become visible before Windows closes the rename
+    # handle. Publish readiness only after replace returns, so the parent
+    # never reads through that transient sharing denial.
+    (markers / (name + ".ready")).mkdir()
 
 def wait_for(name):
     deadline = time.monotonic() + 30

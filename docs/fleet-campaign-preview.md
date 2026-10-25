@@ -1,5 +1,7 @@
 # Offline fleet campaign preview
 
+Hub-backed campaign membership (`campaign create`, `campaigns`, `campaign show`) is in [fleet-campaigns.md](fleet-campaigns.md).
+
 `brigade fleet campaign preview` prints a read-only JSON membership plan. It
 selects repositories through the existing `.brigade/repos.toml` selector and
 binds each selected opaque repository ID to an explicit existing task or
@@ -108,7 +110,7 @@ not task completion or safe launch. JSON is also the default without `--json`.
 Issues #1128 and #1121 remain open for persistent Hub grouping, cross-machine
 fan-out/resume, duplicate prevention, dashboard integration and Grok Bot
 campaign propagation. Exactly-once or two-conductor dispatch is outside this
-preview. The current Hub code declares schema version 25 in
+preview. The current Hub code declares schema version 32 in
 `src/brigade/fleet_hub.py`. Issue #1576 covers hosted-worker concurrency policy.
 Future persistence must bind existing Worklore/item authorities, per-member
 operation keys, response-lost reconciliation, explicit retries and canonical

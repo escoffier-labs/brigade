@@ -156,31 +156,68 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
 def _mcp_tool_specs() -> list[dict[str, Any]]:
     schema_skill = {
         "type": "object",
-        "properties": {"skill_id": {"type": "string"}},
+        "properties": {
+            "skill_id": {"type": "string", "description": "Registered skill id, for example security-review."}
+        },
         "required": ["skill_id"],
         "additionalProperties": False,
     }
     return [
         {
             "name": "search_skills",
-            "description": "Search the local reviewed skill registry.",
+            "description": (
+                "Search the workspace's reviewed skill registry. Every query term must appear in a skill's id, "
+                "title, or description; an empty query lists every registered skill. Returns the count and each "
+                "match's skill.json metadata."
+            ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string", "description": "Space-separated keywords, case-insensitive."}
+                },
                 "required": ["query"],
                 "additionalProperties": False,
             },
         },
-        {"name": "get_skill", "description": "Read a skill SKILL.md file.", "inputSchema": schema_skill},
-        {"name": "get_skill_metadata", "description": "Read skill.json metadata.", "inputSchema": schema_skill},
-        {"name": "get_skill_changelog", "description": "Read skill changelog text.", "inputSchema": schema_skill},
         {
-            "name": "get_skill_compatibility",
-            "description": "Read skill compatibility JSON.",
+            "name": "get_skill",
+            "description": "Read a registered skill's SKILL.md instructions as markdown.",
             "inputSchema": schema_skill,
         },
-        {"name": "get_skill_history", "description": "Read skill install history JSON.", "inputSchema": schema_skill},
-        {"name": "lint_skill", "description": "Read skill lint JSON.", "inputSchema": schema_skill},
+        {
+            "name": "get_skill_metadata",
+            "description": (
+                "Read a registered skill's skill.json metadata: id, title, description, version, required tools "
+                "and MCP servers, and supported harnesses."
+            ),
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_changelog",
+            "description": "Read a registered skill's CHANGELOG.md. Returns an error result when the skill has none.",
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_compatibility",
+            "description": (
+                "Report, per harness adapter, whether a skill is supported and installed, its installed and current "
+                "versions, source or render drift, and any blockers, as JSON."
+            ),
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_history",
+            "description": "List the install receipts recorded for a skill in this workspace, as JSON.",
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "lint_skill",
+            "description": (
+                "Lint a registered skill and return validity, errors, and warnings as JSON. Read-only: nothing is "
+                "fixed or written."
+            ),
+            "inputSchema": schema_skill,
+        },
     ]
 
 
@@ -231,10 +268,42 @@ def _run_mcp_stdio(target: Path) -> int:
     )
 
 
-def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -> int:
+MCP_HTTP_DEFAULT_PORT = 8932
+
+
+def _run_mcp_http(target: Path, *, host: str | None, port: int | None) -> int:
+    return mcp_server.run_http_from_env(
+        server_name="brigade-skills-readonly",
+        host=host,
+        port=port,
+        default_port=MCP_HTTP_DEFAULT_PORT,
+        list_resources=lambda: _mcp_resource_items(target),
+        read_resource=lambda uri: _mcp_read_resource(target, uri),
+        list_tools=_mcp_tool_specs,
+        call_tool=lambda name, arguments: _mcp_tool_call(target, name, arguments),
+    )
+
+
+def serve_mcp(
+    *,
+    target: Path,
+    json_output: bool = False,
+    stdio: bool = False,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+) -> int:
     target = target.expanduser().resolve()
+    if stdio and http:
+        print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
+        return 2
+    if not http and (host is not None or port is not None):
+        print("error: --host and --port require --http", file=sys.stderr)
+        return 2
     if stdio:
         return _run_mcp_stdio(target)
+    if http:
+        return _run_mcp_http(target, host=host, port=port)
     payload = _mcp_contract_payload(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -247,6 +316,9 @@ def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -
         "tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill"
     )
     print(f"registered_resources: {len(payload['registered_resources'])}")
+    print(
+        "transports: --stdio (stdin/stdout server), --http (loopback Streamable HTTP, token from BRIGADE_MCP_HTTP_TOKEN)"
+    )
     return 0
 
 

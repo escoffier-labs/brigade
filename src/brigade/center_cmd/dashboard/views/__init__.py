@@ -70,4 +70,4 @@ def render_nav(current: str) -> str:
         label = render.esc(module.TITLE)
         current_attr = ' aria-current="page"' if module.NAME == current else ""
         items.append(f'<a href="{href}"{current_attr}>{label}</a>')
-    return f'<nav aria-label="Center">{" ".join(items)}</nav>'
+    return f'<nav class="deck-nav" aria-label="Center">{" ".join(items)}</nav>'

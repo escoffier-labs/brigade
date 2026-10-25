@@ -37,9 +37,17 @@ non-authoritative `declared_source` metadata. Existing stored rows are not
 rewritten. The local learning-summary importer also uses `learning-loop` and
 receives the external tier. Other producer mappings stay unchanged.
 
-This change applies to the import's `text` field. Structured metadata and task
-acceptance fields retain their existing handling and are not covered by the
-text redactor or this regression.
+The redaction first covered only the import's `text` field.
+[#1712](https://github.com/escoffier-labs/brigade/issues/1712) extends it to
+`learning-loop` rows' `acceptance` entries and every string key and value in
+the allowlisted metadata, nested ones included, at the same origin. Dedupe identity keys such as
+`source_fingerprint` and `source_item_key` keep their raw values, so re-import
+dedupe still matches. The field verdict is stored as `metadata.field_redaction`,
+next to the provenance envelope. The envelope's `redaction` record still
+describes only the item text, which the promote gate checks. A failed field
+redaction quarantines the row. The regression ingests personal and
+infrastructure values in both fields, then checks the stored inbox and the
+promoted task.
 
 The regression exercises the public import boundary with arbitrary-path JSONL,
 a claimed local producer, and planted sensitive values. It checks the stored

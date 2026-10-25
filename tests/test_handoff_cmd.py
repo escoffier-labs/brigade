@@ -2456,12 +2456,17 @@ Body
 def test_split_outcome_line_keeps_windows_drive_paths():
     from brigade.handoff_cmd import sources as handoff_sources
 
-    assert handoff_sources._split_outcome_line(r"C:\Users\x\handoff.md") == (r"C:\Users\x\handoff.md", None)
+    assert handoff_sources._split_outcome_line(r"C:\Users\x\handoff.md") == (  # content-guard: allow windows-home-path
+        r"C:\Users\x\handoff.md",  # content-guard: allow windows-home-path
+        None,
+    )
     assert handoff_sources._split_outcome_line("C:/x/y") == ("C:/x/y", None)
     assert handoff_sources._split_outcome_line("path:detail") == ("path", None)
     assert handoff_sources._split_outcome_line("path: detail") == ("path", None)
-    assert handoff_sources._split_outcome_line(r"C:\Users\x\handoff.md: broken") == (
-        r"C:\Users\x\handoff.md",
+    assert handoff_sources._split_outcome_line(
+        r"C:\Users\x\handoff.md: broken"  # content-guard: allow windows-home-path
+    ) == (
+        r"C:\Users\x\handoff.md",  # content-guard: allow windows-home-path
         None,
     )
     assert handoff_sources._split_outcome_line(r"C:\a.md -> outbox") == (r"C:\a.md", "outbox")

@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, message_envelope, proc, receipt_schema, run_budget, run_control, runguard
+from . import agents, localio, message_envelope, proc, receipt_schema, run_budget, run_cassette, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
@@ -588,6 +588,9 @@ def dispatch(
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], Any] | None = None,
     remote_transport: RemoteTransport | None = None,
+    coordinator_prompt_sha256: str | None = None,
+    codex_transport: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -605,7 +608,6 @@ def dispatch(
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
     same-seat retry before quarantining the seat for the rest of the run.
-
     ``remote_transport`` resolves the central fleet route for a seat *before*
     the ``model_lease`` context is entered. When policy selected another
     machine the work is delegated there and no local lease or provider call is
@@ -678,7 +680,9 @@ def dispatch(
                 except Exception:
                     pass
 
-    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+    def _run_one(
+        assignment: Assignment, prior_results: list[WorkerResult], recording: run_cassette.DispatchRecording
+    ) -> WorkerResult:
         agent = roster.agents[assignment.worker]
         if quarantine_state.is_quarantined(assignment.worker):
             return WorkerResult(
@@ -776,10 +780,9 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
-        # Set by the most recent invoke() and read by the finish() that maps it,
-        # so a delegated attempt's routing/handoff facts reach its own receipt
-        # and a following local attempt does not inherit them.
+        # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
+        recording.agent, recording.prompt = agent, prompt
 
         def _invoke_external(
             selected_agent: Agent,
@@ -821,6 +824,8 @@ def dispatch(
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -857,8 +862,7 @@ def dispatch(
                     **cloud_dispatch_kwargs,
                 )
             if selected_agent.env is not None:
-                # Env seats always dispatch through the direct CLI path. The
-                # app-server session cannot apply per-seat env safely.
+                # Env seats use direct CLI because app-server cannot apply per-seat env.
                 env_kwargs: dict[str, Any] = {}
                 if sandbox is not None:
                     env_kwargs["sandbox"] = sandbox
@@ -880,7 +884,7 @@ def dispatch(
                     session_binding_id=session_binding_id,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
-                approval_prompt = (
+                approval_prompt = recording.prompt = (
                     f"{selected_prompt}\n\n"
                     "Approval correlation rule: prefix every Brigade CLI command in this turn with "
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
@@ -1045,6 +1049,8 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            recording.agent = selected_agent
+            proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
                 roster=roster,
@@ -1054,6 +1060,8 @@ def dispatch(
             if blocked is not None:
                 return blocked
             remote_disposition[0] = None
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
                 # The fleet route is resolved before the model lease is entered.
@@ -1258,7 +1266,7 @@ def dispatch(
             )
             return finish(missing_fallback, agent, attempts)
 
-        fallback_agent = roster.agents[fallback_name]
+        recording.agent = fallback_agent = roster.agents[fallback_name]
         fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
         if fallback_cloudflare_detail is not None:
             # Route through finish() so the accumulated grok attempt history and
@@ -1300,6 +1308,18 @@ def dispatch(
         )
         return finish(fallback_result, fallback_agent, attempts)
 
+    run_one = run_cassette.dispatch_recorder(
+        _run_one,
+        roster=roster,
+        run_dir=output_dir,
+        workspace=policy_workspace or cwd,
+        codex_transport=codex_transport or roster.codex_transport,
+        read_only=read_only,
+        sandbox=sandbox or ("read-only" if (read_only if sandbox_read_only is None else sandbox_read_only) else None),
+        transport=lambda agent: _receipt_transport(agent, appserver=appserver),
+        coordinator_prompt_sha256=coordinator_prompt_sha256,
+    )
+
     if not assignments:
         return []
 
@@ -1317,6 +1337,8 @@ def dispatch(
                 cancel_active_work=cancel_active_work,
                 route_dependencies=route_dependencies or {},
                 route_held=route_held or {},
+                output_dir=output_dir,
+                cwd=cwd,
             )
         if on_scheduler_resolved is not None:
             on_scheduler_resolved("waves", placement_error)
@@ -1371,17 +1393,22 @@ def dispatch(
                         ok=False,
                         detail=str(exc)[:200],
                     )
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             try:
                 if on_interrupt is not None:
                     on_interrupt()
             finally:
                 cancel_active_work(future_to_index)
                 executor.shutdown(wait=True, cancel_futures=True)
+                runguard.raise_if_retained_run_lock(exc)
+                _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
             raise
-        except BaseException:
+        except BaseException as exc:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
+            if not isinstance(exc, runguard.RetainRunLockError):
+                _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
+            _note_sibling_failures(future_to_index, exc, output_dir, cwd)
             raise
         else:
             executor.shutdown(wait=True)
@@ -1390,6 +1417,85 @@ def dispatch(
         if fail_fast and any(not result.ok for result in stage_results):
             abort_after_stage = stage
     return all_results
+
+
+def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Path | None) -> None:
+    # Same effect as BaseException.add_note, which is 3.11+.
+    error.__dict__.setdefault("__notes__", []).append(note)
+    if output_dir is None:
+        return
+    # Workers have joined before these diagnostics are saved. Keep them out of
+    # run.json so retention cannot invalidate journal/checkpoint projections.
+    try:
+        try:
+            run_meta = localio.read_json_dict(output_dir / "run.json") or {}
+        except (OSError, ValueError, RecursionError):
+            run_meta = {}
+        workspace = runguard.resolve_run_lock_workspace(run_meta, output_dir, fallback=cwd)
+        if workspace is None:
+            return
+        owner = runguard.read_run_lock_owner(workspace, output_dir)
+        if owner is None or owner.get("pid") != os.getpid():
+            return
+        owner_token = owner.get("owner_token")
+        if not isinstance(owner_token, str) or not owner_token:
+            return
+        diagnostics = [
+            saved_note[: runguard.RETENTION_DIAGNOSTIC_CHAR_LIMIT]
+            for saved_note in error.__dict__["__notes__"][-runguard.RETENTION_DIAGNOSTICS_LIMIT :]
+        ]
+        localio.write_json(
+            output_dir / runguard.RETENTION_DIAGNOSTICS_NAME,
+            {"owner_token": owner_token, "diagnostics": diagnostics},
+        )
+    except BaseException:
+        # Even an interrupted diagnostic write must not replace retention.
+        pass
+
+
+def _describe_failure(error: BaseException) -> str:
+    summary = "budget-policy: worker dispatch denied" if isinstance(error, run_budget.BudgetPolicyError) else None
+    try:
+        detail = str(error)[:200]
+        description = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+        return f"{summary} ({description})" if summary else description
+    except BaseException:
+        # Even an interrupted formatter must not replace lock retention.
+        return summary or type(error).__name__
+
+
+def _raise_retained_future_error(
+    futures: dict[Any, int], interrupt: BaseException, output_dir: Path | None, cwd: Path | None
+) -> None:
+    """Do not discard worker cleanup failures when interrupting the scheduler.
+
+    The retention error replaces ``interrupt``, so record it as a note and a
+    best-effort non-terminal sidecar diagnostic for stale recovery. Python
+    keeps ``__context__`` out of the printed traceback when the retention error
+    already has a ``__cause__``, and a replaced worker failure such as a budget
+    denial would otherwise leave no trace.
+    """
+    for future in futures:
+        if future.done() and not future.cancelled():
+            error = future.exception()
+            retained = runguard.retained_run_lock_error(error) if error is not None else None
+            if retained is not None:
+                _add_note(retained, f"replaced scheduler failure: {_describe_failure(interrupt)}", output_dir, cwd)
+                raise retained
+
+
+def _note_sibling_failures(
+    futures: dict[Any, int], retained: BaseException, output_dir: Path | None, cwd: Path | None
+) -> None:
+    """Keep non-retention worker failures that finished beside a retention error."""
+    retention = runguard.retained_run_lock_error(retained)
+    if retention is None:
+        return
+    for future in futures:
+        if future.done() and not future.cancelled():
+            error = future.exception()
+            if error is not None and runguard.retained_run_lock_error(error) is None:
+                _add_note(retention, f"sibling worker failure: {_describe_failure(error)}", output_dir, cwd)
 
 
 def _dag_placement_error(
@@ -1477,6 +1583,8 @@ def _dag_dispatch(
     cancel_active_work: Callable[[dict[Any, int]], None],
     route_dependencies: dict[str, tuple[str, ...]],
     route_held: dict[str, list[str]],
+    output_dir: Path | None,
+    cwd: Path | None,
 ) -> list[WorkerResult]:
     """Ready-queue scheduler keyed on Assignment.covers over the route DAG.
 
@@ -1603,17 +1711,22 @@ def _dag_dispatch(
                 results[i] = finished
             if finished.ok:
                 completed_ok.append(finished)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         try:
             if on_interrupt is not None:
                 on_interrupt()
         finally:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
+            runguard.raise_if_retained_run_lock(exc)
+            _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
         raise
-    except BaseException:
+    except BaseException as exc:
         cancel_active_work(future_to_index)
         executor.shutdown(wait=True, cancel_futures=True)
+        if not isinstance(exc, runguard.RetainRunLockError):
+            _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
+        _note_sibling_failures(future_to_index, exc, output_dir, cwd)
         raise
     else:
         executor.shutdown(wait=True)

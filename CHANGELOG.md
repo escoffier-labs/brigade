@@ -7,7 +7,168 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
+
 - Add internal Windows handle-relative owner-only storage primitives with protected DACL creation and verification, not yet used by any command. Model-roster LKG and audit replay remain fail-closed pending lock fencing, publication ordering, and native qualification. (Refs #1739)
+- Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
+- Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
+- Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
+
+### Added
+
+- `brigade model trial run|resume --retry-transient` re-runs `adapter_error` and timeout-reason `execution_error` cells as new attempts (caps: 2 and 1), keeping each failed attempt in the cell's `prior_attempts` record. Deterministic results are never retried.
+- `brigade model trial drain <output-dir>` and the first SIGINT or SIGTERM to a running trial stop it from launching new cells while in-flight cells finish and record results. Unlaunched cells are recorded as `not_run` (not a failure), `resume` launches them, and an incomplete trial exits 4.
+- A structured provider quota or capacity response (`capacity-exhausted`) during a model trial is recorded as the cell's `failure_reason` on an `adapter_error` cell, not scored as a model failure and never retried as transient. The runner launches no more cells for that seat and records them as `not_run`.
+
+- A programmatic assignment journal records stable task and attempt identities, classified result references, and result-consumption acknowledgements under the existing run owner. It does not dispatch work or retry uncertain attempts (#2049).
+- Live appserver controls accept explicit task and attempt IDs, keeping assignments on the same seat independently addressable. Ambiguous seat-name controls refuse before contacting a worker. Ordinary dispatch continues using legacy seat controls until task identity propagation is connected (#2049).
+- Add `brigade roster ready` to inspect an explicit worker pool, concurrency, route, and isolation. It reports blocked or unverified operations without dispatching work or reserving capacity. Live admission and T3 readiness evidence remain unverified in this initial command (#2051).
+
+- Add the optional `mesh` crypto core with frozen `bm1` hybrid encryption and signed envelopes. Fleet messaging integration follows in later slices.
+
+- Fleet MCP tools advertise read-only and destructive annotations, and send/reply accept optional `client_id` keys for duplicate-free replay. The opt-in Executor app recipe documents browser approval, credential boundaries and manual compatibility checks (#1887).
+- Fleet message credentials can read their unread total without fetching bodies through `brigade fleet msg count`, the hub `count` action, or the optional `fleet_inbox` MCP argument `count_only`. Counts exclude expired and acknowledged mail and do not run retention writes (#1715).
+
+- Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
+- Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
+
+### Fixed
+
+- Managed Cursor command hooks with an explicit command type are recognized without duplicate callbacks.
+- Incomplete runs without infrastructure-only attribution score -1 during outcome capture, matching the scoring policy.
+- Skill validation accepts folded and literal YAML block scalars, including chomping and explicit indentation indicators, while continuing to reject unsupported nesting.
+- Fleet Machines and Repos boards use the shared Deck sidebar, navigation, and Resources while preserving board filters and pivot query state in dark and light themes. Wide tables scroll within their wrappers, and board refresh timing stays synchronized with its label.
+
+- Duet binds its authenticated Hub credential and endpoint until restart, keeps maintenance out of the shared node queue, and holds queued sends and replies while messaging is disabled. Doctor and watch verify the active principal. Watch reports polling outages without webhooks. Skill reads enforce both registry IDs and directory names.
+
+- Duet keeps its Hub inbox mirror, reconciliation and pending-send flush current while event webhooks remain disabled. Startup verifies the message credential's authenticated principal before registering MCP tools. Replies obey the messaging switch and share the 20-message hourly budget. New messages require an exact configured recipient alias. `brigade fleet msg identity` provides the read-only credential identity probe.
+- Control crosswalk version 3 narrows SOC 2 rationales to recorded artifact properties, limits EU AI Act approval and archive evidence, uses Commission article sources, and adds explicit nonmatches for Articles 19, 50 and 111(4). CSA AICM 1.1.1 mappings cover eight controls in the OSP layer with partial evidence and explicit gaps for monitoring, service BOMs and model signing (#2033, #2034, #2035).
+- Fleet MCP directory and claim reads return bounded pages with continuation cursors, so callers can walk a roster or claim snapshot that exceeds one response. Legacy `who` requests without `limit` return at most 200 nodes and 200 principals with `truncated: true` when more remain. New clients retry older hubs once without paging arguments and report `paging_continuation_unsupported` for truncated legacy results. Expired cursors return `paging_cursor_expired` so callers can restart. Global snapshot saturation reclaims walks idle for more than 60 seconds across callers, retaining HTTP 429 when all walks are active.
+- Fleet Hub keeps one idle database connection until shutdown to remove the per-request last-connection checkpoint, WAL deletion and recreation, and about 3 of 4 syncs per HTTP write request. Independent review measured 0.76 s per request (3 WAL syncs) before this change and 0.26 s (1 WAL sync) after it with a 250 ms WAL-sync delay. Slow disk flushes on the Windows runner remain the likely shared cause of the timeout family: this PR's own CI took 92.65 s for 1,024 claims and 191.41 s for 1,603 stats stores on persistent connections, versus 0.84 s and 1.30 s on Linux, about 90-120 ms per commit under `synchronous=FULL`. This is a partial mitigation and does not fix those slow flushes.
+- Fleet Hub rejection responses drain at most 1 MiB of late upload data within 250 ms to prevent oversized and late-upload resets, including the policy-route WinError 10053. Plain TCP half-closes before draining. TLS skips that early raw half-close and drains before normal server closure, whose stdlib shutdown behavior is unchanged. Zero-length and fully read bodies skip draining, and error responses carry one `Connection: close` header. The HTTP/1.0 roster timeout and credential-test timeouts remain unexplained. The buffered 516-byte roster form does not support a keep-alive explanation, and `leaked_descendants=1` appears on nearly every Windows test file and is not a diagnostic signal. (#2014)
+- Invalid Cursor hook event names no longer let a project configuration suppress the user presence callback.
+- Preserve campaign execution bindings after the 50-link retention window, including against trusted observations and cross-item relinks. Hub schema 42 adds an indexed history lookup without rewriting stored events.
+- Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.
+- Fence campaign execution and attempt writes to the current holder grant, refuse member specification drift, and reserve take capacity for progress and release. Campaign operators can recover a stranded reservation with explicit quiescence acknowledgement and an audited evidence reference.
+
+- Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.
+- Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.
+- Brigade self-invocations isolate Python imports from workspace files and `PYTHONPATH`, using the running installation with `-I` so `pip --user` installs keep working. This covers hooks, update refreshes, detached runs, dispatch, dashboard access, embedded scanners, and generated service commands. Agent hook commands skip update notices and refreshes entirely.
+- Work briefs read only the newest release candidate and release run instead of decoding every bundle, and the harness-wiring scan skips its per-ancestor worktree check for files that are not wiring documents. On a checkout with a large release history the brief ran about 3x faster with 60% lower peak memory.
+- Work briefs limit Codex Cloud inventory to the newest page and check registered tasks missing from that page individually, preserving stale-task warnings without full inventory pagination.
+- Handoff drafts use consistent LF line endings on Windows for both creation and forced replacement.
+- The Command Deck separates counted queue exclusions from blocked jobs. Blocker and attempt-limit counts retain alerts, while routine backlog stays in queue details. Malformed exclusions remain actionable, and absent telemetry stays unknown. Hub snapshots report optional integration readiness coverage explicitly.
+- Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
+- Deck Activity separates managed jobs from reported agent sessions. Ready queue counts avoid duplicate totals and fold routine exclusions. Shared repository names across machines show neutral parallel activity, while reported shared modified paths retain warnings.
+- Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
+- The content guard recognizes host-related assignment keys behind shell declaration prefixes (`export`, `readonly`, and Windows batch `set`), so `export HOSTNAME=<host>` is detected like its bare assignment; arbitrary keys, code expressions, and call arguments stay skipped.
+- The content guard no longer flags a private hostname in a formatted URL when an f-string replacement field holds only that expression, such as `f"https://{cfg.db.host}/path"`; every other URL, prose, string, and configuration hostname is still detected.
+
+- Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
+- The content guard detects bare AWS temporary access keys, Google API keys, and GitLab personal access tokens while preserving assignment and Bearer detector precedence.
+- Content guard matches and redacts complete quoted root-home paths with spaces in directory or file names, preserving the quotes and surrounding prose.
+- The content guard detects and redacts private hostnames in equals-form host options, including single- and double-hyphen options and compound host-related keys, while preserving code-expression and arbitrary-assignment skips.
+- The content guard recognizes host-related keys after YAML sequence markers, including indented items and compound keys, while preserving its code-expression and public-suffix skips.
+- Content guard detects host-key assignments after batch `@set` and `set /a`, shell declaration flags, `declare` and `local`, and earlier assignments on the same line.
+- The content guard keeps JavaScript URL template fields such as `https://${cfg.db.host}/path` code-shaped while still detecting literal hosts in quoted expressions, escaped fields, comments, and ordinary strings.
+
+
+### Added
+
+- A `duet` connector pack serves Claude Duet from the Dot connector code with its own runtime schema, Hub principal `agent:duet`, state, Access audience and handoff inbox. It exposes 22 memory, skills, inbox and read-only fleet tools; dispatch and T3 fleet tools are absent from discovery. `message_send` has its own `messaging_enabled` gate (optional for Dot) and a 20 per hour limit for Duet, and the call log records each client's name. See `docs/duet-connector.md`.
+- Fleet MCP can ask the configured operator a question, with optional desktop entry, inbox replies, and hub-recorded answers or timeouts bound to the caller credential. Authenticated operator replies return the exact answer with its identity binding. Caller-reported desktop answers retain their unverified source.
+- Live Fleet Hub inbox delivery (#1887 slice 3): new unread mail reaches running Claude Code sessions through the managed `UserPromptSubmit` and `PostToolUse` hooks, and Codex sessions through `brigade work presence-hook --harness codex --stdin --context fleet-inbox`. Messages are fenced as untrusted peer content, shown once per session from a private cursor file, never acknowledged by delivery, and fetched with one 2 second hub request behind a 60 second failure backoff. See `docs/fleet-inbox-delivery.md`.
+- The fleet MCP station serves MCP Events (`events/list`, `events/subscribe`, `events/unsubscribe`) behind `brigade fleet mcp --events`, with subscriptions stored on the Fleet Hub (schema 39) and signed Standard Webhooks delivery for `message.created`, `claim.expired` and `run.failed`. The hub keeps events off until `BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS` names exact callback hosts. The shared MCP transport now accepts protocol version `2026-07-28` (`server/discover`, `Mcp-Method` and `Mcp-Name` header checks) and the dot pack reuses the shared signing and callback code. See `docs/fleet-mcp-events.md`. (#1887)
+- Add an operator CI board with exact-head required checks, PR rollups, node-only relay pulls and budgeted on-demand reconciliation. Hub refresh queues work without outbound calls, and private repository names stay operator-only.
+
+- Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
+
+- Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.
+- The `t3-dispatch` connector can read, acknowledge, reply to, send, and check Fleet Hub messages through an optional owner-only principal file. Its one-minute watcher wakes configured targets with message counts and sender ids, retries failed wakes, and keeps message bodies and subjects out of notifications.
+
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
+- MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
+- Scoped per-alert repair actions with explicit browser operator activation, registered destinations, fenced broker jobs, and separate delivery and verification receipts.
+- Optional metadata collectors for native T3 Code conversations and recent OpenClaw sessions. Publication uses the enrolled node's existing credential and requires an explicit flag.
+- Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
+- Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The skills tools are read-only; the memory server also has `write_handoff`. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
+- MCP registry metadata for the memory and skills servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
+- A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
+- A root `Dockerfile` that runs the memory MCP server over stdio as a non-root user, plus `glama.json`; the image installs the latest `brigade-cli` release from PyPI (`--build-arg BRIGADE_VERSION=X.Y.Z` pins one), so MCP directories that build and introspect a repo image can list the servers.
+
+### Changed
+
+- `brigade model trial run|resume` behavior changes for callers that set no new option. Check wrappers and CI that key on trial exit codes:
+  - A provider capacity response with a nonzero seat exit used to score as `execution_error` (exit 1). It is now `adapter_error` with `failure_reason: capacity-exhausted` (exit 3), and the per-seat stop is on by default, so the seat's remaining cells become `not_run`.
+  - `run` and `resume` now install SIGINT and SIGTERM handlers for the whole trial. The first signal drains instead of stopping the process. A second signal hard-stops it.
+  - Exit code 4 is new: the trial ended with `not_run` or `running` cells and no measurement failures.
+
+- The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
+- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
+- The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
+- The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest directory above the working directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, never the home directory. An explicit `--target` is still used as the repo store, and one that is not an existing directory exits 2.
+- The memory `work_brief` tool builds its git, session, and next-task keys from local helpers only, so it never contacts the fleet hub. An unexpected exception in any memory tool is returned as a tool error instead of ending the server, and `write_handoff` writes to the repo inbox even when an invalid memory-care config drops the repo store from reads.
+- `brigade handoff draft` creates draft files with mode 0600 (previously the umask default).
+- The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
+
+### Fixed
+
+- T3 inbox acknowledgement batches stop on credential rotation or an invalid credential, including during failed requests and recount. Each request checks the credential loaded for transport against the original batch scope.
+- Work readiness, claim, and explicit task runs fail closed on missing blockers or ancestor parents. JSON separates unfinished and missing dependencies, and explained output names edge-removal repairs. (Fixes #1857)
+- Readiness repair commands include the repository target and preserve literal edge endpoints when a live task shares their prefix. Campaign views omit member repair commands that use synthetic IDs. (Refs #1857)
+
+- Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
+
+## [0.30.0] - 2026-10-20
+
+### Added
+
+- A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
+- CI runs affected test files on Windows for pull requests, and keeps one nightly tracking issue open until the full Windows suite is clean.
+
+- Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+- Installation guides now cover the npm and npx routes, Node.js requirements, managed Python downloads, npm-managed upgrades, and known platform limits.
+- The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
+
+### Fixed
+
+- Keep caught verification cancellation active through the `brigade` console script and `python -m brigade` process exit so late repeated signals preserve exit status 130. Programmatic calls still restore their prior signal handlers.
+- The workflow-rules repair hint includes the full repo kit (`--full`), so following it installs the missing rule templates and keeps rule files that already exist. (Fixes #1762)
+- Fleet event and message spools work on Windows when an existing drive or share root denies directory creation. Existing directories are recognized before treating a creation error as a persistence failure.
+- Dot reports `unsupported_on_windows` for its Linux-only local runtime and state operations. Portable auth/config tests now use native absolute paths, and the bounded command runner uses Brigade's owned Windows job objects and pipe readers.
+- T3 dispatch now reports an explicit unsupported-platform error on Windows before opening private runtime, ledger, or wake-log files. Its existing POSIX owner-only storage requirement is documented.
+- Cloud leases for bound Jules and Cursor sessions no longer lapse five minutes after launch. The hub `bind` action accepts an optional `ttl_seconds` (same 1 to 86400 range as `admit`) that resets the lease clock in the same update, and the Jules and Cursor launchers bind with six hours, matching the tracker's stale-ready threshold. `brigade run cloud sync` renews active leases with the same six hours instead of 900 seconds. A bind without `ttl_seconds` is unchanged, and an older hub ignores the field and keeps the admission TTL. Codex Cloud still renews in-process. Running `cloud sync` on a schedule is not part of this change. (Refs #1794)
+- Jules sessions that finish with a pull request now reach `landed` once it merges. The tracker reads the `pull_request_url` the session reports, looks that PR up directly by URL, and records its head branch on the entry, so branch names without a `jules/` prefix no longer strand a merged session at `ready-to-land` and then `stale`. Branch discovery by prefix is unchanged. (Refs #1794)
+- The npm validation harness canonicalizes its temporary root before deriving install and cache paths, preserving exact lockfile integrity checks on symlinked temporary directories. A manual read-only macOS workflow can validate the retained original release archives with separate packaging and harness identities.
+
+## [0.29.0] - 2026-10-18
+
+### Changed
+
+- Verification reaps descendants that escape the process group on macOS when a run is canceled or times out.
+
+- Claude hook state reads retain the opened snapshot when atomic replacement unlinks it before the first metadata check, preventing retry starvation while preserving observed writes and containment checks.
+
+- Declared version and beta preview base move to 0.29.0 after the v0.28.0 tag so publish-dev wheels sort above stable. (#1787)
+- Add an unpublished 0.29.0 npm/npx distribution candidate that bundles Brigade's wheel and provisions pinned uv and managed Python on Node-only machines. Candidate CI defines native acceptance jobs for Linux, macOS and Windows. Registry publication remains a separate step.
+- Preserve canceled verification receipts, neutral outcome capture and the first interruption signal across command startup, process cleanup and receipt finalization. Canceled verification skips optional code-graph work.
+
+- The Command Deck opens on a Fleet overview: a left sidebar with the page nav, a machine tree, and cloud providers; four summary cards; an alerts strip with first-observed times; working and queued lists; and a machines table with seat and load bars. Deck pages and the fleet boards follow the system light or dark scheme. The routing snapshot gains an additive `node_id` per machine so stations join to machines by node id. Center stays dark for now.
+
+## [0.28.0] - 2026-10-18
+
+- Background cleanup of an orphaned fleet claim keeps using the hub URL and token of the claim that scheduled it. Before, each retry re-read the fleet configuration, so a process whose configuration changed could send the cleanup request, with the new token, to a different hub. Renewal and exit release use the same bound connection. (Fixes #1778)
+
+- Deck, fleet boards, and Center use shared spacing tokens derived from one scale while preserving existing layout sizes. Center navigation explicitly uses the shared Deck nav class. (#1495)
+- The dot connector pack connects a ChatGPT dot to T3 fleet dispatch, Brigade memory and the Fleet Hub inbox, with Cloudflare Access authentication and operator checks for setup and service health. (Refs #1765)
+
+- Fleet Hub refuses oversized or ambiguously framed JSON bodies, documents above the nesting and aggregate complexity budgets, and new acquisitions above 1024 active claims per node. Clients report claim quota refusals as definite failures, terminate the lease, and schedule fenced cleanup after an ambiguous acquire. The JSON complexity budget accepts producer-shaped Worklore import batches, with regex scans for string and numeric bodies. The claim count uses an index repaired on current-version databases without a schema version bump. Result-set bounds move to #1738. (#1151)
+- Claude hook session state, timeout journals, pending increments, locks, and recent-state reads use validated directory descriptors on POSIX and native handles on Windows. POSIX reads preserve held-fd contents across atomic replacement. Windows publication retries open-handle contention for a bounded interval. Integrity refusals preserve observed writes and stop repeated Stop attempts safely. Ordinary resource errors retain fail-open behavior. Doctor and adoption report unsafe session storage without aborting their reports. (#1238)
+- Fleet claims reject stale holders within a durable seven-day retirement horizon, bounded by a 1,000,000-row global budget and a 100,000-row per-node quota on free-target cleanup and every non-retry admission, including superseding replacements. Live-claim retirement is exempt from the node quota, and expiry pruning handles at most 32 unrelated claims per acquire. Target generation fences are never evicted. Optional `generation` on `/claims` and inspected force release fence obsolete operations with `stale-generation`. Schema 34 preserves live claims and v33 retirement history while adding age indexes. Claim mutation fencing failures return HTTP 409 with terminal `claim-fence-refused` and an empty owner object to prevent base-client local fallback. Read-only fencing failures return HTTP 503 for monitoring. Oversized new targets return terminal HTTP 409 with `claim-target-too-long`. Exit and rejected-grant cleanup retry fencing refusals until their deadline. Missing-row holder release stays HTTP 200 with `stale-holder`, and the CLI preserves JSON and exits 1. Fresh legacy holders and current live holders remain compatible. See [claim fencing](docs/fleet-claim-fencing.md) for the finite-horizon residual and rollback procedure. (#1189)
+- Antigravity model pins map bare Gemini Argon IDs such as `gemini-4-argon` to the default low-effort slug, matching flash/pro. Explicit effort slugs remain unchanged. Document the `agy_argon` Gemini 4 Argon High subscription seat for implementation and research, excluding security review. (Refs #1747)
+- Runs with an acquired fleet claim now share one cancellation registry across registered local workers and local `t3-fleet` client calls. `brigade run` checks claim loss before planning, synthesis, dispatch, and terminal result receipts, waits for cancellation outcomes before releasing its local run lock, and retains the lock if cancellation fails. POSIX groups get a three-second SIGTERM grace for nested seats. Only directly registered groups are guaranteed to stop. T3 calls without a registry retain their previous subprocess behavior. Remote jobs and target-owned reservations are unchanged. (#1219)
+
 - `brigade fleet events report` delivers or durably queues T3 lifecycle observations with stable replay digests and bounded execution context. Hub schema 32 preserves event history and exposes reported initiators and request correlation on fleet boards. Unknown or delayed observations do not appear as running. (Refs #1630, #1121)
 - Upgrade the hub before enabling t3-fleet reporting. T3 observations remain fresh for 900 seconds with a 300-second producer heartbeat. Permanent hub rejections return exit 2 without queueing. Older binaries refuse schema 32. For the nullable context-column migration alone, rollback can retain the column and set `PRAGMA user_version=31`. See [deployment and rollback instructions](docs/fleet-t3-events.md).
 
@@ -34,7 +195,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade doctor` reports an `instruction-chain: codex` check for codex-harness targets. It estimates the Codex 0.160.0 project instruction chain at the target under stated default assumptions, warns on consumer-cap truncation separately from Brigade advisory budgets, and reports reason codes when it cannot evaluate. Results are fresh-disk estimates, never observed session consumption. (Refs #1564)
 - Add `brigade receipts export derivative` for locally minimized evidence exports with source artifact digests, redacted allowlisted receipt metadata, and explicit authorization and verification limits. (#1623)
 - Treat generic JSONL imports as external content for every import kind, redacting email addresses and infrastructure values from import text before persistence while preserving importer identity. Record the shipped #1006 fixes and the separate same-UID containment residuals.
-- The fleet hub rejects `/events` posts with HTTP 422 when any string event field exceeds its length bound (64 characters for the timestamp, 128 for node, state, digest and capability fingerprint, 512 for seat, harness and repository identity, matching the run-event payload bound, 1024 for the repository, and the 16384-byte journal line bound for run id). New claim targets are capped at 1024 UTF-8 bytes with a structured HTTP 422 error. Migrated longer targets remain inspectable, renewable, releasable and re-acquirable, but their lifecycle events are rejected by the `/events` repository bound. Bounds are measured before trimming, and one oversized event rejects the whole batch. Body, retention and result-set bounds remain open. (Refs #1151)
+- The fleet hub rejects `/events` posts with HTTP 422 when any string event field exceeds its length bound (64 characters for the timestamp, 128 for node, state, digest and capability fingerprint, 512 for seat, harness and repository identity, matching the run-event payload bound, 1024 for the repository, and the 16384-byte journal line bound for run id). New claim targets are capped at 1024 UTF-8 bytes with HTTP 409, `claim-target-too-long`, and an empty owner object. Invalid UTF-8 remains HTTP 422. Migrated longer targets remain inspectable, renewable, releasable and re-acquirable, but their lifecycle events are rejected by the `/events` repository bound. Bounds are measured before trimming, and one oversized event rejects the whole batch. Retention and result-set bounds remain open. (Refs #1151)
 
 - Explicit authority downgrades remove every posture marker governing a relocated workspace and stop when marker state cannot be read safely. (#1217)
 - Explicit authority downgrades remove every posture marker governing a relocated workspace, fail closed when marker state is unreadable, and record removed fingerprints only after rollback is no longer possible. (#1217)
@@ -2028,7 +2189,10 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
+[0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0

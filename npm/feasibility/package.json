@@ -1,0 +1,34 @@
+{
+  "name": "@escoffier-labs/brigade",
+  "version": "0.30.0",
+  "description": "Brigade CLI with a verified bundled Python wheel and managed runtime",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "brigade": "launcher.cjs"
+  },
+  "files": [
+    "launcher.cjs",
+    "runtime.json",
+    "README.md",
+    "LICENSE",
+    "wheel/"
+  ],
+  "optionalDependencies": {
+    "@escoffier-labs/brigade-uv-linux-x64": "0.30.0",
+    "@escoffier-labs/brigade-uv-linux-arm64": "0.30.0",
+    "@escoffier-labs/brigade-uv-darwin-x64": "0.30.0",
+    "@escoffier-labs/brigade-uv-darwin-arm64": "0.30.0",
+    "@escoffier-labs/brigade-uv-win32-x64": "0.30.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/escoffier-labs/brigade.git",
+    "directory": "npm/feasibility"
+  }
+}

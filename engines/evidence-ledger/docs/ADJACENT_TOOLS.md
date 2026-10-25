@@ -21,8 +21,8 @@ MiseLedger is different:
 
 Each source system is best at its native domain:
 
-- Built-in `miseledger crawl sessions`: Codex, Claude, OpenClaw, OpenCode, Hermes, Cursor, and Grok local history
-- Built-in `miseledger crawl docs/files/html/json/jsonl/gitlog`: local files, Markdown, HTML, JSON, JSONL, and git history
+- Built-in `miseledger crawl sessions`: Codex, Claude, Pi, OpenClaw, OpenCode, Hermes, Cursor, and Grok local history
+- `miseledger crawl docs/files/html/json/jsonl/gitlog`: wrappers around the external `sourceharvest` binary for local files, Markdown, HTML, JSON, JSONL, and git history
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
@@ -35,10 +35,10 @@ Agent session scanning is in scope for MiseLedger through conservative native JS
 
 The intended split is:
 
-- MiseLedger owns built-in local harness parsing, local artifact crawling, adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
+- MiseLedger owns built-in local harness parsing, local artifact crawl wrappers, adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
 - External crawler binaries own their source-specific sync and query behavior, then hand MiseLedger adapter JSONL.
 
-The earlier StationTrail and SourceHarvest repos were archived once their portable export paths were absorbed into MiseLedger. Existing adapter JSONL from those tools can still be imported.
+The earlier StationTrail and SourceHarvest repos are archived. Native session parsers live in MiseLedger, but local artifact crawl wrappers still execute `sourceharvest`. Existing adapter JSONL from those tools can still be imported.
 
 Common paths:
 
@@ -65,9 +65,9 @@ Do not turn MiseLedger into a worse Agent Sessions clone.
 
 Do not build for this MVP:
 
-- GUI or native macOS app behavior.
+- Native desktop app behavior.
 - Agent Cockpit live monitoring.
-- terminal resume workflows.
+- Launching terminals or resuming harness sessions automatically.
 - image-browser UI.
 - usage-limit dashboards.
 - perfect parsers for every harness.

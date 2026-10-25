@@ -6,11 +6,11 @@ Developing Brigade itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. 
 
 ## What Brigade is for
 
-Brigade is a **local control plane for coding agents**, not a human day-to-day terminal app.
+Brigade coordinates coding agents across machines and cloud seats. Agents leave receipts and pass evidence-based handoffs so another agent can check their work.
 
 - **Agents run:** install, `setup`, `operator quickstart`, `work verify`, handoffs, `code`, `evidence`.
-- **Humans own:** policy and review when a gate is ambiguous or risky (or when they explicitly ask for a destructive or remote action).
-- **Artifacts:** plain files on the machine (receipts, memory cards, configs). No daemon. No lock-in. See [`docs/execution-model.md`](execution-model.md).
+- **Humans own:** policy, budgets, scopes, and gates. The operator can inspect or stop work and choose where approval is needed.
+- **Artifacts:** local receipts, run journals, memory cards, and configs remain inspectable across harnesses. Optional services coordinate fleet work and serve views or MCP resources. See [`docs/execution-model.md`](execution-model.md).
 
 Public names for the built-in engines:
 
@@ -36,25 +36,29 @@ When a human pastes a short job into Claude Code, Codex, Cursor, OpenClaw, or an
 
 ```text
 Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
-Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
+If brigade is missing, install it with npm install --global
+@escoffier-labs/brigade@0.30.0 only when Node.js 22+ and npm are present and
+the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64.
+Otherwise use pipx install brigade-cli (or uv tool install brigade-cli),
+including on musl Linux (such as Alpine) and Windows ARM64.
 Run operator quickstart with --dry-run first and show the plan. Then apply,
 run brigade operator doctor, and report ready: yes. Keep existing memory
 layout. Do not touch remotes, do not commit, stop before anything destructive.
 ```
 
-Brigade is local-first workspace wiring. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service. Adapt the user's existing memory, handoff, and agent workflow. Do not replace a working layout with someone else's exact tree.
+Brigade coordinates autonomous agent work across machines and cloud seats through local receipts, run journals, and evidence-based handoffs. It also serves memory and skills over MCP and syncs tool and skill projections across harnesses. The operator chooses the scope and gates. Adapt the user's existing memory, handoff, and agent workflow, keeping their local records inspectable.
 
 ## Installing for a user (you run this)
 
-Platform: Linux, macOS, or native Windows PowerShell with Python 3.10 or newer. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required.
+Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.10 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
 
 Work in the **target** directory (the repo or operator workspace the user named), not the Brigade source tree unless they asked to develop Brigade.
 
 Always dry-run before write. Then apply. Then doctor.
 
 ```bash
-pipx install brigade-cli
-# alternative: uv tool install brigade-cli
+npm install --global @escoffier-labs/brigade@0.30.0
+# alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses <harness> --dry-run
@@ -165,7 +169,7 @@ Do not commit generated local state unless the user explicitly asks and the docs
 
 ## Safety boundaries
 
-Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of Brigade setup unless the user explicitly asks. Brigade is not a scheduler. An external trigger may call its commands later. Boundary: [`docs/execution-model.md`](execution-model.md).
+Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of Brigade setup unless the user explicitly asks. Setup writes local wiring and reports its checks. Long-running services and scheduled care can be enabled separately within the user's authorized scope. Boundary: [`docs/execution-model.md`](execution-model.md).
 
 Do not paste raw scanner output, session text, tokens, API keys, private hostnames, private repo names, or unredacted absolute paths into public issues or docs.
 
@@ -185,9 +189,9 @@ Issue form: https://github.com/escoffier-labs/brigade/issues/new/choose
 Report the exact commands you ran. A healthy first run should end with:
 
 ```text
-quickstart: ok
-operator doctor: ready yes
-blocking issues: 0
+status: ok
+ready: yes
+blocking_issues: 0
 ```
 
 If anything remains manual, list the remaining steps clearly and do not hide warnings.

@@ -12,8 +12,9 @@ without heuristic string guessing.
 
 Model availability exists across three distinct layers that must not be conflated:
 
-1. **CLI Local Access (`cli_local`)**: Proves an installed tool executable is
-   logged in and capable of executing dispatches locally.
+1. **CLI Local Access (`cli_local`)**: Requires evidence that an installed tool
+   can execute locally. A successful model-list probe alone does not prove login
+   or dispatch capability.
 2. **Cloud Model Catalogue (`cloud_catalog`)**: Represents models listed in a
    remote vendor API or documentation catalogue. A catalogue listing does not
    guarantee local CLI execution.
@@ -75,6 +76,28 @@ identifiers must be registered through explicit operator alias mappings scoped
 to a provider (and optionally a harness). A mapping for one provider never
 blesses another provider's missing canonical model, and stored aliases never
 select a different account or harness native identity.
+
+### Antigravity subscription seats
+
+`agy` 1.4.0 lists `gemini-4-argon-{low,medium,high}` alongside
+`gemini-3.8-flash-{low,medium,high}`. An operator can expose these as Google
+subscription seats. An Argon seat, for example:
+
+| Seat | Model | Binding | Access | Security review |
+|---|---|---|---|---|
+| `agy_argon` | `gemini-4-argon-high` (Gemini 4 Argon High) | `antigravity` | Antigravity subscription | Not for security review |
+
+An Argon roster seat pins `cli = "antigravity"` and
+`model = "gemini-4-argon-high"`, and the matching Fleet Hub seat uses binding
+`antigravity`. These are operator-managed seats, not additions to the repository's roster
+templates. A model-list observation proves the advertised identity, not a
+successful dispatch or security-review suitability.
+
+Brigade's Antigravity argv adapter maps bare `gemini-4-argon` to
+`gemini-4-argon-low`, just as it does for bare flash/pro IDs. Explicit effort
+slugs stay unchanged. Inventory identity matching still requires an explicit
+operator alias when canonical and native IDs differ. The adapter's default
+does not create inventory aliases or redirect the High seat to Low.
 
 ## Database Schema
 
@@ -138,7 +161,11 @@ measurement fields:
 - `expires_at`: ISO 8601 string
 - `models`: Canonical sorted model records
 - `error_reason`: Sanitized safe error code
-- `evidence_type`: Observation type (`cli_probe` or `manual_browser`)
+- `evidence_type`: Observation type (`cli_probe`, `catalog`, or `manual_browser`)
+
+The server derives the evidence type from the trusted source. `cli:opencode`
+uses `catalog`, `manual:browser` uses `manual_browser`, and the other allowed CLI
+sources use `cli_probe`. A conflicting caller-supplied type is rejected.
 
 If an incoming observation generates an existing ID with differing content, an
 `InventoryCollisionError` is raised.

@@ -892,12 +892,26 @@ def test_run_cli_records_workspace_roster_provenance_and_shadow_warning(tmp_path
 
 def test_run_cli_worktree_parent_roster_resolves_without_shadow_warning(tmp_path, monkeypatch, capsys):
     parent = tmp_path / "clone"
-    admin = parent / ".git" / "worktrees" / "wt"
-    admin.mkdir(parents=True)
-    (admin / "commondir").write_text("../..\n")
+    # Exercise a real linked checkout: a partial .git/worktrees layout is
+    # rejected by Git for Windows before the CLI can derive its claim target.
+    parent.mkdir()
+    _git(parent, "init", "-q", "-b", "main")
+    _git(
+        parent,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "--allow-empty",
+        "-m",
+        "fixture",
+    )
     worktree = tmp_path / "wt"
-    worktree.mkdir()
-    (worktree / ".git").write_text(f"gitdir: {admin}\n")
+    _git(parent, "worktree", "add", "-q", "-b", "wt", str(worktree))
     parent_roster = parent / ".brigade" / "roster.toml"
     home = tmp_path / "home"
     user_roster = home / ".brigade" / "roster.toml"
@@ -2743,6 +2757,38 @@ def test_run_cli_does_not_reclassify_receipt_write_failure(tmp_path, monkeypatch
 
     assert termination_calls == []
     assert (repo / ".brigade" / "run.lock").is_dir()
+
+
+def test_run_cli_prints_notes_on_retained_lock_error(tmp_path, monkeypatch, capsys):
+    repo = _git_repo_with_roster(tmp_path)
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+    retained.__notes__ = ["replaced scheduler failure: BudgetPolicyError: token ceiling reached"]
+
+    def failed_run(*args, **kwargs):  # noqa: ARG001
+        raise retained
+
+    monkeypatch.setattr(aboyeur, "run", failed_run)
+
+    assert (
+        cli.main(
+            [
+                "run",
+                "inspect",
+                "--cwd",
+                str(repo),
+                "--output-dir",
+                str(tmp_path / "run-artifacts"),
+                "--no-code-graph",
+                "--no-evidence",
+                "--no-route",
+            ]
+        )
+        == 2
+    )
+
+    err = capsys.readouterr().err
+    assert "error: sibling receipt unavailable" in err
+    assert "note: replaced scheduler failure: BudgetPolicyError: token ceiling reached" in err
 
 
 def test_app_server_fallback_clears_uncreated_control_socket(tmp_path, monkeypatch):

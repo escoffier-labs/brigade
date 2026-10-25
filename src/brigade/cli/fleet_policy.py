@@ -175,6 +175,12 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     p_ack.add_argument("--json", action="store_true", help="Emit JSON.")
     p_ack.set_defaults(func=_dispatch_acknowledge)
 
+    # Charters live in the policy document, so the owners group registers with it.
+    # cli/fleet.py sits at the module size ceiling and cannot take another import.
+    from .fleet_owners import register as register_owners
+
+    register_owners(fleet_sub)
+
 
 def _add_document_flags(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--file", type=Path, required=True, dest="file")

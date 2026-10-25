@@ -1,6 +1,6 @@
 # Contributing to Brigade
 
-Brigade is the local-first operator CLI for agent memory, handoffs, and reviewable work receipts. It grew out of [Solomon's Cookbook](https://github.com/escoffier-labs/solos-cookbook), and patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
+Brigade coordinates autonomous coding agents across machines and cloud seats under operator-defined policy. Agents leave receipts and run journals, then pass evidence packages and handoffs to the next agent. Memory, MCP servers, and skill sync share that record of work. Brigade grew out of [Solomon's Cookbook](https://github.com/escoffier-labs/solos-cookbook), and patches are welcome. Before you start, please skim this file so we both spend our time on the right things.
 
 ## Your first PR
 
@@ -25,7 +25,7 @@ External contributions are welcome. This section is the short path; [Pull reques
 
 - Every required status check passes.
 - No review conversation is left unresolved. Branch protection enforces this.
-- Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
+- `main` requires a merge queue. The queue tests each pull request combined with current `main` and any pull requests ahead of it, so a branch does not need to be rebased only because it is behind `main`.
 
 Satisfy the applicable branch's current approval requirements and any explicit maintainer hold before merging. Verify that any review relied on covers the current head; a green bot check alone does not establish approval.
 
@@ -41,6 +41,8 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 ```
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
+
+Merging into `main` is asynchronous. `gh pr merge <number>` adds a pull request whose required checks have passed to the merge queue, or enables auto-merge if checks are still running. No merge-method flag is needed because the queue squashes. The queue reruns `ci.yml` on a `merge_group` event against the combined change and merges only if the required checks pass, so two pull requests that pass separately but conflict in behavior are caught before `main` goes red. `ci-gate` is the only required check. Pull requests run the Python 3.12 test shards. The queue runs 3.10, 3.11, and 3.12, so a failure that only appears on 3.10 or 3.11 surfaces there. A pull request that fails in the queue is removed from it and stays open. Merge verification means waiting until `gh pr view <number> --json state,mergeCommit` reports `MERGED`, not the exit status of `gh pr merge`. The queue ruleset has no bypass actors. Do not use `gh pr merge --admin` to skip it.
 
 For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session; explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
 
@@ -183,7 +185,7 @@ To add a harness:
 4. Update `HARNESS_PRIORITY` if the new harness should be an owner candidate (readers usually want to land near OpenClaw/Hermes in the priority list).
 5. If it is a writer, add it to `WRITER_INBOXES` in `src/brigade/selection.py` and update any writer-specific installer, doctor, or ingest tests.
 6. Add the harness to the CI matrix in `.github/workflows/ci.yml`.
-7. Add a row to the harness table in `README.md`.
+7. Add a row to the writer harness table in `docs/overview.md` and update the harness list in `docs/technical-guide.md`.
 
 ## Adding a depth
 
@@ -195,11 +197,11 @@ Includes live at `src/brigade/templates/includes/<id>.json`. Add the id to `KNOW
 
 ## Adding a doctor check
 
-Check functions live in `src/brigade/doctor.py` and nearby command modules. Each returns structured status data where status is `OK`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or `MANUAL` over `FAIL` for things the user can choose not to wire up - `FAIL` should mean "this profile is broken."
+Check functions live in `src/brigade/doctor.py` and nearby command modules. Each returns structured status data where status is `OK`, `INFO`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or `MANUAL` over `FAIL` for things the user can choose not to wire up - `FAIL` should mean "this profile is broken."
 
 ## Promoting an experimental adapter
 
-The Hermes adapter is currently marked experimental. To graduate it (or any future experimental adapter) to "tested":
+The Hermes adapter is validated against a real Hermes install. To graduate a future experimental adapter to "tested":
 
 - A doctor check exists that meaningfully exercises the adapter against a real install.
 - Someone has run the full init + doctor cycle on a real Hermes workspace and reported it on an issue.

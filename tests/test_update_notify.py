@@ -22,6 +22,7 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "HOME": str(tmp_path),
         "USERPROFILE": str(tmp_path),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "LOCALAPPDATA": str(tmp_path / "cache"),
     }
     env.update(extra)
     return env
@@ -325,6 +326,7 @@ def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
 
     set_home(monkeypatch, str(cache_home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
+    monkeypatch.setenv("LOCALAPPDATA", str(cache_home / "cache"))
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -375,3 +377,159 @@ def test_main_invokes_notify_after_command(monkeypatch):
     monkeypatch.setattr(cli, "_build_parser", fake_build_parser)
     assert cli.main(["notify-probe"]) == 7
     assert seen == {"argv": ["notify-probe"], "exit_code": 7}
+
+
+@pytest.mark.parametrize(
+    "gate,entry",
+    [
+        ("npm", "available"),
+        ("optout", "available"),
+        ("optout", "notice"),
+        ("optout", "refresh"),
+        ("ci", "notice"),
+        ("ci", "refresh"),
+    ],
+)
+def test_disabled_updates_do_no_state_io_spawn_or_fetch(tmp_path, monkeypatch, gate, entry):
+    from brigade import distribution
+
+    monkeypatch.setattr(distribution, "_name", "npm" if gate == "npm" else None)
+    environment = _env(tmp_path)
+    if gate == "optout":
+        environment["BRIGADE_NO_UPDATE_CHECK"] = "caller-optout"
+    elif gate == "ci":
+        environment["CI"] = "true"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled updates accessed state, spawned, or fetched")
+
+    monkeypatch.setattr(update_notify, "cache_path", forbidden)
+    monkeypatch.setattr(update_notify.localio, "read_json_dict", forbidden)
+    monkeypatch.setattr(update_notify.localio, "write_json", forbidden)
+    monkeypatch.setattr(update_notify.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", forbidden)
+    err = _Tty()
+    if entry == "available":
+        assert update_notify.available_update(env=environment) is None
+    elif entry == "notice":
+        update_notify.maybe_notify(["work"], 0, env=environment, now=1.0, stderr=err, spawn=forbidden)
+    else:
+        assert update_notify.run_refresh(env=environment, now=1.0) == 0
+    assert err.getvalue() == ""
+    assert not list(tmp_path.iterdir())
+
+
+@pytest.fixture(autouse=True)
+def _deny_sockets(monkeypatch):
+    import socket
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("update-notice test opened a socket")
+
+    class DeniedSocket(socket.socket):
+        def __new__(cls, *args, **kwargs):
+            pytest.fail("update-notice test opened a socket")
+
+    monkeypatch.setattr(socket, "socket", DeniedSocket)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+
+
+@pytest.mark.parametrize(
+    "extra,counted",
+    [
+        ({}, True),
+        ({"BRIGADE_INSTALL_CHANNEL": "plugin"}, True),
+        ({"DO_NOT_TRACK": "1"}, False),
+        ({"DO_NOT_TRACK": "true"}, False),
+        ({"BRIGADE_TELEMETRY": "0"}, False),
+        ({"BRIGADE_TELEMETRY": "off"}, False),
+        ({"BRIGADE_TELEMETRY": "false"}, False),
+        ({"DO_NOT_TRACK": "0"}, True),
+    ],
+)
+def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra, counted):
+    from contextlib import closing
+
+    captured = []
+
+    def fetch(request, timeout):
+        captured.append(request)
+        return closing(io.BytesIO(b'{"latest":"99.0.0"}'))
+
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    update_notify.run_refresh(env=_env(tmp_path, **extra), now=42.0)
+    assert len(captured) == 1
+    headers = dict(captured[0].header_items())
+    if counted:
+        assert headers["User-agent"] == f"brigade-cli/{__version__} ({update_notify.platform.system()})"
+        assert headers["X-brigade-channel"] in {"pipx", "pip", "uvx", "npm", "source", "plugin"}
+        if extra.get("BRIGADE_INSTALL_CHANNEL"):
+            assert headers["X-brigade-channel"] == "plugin"
+    else:
+        assert headers == {"User-agent": "Python-urllib"}
+    assert update_notify.available_update(env=_env(tmp_path))["latest"] == "99.0.0"
+
+
+@pytest.mark.parametrize("optout", [{"DO_NOT_TRACK": "1"}, {"BRIGADE_TELEMETRY": "0"}])
+def test_default_refresh_child_preserves_supplied_environment(tmp_path, monkeypatch, optout):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("BRIGADE_TELEMETRY", raising=False)
+    monkeypatch.setenv("BRIGADE_INSTALL_CHANNEL", "pip")
+    environment = _env(tmp_path, BRIGADE_INSTALL_CHANNEL="plugin", **optout)
+    original = environment.copy()
+    children = []
+    monkeypatch.setattr(update_notify.subprocess, "Popen", lambda *a, **kw: children.append(kw["env"]))
+
+    update_notify.maybe_notify(["work"], 0, env=environment, now=100.0, stderr=io.StringIO())
+
+    assert len(children) == 1
+    child_env = children[0]
+    assert {key: child_env.get(key) for key in original} == original
+    assert environment == original
+
+
+def test_npm_refreshes_without_notice_and_preserves_channel_in_child(tmp_path, monkeypatch):
+    from brigade import distribution
+
+    monkeypatch.setattr(distribution, "_name", "npm")
+    monkeypatch.delenv("BRIGADE_INSTALL_CHANNEL", raising=False)
+    set_home(monkeypatch, str(tmp_path))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
+    monkeypatch.delenv("CI", raising=False)
+    calls = []
+    monkeypatch.setattr(update_notify.subprocess, "Popen", lambda *a, **kw: calls.append((a, kw)))
+    err = _Tty()
+    update_notify.maybe_notify(["work"], 0, now=100.0, stderr=err)
+    assert err.getvalue() == ""
+    assert len(calls) == 1
+    assert calls[0][1]["env"]["BRIGADE_INSTALL_CHANNEL"] == "npm"
+    assert calls[0][1]["stdin"] == update_notify.subprocess.DEVNULL
+    if update_notify.os.name == "posix":
+        assert calls[0][1]["start_new_session"] is True
+
+    # A new interpreter receives the channel through its environment, not _name.
+    monkeypatch.setattr(distribution, "_name", None)
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", lambda req, **kw: calls.append(req))
+    assert update_notify.run_refresh(env=_env(tmp_path, BRIGADE_INSTALL_CHANNEL="npm"), now=100.0) == 0
+    assert calls[-1].get_header("X-brigade-channel") == "npm"
+
+
+@pytest.mark.parametrize(
+    "channel", ["pipx", "pip", "uvx", "plugin", "source", "npm", "/private/path", "private.example"]
+)
+def test_channel_is_closed_enum(tmp_path, monkeypatch, channel):
+    from contextlib import closing
+
+    captured = []
+
+    def fetch(request, timeout):
+        captured.append(request)
+        return closing(io.BytesIO(b'{"latest":"99.0.0"}'))
+
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    update_notify.run_refresh(env=_env(tmp_path, BRIGADE_INSTALL_CHANNEL=channel), now=42.0)
+    value = captured[0].get_header("X-brigade-channel")
+    assert value in {"pipx", "pip", "uvx", "npm", "source", "plugin"}
+    if channel in {"pipx", "pip", "uvx", "npm", "source", "plugin"}:
+        assert value == channel

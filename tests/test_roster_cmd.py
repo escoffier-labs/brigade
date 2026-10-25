@@ -17,7 +17,7 @@ def _hermetic_home(tmp_path_factory, monkeypatch):
     """Keep the machine's real ~/.brigade/roster.toml out of init's shadow guard.
 
     Tests that need a specific home (with or without a user roster) re-patch
-    Path.home in their own body, which takes precedence over this fixture.
+    Path.home in their own body, which takes precedence over this fixture.   # content-guard: allow private-hostname
     """
     home = tmp_path_factory.mktemp("roster-cmd-home")
     monkeypatch.setattr(Path, "home", lambda: home)
@@ -1098,3 +1098,13 @@ def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_targ
     roster_cmd.stats(tmp_target)
 
     assert preset.read_bytes() == original
+
+
+def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsys):
+    assert roster_cmd.init(tmp_target) == 0
+    capsys.readouterr()
+    assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "chef", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked"
+    assert report["selected_seats"][0]["selection_role"] == "orchestrator"
+    assert any(item["reason"] == "orchestrator-selected" for item in report["evidence"])

@@ -1,6 +1,6 @@
 # Proposal: ProvenanceEnvelope on every evidence item
 
-Status: draft, executor-ready. Not implemented.
+Status (2026-10-17): all six slices shipped across #602 (e74a8c553), #813 (9a3af7ae7), #950 (f6260191e), #988 (334447d28), #960 (e4c443b52), and #965 (d79e0207b).
 
 Issue: [#505](https://github.com/escoffier-labs/brigade/issues/505).
 

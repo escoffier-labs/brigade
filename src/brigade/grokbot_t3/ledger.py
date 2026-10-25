@@ -13,9 +13,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import runtime_config
 from .contracts import REOPENING_STATE, REOPENING_TTL_SECONDS, TERMINAL_STATES, T3DispatchError
 
 IN_DOUBT_TTL = timedelta(hours=2)
+HUB_PENDING_LIMIT = 300
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     request_id TEXT PRIMARY KEY,
@@ -44,19 +46,24 @@ def wake_target_id(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def _prepare_storage(path: Path) -> None:
+    runtime_config.require_posix_storage()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        parent = path.parent.stat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+            raise T3DispatchError("unavailable") from None
+    else:
+        os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    os.chmod(path, 0o600)
+
+
 class Ledger:
     def __init__(self, path: Path):
-        try:
-            path.parent.mkdir(mode=0o700, parents=True)
-        except FileExistsError:
-            parent = path.parent.stat()
-            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
-                raise T3DispatchError("unavailable") from None
-        else:
-            os.chmod(path.parent, 0o700)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
-        os.chmod(path, 0o600)
+        _prepare_storage(path)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(path), timeout=10, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
@@ -64,6 +71,19 @@ class Ledger:
         self._conn.execute(_SCHEMA)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS in_doubt (caller TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS intake_claims "
+            "(issue_key TEXT PRIMARY KEY, request_id TEXT, claimed_at TEXT NOT NULL)"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS hub_wake_cursors "
+            "(scope TEXT NOT NULL, target TEXT NOT NULL, cursor INTEGER NOT NULL, PRIMARY KEY (scope, target))"
+        )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS hub_wake_pending "
+            "(scope TEXT NOT NULL, target TEXT NOT NULL, id INTEGER NOT NULL, sender TEXT NOT NULL, "
+            "PRIMARY KEY (scope, target, id))"
         )
         # Seed legacy rows once, atomically with creation of the attempt ledger.
         with self._conn:
@@ -105,6 +125,21 @@ class Ledger:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def claim_intake(self, issue_key: str, now: datetime) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO intake_claims (issue_key, claimed_at) VALUES (?, ?)", (issue_key, _ts(now))
+            )
+            return cursor.rowcount > 0
+
+    def attach_intake(self, issue_key: str, request_id: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE intake_claims SET request_id = ? WHERE issue_key = ?", (request_id, issue_key))
+
+    def release_intake(self, issue_key: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM intake_claims WHERE issue_key = ?", (issue_key,))
 
     def record_submit(
         self,
@@ -302,3 +337,60 @@ class Ledger:
                 "SELECT wake_attempts FROM requests WHERE request_id = ?", (request_id,)
             ).fetchone()
             return int(row[0])
+
+    def hub_wake_cursor(self, scope: str, target: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cursor FROM hub_wake_cursors WHERE scope = ? AND target = ?", (scope, target)
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+    def pending_hub_wake(self, scope: str, target: str) -> list[dict[str, Any]]:
+        with self._lock:
+            return [
+                dict(row)
+                for row in self._conn.execute(
+                    "SELECT id, sender FROM hub_wake_pending WHERE scope = ? AND target = ? ORDER BY id",
+                    (scope, target),
+                )
+            ]
+
+    def queue_hub_wake(self, scope: str, target: str, rows: list[dict[str, Any]]) -> None:
+        # Persist each page before attempting delivery. Concurrent scans cannot grow the batch
+        # past its cap, duplicate rows, or resurrect already-delivered ids.
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            delivered = self._conn.execute(
+                "SELECT cursor FROM hub_wake_cursors WHERE scope = ? AND target = ?", (scope, target)
+            ).fetchone()
+            cursor = int(delivered[0]) if delivered else 0
+            pending = {
+                row[0]
+                for row in self._conn.execute(
+                    "SELECT id FROM hub_wake_pending WHERE scope = ? AND target = ?", (scope, target)
+                )
+            }
+            for row in rows:
+                if len(pending) >= HUB_PENDING_LIMIT:
+                    break
+                if row["id"] > cursor and row["id"] not in pending:
+                    self._conn.execute(
+                        "INSERT INTO hub_wake_pending (scope, target, id, sender) VALUES (?, ?, ?, ?)",
+                        (scope, target, row["id"], row["sender"]),
+                    )
+                    pending.add(row["id"])
+
+    def mark_hub_notified(self, scope: str, target: str, cursor: int) -> None:
+        # Success and retirement are one transaction. An older in-flight POST cannot erase a
+        # newer pending page or move a concurrent watcher's successful cursor backwards.
+        with self._lock, self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            self._conn.execute(
+                "INSERT INTO hub_wake_cursors (scope, target, cursor) VALUES (?, ?, ?) "
+                "ON CONFLICT (scope, target) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+                (scope, target, cursor),
+            )
+            self._conn.execute(
+                "DELETE FROM hub_wake_pending WHERE scope = ? AND target = ? AND id <= ?",
+                (scope, target, cursor),
+            )

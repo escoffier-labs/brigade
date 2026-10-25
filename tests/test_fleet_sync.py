@@ -58,7 +58,7 @@ def hub(tmp_path):
     token = "test-token-12345"
     # Legacy shared-token mode (pre-#1150): the one token posts as any node.
     server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
     server.shutdown()
@@ -1081,6 +1081,32 @@ class TestSpoolHardening:
         finally:
             conn.close()
 
+    def test_oversized_legacy_target_does_not_drop_batch_peers(self, hub, monkeypatch):
+        """#1710: one 422 event between valid events in one batch loses only itself."""
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        node = _event()["node_id"]
+        spool = fleet_client.spool_path(node)
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        oversized = {**_event(node=node, seq=2), "repo": "legacy/" + "t" * 2000}
+        spool.write_text(
+            "".join(
+                json.dumps(e, sort_keys=True) + "\n"
+                for e in (_event(node=node, seq=1), oversized, _event(node=node, seq=3))
+            )
+        )
+        assert fleet_client.flush_spool(node) == 2
+        assert not spool.exists()
+        conn = fleet_hub.init_db(db)
+        try:
+            assert [r[0] for r in conn.execute("SELECT sequence FROM events ORDER BY rowid")] == [1, 3]
+        finally:
+            conn.close()
+        dead = spool.with_name(spool.stem + ".rejected.jsonl")
+        [record] = [json.loads(line) for line in dead.read_text().splitlines()]
+        assert record["sequence"] == 2 and record["event"] == oversized
+
     def test_401_keeps_spool(self, hub, monkeypatch):
         url, _token, _db = hub
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
@@ -1352,7 +1378,7 @@ def hub_server(tmp_path):
     global NODE_A_TOKEN, NODE_B_TOKEN
     db = tmp_path / "hub" / "sessions.db"
     server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN_TOKEN, allow_admin_writes=False)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     url = f"http://127.0.0.1:{server.server_address[1]}"
     NODE_A_TOKEN = _enroll_node(url, NODE_A)
@@ -1683,7 +1709,7 @@ def test_v31_to_v32_preserves_event_history(tmp_path):
     conn.close()
     conn = fleet_hub.init_db(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         assert "context" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
         row = fleet_hub.latest_status(conn, include_all=True)[0]
         assert (row["run_id"], row["digest"], row["state"], row["context"]) == (

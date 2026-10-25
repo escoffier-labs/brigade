@@ -9,6 +9,7 @@ StationTrail was a separate local harness exporter. Its adapter JSONL output rem
 | Source | Archived StationTrail parity | MiseLedger native | Recommended path |
 | --- | --- | --- | --- |
 | Codex sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import codex`. |
+| Pi sessions | not covered | yes | Use `miseledger crawl sessions` or `miseledger import pi`. |
 | Claude project logs | covered | yes | Use `miseledger crawl sessions` or `miseledger import claude`. |
 | OpenClaw sessions and trajectories | covered | yes | Use `miseledger crawl sessions` or `miseledger import openclaw`. |
 | OpenCode sessions | covered | yes | Use `miseledger crawl sessions` or `miseledger import opencode` with sanitized export JSON. |
@@ -54,6 +55,7 @@ MiseLedger compatibility imports:
 ```bash
 miseledger import codex ~/.codex/sessions --json
 miseledger import claude ~/.claude/projects --json
+miseledger import pi ~/.pi/agent/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json

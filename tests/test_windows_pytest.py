@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 import threading
 import time
 from concurrent.futures import Future
@@ -11,6 +12,47 @@ from types import SimpleNamespace
 import pytest
 
 from scripts import windows_job, windows_pytest
+
+
+@pytest.mark.parametrize("runner_location", ["outside", "inside", "absent"])
+def test_ci_temp_root_covers_driver_and_direct_tempfile(tmp_path, monkeypatch, capsys, runner_location):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    runner = repo / "runner" if runner_location == "inside" else tmp_path / "runner"
+    runner.mkdir()
+    environment_file = tmp_path / "github-env"
+    monkeypatch.setenv("GITHUB_ENV", str(environment_file))
+    if runner_location == "absent":
+        monkeypatch.delenv("RUNNER_TEMP", raising=False)
+    else:
+        monkeypatch.setenv("RUNNER_TEMP", str(runner))
+
+    assert windows_pytest.main(["--configure-temp-root", "--repo", str(repo)]) == 0
+    updates = dict(line.split("=", 1) for line in environment_file.read_text().splitlines())
+    expected = (runner if runner_location == "outside" else repo.parent) / "brigade-windows-temp"
+    assert {updates[key] for key in ("TMP", "TEMP", "TMPDIR")} == {str(expected.resolve())}
+    assert "workspace_drive=" in capsys.readouterr().out
+    script = """
+import json, pathlib, tempfile
+from scripts import windows_pytest
+repo = pathlib.Path(__import__('sys').argv[1])
+root = windows_pytest.make_temp_root(repo)
+with tempfile.TemporaryDirectory() as direct:
+    print(json.dumps([str(root), direct]))
+windows_pytest._remove_owned_temp_root(root)
+assert not root.exists()
+"""
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(repo)],
+        env={**os.environ, **updates},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    driver_root, direct_root = map(Path, json.loads(child.stdout))
+    assert driver_root.parent == direct_root.parent == expected.resolve()
+    assert driver_root.name.startswith("brigade-windows-pytest-")
 
 
 class FakeProcess:
@@ -416,14 +458,14 @@ def test_allowlist_only_fails_closed_for_malformed_baseline(allowlist_repo, caps
     assert "allowlist check error:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("count", "expected"), [(182, 0), (183, 2)])
+@pytest.mark.parametrize(("count", "expected"), [(181, 0), (182, 2)])
 def test_allowlist_only_initial_creation_uses_historical_cap(allowlist_repo, capsys, count, expected):
     repo, allowlist, commit = allowlist_repo
     base = commit(None)
     allowlist.write_text(_allowlist_payload([f"test_initial_{i}.py" for i in range(count)]), encoding="utf-8")
     assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == expected
     if expected:
-        assert "initial allowlist exceeds 182 historical entries" in capsys.readouterr().err
+        assert "initial allowlist exceeds 181 historical entries" in capsys.readouterr().err
 
 
 def test_full_windows_harness_still_requires_record(capsys):

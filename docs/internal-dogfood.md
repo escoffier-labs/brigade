@@ -70,7 +70,9 @@ If a session changes how Brigade should be used in this repo, write that durable
 Prefer the writer command so the draft matches Brigade's expected section style and lints before handoff:
 
 ```bash
-brigade handoff draft --title "Brigade workflow update" --summary "What changed and why it matters." --content "### Brigade workflow update\n\nDurable guidance to append."
+brigade handoff draft --title "Brigade workflow update" --summary "What changed and why it matters." --content "### Brigade workflow update
+
+Durable guidance to append."
 ```
 
 Handoffs should mention the concrete commands, what changed, what remains manual, and any local-only waiver or setup assumption. Do not copy raw `.brigade/` evidence into committed docs.

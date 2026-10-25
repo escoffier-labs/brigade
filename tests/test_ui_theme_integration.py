@@ -1,5 +1,6 @@
 """Shared fleet shell/navigation contracts at the actual renderer boundary."""
 
+import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -172,14 +173,47 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
     for route, rendered in fleet_pages.items():
         markup = Markup(rendered)
         assert len(markup.elements("html")) == len(markup.elements("body")) == len(markup.elements("main")) == 1, route
-        assert rendered.count("--canvas:") == 1, route
+        assert len(markup.elements("aside")) == 1, route
+        sidebar = next(index for index, (tag, _) in enumerate(markup.tags) if tag == "aside")
+        assert markup.tags[sidebar][1]["class"] == "shell-sidebar", route
+        assert [markup.tags[index][1] for index in markup.descendants(sidebar, "nav")] == [
+            {"class": "deck-nav", "aria-label": "Command Deck"}
+        ], route
+        assert rendered.count("--canvas:") == 2, route  # dark :root plus the light media override
         for tag in ["style", "script"]:
             assert len(markup.elements(tag)) == 1, route
             assert markup.elements(tag)[0]["nonce"] == "integration-nonce", route
-        assert markup.elements("nav") == [{"class": "deck-nav", "aria-label": "Command Deck"}], route
+        expected_nav = [{"class": "deck-nav", "aria-label": "Command Deck"}]
+        if route.startswith("/view/"):
+            expected_nav.append({"class": "board-nav", "aria-label": "Board views"})
+        assert markup.elements("nav") == expected_nav, route
         routes = {urlsplit(attrs["href"]).path for attrs in markup.elements("a") if "href" in attrs}
         assert {"/deck/repos", "/deck/roster", "/deck/policy", "/view/machines"} <= routes, route
         assert "/" in routes or "/deck" in routes, route
+
+
+def test_renderer_documents_resolve_shared_spacing_and_color_properties(fleet_pages):
+    from brigade.center_cmd.dashboard import render
+    from brigade.center_cmd.dashboard.views import render_nav, status_grid
+
+    pages = {
+        **fleet_pages,
+        "/center/status": render.page(
+            "Status",
+            "integration-nonce",
+            render_nav("status"),
+            status_grid.render({"pending_tasks": []}, nonce="integration-nonce"),
+        ),
+    }
+    for route, rendered in pages.items():
+        markup = Markup(rendered)
+        stylesheet = "\n".join(markup.text[index] for index, (tag, _) in enumerate(markup.tags) if tag == "style")
+        declarations = re.findall(r"(--[\w-]+)\s*:", stylesheet)
+        references = set(re.findall(r"var\(\s*(--[\w-]+)", rendered))
+        assert "var(--space-" in stylesheet, route
+        assert references <= set(declarations), (route, references - set(declarations))
+        for index in range(1, 9):
+            assert declarations.count(f"--space-{index}") == 1, route
 
 
 @pytest.mark.parametrize("view, table_count", [("machines", 2), ("repos", 1)])
@@ -226,7 +260,9 @@ def test_populated_board_tables_keep_rows_semantics_and_individual_scroll_wrappe
             "synthetic-completed-alpha",
             "synthetic-completed-bravo",
         ]
-        assert all(attrs["title"].endswith(BOARD_HOSTILE) for attrs in markup.elements("h2"))
+        machine_titles = [attrs for attrs in markup.elements("h2") if attrs.get("class") == "machine-card-title"]
+        assert len(machine_titles) == 2
+        assert all(attrs["title"].endswith(BOARD_HOSTILE) for attrs in machine_titles)
     else:
         assert (
             len(
@@ -245,8 +281,13 @@ def test_populated_board_tables_keep_rows_semantics_and_individual_scroll_wrappe
         )
     assert markup.elements("img") == []
     assert not [attrs for _, attrs in markup.tags if "onerror" in attrs]
+    pivots = next(index for index, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-label") == "Board views")
     for name in ["machines", "repos"]:
-        link = next(attrs for attrs in markup.nav_links if urlsplit(attrs["href"]).path == "/view/" + name)
+        link = next(
+            markup.tags[index][1]
+            for index in markup.descendants(pivots, "a")
+            if urlsplit(markup.tags[index][1]["href"]).path == "/view/" + name
+        )
         assert parse_qs(urlsplit(link["href"]).query) == {"all": ["1"]}
         assert ("aria-current" in link) == (name == view)
 
@@ -273,8 +314,13 @@ def test_board_navigation_and_filters_preserve_query_state(view):
         now=NOW,
     )
     markup = Markup(rendered)
+    pivots = next(index for index, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-label") == "Board views")
     for name in ["machines", "repos"]:
-        link = next(attrs for attrs in markup.nav_links if urlsplit(attrs["href"]).path == "/view/" + name)
+        link = next(
+            markup.tags[index][1]
+            for index in markup.descendants(pivots, "a")
+            if urlsplit(markup.tags[index][1]["href"]).path == "/view/" + name
+        )
         assert parse_qs(urlsplit(link["href"]).query) == query
         assert ("aria-current" in link) == (name == view)
     fields = {attrs["name"]: attrs for attrs in markup.elements("input") if "name" in attrs}
@@ -284,11 +330,7 @@ def test_board_navigation_and_filters_preserve_query_state(view):
     assert markup.elements("form")[0]["action"] == ("/" if view == "machines" else "/view/repos")
 
 
-def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
-    import re
-
-    from brigade.fleet_deck_brands import harness_brand, provider_brand
-
+def test_badge_icons_have_trusted_accessible_labels_without_inline_styles():
     hostile = '"><img src=x onerror="alert(1)">'
     names = ["claude", "codex", "cursor", "opencode", "google", "t3-fleet", "grok", "grok-bot", "anthropic", hostile]
     tiles = tuple(
@@ -319,29 +361,76 @@ def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
     assert not [(tag, attrs) for tag, attrs in markup.tags if "style" in attrs]
     assert markup.elements("img") == []
     assert markup.elements("style") == [{"nonce": "badge-nonce"}]
-    stylesheet = rendered.split('<style nonce="badge-nonce">', 1)[1].split("</style>", 1)[0]
     badges = [attrs for attrs in markup.elements("span") if "badge" in attrs.get("class", "").split()]
-    assert len(badges) == 2 * len(names)
-    for attrs, brand in zip(
-        badges, [brand for name in names for brand in (harness_brand(name), provider_brand(name))], strict=True
-    ):
-        assert any(
-            re.search(
-                r"\." + re.escape(cls) + r"\s*\{[^}]*background:\s*" + re.escape(brand.accent) + r"\s*;", stylesheet
-            )
-            for cls in attrs["class"].split()
-        )
-    assert [attrs["title"] for attrs in badges[-2:]] == [hostile, hostile]
+    assert len(badges) == len(names)
+    labels = ["Claude", "Codex", "Cursor", "OpenCode", "Google", "T3 Fleet", "Grok", "Grokbot", "Anthropic", "Agent"]
+    for attrs, label in zip(badges, labels, strict=True):
+        assert "badge-icon" in attrs["class"].split()
+        assert attrs["role"] == "img"
+        assert attrs["aria-label"] == label
+    assert [attrs["title"] for attrs in badges[-1:]] == [hostile]
 
 
-def test_populated_deck_separates_station_grid_from_following_panel():
+def test_populated_deck_orders_summary_alerts_work_and_machines():
     station = deck.StationView(
         deck.StationConfig("fixture-node", "Example", 2), "Example", True, 0, NOW.isoformat(), ()
     )
     view = deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
-    markup = Markup(rendered)
-    assert [attrs["class"] for attrs in markup.top_sections[:2]] == ["stations", "panel"]
-    assert markup.top_sections[1]["aria-labelledby"] == "control-plane"
+    markers = [
+        'aria-label="Fleet summary"',
+        'class="alert-line"',
+        'id="machines-table"',
+        'aria-labelledby="working-title"',
+    ]
+    positions = [rendered.index(marker) for marker in markers]
+    assert positions == sorted(positions)
     stylesheet = rendered.split('<style nonce="spacing-nonce">', 1)[1].split("</style>", 1)[0]
-    assert ".stations + .panel { margin-top: 16px; }" in stylesheet
+    # The shared 16px step still separates the sections of the main column.
+    assert ".overview > * + * { margin-top: var(--space-4); }" in stylesheet
+
+
+def _document_css(rendered: str) -> str:
+    """The document stylesheet: the first style element, which is the one in the head."""
+    match = re.search(r'<style nonce="[^"]*">(.*?)</style>', rendered, re.DOTALL)
+    assert match
+    return match.group(1)
+
+
+def _center_status_page() -> str:
+    from brigade.center_cmd.dashboard import render
+    from brigade.center_cmd.dashboard.views import render_nav, status_grid
+
+    return render.page(
+        "Status",
+        "integration-nonce",
+        render_nav("status"),
+        status_grid.render({"pending_tasks": []}, nonce="integration-nonce"),
+    )
+
+
+def test_boards_and_deck_pages_follow_the_system_scheme_and_center_stays_dark(fleet_pages):
+    for route, rendered in fleet_pages.items():
+        css = _document_css(rendered)
+        assert "color-scheme: light dark;" in css, route
+        assert "@media (prefers-color-scheme: light)" in css, route
+    center = _document_css(_center_status_page())
+    assert "color-scheme: dark;" in center and "prefers-color-scheme" not in center
+    assert "--canvas: #0a0a0a;" in center
+
+
+_LITERAL_COLOR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\(", re.IGNORECASE)
+
+
+def test_page_css_has_no_literal_colors_outside_the_token_block(fleet_pages):
+    pages = {**fleet_pages, "/center/status": _center_status_page()}
+    for route, rendered in pages.items():
+        css = _document_css(rendered).replace(ui_theme.TOKENS, "").replace(ui_theme.DARK_TOKENS, "")
+        assert _LITERAL_COLOR.findall(css) == [], route
+
+
+def test_token_block_is_where_the_literals_live():
+    assert _LITERAL_COLOR.search(ui_theme.TOKENS)
+    assert _LITERAL_COLOR.search(ui_theme.DARK_TOKENS)
+    assert not _LITERAL_COLOR.search(ui_theme.BASE_CSS)
+    assert not _LITERAL_COLOR.search(ui_theme.OVERVIEW_CSS)

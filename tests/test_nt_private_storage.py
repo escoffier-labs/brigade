@@ -351,6 +351,66 @@ def test_private_handle_refuses_wrong_kind_reparse_and_links(monkeypatch, attrib
         nt_private._verify_handle(api, 101, directory=directory, owner=OWNER)
 
 
+@pytest.mark.parametrize(
+    "information,acl,expected_owner",
+    [(4 | 0x20000000, 202, None), (4 | 0x80000000, 202, None), (4 | 0x80000000, None, None), (1, None, 101)],
+    ids=["unprotected", "protected", "null-dacl", "owner-only"],
+)
+@pytest.mark.parametrize("error_code", [0, 5])
+def test_native_fixture_setter_preserves_requested_security_parts(
+    monkeypatch, tmp_path, information, acl, expected_owner, error_code
+):
+    from contextlib import contextmanager
+
+    calls, queries = [], []
+
+    class Function:
+        def __init__(self, callback):
+            self.callback = callback
+
+        def __call__(self, *args):
+            return self.callback(*args)
+
+    def owner(descriptor, output, defaulted):
+        assert descriptor == 303
+        queries.append("owner")
+        ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = 101
+        return True
+
+    def dacl(descriptor, present, output, defaulted):
+        assert descriptor == 303
+        queries.append("dacl")
+        ctypes.cast(present, ctypes.POINTER(ctypes.wintypes.BOOL)).contents.value = True
+        ctypes.cast(output, ctypes.POINTER(ctypes.c_void_p)).contents.value = acl
+        return True
+
+    def named(path, object_type, flags, owner, group, dacl, sacl):
+        calls.append((path, object_type, flags, owner.value, group, dacl.value, sacl))
+        return error_code
+
+    api = SimpleNamespace(
+        GetSecurityDescriptorOwner=Function(owner),
+        GetSecurityDescriptorDacl=Function(dacl),
+        SetNamedSecurityInfoW=Function(named),
+        SetFileSecurityW=Function(lambda *args: calls.append(("legacy", *args)) or True),
+    )
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *args, **kwargs: api, raising=False)
+
+    @contextmanager
+    def descriptor(_sddl):
+        yield 303
+
+    monkeypatch.setattr(sys.modules[__name__], "_native_descriptor", descriptor)
+    path = tmp_path / "fixture"
+    if error_code:
+        with pytest.raises(AssertionError, match=f"fixture SetNamedSecurityInfoW failed: {error_code}"):
+            TestNativePrivateStorage._set_fixture_security(path, "fixture descriptor", information=information)
+    else:
+        TestNativePrivateStorage._set_fixture_security(path, "fixture descriptor", information=information)
+    assert queries == (["owner"] if information == 1 else ["dacl"])
+    assert calls == [(str(path), 1, information, expected_owner, None, acl, None)]
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="native Windows private storage acceptance")
 class TestNativePrivateStorage:
     def test_child_directory_file_lock_creation_and_reopen(self, tmp_path: Path):
@@ -426,10 +486,42 @@ class TestNativePrivateStorage:
         from ctypes import wintypes
 
         api = ctypes.WinDLL("advapi32", use_last_error=True)
-        api.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
-        api.SetFileSecurityW.restype = wintypes.BOOL
+        api.GetSecurityDescriptorOwner.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        api.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+        api.GetSecurityDescriptorDacl.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(wintypes.BOOL),
+            ctypes.POINTER(ctypes.c_void_p),
+            ctypes.POINTER(wintypes.BOOL),
+        ]
+        api.GetSecurityDescriptorDacl.restype = wintypes.BOOL
+        api.SetNamedSecurityInfoW.argtypes = [
+            wintypes.LPWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+        ]
+        api.SetNamedSecurityInfoW.restype = wintypes.DWORD
         with _native_descriptor(sddl) as descriptor:
-            assert api.SetFileSecurityW(str(path), information, descriptor), ctypes.WinError(ctypes.get_last_error())
+            owner, dacl = ctypes.c_void_p(), ctypes.c_void_p()
+            defaulted, present = wintypes.BOOL(), wintypes.BOOL()
+            if information & 1:  # OWNER_SECURITY_INFORMATION: leave the DACL untouched.
+                assert api.GetSecurityDescriptorOwner(descriptor, ctypes.byref(owner), ctypes.byref(defaulted))
+            if information & 4:  # DACL_SECURITY_INFORMATION, including an explicit null DACL.
+                assert api.GetSecurityDescriptorDacl(
+                    descriptor, ctypes.byref(present), ctypes.byref(dacl), ctypes.byref(defaulted)
+                )
+                assert present.value
+            # Protection flags are interpreted by SetNamedSecurityInfoW, not the obsolete setter.
+            error = api.SetNamedSecurityInfoW(str(path), 1, information, owner, None, dacl, None)
+            assert error == 0, f"fixture SetNamedSecurityInfoW failed: {error}"
 
     @pytest.mark.parametrize("policy", ["explicit", "null", "unprotected", "owner-read-only"])
     def test_refuses_unsafe_existing_security(self, tmp_path: Path, policy):

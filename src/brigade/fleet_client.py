@@ -106,12 +106,22 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_flush import flush_locked as _flush_locked
 from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
+from .fleet_client_spool_lock import _spool_lock as _spool_lock
+from .fleet_client_spool_lock import _validate_spool_lock_timeout as _validate_spool_lock_timeout
 from . import toml_compat as tomllib
-from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
+from .fleet_claim_lifecycle import (
+    CLAIM_FENCE_REFUSALS,
+    CLEANUP_RETRY_REASONS,
+    STALE_CLAIM_REFUSALS,
+    TERMINAL_CLAIM_REFUSALS,
+    UNCERTAIN_CLEANUP_REASONS,
+    _ConfirmedClaimLease as _ConfirmedClaimLease,
+)
 
 try:
     import fcntl
@@ -136,6 +146,12 @@ CLAIM_TIMEOUT_SECONDS = 2.5
 # deadline as claims. A missing or unavailable hub is a refusal, never a
 # reason to start provider work locally.
 CLOUD_TIMEOUT_SECONDS = 2.5
+# Lease TTL a launcher requests when it binds a provider session. Admission uses a
+# short 300 second TTL because it only covers the submit round trip; once bound, the
+# session runs for hours and nothing renews the lease between manual `cloud sync`
+# runs. Six hours matches the tracker's default stale-ready threshold, so a session
+# stays visible on the Deck for as long as it can still be classified as live.
+CLOUD_BOUND_TTL_SECONDS = 6 * 60 * 60
 MAX_CLOUD_RESPONSE_BYTES = 64 * 1024
 MAX_ACTIVE_SESSIONS_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_SESSION_HISTORY_RESPONSE_BYTES = 40 * 1024 * 1024
@@ -250,8 +266,7 @@ def load_fleet_config() -> dict[str, str]:
     (``BRIGADE_FLEET_NODE_TOKEN`` / ``[fleet] node_token_file``), or, when
     none is configured, the shared admin token (``BRIGADE_FLEET_TOKEN`` /
     ``[fleet] token_file``) — the deprecated shared-token mode, logged as
-    one WARNING per process when a hub is configured. See
-    ``load_fleet_settings`` for precedence.
+    one WARNING per process when a hub is configured. See ``load_fleet_settings`` for precedence.
     """
     global _SHARED_TOKEN_WARNED
     settings = load_fleet_settings()
@@ -261,7 +276,7 @@ def load_fleet_config() -> dict[str, str]:
         if settings["hub_url"] and not _SHARED_TOKEN_WARNED:
             _SHARED_TOKEN_WARNED = True
             _LOG.warning(_SHARED_TOKEN_WARNING)
-    return {"hub_url": settings["hub_url"], "token": token}
+    return _claim_lifecycle._FleetConfig(settings, token)
 
 
 def _read_token_file(raw_path: str) -> str:
@@ -586,48 +601,6 @@ def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
     return fd
 
 
-@contextmanager
-def _spool_lock(path: Path) -> Iterator[int | None]:
-    """Guard a spool across processes and threads.
-
-    Yields a validated directory descriptor for relative I/O, or None on Windows.
-    """
-    dir_fd = _ensure_private_dir(path.parent)
-    lock_name = path.name + ".lock"
-    try:
-        with _SPOOL_PROCESS_LOCK:
-            if dir_fd is not None:
-                fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
-            else:  # pragma: no cover - Windows
-                fd = os.open(str(path.with_name(lock_name)), os.O_RDWR | os.O_CREAT | _O_CLOEXEC, 0o600)
-            locked = False
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                    locked = True
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    while True:
-                        try:
-                            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                            locked = True
-                            break
-                        except OSError:
-                            continue
-                yield dir_fd
-            finally:
-                try:
-                    if locked:
-                        if fcntl is not None:
-                            fcntl.flock(fd, fcntl.LOCK_UN)
-                        elif msvcrt is not None:  # pragma: no cover - Windows
-                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                finally:
-                    os.close(fd)
-    finally:
-        if dir_fd is not None:
-            os.close(dir_fd)
-
-
 def _encode(event: dict[str, Any]) -> str:
     return json.dumps(event, sort_keys=True)
 
@@ -761,54 +734,6 @@ def _spool_append_locked(
     return True
 
 
-def _flush_locked(
-    path: Path,
-    hub: str,
-    token: str,
-    *,
-    max_batches: int | None,
-    timeout: float,
-    dir_fd: int | None = None,
-    preserve_poison: bool = False,
-    on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
-) -> int:
-    events = _read_spool(path, dir_fd=dir_fd)
-    if not events:
-        if dir_fd is not None:
-            try:
-                os.unlink(path.name, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-        else:
-            path.unlink(missing_ok=True)
-        return 0
-    index = 0
-    delivered = 0
-    batches = 0
-    while index < len(events) and (max_batches is None or batches < max_batches):
-        batch = events[index : index + FLUSH_BATCH_SIZE]
-        try:
-            _post_events(hub, token, batch, timeout=timeout)
-        except _PoisonResponse as exc:
-            if preserve_poison:
-                break
-            _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
-            index += len(batch)
-            batches += 1
-            continue
-        except Exception:
-            break
-        index += len(batch)
-        delivered += len(batch)
-        if on_delivered is not None:
-            on_delivered(batch)
-        batches += 1
-    if index == 0:
-        return 0
-    _write_spool_atomic(path, events[index:], dir_fd=dir_fd)
-    return delivered
-
-
 def flush_spool(
     node_id: str,
     *,
@@ -819,9 +744,10 @@ def flush_spool(
 ) -> int:
     """Re-POST spooled events in order, ``FLUSH_BATCH_SIZE`` per request.
 
-    Delivered (or poison-dropped) events are removed from the spool via an
-    atomic rewrite; undelivered ones keep their order so the next flush
-    resumes where this one stopped. A flush that makes no progress leaves
+    Delivered events are removed from the spool via an atomic rewrite. A
+    rejected batch is bisected so only the rejected events move to the
+    bounded dead letter (``fleet_client_flush``); undelivered ones keep their
+    order so the next flush resumes where this one stopped. A flush that makes no progress leaves
     the file untouched. Returns the number of delivered events. Never raises
     for network failures.
     """
@@ -842,8 +768,11 @@ def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_i
     """Report with local identity and durable spool, preserving the public bool API.
 
     Origin overrides remain ignored. Interrupts propagate only after a
-    best-effort spool write. One request per call, with a bounded deadline.
-    ``report_event_detailed`` captures the durable outcome for receipt callers
+    best-effort spool write. Without a spool this is one request with a
+    bounded deadline. With a spool it is one batch request, plus isolation
+    of a rejected batch capped at ``REPORT_TIMEOUT_SECONDS`` in total; on a
+    hub too slow to isolate within that, the spool waits for an explicit
+    ``fleet flush``. ``report_event_detailed`` captures the durable outcome for receipt callers
     without changing this established signature or return type.
     """
     from .fleet_event_report import report
@@ -1068,6 +997,7 @@ class ClaimDecision:
     superseded: dict[str, Any] | None = None
     lock_run_dir: str | None = None
     cancel_event: threading.Event | None = None
+    generation: int | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -1080,6 +1010,10 @@ class FleetClaimHeldError(FleetClientError):
 
 class FleetClaimExpiredError(FleetClaimHeldError):
     """A granted response arrived after its conservative local deadline."""
+
+
+class FleetClaimQuotaError(FleetClaimHeldError):
+    """The hub refused another active claim for this node."""
 
 
 class FleetClaimAuthError(FleetClaimHeldError):
@@ -1114,7 +1048,7 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 401, 403, 409):
+        if exc.code in (400, 401, 403, 409, 503):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
             # that does not know a request field), a 403 names the node the
@@ -1162,6 +1096,7 @@ def _claim_op(
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
     acquired_at: str | None = None,
+    generation: int | None = None,
     harness: str | None = None,
     role: str | None = None,
     job: str | None = None,
@@ -1176,8 +1111,8 @@ def _claim_op(
     node-scoped acquire presents (see ``lease_from_lock_owner``).
     """
     try:
-        config = load_fleet_config()
-        hub = hub_url or config["hub_url"]
+        config = load_fleet_config() if hub_url is None or token is None else {}
+        hub = config["hub_url"] if hub_url is None else hub_url
         if not hub:
             return ClaimDecision(granted=False, reason="no-hub", holder=holder)
         resolved_node = node_id or resolve_node_id(base_path)
@@ -1199,6 +1134,8 @@ def _claim_op(
             body["supersede"] = dict(supersede)
         if acquired_at is not None:
             body["acquired_at"] = acquired_at
+        if generation is not None:
+            body["generation"] = generation
         if conductor:
             body["conductor"] = conductor
         try:
@@ -1208,7 +1145,7 @@ def _claim_op(
         for field, value in labels.items():
             if value is not None:
                 body[field] = value
-        tok = token or config["token"]
+        tok = config["token"] if token is None else token
         status, payload = _run_with_deadline(
             lambda: _post_claim_blocking(hub, tok, body, timeout=CLAIM_TIMEOUT_SECONDS),
             timeout=CLAIM_TIMEOUT_SECONDS,
@@ -1218,6 +1155,8 @@ def _claim_op(
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+    if status == 409 and payload.get("reason") == "claim-cardinality-exceeded":
+        return ClaimDecision(granted=False, reason="quota", detail=detail, holder=holder)
     if status in (401, 403):
         # A stable credential answer (#1161): retrying cannot heal it and it
         # must never be mistaken for a transport failure (which would fail
@@ -1225,17 +1164,43 @@ def _claim_op(
         return ClaimDecision(
             granted=False, reason="auth-failed", detail=detail or f"hub returned HTTP {status}", holder=holder
         )
+    if payload.get("reason") in CLAIM_FENCE_REFUSALS:
+        return ClaimDecision(granted=False, reason=payload["reason"], detail=detail, holder=holder)
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
+        if action == "inspect":
+            held = payload.get("claim")
+            owner_node = held.get("owner_node") if isinstance(held, dict) else None
+            if "claim" not in payload or (
+                held is not None
+                and not (
+                    isinstance(owner_node, str)
+                    and _node_id_is_claimable(owner_node)
+                    and _CLAIM_ID_RE.fullmatch(owner_node)
+                )
+            ):
+                return ClaimDecision(
+                    granted=False,
+                    reason="hub-unavailable",
+                    detail="hub returned a malformed inspect response",
+                    holder=holder,
+                )
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
         run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
         return ClaimDecision(
-            granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
+            granted=True,
+            reason="ok",
+            claim=claim,
+            holder=holder,
+            superseded=superseded,
+            lock_run_dir=run_dir,
+            generation=payload.get("generation", claim.get("generation") if claim else None),
         )
     if status in (200, 409):
-        return ClaimDecision(
-            granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
-        )
+        reason = payload.get("reason")
+        if reason not in STALE_CLAIM_REFUSALS:
+            reason = "held" if owner is not None else "missing"
+        return ClaimDecision(granted=False, reason=reason, owner=owner, detail=detail, holder=holder)
     return ClaimDecision(
         granted=False, reason="hub-unavailable", detail=detail or f"hub returned HTTP {status}", holder=holder
     )
@@ -1301,6 +1266,9 @@ def release_claim(
     ``held``). The deleted row comes back as ``ClaimDecision.claim``.
     """
     kwargs.pop("ttl_seconds", None)
+    if force and kwargs.get("generation") is None:
+        kwargs.pop("generation", None)
+        return _claim_lifecycle._force_release(target, holder=holder, acquired_at=acquired_at, **kwargs)
     scope = "force" if force else ("holder" if holder is not None else "node")
     return _claim_op("release", target, holder=holder, scope=scope, acquired_at=acquired_at, **kwargs)
 
@@ -1556,10 +1524,25 @@ def _claim_loss_policy(explicit: str | None = None) -> str:
 
 
 def _schedule_orphan_release(
-    target: str, *, node_id: str, holder: str, conductor: str | None, ttl_seconds: int
+    target: str,
+    *,
+    node_id: str,
+    holder: str,
+    conductor: str | None,
+    ttl_seconds: int,
+    hub_url: str | None = None,
+    token: str | None = None,
+    connect: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     _claim_lifecycle._schedule_orphan_release(
-        target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+        target,
+        node_id=node_id,
+        holder=holder,
+        conductor=conductor,
+        ttl_seconds=ttl_seconds,
+        hub_url=hub_url,
+        token=token,
+        connect=connect,
     )
 
 
@@ -1670,12 +1653,16 @@ def repo_claim(
     supersede once. The heartbeat's re-acquire never supersedes.
     """
     try:
-        hub_configured = bool(load_fleet_config()["hub_url"])
+        config = load_fleet_config()
+        hub_configured = bool(config["hub_url"])
     except Exception:
         hub_configured = False
     if not hub_configured:
         yield ClaimDecision(granted=False, reason="no-hub")
         return
+    connection = _claim_lifecycle._bound_connection(
+        config["hub_url"], config.get("token", ""), shared=getattr(config, "shared_token", None)
+    )
     node_id = resolve_node_id(base_path)
     if not _node_id_is_claimable(node_id):
         _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
@@ -1690,16 +1677,23 @@ def repo_claim(
         "conductor": conductor,
         "ttl_seconds": ttl_seconds,
         "lock_owner": lock_owner,
+        **connection(),
     }
     request_start = time.monotonic()
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
-        # One retry with the same fencing token: a lost response may have
-        # committed the row (idempotent for this holder), and a 409 with no
-        # owner means the target freed mid-request.
+        # One retry, same fencing token, current credential: a lost response may have committed the row
+        # (idempotent for this holder), and a 409 with no owner means the target freed mid-request.
         request_start = time.monotonic()
+        acquire_kwargs.update(connection())
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    if not decision.granted and decision.reason == "quota":
+        if ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+            )
+        raise FleetClaimQuotaError(f"fleet hub claim quota refused {target!r}: {decision.detail}")
     if not decision.granted and decision.reason == "auth-failed":
         # Fail closed (#1161): bad credentials would turn "the hub refused"
         # into "every node runs unprotected on its local lock". No retry,
@@ -1712,7 +1706,9 @@ def repo_claim(
         )
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
-        _schedule_orphan_release(target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds)
+        _schedule_orphan_release(
+            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+        )
         yield decision
         return
     if not decision.granted and decision.reason == "missing":
@@ -1725,11 +1721,17 @@ def repo_claim(
             # still in flight. Preserve degraded admission and fence any
             # later commit using the original retry holder token.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         yield decision
         return
     if not decision.granted:
+        if decision.reason == "claim-fence-refused" and ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+            )
+        if decision.reason in TERMINAL_CLAIM_REFUSALS:
+            raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
         until = owner.get("expires_at") or "its TTL expires"
@@ -1754,9 +1756,9 @@ def repo_claim(
         pending_orphan_release.set()
 
     def _release_on_exit(*, admission_refused: bool = False) -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
         if ambiguous_initial_acquire or (
-            pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing")
+            pending_orphan_release.is_set() and release_outcome.reason in UNCERTAIN_CLEANUP_REASONS
         ):
             # Inline cleanup survives imminent CLI exit: two further calls,
             # each spaced by one request timeout and bounded by that timeout.
@@ -1766,19 +1768,22 @@ def repo_claim(
             # on a definitive reply when no initial uncertainty exists.
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
                 time.sleep(CLAIM_TIMEOUT_SECONDS)
-                release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if not ambiguous_initial_acquire and release_outcome.reason not in ("hub-unavailable", "missing"):
+                release_outcome = release_claim(
+                    target, holder=holder, node_id=node_id, conductor=conductor, **connection()
+                )
+                if not ambiguous_initial_acquire and release_outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
                     break
-            if release_outcome.reason in ("hub-unavailable", "missing"):
+            if release_outcome.reason in UNCERTAIN_CLEANUP_REASONS:
                 _LOG.warning(
                     "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
                     "(last answer: %s); the row lives until its TTL expires",
                     target,
                     release_outcome.reason,
                 )
-        if release_outcome.reason == "hub-unavailable" and (admission_refused or ambiguous_initial_acquire):
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
+            # Retain the bound connection while retrying refused releases after exit or rejected admission.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         # This window cannot fence a server request that commits beyond it
         # (#1189), even when every release received a positive acknowledgement.
@@ -1835,10 +1840,10 @@ def repo_claim(
     )
 
     def _release_rejected_grant() -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if release_outcome.reason == "hub-unavailable":
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
 
     def _renew_loop() -> None:
@@ -1848,14 +1853,16 @@ def repo_claim(
             if not lease.active():
                 return
             attempt_start = time.monotonic()
-            outcome = renew_claim(target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds)
+            outcome = renew_claim(
+                target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+            )
             if not outcome.granted and outcome.reason == "missing":
                 # Check deadline and authority, and mark the possible orphan,
                 # together before sending. Shutdown cannot miss this request.
                 if not lease.active(pending_orphan=pending_orphan_release):
                     return
                 attempt_start = time.monotonic()
-                outcome = acquire_claim(target, **acquire_kwargs)
+                outcome = acquire_claim(target, **{**acquire_kwargs, **connection()})
             next_request = attempt_start + _claim_renew_interval(ttl_seconds)
             if outcome.granted:
                 if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
@@ -1888,7 +1895,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason == "held":
+            if outcome.reason in ("held", "quota") or outcome.reason in TERMINAL_CLAIM_REFUSALS:
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -22,9 +23,18 @@ from .. import fleet_hub_messages
 
 
 def register(fleet_sub: argparse._SubParsersAction) -> None:
+    # The fleet MCP station is the agent-facing side of messaging; registering
+    # it here keeps cli/fleet.py under the module size ceiling.
+    from ..fleet_mcp import register as register_mcp
+
+    register_mcp(fleet_sub)
     parser = fleet_sub.add_parser("msg", help="Send and manage durable Fleet Hub messages.")
     sub = parser.add_subparsers(dest="msg_command", metavar="<msg-command>")
     sub.required = True
+    identity = sub.add_parser("identity", help="Read this credential's authenticated active Hub principal.")
+    identity.add_argument("--json", action="store_true")
+    _message_options(identity)
+    identity.set_defaults(func=_identity)
     send = sub.add_parser("send", help="Send a message to an active node or agent principal.")
     send.add_argument("--to", required=True, help="Recipient node or agent principal.")
     send.add_argument("--subject", required=True)
@@ -38,9 +48,21 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     listing = sub.add_parser("list", help="Read this principal's message inbox.")
     listing.add_argument("--unacked", action="store_true")
     listing.add_argument("--after", type=int, default=0, help="Return messages after this cursor.")
+    listing.add_argument(
+        "--wait",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Wait up to SECONDS for matching messages (0 to 20 seconds; larger values are rejected).",
+    )
     listing.add_argument("--json", action="store_true")
     _message_options(listing)
     listing.set_defaults(func=_list)
+
+    count = sub.add_parser("count", help="Count this principal's unread inbox messages without fetching bodies.")
+    count.add_argument("--json", action="store_true")
+    _message_options(count)
+    count.set_defaults(func=_count)
 
     ack = sub.add_parser("ack", help="Acknowledge one inbox message.")
     ack.add_argument("id", type=int)
@@ -74,7 +96,9 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     principals = sub.add_parser("principals", help="Enroll or revoke named external agent principals (admin token).")
     principal_sub = principals.add_subparsers(dest="principal_command", metavar="<principal-command>")
     principal_sub.required = True
-    add = principal_sub.add_parser("add", help="Enroll a named external agent and print its one-time token.")
+    add = principal_sub.add_parser(
+        "add", help="Enroll a named external agent and print its token (shown once; store it privately)."
+    )
     add.add_argument("name")
     add.add_argument("--label")
     add.add_argument("--may-send-to", nargs="+", action="extend")
@@ -106,7 +130,7 @@ def _message_options(parser: argparse.ArgumentParser, *, metadata: bool = False)
         parser.add_argument("--client-id", help="Stable idempotency key for retries.")
 
 
-def _token_kwargs(args: argparse.Namespace) -> dict[str, str]:
+def _token_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return {"token_file": args.token_file} if args.token_file is not None else {}
 
 
@@ -200,12 +224,41 @@ def _send(args: argparse.Namespace) -> int:
     )
 
 
+def _wait_ms(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError("wait must be a non-negative number of seconds")
+    if value == 0:
+        return 0
+    if value > fleet_hub_messages.MAX_WAIT_MS / 1000:
+        raise ValueError("wait must not exceed 20 seconds")
+    return max(1, int(round(float(value) * 1000)))
+
+
+def _identity(args: argparse.Namespace) -> int:
+    from .. import fleet_client_messages
+
+    return _result(args, lambda: fleet_client_messages.identity(**_token_kwargs(args)))
+
+
 def _list(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
-    return _result(
-        args, lambda: fleet_client_messages.list_messages(after=args.after, unacked=args.unacked, **_token_kwargs(args))
-    )
+    def operation() -> dict[str, Any]:
+        wait_ms = _wait_ms(getattr(args, "wait", 0.0))
+        kwargs: dict[str, Any] = _token_kwargs(args)
+        if wait_ms > 0:
+            kwargs["wait_ms"] = wait_ms
+        return fleet_client_messages.list_messages(after=args.after, unacked=args.unacked, **kwargs)
+
+    return _result(args, operation)
+
+
+def _count(args: argparse.Namespace) -> int:
+    from .. import fleet_client_messages
+
+    return _result(args, lambda: fleet_client_messages.unread_count(**_token_kwargs(args)))
 
 
 def _ack(args: argparse.Namespace) -> int:
@@ -238,6 +291,7 @@ def _principal_add(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
     deferred_request_ids: list[str] = []
+    deferred_paths: list[Path] = []
 
     return _result(
         args,
@@ -248,9 +302,10 @@ def _principal_add(args: argparse.Namespace) -> int:
             may_send_to=getattr(args, "may_send_to", None),
             _defer_finalize=True,
             _deferred_request_ids=deferred_request_ids,
+            _deferred_paths=deferred_paths,
         ),
         after_output=lambda: fleet_client_messages.finalize_principal_add(
-            args.name, request_id=deferred_request_ids[-1]
+            args.name, request_id=deferred_request_ids[-1], pending_path=deferred_paths[-1]
         ),
     )
 

@@ -5,9 +5,9 @@ MiseLedger is usable now as a local archive, search, and evidence layer for norm
 ## Usable Now
 
 - Import `miseledger.adapter.v1` JSONL from source-specific exporters.
-- Import native Codex, OpenClaw, Claude, OpenCode, Hermes, Cursor, and Grok session fixtures and local logs.
+- Import native Codex, OpenClaw, Claude, Pi, OpenCode, Hermes, Cursor, and Grok session fixtures and local logs.
 - Crawl local agent sessions with `miseledger crawl sessions`.
-- Crawl Markdown, files, HTML, JSON, JSONL, and git history with built-in local artifact crawlers.
+- Crawl Markdown, files, HTML, JSON, JSONL, and git history through wrappers that require the external `sourceharvest` binary.
 - Search one SQLite archive across crawler records, local source exports, and agent-session logs.
 - Produce evidence bundles with `untrusted_context: true`, raw refs, snippets, actors, collections, artifacts, and warnings.
 - Cache evidence bundles with stable local `miseledger://evidence/<id>` references.
@@ -36,7 +36,7 @@ recommending MiseLedger broadly:
 
 ## Non-Goals
 
-- No GUI.
+- No native desktop app. The loopback server includes a browser search UI.
 - No hosted service requirement.
 - No macOS-only behavior.
 - No network calls from archive, import, search, evidence, MCP, or HTTP commands.

@@ -25,6 +25,7 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
+from .memory_paths import read_only_pattern as read_only_pattern, relative_path as _relative_path
 from .memory_search_diagnostics import _normalize_search_query, redundancy_from_entries
 from .card_identity import (
     CardIdentity,
@@ -36,6 +37,7 @@ from .card_identity import (
     valid_card_id,
 )
 from .templates import template_root
+from .memory_evidence_log import EvidenceLog
 from .memory_care_plan import (
     PLANABLE_METADATA_FIXES,
     format_block_reasons,
@@ -56,6 +58,7 @@ MEMORY_CARE_RUNBOOK_NAMES = (
 LEGACY_OUTPUT_PATH = "memory/cards/decay"
 CHECKS = (
     "stale",
+    "unconsolidated-evidence",
     "expired",
     "undersourced",
     "contradictory",
@@ -83,6 +86,7 @@ class MemoryCareConfig:
     output_path: str = DEFAULT_OUTPUT_PATH
     enabled_checks: tuple[str, ...] = CHECKS
     max_card_bytes: int = MEMORY_CARD_BUDGET_BYTES
+    read_only_paths: tuple[str, ...] = ()
 
 
 def config_path(target: Path) -> Path:
@@ -159,6 +163,7 @@ def _format_config(config: MemoryCareConfig | None = None) -> str:
             f"output_path = {_toml_value(config.output_path)}",
             f"enabled_checks = {_toml_value(list(config.enabled_checks))}",
             f"max_card_bytes = {config.max_card_bytes}",
+            f"read_only_paths = {_toml_value(list(config.read_only_paths))}",
             "",
         ]
     )
@@ -187,13 +192,6 @@ def _positive_int(raw: object, *, field: str, default: int, minimum: int = 0) ->
     return raw
 
 
-def _relative_path(value: str, *, field: str) -> str:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or not value.strip():
-        raise ValueError(f"{field} must be a non-empty relative path without '..'")
-    return value.strip()
-
-
 def load_config(target: Path) -> MemoryCareConfig | None:
     path = config_path(target)
     if not path.is_file():
@@ -210,6 +208,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     index_paths = _string_list(data.get("index_paths"), field="index_paths", default=("MEMORY.md",))
     include_paths = _string_list(data.get("include_paths"), field="include_paths", default=())
     exclude_paths = _string_list(data.get("exclude_paths"), field="exclude_paths", default=("memory/cards/decay",))
+    read_only_paths = _string_list(data.get("read_only_paths"), field="read_only_paths", default=())
     enabled_checks = _string_list(data.get("enabled_checks"), field="enabled_checks", default=CHECKS, allowed=CHECKS)
     minimum_confidence = data.get("minimum_confidence", "medium")
     if not isinstance(minimum_confidence, str) or minimum_confidence not in CONFIDENCE_RANK:
@@ -225,6 +224,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         ("index_paths", index_paths),
         ("include_paths", include_paths),
         ("exclude_paths", exclude_paths),
+        ("read_only_paths", read_only_paths),
     ):
         for item in paths:
             _relative_path(item, field=field)
@@ -242,6 +242,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         max_card_bytes=_positive_int(
             data.get("max_card_bytes"), field="max_card_bytes", default=MEMORY_CARD_BUDGET_BYTES, minimum=1
         ),
+        read_only_paths=read_only_paths,
     )
 
 
@@ -393,6 +394,10 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
+    return bool(config.read_only_paths) and read_only_pattern(rel, config.read_only_paths) is not None
+
+
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
     paths: list[Path] = []
     for root_text in config.card_roots:
@@ -404,7 +409,7 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
                 continue
             if not path.is_file():
                 continue
-            rel = str(path.relative_to(target))
+            rel = path.relative_to(target).as_posix()
             if config.include_paths and not _path_matches(rel, config.include_paths):
                 continue
             if config.exclude_paths and _path_matches(rel, config.exclude_paths):
@@ -504,14 +509,6 @@ def _safe_summary(text: str) -> str:
 def _priority(issue_type: str, severity: str) -> str:
     if severity == "high" or issue_type in {"expired", "missing-index-link"}:
         return "high"
-    if issue_type in {
-        "missing-frontmatter",
-        "missing-reviewed",
-        "missing-freshness",
-        "oversized-card",
-        "contradictory",
-    }:
-        return "normal"
     return "normal"
 
 
@@ -599,7 +596,10 @@ def _issue(
 def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     target = target.expanduser().resolve()
     today = _today()
+    # Read-only cards still count toward identity and collision data so a normal
+    # card that copies a protected ID is flagged; only their own issues are dropped.
     cards = _iter_cards(target, config)
+    read_only_card_count = 0
     linked = _index_links(target, config)
     linked_existing = {link for link in linked if (target / link).is_file()}
     issues: list[dict[str, Any]] = []
@@ -608,9 +608,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     identities: list[tuple[str, CardIdentity]] = []
     identities_by_path: dict[str, CardIdentity] = {}
     enabled = set(config.enabled_checks)
-
+    evidence_log = EvidenceLog(target)
     for path in cards:
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
         identity = card_identity(meta, rel)
@@ -618,6 +618,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         by_id.setdefault(card_id, []).append(rel)
         identities.append((rel, identity))
         identities_by_path[rel] = identity
+        if _is_read_only(config, rel):
+            read_only_card_count += 1
+            continue
         row = {
             "file": rel,
             "card_id": card_id,
@@ -640,6 +643,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
             )
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         row["last_reviewed"] = reviewed.isoformat() if reviewed else None
+        issues.extend(evidence_log.findings(target, config, rel, identity, meta))
         if has_frontmatter and "missing-reviewed" in enabled and reviewed is None:
             issues.append(
                 _issue(
@@ -815,6 +819,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     )
                 )
 
+    issues = [issue for issue in issues if not _is_read_only(config, str(issue.get("file") or ""))]
     for issue in issues:
         issue_identity = identities_by_path.get(str(issue.get("card_file") or ""))
         if issue_identity is not None:
@@ -855,11 +860,13 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "generated_at": _utc_iso(),
         "scan_date": today.isoformat(),
         "card_count": len(cards),
+        "read_only_card_count": read_only_card_count,
         "issue_count": len(issues),
         "refresh_queue_size": len(issues),
         "counts": dict(sorted(counts.items())),
         "metadata": metadata_summary,
         "identity_collisions": identity_collision_aliases(identities),
+        "evidence_log": evidence_log.summary,
         "cards": card_rows,
         "issues": issues,
     }
@@ -1036,6 +1043,14 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": f"missing, run `brigade memory care init --target {target}`",
                 }
             )
+    if config.read_only_paths:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "memory_read_only_paths",
+                "detail": f"{len(config.read_only_paths)} active: {', '.join(config.read_only_paths)}",
+            }
+        )
     scan_path = _scan_path(target, config)
     queue_path = _queue_path(target, config)
     scan_payload = None
@@ -1161,6 +1176,13 @@ def health(target: Path) -> dict[str, Any]:
         "valid": not any(check["status"] == "fail" for check in checks),
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
+        "enabled_checks": list(config.enabled_checks),
+        "read_only_paths": list(config.read_only_paths),
+        "counts": (
+            scan_payload["counts"]
+            if isinstance(scan_payload, dict) and isinstance(scan_payload.get("counts"), dict)
+            else {}
+        ),
         "queue_count": queue_count,
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,
@@ -1193,8 +1215,14 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"config_path: {payload['config_path']}")
     print(f"scan_path: {payload['scan_path']}")
     print(f"queue_path: {payload['queue_path']}")
+    if payload.get("read_only_paths"):
+        print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
+    evidence_count = payload["counts"].get("unconsolidated-evidence", 0)
+    if "unconsolidated-evidence" not in payload["enabled_checks"]:
+        evidence_count = "disabled"
+    print(f"unconsolidated-evidence: {evidence_count}")
     metadata_value = payload.get("metadata")
     metadata = metadata_value if isinstance(metadata_value, dict) else {}
     reviewed_value = metadata.get("reviewed_dates")
@@ -1317,8 +1345,9 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
     claimed_ids: IdentityIndex[str] = IdentityIndex()
     pending: list[tuple[Path, str, str, dict[str, Any]]] = []
+    # Every card claims its explicit ID so minting never reuses a read-only card's ID.
     for path in _iter_cards(target, config):
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         try:
             text = read_text_nofollow(path)
         except OSError:
@@ -1330,7 +1359,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         identity = card_identity(meta, rel)
         if identity.explicit:
             claimed_ids.claim(identity.card_id, rel)
-        pending.append((path, rel, text, meta))
+        if not _is_read_only(config, rel):
+            pending.append((path, rel, text, meta))
 
     for path, rel, text, meta in pending:
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
@@ -1807,11 +1837,11 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     except OSError:
         return {}
     frontmatter, _ = _parse_frontmatter(text)
-    identity = card_identity(frontmatter, str(path.relative_to(target)))
+    identity = card_identity(frontmatter, path.relative_to(target).as_posix())
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
-        "rel": str(path.relative_to(target)),
+        "rel": path.relative_to(target).as_posix(),
         "card_id": identity.card_id,
         "card_aliases": list(identity.aliases),
         "title": str(frontmatter.get("title") or path.stem),
@@ -1821,9 +1851,12 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
-def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[str, Any]:
+def search_cards_payload(
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    config = load_config(target) or MemoryCareConfig()
+    if config is None:
+        config = load_config(target) or MemoryCareConfig()
     terms = [term for term in query.lower().split() if term]
     matches: list[dict[str, Any]] = []
     for path in _iter_cards(target, config):
@@ -1885,128 +1918,64 @@ def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False
     return memory_hooks.recall(target=target, cwd=cwd, limit=limit, json_output=json_output, query=query)
 
 
-# --- read-only MCP server exposing memory cards over card:// ---
-
-_CARD_URI_PREFIX = "card://"
+# --- memory MCP server (stdio or loopback HTTP); the tool contract lives in memory_mcp_core ---
 
 
-def _card_uri(rel: str) -> str:
-    return f"{_CARD_URI_PREFIX}{rel}"
+MCP_HTTP_DEFAULT_PORT = 8931
 
 
-def _mcp_card_resources(target: Path, config: MemoryCareConfig) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for path in _iter_cards(target, config):
-        fields = _card_search_fields(path, target)
-        if not fields:
-            continue
-        items.append(
-            {
-                "uri": _card_uri(fields["rel"]),
-                "name": fields["title"],
-                "mimeType": "text/markdown",
-                "description": fields["summary"],
-            }
-        )
-    return items
+def serve_mcp(
+    *,
+    target: Path | None = None,
+    stdio: bool = False,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+    inbox: str = "codex",
+    json_output: bool = False,
+) -> int:
+    from . import memory_mcp_core
 
-
-def _mcp_read_card(target: Path, config: MemoryCareConfig, uri: str) -> tuple[str, str] | tuple[None, None]:
-    ref = uri[len(_CARD_URI_PREFIX) :] if uri.startswith(_CARD_URI_PREFIX) else uri
-    target_resolved = target.expanduser().resolve()
-    candidate = (target_resolved / ref).resolve()
-    # Only serve files whose real path stays inside the workspace; a `.md` symlink
-    # pointing outside a card root must not become a read primitive.
-    if not candidate.is_relative_to(target_resolved):
-        return None, None
-    for path in _iter_cards(target, config):
-        if path.is_symlink():
-            continue
-        if path.resolve() == candidate:
-            try:
-                return path.read_text(encoding="utf-8", errors="replace"), "text/markdown"
-            except OSError:
-                return None, None
-    return None, None
-
-
-def _mcp_card_tool_specs() -> list[dict[str, Any]]:
-    return [
-        {
-            "name": "list_cards",
-            "description": "List memory cards (path and title).",
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "get_card",
-            "description": "Read one memory card by repo-relative path or card:// uri.",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        },
-        {
-            "name": "search_cards",
-            "description": "Keyword-search memory cards; returns ranked path/title matches.",
-            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
-        },
-    ]
-
-
-def _mcp_card_tool_call(
-    target: Path, config: MemoryCareConfig, name: str, arguments: dict[str, Any]
-) -> tuple[object, bool]:
-    if name == "list_cards":
-        return (
-            [
-                {"path": str(p.relative_to(target)), "uri": _card_uri(str(p.relative_to(target)))}
-                for p in _iter_cards(target, config)
-            ],
-            False,
-        )
-    if name == "get_card":
-        ref = str(arguments.get("path") or "")
-        text, _ = _mcp_read_card(target, config, ref)
-        if text is None:
-            return (f"card not found: {ref}", True)
-        return (text, False)
-    if name == "search_cards":
-        return (search_cards_payload(target, str(arguments.get("query") or ""))["matches"], False)
-    return (f"unknown tool: {name}", True)
-
-
-def _run_card_mcp_stdio(target: Path) -> int:
-    config = load_config(target) or MemoryCareConfig()
-    return mcp_server.serve_stdio(
-        server_name="brigade-memory-readonly",
-        list_resources=lambda: _mcp_card_resources(target, config),
-        read_resource=lambda uri: _mcp_read_card(target, config, uri),
-        list_tools=_mcp_card_tool_specs,
-        call_tool=lambda name, arguments: _mcp_card_tool_call(target, config, name, arguments),
-    )
-
-
-def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -> int:
-    target = target.expanduser().resolve()
-    try:
-        config = load_config(target) or MemoryCareConfig()
-    except ValueError as exc:
-        print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
+    if target is not None and not target.expanduser().is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
+    if stdio and http:
+        print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
+        return 2
+    if not http and (host is not None or port is not None):
+        print("error: --host and --port require --http", file=sys.stderr)
+        return 2
+    tools = memory_mcp_core.MemoryTools(target=target, inbox=inbox)
     if stdio:
-        return _run_card_mcp_stdio(target)
-    resources = _mcp_card_resources(target, config)
-    tools = [str(spec["name"]) for spec in _mcp_card_tool_specs()]
+        return mcp_server.serve_stdio(**tools.callbacks())
+    if http:
+        return mcp_server.run_http_from_env(
+            **tools.callbacks(), host=host, port=port, default_port=MCP_HTTP_DEFAULT_PORT
+        )
+    resolution = tools.resolution()
+    if resolution.repo_config_error:
+        print(f"error: invalid memory-care config: {resolution.repo_config_error}", file=sys.stderr)
+        return 2
+    tool_names = [str(spec["name"]) for spec in memory_mcp_core.tool_specs()]
     payload: dict[str, Any] = {
-        "target": str(target),
-        "read_only": True,
-        "resource_scheme": "card://<repo-relative-path>",
-        "tools": tools,
-        "registered_resources": len(resources),
+        "target": str(resolution.repo_root) if resolution.repo_root is not None else None,
+        "read_only": False,
+        "resource_scheme": "card://<repo-relative-path> and user-card://<path>",
+        "tools": tool_names,
+        "stores": [{"origin": store.origin, "root": str(store.root)} for store in resolution.stores],
+        "registered_resources": len(tools.resources()),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print("memory MCP resources: ready read_only=true")
-    print("resources: card://<repo-relative-path>")
-    print(f"tools: {', '.join(tools)}")
+    print("memory MCP: ready")
+    for store in payload["stores"]:
+        print(f"store: {store['origin']} {store['root']}")
+    print(f"tools: {', '.join(tool_names)}")
     print(f"registered_resources: {payload['registered_resources']}")
     print("run the stdio server with: brigade memory serve-mcp --stdio")
+    print(
+        "or serve over loopback HTTP with: brigade memory serve-mcp --http "
+        f"(token from {mcp_server.HTTP_TOKEN_ENV}, default port {MCP_HTTP_DEFAULT_PORT})"
+    )
     return 0

@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from brigade import grokbot_ops
+from brigade.grokbot_n8n import actions as actions_module
 from brigade.grokbot_n8n.actions import (
     APPROVAL_KEYS,
     MAX_CONSUMED,
@@ -550,6 +551,34 @@ def test_create_rejects_action_root_swap(tmp_path: Path, monkeypatch: pytest.Mon
     recreated = tmp_path / "actions-real" / "proposals"
     if recreated.exists():
         assert list(recreated.iterdir()) == []
+
+
+def test_create_rejects_action_root_swap_after_approvals_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store, _clock = _dirs(tmp_path)
+    root = Path(store._root)
+    outside = tmp_path / "outside-actions"
+    outside.mkdir(mode=0o700)
+    os.chmod(outside, 0o700)
+    real_walk_directory = actions_module._walk_directory
+    swapped: list[str] = []
+
+    def walk_then_swap(path: Path, **kwargs: object) -> int:
+        child = real_walk_directory(path, **kwargs)
+        if Path(path) == store._approvals and not swapped:
+            swapped.append("root")
+            root.rename(tmp_path / "actions-real")
+            root.symlink_to(outside)
+        return child
+
+    monkeypatch.setattr(actions_module, "_walk_directory", walk_then_swap)
+    with pytest.raises(N8nError) as caught:
+        store.create_proposal({"action_id": "deactivate-workflow", "target_id": "wf1"}, revision="a" * 64)
+
+    assert swapped
+    assert caught.value.code == "protocol_error"
+    assert "n8n action state is invalid" in str(caught.value)
+    assert list((tmp_path / "actions-real" / "proposals").iterdir()) == []
+    assert list(outside.iterdir()) == []
 
 
 def test_list_and_prune_stay_on_held_proposals_fd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

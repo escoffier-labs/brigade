@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,8 @@ def runtime_payload(tmp_path: Path, **overrides):
     payload = {
         "schema": rc.RUNTIME_SCHEMA,
         "enabled": True,
-        "t3_fleet_bin": "/usr/bin/t3-fleet",
-        "git_bin": "/usr/bin/git",
+        "t3_fleet_bin": str(tmp_path / "t3-fleet"),
+        "git_bin": str(tmp_path / "git"),
         "repositories": {
             "brigade": {"remote": "https://github.com/escoffier-labs/brigade.git", "default_branch": "main"},
         },
@@ -44,6 +45,10 @@ def write_runtime(tmp_path: Path, mode: int = 0o600, **overrides) -> Path:
     return path
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_loads_valid_runtime(tmp_path):
     runtime = rc.load_runtime(write_runtime(tmp_path))
     assert runtime.enabled is True
@@ -54,11 +59,19 @@ def test_loads_valid_runtime(tmp_path):
     assert runtime.ledger_path == tmp_path / "state" / "ledger.sqlite3"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_rejects_group_readable_file(tmp_path):
     with pytest.raises(c.T3DispatchError):
         rc.load_runtime(write_runtime(tmp_path, mode=0o640))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_rejects_symlink(tmp_path):
     real = write_runtime(tmp_path)
     link = tmp_path / "link.json"
@@ -70,6 +83,14 @@ def test_rejects_symlink(tmp_path):
 @pytest.mark.parametrize(
     "overrides",
     [
+        {"hub_recipients": []},
+        {"hub_recipients": {"host-a": "bad-node-id"}},
+        {"hub_recipients": {"bad alias": "00000000-0000-4000-8000-000000000001"}},
+        {"hub_recipients": {str(i): "00000000-0000-4000-8000-000000000001" for i in range(17)}},
+        {"hub_token_file": "relative.token"},
+        {"hub_token_file": None},
+        {"hub_wake_target": "bad\nname"},
+        {"hub_wake_target": ""},
         {"default_seat": "nope"},
         {"fallback_seat": "dsflash"},
         {"fallback_seat": "missing"},
@@ -87,15 +108,165 @@ def test_rejects_symlink(tmp_path):
 )
 def test_rejects_invalid_runtime(tmp_path, overrides):
     with pytest.raises(c.T3DispatchError):
-        rc.load_runtime(write_runtime(tmp_path, **overrides))
+        if sys.platform == "win32":
+            rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+        else:
+            rc.load_runtime(write_runtime(tmp_path, **overrides))
 
 
 def test_fallback_seat_may_be_null(tmp_path):
-    assert rc.load_runtime(write_runtime(tmp_path, fallback_seat=None)).fallback_seat is None
+    runtime = (
+        rc.parse_runtime(runtime_payload(tmp_path, fallback_seat=None))
+        if sys.platform == "win32"
+        else rc.load_runtime(write_runtime(tmp_path, fallback_seat=None))
+    )
+    assert runtime.fallback_seat is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_validate_runtime_reference_returns_path(tmp_path):
     path = write_runtime(tmp_path)
     assert rc.validate_runtime_reference(str(path)) == str(path)
     with pytest.raises(c.T3DispatchError):
         rc.validate_runtime_reference("relative.json")
+
+
+def intake_payload(**overrides):
+    policy = {
+        "label": "grokbot-build-approved",
+        "queued_label": "grokbot-build-queued",
+        "repositories": ["brigade"],
+        "caller": "Builder",
+        "gh_bin": str(Path("/usr/bin/gh").absolute()),
+        "max_per_pass": 1,
+        "headroom": 2,
+    }
+    policy.update(overrides)
+    return policy
+
+
+def test_intake_is_optional(tmp_path):
+    assert rc.parse_runtime(runtime_payload(tmp_path)).intake is None
+
+
+def test_intake_policy_preserves_repository_order(tmp_path):
+    payload = runtime_payload(tmp_path, intake=intake_payload(repositories=["other", "brigade"]))
+    payload["repositories"]["other"] = {"remote": "https://github.com/example/other.git", "default_branch": "main"}
+    policy = rc.parse_runtime(payload).intake
+    assert policy.repositories == (("other", "example/other"), ("brigade", "escoffier-labs/brigade"))
+    assert (policy.label, policy.queued_label, policy.caller, policy.gh_bin, policy.max_per_pass, policy.headroom) == (
+        "grokbot-build-approved",
+        "grokbot-build-queued",
+        "Builder",
+        str(Path("/usr/bin/gh").absolute()),
+        1,
+        2,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"extra": 1},
+        {"label": "grokbot-build-queued"},
+        {"label": "bad label"},
+        {"queued_label": ""},
+        {"repositories": ["missing"]},
+        {"repositories": []},
+        {"repositories": ["brigade", "brigade"]},
+        {"headroom": 6},
+        {"headroom": -1},
+        {"headroom": 0},
+        {"max_per_pass": 0},
+        {"max_per_pass": 6},
+        {"max_per_pass": True},
+        {"gh_bin": "relative/gh"},
+        {"caller": "bad:caller"},
+    ],
+)
+def test_rejects_invalid_intake(tmp_path, overrides):
+    with pytest.raises(c.T3DispatchError) as error:
+        rc.parse_runtime(runtime_payload(tmp_path, intake=intake_payload(**overrides)))
+    assert error.value.code == "invalid_request"
+
+
+def test_intake_rejects_non_github_remote(tmp_path):
+    payload = runtime_payload(tmp_path, intake=intake_payload())
+    payload["repositories"]["brigade"]["remote"] = "https://example.com/team/brigade.git"
+    with pytest.raises(c.T3DispatchError):
+        rc.parse_runtime(payload)
+
+
+def test_hub_aliases_default_empty_and_preserve_node_id(tmp_path):
+    runtime = rc.parse_runtime(runtime_payload(tmp_path))
+    assert runtime.hub_recipients == {}
+    assert runtime.hub_wake_target == "default"
+    assert runtime.hub_token_file is None
+    aliases = {"host-a": "00000000-0000-4000-8000-000000000001"}
+    configured = rc.parse_runtime(runtime_payload(tmp_path, hub_recipients=aliases))
+    assert configured.hub_recipients == aliases
+    aliases.clear()
+    assert configured.hub_recipients == {"host-a": "00000000-0000-4000-8000-000000000001"}
+
+
+def test_messaging_defaults_disabled(tmp_path):
+    runtime = rc.parse_runtime(runtime_payload(tmp_path))
+    assert runtime.hub_messaging_enabled is False
+    assert runtime.hub_message_principal is None
+
+
+def test_messaging_enable_requires_explicit_principal_and_token(tmp_path):
+    for overrides in (
+        {"hub_messaging_enabled": True},
+        {"hub_messaging_enabled": True, "hub_message_principal": "agent:grokbot"},
+        {"hub_messaging_enabled": "true"},
+        {"hub_message_principal": "agent:other"},
+    ):
+        with pytest.raises(c.T3DispatchError):
+            rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+    runtime = rc.parse_runtime(
+        runtime_payload(
+            tmp_path,
+            enabled=False,
+            hub_messaging_enabled=True,
+            hub_message_principal="agent:grokbot",
+            hub_token_file=str(tmp_path / "principal.token"),
+        )
+    )
+    assert runtime.hub_messaging_enabled and not runtime.enabled
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"hub_recipients": {"../host-a": "00000000-0000-4000-8000-000000000001"}},
+        {"hub_recipients": {"host-a": "00000000000040008000000000000001"}},
+        {"hub_recipients": {"host-a": "00000000-0000-4000-8000-00000000000A"}},
+        {"hub_recipients": {"host-a": "agent:Example"}},
+        {"hub_token": "inline-secret"},
+        {"hub_message_principal": None},
+    ],
+)
+def test_messaging_runtime_rejects_unsafe_optional_configuration(tmp_path, overrides):
+    with pytest.raises(c.T3DispatchError) as error:
+        rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+    assert error.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize("alias", ["00000000-0000-4000-8000-000000000001", "00000000000040008000000000000001"])
+def test_runtime_rejects_uuid_alias_keys(tmp_path, alias):
+    with pytest.raises(c.T3DispatchError):
+        rc.parse_runtime(runtime_payload(tmp_path, hub_recipients={alias: "00000000-0000-4000-8000-000000000001"}))
+
+
+@pytest.mark.parametrize("principal", ["agent:miller", "agent:a", "agent:" + "a" * 63])
+def test_hub_recipient_principals_are_exact_immutable_config_values(tmp_path, principal):
+    aliases = {"helper": principal}
+    runtime = rc.parse_runtime(runtime_payload(tmp_path, hub_recipients=aliases))
+    aliases["helper"] = "agent:other"
+    assert runtime.hub_recipients == {"helper": principal}
+    with pytest.raises(TypeError):
+        runtime.hub_recipients["helper"] = "agent:other"

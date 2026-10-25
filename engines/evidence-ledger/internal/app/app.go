@@ -122,6 +122,10 @@ func Run(args []string, out, errw io.Writer) int {
 	if cmd == nil {
 		return fatalf(errw, "unknown command: %s", args[0])
 	}
+	if wantsHelp(args[1:]) {
+		writeCommandHelp(out, cmd, args[1:])
+		return 0
+	}
 	return cmd.run(args[1:], out, errw)
 }
 
@@ -660,7 +664,9 @@ func discoverSources() []map[string]any {
 					count = countOpenCodeExports(c.root)
 				} else {
 					include := sources.DefaultInclude
-					if c.kind == "hermes" {
+					if c.kind == "codex" {
+						include = codex.Include
+					} else if c.kind == "hermes" {
 						include = hermes.Include
 					}
 					if files, err := sources.ListJSONLFiles(c.root, include); err == nil {

@@ -17,7 +17,7 @@ from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Callable, List, Optional
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
@@ -46,26 +46,108 @@ _TIMED_OUT_DRAIN_SECONDS = 0.5
 _INCOMPLETE_GROUP_EXIT_CODE = 125
 
 
+def check_cancellation(process_registry: ProcessRegistry | None) -> None:
+    """Honor cancellation when supported by a registry's additive interface."""
+    check = getattr(process_registry, "check_cancellation", None)
+    if check is not None:
+        check()
+
+
+def _check_launch_allowed(process_registry: ProcessRegistry | None) -> None:
+    gate = getattr(process_registry, "ensure_launch_allowed", None)
+    if gate is not None:
+        gate()
+
+
+class ProcessCancelledError(RuntimeError):
+    """A canceled non-claim registry refused a new worker launch."""
+
+
 class ProcessRegistry:
     """Own cancellable subprocess groups for one worker dispatch."""
 
-    def __init__(self, *, terminate_grace: float = 0.5, kill_grace: float = 0.5) -> None:
+    def __init__(
+        self,
+        *,
+        terminate_grace: float = 0.5,
+        kill_grace: float = 0.5,
+        check_cancellation: Callable[[], None] | None = None,
+    ) -> None:
         self._terminate_grace = terminate_grace
         self._kill_grace = kill_grace
+        self._check_cancellation = check_cancellation
         self._lock = threading.Lock()
+        self._cancel_gate = threading.Lock()
         self._processes: dict[subprocess.Popen[bytes], str | None] = {}
+        self._cancel_outcomes: dict[subprocess.Popen[bytes], ProcessCancelOutcome] = {}
+        self._cancellation_group_count = 0
         self._canceled = False
+
+    def check_cancellation(self) -> None:
+        """Honor the owner's signal without replacing an internal dispatch error."""
+        if self._check_cancellation is not None:
+            self._check_cancellation()
+
+    def ensure_launch_allowed(self) -> None:
+        self.check_cancellation()
+        with self._lock:
+            canceled = self._canceled
+        if canceled:
+            raise ProcessCancelledError("worker dispatch canceled")
+
+    @property
+    def cancellation_timeout(self) -> float:
+        """Bound serial Windows tree cleanup as well as POSIX group cleanup."""
+        with self._lock:
+            # In-flight batch members may unregister before their outcomes land.
+            groups = max(self._cancellation_group_count, len(self._processes.keys() | self._cancel_outcomes.keys()))
+        return max(1, groups) * (self._terminate_grace + self._kill_grace) + 2.0
+
+    @property
+    def cancellation_outcomes(self) -> tuple[ProcessCancelOutcome, ...]:
+        with self._lock:
+            observed = dict(self._cancel_outcomes)
+            for process, outcome in observed.items():
+                if outcome.result == "still_active" and process.poll() is not None:
+                    observed[process] = ProcessCancelOutcome(outcome.seat, "interrupted")
+            for process, seat in self._processes.items():
+                if process not in observed:
+                    observed[process] = ProcessCancelOutcome(
+                        seat, "interrupted" if process.poll() is not None else "still_active"
+                    )
+            return tuple(observed.values())
+
+    def _cancel_processes(self, processes: tuple[tuple[subprocess.Popen[bytes], str | None], ...]) -> None:
+        if not processes:
+            return
+        try:
+            _terminate_processes(
+                tuple(process for process, _seat in processes),
+                terminate_grace=self._terminate_grace,
+                kill_grace=self._kill_grace,
+            )
+            outcomes = tuple(
+                (process, ProcessCancelOutcome(seat, "interrupted" if process.poll() is not None else "still_active"))
+                for process, seat in processes
+            )
+        except Exception:
+            outcomes = tuple((process, ProcessCancelOutcome(seat, "error")) for process, seat in processes)
+        with self._lock:
+            for process, outcome in outcomes:
+                previous = self._cancel_outcomes.get(process)
+                if previous is None or previous.result != "error":
+                    self._cancel_outcomes[process] = outcome
 
     def register(self, process: subprocess.Popen[bytes], *, seat: str | None = None) -> None:
         with self._lock:
-            if not self._canceled:
-                self._processes[process] = seat
-                return
-        _terminate_processes(
-            (process,),
-            terminate_grace=self._terminate_grace,
-            kill_grace=self._kill_grace,
-        )
+            self._processes[process] = seat
+            canceled = self._canceled
+        if canceled:
+            with self._cancel_gate:
+                with self._lock:
+                    pending = process not in self._cancel_outcomes
+                if pending:
+                    self._cancel_processes(((process, seat),))
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         with self._lock:
@@ -75,21 +157,18 @@ class ProcessRegistry:
         return _SeatProcessRegistry(self, seat)
 
     def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
-        with self._lock:
-            self._canceled = True
-            processes = tuple(self._processes.items())
-        try:
-            _terminate_processes(
-                tuple(process for process, _seat in processes),
-                terminate_grace=self._terminate_grace,
-                kill_grace=self._kill_grace,
-            )
-        except Exception:
-            return tuple(ProcessCancelOutcome(seat, "error") for _process, seat in processes)
-        return tuple(
-            ProcessCancelOutcome(seat, "interrupted" if process.poll() is not None else "still_active")
-            for process, seat in processes
-        )
+        with self._cancel_gate:
+            with self._lock:
+                self._canceled = True
+                processes = tuple(
+                    (process, seat)
+                    for process, seat in self._processes.items()
+                    if process not in self._cancel_outcomes
+                    or (self._cancel_outcomes[process].result != "interrupted" and process.poll() is None)
+                )
+                self._cancellation_group_count = max(self._cancellation_group_count, len(processes))
+            self._cancel_processes(processes)
+            return self.cancellation_outcomes
 
     def terminate(self, process: subprocess.Popen[bytes]) -> None:
         _terminate_processes(
@@ -113,6 +192,12 @@ class _SeatProcessRegistry:
     def __init__(self, parent: ProcessRegistry, seat: str) -> None:
         self._parent = parent
         self._seat = seat
+
+    def check_cancellation(self) -> None:
+        self._parent.check_cancellation()
+
+    def ensure_launch_allowed(self) -> None:
+        self._parent.ensure_launch_allowed()
 
     def register(self, process: subprocess.Popen[bytes]) -> None:
         self._parent.register(process, seat=self._seat)
@@ -1392,6 +1477,7 @@ def _launch_and_collect(
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
 ) -> Result:
+    _check_launch_allowed(process_registry)
     windows_launch = os.name == "nt"
     child_job: _WindowsChildJob | None = None
     started_threads: list[threading.Thread] = []
@@ -1436,6 +1522,7 @@ def _launch_and_collect(
         if process_registry is not None:
             registration_attempted = True
             process_registry.register(process)
+            _check_launch_allowed(process_registry)
         return _collect_process_output(
             process,
             timeout=timeout,

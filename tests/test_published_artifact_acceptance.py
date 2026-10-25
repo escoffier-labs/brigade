@@ -2,6 +2,7 @@ import importlib.util
 import hashlib
 import json
 import os
+import shutil
 import stat
 import subprocess
 import threading
@@ -766,7 +767,7 @@ def test_build_go_free_path_drops_directories_containing_go_but_keeps_system_dir
     pipx_bin.mkdir()
     original = os.pathsep.join((str(go_dir), str(safe_dir), str(tmp_path / "missing")))
 
-    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin)
+    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin, tmp_path / "go-free")
 
     entries = path.split(os.pathsep)
     # poison and pipx entries come first so a stray component name resolves to the poison binary.
@@ -788,9 +789,31 @@ def test_build_go_free_path_drops_go_symlink_directory(acceptance_module, tmp_pa
     pipx_bin.mkdir()
     original = os.pathsep.join((str(go_dir), "/usr/bin"))
 
-    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin)
+    path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin, tmp_path / "go-free")
 
     assert str(go_dir) not in path.split(os.pathsep)
+
+
+def test_build_go_free_path_keeps_other_tools_from_a_go_directory(acceptance_module, tmp_path):
+    """A system directory that ships go (for example /usr/bin) also ships git."""
+    system = tmp_path / "usr-bin"
+    system.mkdir()
+    for name in ("go", "gofmt", "git"):
+        tool = system / name
+        tool.write_text("#!/bin/sh\nexit 0\n")
+        tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
+    poison_dir = tmp_path / "poison-bin"
+    poison_dir.mkdir()
+    pipx_bin = tmp_path / "pipx-bin"
+    pipx_bin.mkdir()
+
+    path = acceptance_module.build_go_free_path(str(system), poison_dir, pipx_bin, tmp_path / "go-free")
+
+    assert str(system) not in path.split(os.pathsep)
+    assert shutil.which("go", path=path) is None
+    assert shutil.which("gofmt", path=path) is None
+    git = shutil.which("git", path=path)
+    assert git is not None and Path(git).resolve() == (system / "git").resolve()
 
 
 def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke(acceptance_module):

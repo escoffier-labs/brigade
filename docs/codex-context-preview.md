@@ -3,7 +3,8 @@
 `brigade context preview` reports fresh-disk instruction byte accounting for
 one explicitly scoped POSIX environment and caller-supplied Codex 0.160.0
 settings. Every result has `actual_session_observed: false`. The version is
-supplied by the caller. Brigade never invokes Codex to verify it.
+supplied by the caller. Brigade never invokes Codex to verify it. Enable the
+extras surface with `brigade extras on` or `BRIGADE_EXTRAS=1`.
 
 ```sh
 brigade context preview --target /approved/project --cwd /approved/project/sub \

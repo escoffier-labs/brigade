@@ -17,6 +17,183 @@ brigade memory care closeout
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
 
+## Deterministic reflection candidates
+
+`brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,
+`reinforce`, and `opposite-polarity` candidates without editing cards or calling a
+model. It reads the pending-evidence log and canonical cards selected by
+`.brigade/memory-care.toml`. `--scope` matches the exact card frontmatter scope,
+with missing scope treated as `repo`. `--limit` bounds the retained candidates
+from 1 to 100, with a default of 20. Receipts include `total_candidates` and
+`truncated`. Priority is opposite-polarity flags, stale evidence, reinforcement,
+then duplicates, with stable ordering within each class.
+
+Each candidate cites evidence resolved to an existing file in a receipt or
+handoff root, an evidence root, or the local evidence bundle cache. A log row
+alone does not resolve its id. Missing pointers, hash-only ids, unrelated
+repository files, and external URLs do not count. `proof_count` counts
+distinct resolved supporting ids. Receipt prefixes and fragments are removed before
+deduplication and storage, and bundle aliases use `miseledger:<bundle>`.
+`evidence_sources` records the matching root for
+each id, or `evidence-bundle` for local cached evidence bundles. `proof_sources` counts distinct
+roots among the supporting ids. These source labels do not establish trust or
+independence. Handoff roots include all writer inboxes from the harness registry,
+`memory/handoff-inbox`, and local inboxes in `.brigade/handoff-sources.json`.
+Only `reinforced` and `outcome` log rows supply new support.
+Pending near matches appear in `review_evidence_ids` and never increase proof.
+Pending near matches and contrary ids still block when their files are missing.
+These pointers appear in `unresolved_evidence_ids` and do not supply proof or
+satisfy the requirement for resolved evidence. Candidates with either kind of
+pending flag are Tier 2 and have no metadata diff.
+Exact reinforcement is already applied by ingest, so its log rows alone do not
+produce reinforcement previews. A preview triggered by new outcome evidence
+also includes resolved reinforcement ids so its evidence list supports its proof count.
+Reflection considers the newest 64 distinct log evidence ids per card by timestamp,
+with evidence ids breaking ties. Older ids remain in the log.
+The `outcome` row kind is reserved for future outcome capture. No production
+command writes it yet, so ingest alone cannot produce `reinforce` candidates
+in this slice.
+Staleness uses `last_consolidated`, falling back to `last_reviewed` and
+its supported aliases. Date-only cutoffs require evidence on a later UTC date.
+Near-match and opposite-polarity flags use the same cutoff, including the care
+scanner's automatic reinforcement exception. Rows already cited by the card do
+not remain pending flags. Newer support for an id does not revive its older flag.
+Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
+that remains pending produces a Tier 2 review flag and never decides which claim is correct.
+Cross-scope and mixed-trust duplicate groups also receive Tier 2. Trust declarations
+include `trust_label` and nested provenance metadata. Block-style metadata lists,
+unparsed YAML flow lists, and citations through `sources`, `source`, `refs`, or
+`links` also force Tier 2 with no diff because the scalar evidence preview cannot
+preserve them.
+
+Runs retain `candidates.jsonl` and `receipt.json` under
+`.brigade/memory/reflect/runs/<run-id>/`, including dry runs. Dry runs print
+reproducible metadata diffs for evidence, proof count, and consolidation time,
+and `would merge` summaries for duplicates. Consolidation time in a preview is
+the newest cited evidence timestamp. A stale candidate with contrary evidence
+prints a review summary instead of a consolidation diff. No preview is applied.
+`memory reflect status` shows the latest receipt, `memory reflect candidates`
+lists the latest successful run, and `memory reflect show <candidate-id>` shows
+one retained candidate and its preview. After each run publishes its receipt,
+retention keeps at most 50 run directories from the past 30 days. The latest
+successful run is always kept, reserving one of those 50 slots even when it is
+older than 30 days. Unfinished directories older than 30 days are also removed.
+Recent unfinished runs and directories changed during cleanup are left alone.
+Links and unexpected files are never deleted. A cleanup failure returns `retention_warning`
+and leaves the published receipt available. Inspection reads the newest 1024 run
+directories. Invalid receipts are skipped and counted
+in the status payload's `invalid_runs`. Candidate inspection also skips runs with
+unreadable or corrupt candidate files and reports skipped runs in the listing's
+`invalid_runs`. Missing receipts indicate unfinished runs
+and are not counted as invalid. All accept `--target` and `--json`.
+Text previews escape terminal control characters except newlines, carriage returns,
+and tabs. Stored candidates retain the original diff text.
+
+A stage failure records a failed receipt and leaves cards untouched. Incomplete
+runs never become visible candidates. Unsafe storage is refused when a receipt
+cannot be written safely, including when reflect storage overlaps a card root.
+Malformed or missing frontmatter, invalid UTF-8, oversized cards, permission-denied
+cards, files with multiple hard links, cards with more than 64 evidence references,
+and ambiguous card identities are skipped and listed by path with a reason in the
+receipt's `skipped_cards`. Cards changed during an exact read still fail the run.
+Malformed or excessively nested trust JSON is treated as unknown trust.
+Retry after the writer finishes.
+Identity collisions include ids and aliases across all valid cards before scope
+filtering. Corpus-wide file and byte limits still fail the run.
+The evidence log's 4 MiB scan window is informational and recorded as
+`scan_window_truncated`. Malformed rows inside that window, unreadable logs,
+and logs changed during a scan still fail the run. No log rotation or compaction
+command is provided in this slice. To recover from a malformed row, pause writers
+and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine the
+invalid line outside the log, or truncate an incomplete final line. Preserve
+valid rows, then rerun reflection before resuming writers. Rows with an unknown
+`kind` also require recovery or a Brigade version that supports that kind.
+Policy promotion and model-authored claim changes are not available through
+reflection. Reviewed proposal creation is available as described below.
+
+## Reviewed consolidation proposals
+
+`brigade memory reflect propose <candidate-id> --reason "Inspect cited support"`
+turns a retained reflection candidate into a `brigade.memory-proposal.v2`
+proposal. It checks every candidate base hash against its current card. The
+proposal records the reflect run id and candidate id. Creation writes a private
+proposal and review notification, leaving canonical cards untouched.
+
+The translator proposes evidence additions for supported stale or reinforcement
+candidates and exact duplicate merges. It refuses contrary evidence, unresolved
+near matches, and candidates that would require invented claim wording. Sources
+must share a configured card root and matching declared scope. Existing trust
+admission checks still apply. No proposal is automatically reviewed or applied.
+Candidate base hashes are rechecked under the proposal lock. Stale-evidence
+consolidations update `last_consolidated` from the newest cited pending evidence
+timestamp and derive `proof_count` from distinct resolved evidence ids.
+Machine reinforcement timestamps do not advance this consolidation timestamp.
+
+Use the existing decision path for both v1 and v2:
+
+```bash
+brigade memory proposal show <proposal-id> --json
+brigade memory proposal review <proposal-id> --digest <digest> --reason "Inspected every delta"
+brigade memory proposal reject <proposal-id> --digest <digest> --reason "Keep the current claims"
+brigade memory proposal apply <proposal-id> --digest <digest>
+```
+
+Review and rejection are alternative decisions. Rejection is terminal for that
+digest. Apply requires an exact accepted digest and rechecks source bytes,
+file modes, configuration, indexes, and cited evidence. A failed kernel write
+restores every changed card and index. A committed retry checks the retained
+receipt and after-state before returning `already-applied`.
+
+To introduce claim anchors, create a reviewed proposal for the selected card:
+
+```bash
+brigade memory proposal create --relation consolidate \
+  --source memory/cards/cache.md --anchor-blocks \
+  --reason "Add stable claim anchors for reviewed deltas"
+```
+
+Anchors use Obsidian syntax, for example `Keep the cache warm. ^c-123abc`.
+Paragraphs and individual bullets receive anchors. Headings, code fences,
+quoted blocks, tables, and `previously` history lines do not. An anchor belongs
+to its card and survives claim replacement. Removed ids remain reserved in
+`claim_anchor_ids` and are never minted again for that card. Each card permits
+at most 4096 reserved ids. Exhaustion refuses the proposal. Vault projection
+preserves anchors in the generated note body. Projection remains one-way and
+cannot authorize canonical edits.
+Evidence-only changes preserve existing trust and provenance. Anchor-only
+changes also preserve them and update envelope content hashes for the new bytes.
+Claim changes and duplicate merges derive reviewed provenance.
+
+V2 accepts one to eight distinct source cards through repeated `--source`
+options. Use `--ops-file <path>` for a bounded JSON list of typed operations.
+Every operation includes `type`, `card_path`, `block_id`, and
+`expected_block_hash`. The hash is SHA-256 of the exact UTF-8 block, including
+its ` ^c-<6hex>` suffix and internal line endings, without a final line ending.
+Operations are evaluated in order against the proposed state.
+
+| Type | Additional fields | Result |
+| --- | --- | --- |
+| `append_evidence` | `evidence_ids` list, optional `last_consolidated` | Add resolved, scan-clean evidence pointers and derive `proof_count`. A supplied timestamp must match the newest cited non-reinforcement evidence-log timestamp for the card. |
+| `replace_block` | `text` | Replace one claim, retain its anchor, and append a `previously X, now Y` history line. |
+| `remove_block` | None | Remove one claim, reserve its id, and append its previous wording to history. |
+| `add_previously` | `text` | Append a supplied previous wording to history. |
+| `supersede_card` | `other_card` | Mark the addressed card superseded by another retained source card. |
+| `merge_exact_duplicates` | `other_card` | Merge exact claims into the addressed card and remove the other source. |
+
+Replacement and history text must be a single unanchored paragraph or bullet.
+Exact duplicate comparison ignores block anchors and normalizes whitespace.
+Case and punctuation must match. Duplicate merges retain
+aliases, evidence, and anchor reservations. Supported Markdown index references
+are rewritten to the survivor. Unsupported or ambiguous removed-card references
+are refused.
+
+Unknown fields, unknown types, missing anchors, hash mismatches, unsafe text,
+and unresolved op evidence cause that op to be dropped. The proposal reports
+only the dropped index and a refusal reason. If all submitted ops are dropped,
+no proposal is saved, even if anchoring was requested. Other valid ops can still
+be proposed. The `diff` field is a deterministic unified diff of the exact
+before and after bytes. The proposal digest binds that preview and its inputs.
+
 ## Config
 
 The local config supports:
@@ -31,12 +208,14 @@ The local config supports:
 - `output_path`: where `scan-latest.json` and `refresh-queue.json` are written.
 - `enabled_checks`: enabled issue types.
 - `max_card_bytes`: oversized-card threshold.
+- `read_only_paths`: glob patterns (relative, no rooted or drive-qualified paths, no `..`) for cards that automation must never edit, such as policy or operator-owned cards. `*` and `?` stay inside one path segment, `**` spans segments, and a pattern naming a directory covers its descendants. Leading `./` and trailing `/` are ignored, so `memory/cards/policy/` and `memory/cards/policy` mean the same thing. `scan`, `plan-fixes`, and `backfill` never raise issues against or write to matching cards, and the cards stay visible to search and recall. Their IDs and aliases still feed duplicate-ID and alias-collision checks, so a normal card that reuses a protected card's identity is flagged on the normal card, `backfill` refuses to apply while such a collision exists, and `backfill` never mints an ID a protected card already holds. The scan reports `read_only_card_count` alongside `card_count`, which still counts every card. `brigade memory proposal create` and `apply` refuse any proposal that touches a matching card, with an error naming the pattern. `create` checks every path the proposal would change, index files such as `MEMORY.md` included. Re-running `apply` on a proposal that already committed returns its receipt even if a matching pattern was added afterwards. `brigade memory care status` and `doctor` list the active patterns. The default is empty. `brigade memory compact` (its flatten and tighten steps) works from the memory directory, not the care config, and does not consult `read_only_paths`.
 
 ## Issue Types
 
 Memory care can emit:
 
 - `stale`
+- `unconsolidated-evidence`
 - `expired`
 - `undersourced`
 - `contradictory`
@@ -46,6 +225,14 @@ Memory care can emit:
 - `missing-frontmatter`
 - `missing-reviewed`
 - `missing-freshness`
+
+`unconsolidated-evidence` flags cards with matched evidence newer than `last_consolidated`, falling back to `last_reviewed` when consolidation metadata is absent or invalid. Cards with neither a valid consolidation date nor a valid review date are unassessable. Date-only references compare each log timestamp's UTC calendar date with the stored date. Ingest sets reinforced `last_reviewed` dates using the local calendar, so evidence from the same local day can fall on a later UTC date. Timestamp references compare exact instants. Each finding lists evidence ids in `evidence_references`, uses the existing refresh queue fingerprint and dedupe rules, and is counted by `memory care status`.
+
+Reinforcement records do not appear in `evidence_references`. When a card lacks a valid `last_consolidated` and has a reinforcement dated on or after its review reference, care treats that reference as a possible automatic bump. Date-only review references use the reinforcement's local calendar date for this check. Care retains all non-reinforcement evidence for review because the earlier review date is unknown. Set `last_consolidated` after consolidation to establish an explicit cutoff.
+
+Existing `.brigade/memory-care.toml` files with an explicit `enabled_checks` list must add `"unconsolidated-evidence"` to enable this check. Upgrade every Brigade installation that reads the config before adding it, because older versions reject unknown check names. A missing `enabled_checks` field uses the installed version's defaults. Status prints `unconsolidated-evidence: disabled` when the check is absent from the enabled list, and JSON status includes `enabled_checks`.
+
+Ingest appends body-free near-match, opposite-polarity, and reinforcement records to `.brigade/memory/reflect/evidence-log.jsonl`. Each row contains a timestamp, card identity and path alias, evidence id, match kind, and similarity. Evidence ids for files inside the target are relative paths to the review inbox copy or processed archive. Archives outside the target use `sha256:` ids derived from their absolute paths, without storing those paths. These hashes identify records but cannot be opened as file pointers. Cards without stable ids retain their legacy identity and path. Reading or appending the log never edits cards. Existing exact-match reinforcement still updates card metadata. Rows are limited to 4 KiB. Care reads only the newest 4 MiB of the log, skipping any partial row at the cutoff. Older evidence can fall outside this window. Exceeding the scan limit adds one warning to `evidence_log.warning_count`. Malformed or oversized rows inside the window also add counted warnings. Unsafe or non-regular paths are refused. Log IO follows the proposal storage rules and fails closed when safe directory descriptors are unavailable, including Windows. Care reports this capability limit as `evidence_log.unsupported: true`, without counting it as an invalid line.
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
 

@@ -1,12 +1,12 @@
 # Brigade Integration
 
-MiseLedger should act as Brigade's evidence source and sink:
+MiseLedger acts as Brigade's evidence source and sink:
 
 ```text
 crawlers and agents -> MiseLedger -> evidence bundle -> Brigade plan -> work run -> MiseLedger
 ```
 
-Brigade must treat MiseLedger output as untrusted context unless the output comes from trusted local plan or run artifacts.
+Brigade treats all MiseLedger output as untrusted context, including imported local plan and run artifacts. Provenance and explicit operator review control content eligibility.
 
 Crawler data, chat exports, web data, Discord messages, Telegram messages, Slack messages, and browser outputs are evidence, not instructions.
 
@@ -53,20 +53,12 @@ Evidence output includes:
 
 Evidence output is assembled from normalized records and scan/import metadata. It should be treated as untrusted context by Brigade even when it came from local files.
 
-JSON shape:
+Example bundle shape after a result becomes eligible (query text and filters are omitted from outbound bundles):
 
 ```json
 {
   "id": "bundle-id",
   "resource_uri": "miseledger://evidence/bundle-id",
-  "query": "adapter contract",
-  "filters": {
-    "source": "discrawl",
-    "project": "miseledger",
-    "from": "",
-    "to": "",
-    "limit": 20
-  },
   "generated_at": "2026-06-03T00:00:00Z",
   "untrusted_context": true,
   "results": [
@@ -90,6 +82,8 @@ JSON shape:
   ]
 }
 ```
+
+New imports are quarantined with pending injection status. Ineligible bundle results contain only an opaque `id`, `eligibility_status`, and `reason_code`, without snippets, refs, or artifacts. These opaque ids cannot be passed to item show or trust review. Search or show supplies the archive item id for operator review through `brigade evidence trust review`. `--mark-injection-clean` is a separate explicit decision. See [SCHEMA.md](SCHEMA.md#read-verification).
 
 ## Inbound: Brigade receipts as evidence
 

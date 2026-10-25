@@ -6,8 +6,11 @@ The opt-in `/claims/v2` contract below remains a proposal. The first storage
 prerequisite now implements offline schema25 to schema26 migration and shared
 durable generations for the existing `/claims` writers. No v2 endpoint,
 capability, client, epoch provisioning, or live activation ships in this slice.
-The legacy unknown-outcome/late-acquire orphan race remains unprotected. Neither
-#1189 nor parent #1121 is complete.
+The subsequent legacy fix adds optional generation comparisons and durable
+retired-holder fences to `/claims`, without implementing this v2 proposal.
+See [implemented legacy fencing](fleet-claim-fencing.md) for the current
+compatibility contract, refusal reasons, and schema 34 migration. The storage
+prerequisite and pinned-base descriptions below record the earlier boundary.
 
 #1576 supplied schema25. This slice changes offline storage only and performs no
 live reads or deployment. Version 0.28.0 and database schema metadata do not
@@ -52,11 +55,12 @@ Fences persist indefinitely, including free, renamed, and retired targets.
 Distinct stored targets are capped at 100,000. Each newly inserted target is
 limited to 1,024 UTF-8 bytes, including multibyte input. The byte limit applies
 only to new fences: migration preserves longer legacy targets, and those targets
-remain operable. Invalid UTF-8 refuses cleanly. An overlong new target returns
-HTTP 422 with an `invalid-field` error naming `target`, `limit: 1024`, and
-`unit: utf8-bytes`, without echoing the submitted value.
+remain operable. Invalid UTF-8 returns HTTP 422. An overlong new target returns
+HTTP 409 with `reason: "claim-target-too-long"`, `owner: {}`, and an
+`invalid-field` error naming `target`, `limit: 1024`, and `unit: utf8-bytes`,
+without echoing the submitted value.
 
-A new target at capacity fails closed with structured HTTP 503 and the static
+A new target at capacity fails closed with structured HTTP 409 and the static
 message `claim generation fence capacity exceeded`, while existing targets
 remain usable. Migration exceeding the row bound refuses without changing the
 old schema or its claims. Capacity, signed-64-bit exhaustion, byte-limit
@@ -78,7 +82,9 @@ reach the whole fleet: startup validation prevents the hub from starting,
 claim listings fail in dashboards and routing occupancy, and a corrupt expired
 claim can block acquisition of other targets during global pruning. The
 `/claims`, authenticated HTML dashboard, and Command Deck readers return
-structured, sanitized HTTP 503 for fence refusal. SQLite lock and I/O errors
+structured, sanitized HTTP 503 with `reason: "claim-fence-refused"` for fence
+refusal. Claim mutation and heartbeat paths return HTTP 409 with that reason
+and `owner: {}`. SQLite lock and I/O errors
 retain their SQLite error classification and existing startup retry policy.
 
 Startup validates current-schema fencing state without recreating it. An
@@ -97,9 +103,9 @@ the first check and the write lock cannot be written to by this hub. The
 following requests return a static HTTP 503 that discloses no database path
 when the database is newer: the authenticated `GET` routes `/status`,
 `/claims`, `/nodes`, `/cloud`, `/models`, `/preference`, `/sessions`, and the
-`/policy` routes; the authenticated `POST` routes `/events`, `/claims`,
-`/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`;
-`PUT /preference`; the dashboard pages; and the Command Deck overview and
+`/policy` routes, the authenticated `POST` routes `/events`, `/claims`,
+`/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`,
+`PUT /preference`, the dashboard pages, and the Command Deck overview and
 repository pages. The dashboard and deck pages map the error only after
 authorization succeeds through an admin bearer token or a trusted Tailscale
 identity. A request authorized only by a dashboard session cookie can still get
@@ -109,11 +115,19 @@ dashboard session API, the roster and policy form pages, observed work, the
 work queue, and the `/work/` routes, are not mapped by this slice and still
 return their generic database error.
 
-Legacy clients still treat HTTP 503 as a hub-unavailable outcome and may fall
-back to a local-only lock. That fallback does not provide cross-machine
-exclusion. Explicit client handling of these refusal responses remains open.
+Fence refusals on claim mutations and heartbeats use HTTP 409 with a reason
+and an empty `owner` object. Read-only API GETs, dashboards, and Command Deck
+use HTTP 503 with a reason. The empty `owner` object on terminal 409 refusals,
+including `stale-holder`, `stale-generation`, `claim-fence-refused`, and
+`claim-target-too-long`, keeps the base legacy client on its terminal `held`
+path. Without it, that client treats an owner-less 409 as `missing`, retries,
+and admits local-only work. Current clients preserve
+`claim-fence-refused` as terminal. Upgrade clients before relying on capacity
+fail-closed and verify the deployed versions. HTTP 503 for unsupported newer
+schemas still permits legacy local fallback and provides no cross-machine
+exclusion.
 
-These generations alone do not fix delayed legacy acquire, same-holder ABA,
+At the storage-prerequisite checkpoint, these generations alone did not fix delayed legacy acquire, same-holder ABA,
 or backup restore and rollback. A missing release can advance the fence and a
 later unfenced legacy POST can still acquire an orphan. A delayed legacy renew
 or holder release can affect a later tenure with the same identities. Force
@@ -334,7 +348,7 @@ still create an unprotected legacy orphan. Its fence advancement protects stale
 v2 requests only. It does not fix the original legacy race or extend v2 cleanup
 to legacy attempts.
 
-Legacy requests carry no generation, so shared fence advancement does not make
+At the pinned base, legacy requests carry no generation, so shared fence advancement does not make
 legacy-to-legacy mutations tenure-specific. A delayed renew can extend a later
 live legacy row with the same target, node, and holder. A delayed holder release
 can delete a later row with those same identities. Force release without

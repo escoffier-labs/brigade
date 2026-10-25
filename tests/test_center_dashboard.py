@@ -22,7 +22,7 @@ def dashboard_server(tmp_target):
         allowed_hosts=None,
         target=tmp_target,
     )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     _wait_until_ready(server)
     yield server
@@ -1435,11 +1435,11 @@ def test_center_pages_render_through_the_shared_deck_shell():
     from brigade.center_cmd.dashboard.views import render_nav
 
     html = render.page("Status", "n0nce", render_nav("status"), "<p>hello</p>")
-    assert "--canvas: #111617;" in html
+    assert "--canvas: #0a0a0a;" in html
     assert '<body class="deck"' in html
     assert '<p class="eyebrow">Center</p>' in html
     assert "<h1>Status</h1>" in html
-    assert '<nav aria-label="Center">' in html
+    assert '<nav class="deck-nav" aria-label="Center">' in html
     assert '<a href="/view/status" aria-current="page">Status</a>' in html
     assert "location.reload" in html
     assert "background: #fff" not in html and "#0066cc" not in html

@@ -1,6 +1,7 @@
 """Tests for the fleet command deck module (config, projections, bounded reads)."""
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -10,6 +11,8 @@ import time
 from contextlib import contextmanager
 
 import pytest
+
+from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_command_deck as deck
 from brigade import fleet_repo_policy_page as repos_page
@@ -155,7 +158,7 @@ def test_deck_sessions_are_separate_escaped_and_do_not_consume_capacity(conn, no
         interactive_sessions=sessions,
     )
     html = deck.render_deck(view, nonce="nonce", now=now)
-    assert "Interactive sessions" in html
+    assert "Reported agent sessions (1)" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
     assert view.stations[0].busy == 0
@@ -834,9 +837,9 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
         assert "Command Deck" in root and "Alpha" in root
         assert "Command Deck" in alias and "Alpha" in alias
         assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
-        # Root is the deck itself, so href="/" is the valid self-link here; what
+        # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
-        assert '<a href="/">deck</a>' in root
+        assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}overview <span class="nav-count">' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
             ("/view/machines", "Fleet: Machines"),
@@ -856,7 +859,8 @@ def test_headers_secrets_and_responsive_css(tmp_path):
         assert "overflow-wrap: anywhere" in body
         assert "table-layout: fixed" in body
         assert "@media (max-width: 700px)" in body
-        assert ".stations { grid-template-columns: 1fr; }" in body
+        assert "@media (max-width: 900px)" in body
+        assert ".shell-sidebar" in body
 
 
 def test_invalid_config_refused_at_make_server(tmp_path):
@@ -902,13 +906,14 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert heading in body and "BravoBox" in body
         assert "not enrolled" not in body
         # Capacity and busy counts.
-        assert "1/1 busy" in body and "1/2 busy" in body
+        assert "1 busy, 0 unknown" in body and "1 busy, 1 unknown" in body
         # Terminal-only timeline, bounded by outcome_window.
         assert "Recent outcomes" in body
         assert body.count("run.completed") <= 2
 
 
-def test_collision_markers_and_observers_and_expired_claims(tmp_path):
+@pytest.mark.parametrize("claimed", [False, True])
+def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path, claimed):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
         for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
             status, _headers, text = _request(
@@ -921,23 +926,30 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
             assert status == 200, text
         _seed_run(hub, NODE_A, "ca", "run.created", repo="shared")
         _seed_run(hub, NODE_B, "cb", "run.created", repo="shared")
-        _seed_claim(hub, "shared", node=NODE_A)
+        if claimed:
+            _seed_claim(hub, "shared", node=NODE_A)
         _seed_claim(hub, "gone", node=NODE_A, ttl=1)
         _seed_run(hub, NODE_C, "obs", "run.created", repo="observer-repo")
         time.sleep(1.5)
         _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
-        assert deck_body.count("! collision") >= 1
-        assert "collision" in deck_body.split('id="rail"')[1].split("</section>")[0]
-        rail = deck_body.split('id="rail"')[1].split("</section>")[0]
-        assert "shared" in rail and "held by Alpha" in rail
-        assert f"held by {NODE_A}" not in rail
+        assert "parallel activity" in deck_body
+        assert "! collision" not in deck_body
+        assert "Same repo label on Alpha, Beta" in deck_body
+        assert "File overlap unknown" in deck_body
+        alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
+        rail = alerts_page.split("<tbody>")[1].split("</tbody>")[0]
+        assert "shared" not in rail and "parallel" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
-        first_row = repos_body.split("<tbody>")[1].split("<tr>")[1]
-        assert "! collision" in first_row and "shared" in first_row
+        repo_rows = repos_body.split("<tbody>")[1].split("<tr>")[1:]
+        assert "observer-repo" in repo_rows[0]
+        shared_row = next(row for row in repo_rows if "<td>shared</td>" in row)
+        assert "parallel activity" in shared_row
+        assert 'class="flag"' not in shared_row
+        assert "Alpha:run.created" in shared_row and "Beta:run.created" in shared_row
         # Expired claims are absent.
         assert "gone" not in repos_body
         # Observers are excluded from station totals.
-        assert "observer-repo" not in deck_body.split('id="rail"')[1]
+        assert "observer-repo" not in deck_body.split("<main", 1)[1]
         assert "Other observers" in deck_body and NODE_C[:12] in deck_body
 
 
@@ -1004,7 +1016,7 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert " cursor</h3>" in body and ">1/3<" in body
         assert "closed" in body
         assert " codex</h3>" in body and ">0/2<" in body and "No active leases." in body
-        assert "1/4 busy" in body
+        assert "1 busy, 3 unavailable" in body
         assert "&lt;task &amp; &quot;one&quot;&gt;" in body
         assert "&lt;repo &amp; &quot;one&quot;&gt;" in body
         assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
@@ -1132,7 +1144,7 @@ def test_command_deck_asset_routes_and_metadata(tmp_path):
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
             assert '<link rel="manifest" href="/site.webmanifest"' in body
-            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="theme-color" content="#0a0a0a"' in body
             assert '<meta name="application-name" content="Fleet Hub"' in body
             assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
 
@@ -1229,7 +1241,7 @@ def test_empty_rail_without_telemetry_is_not_all_clear():
     assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
     html = deck.render_deck(view, nonce="nonce", now=NOW)
     assert "ALL CLEAR" not in html
-    assert "COVERAGE UNKNOWN" in html
+    assert "Coverage unknown" in html
     assert "not the same as nothing being wrong" in html
 
 
@@ -1273,7 +1285,9 @@ def test_existing_run_and_claim_signals_survive_the_verdict_change():
     entry = deck.RailEntry(kind="failed", node_id=NODE_A, repo="acme/tool", run_id="r-1", detail="exit 1")
     view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()), rail=[entry])
     assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    from brigade.fleet_deck_alerts import render_alerts_page
+
+    html = render_alerts_page(view, NOW, nonce="nonce", worklore_enabled=True)
     assert "acme/tool" in html
     assert "exit 1" in html
 
@@ -1304,6 +1318,23 @@ def test_unknown_integration_state_is_a_coverage_gap_not_active():
     plane = deck.control_plane_from_snapshot(snapshot)
     assert plane.integrations[0].routine_state == "unknown"
     assert "integration readiness" in deck.coverage_gaps(plane)
+
+
+@pytest.mark.parametrize("reported", [False, True])
+def test_optional_integration_telemetry_is_distinct_from_a_missing_section(reported):
+    snapshot = _control_plane_snapshot(integrations=[], authority={"active": True, "status": "active"})
+    if not reported:
+        del snapshot["integrations"]
+    plane = deck.control_plane_from_snapshot(snapshot)
+    assert ("integrations" in deck.coverage_gaps(plane)) is not reported
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    if reported:
+        assert "No integration readiness reports in this snapshot" in html
+        assert "Worklore queue sourcing" not in html
+        assert "All clear" in html
+    else:
+        assert "Integration readiness unknown" in html
+        assert "Coverage unknown (1)" in html
 
 
 def test_machine_capacity_and_idle_reasons_render():
@@ -1509,6 +1540,7 @@ def _policy_machines():
         "seats": {"seat-alpha": {"provider": "provider-a", "model": "model-a-1"}},
         "consumers": {},
         "repositories": {},
+        "routing": {"enabled": True},
     }
 
 
@@ -1604,3 +1636,81 @@ def test_deck_http_projects_fake_activated_authority(tmp_path):
             assert int(fleet_hub_policy.current_policy(conn)["revision"]) == revision
         finally:
             conn.close()
+
+
+def test_control_plane_adapter_reads_node_id_and_tolerates_snapshots_without_it():
+    snapshot = _control_plane_snapshot()
+    legacy = deck.control_plane_from_snapshot(snapshot)
+    assert legacy.machines[0].node_id == deck.UNKNOWN
+    snapshot["machines"][0]["node_id"] = NODE_A
+    assert deck.control_plane_from_snapshot(snapshot).machines[0].node_id == NODE_A
+    snapshot["machines"][0]["node_id"] = None
+    assert deck.control_plane_from_snapshot(snapshot).machines[0].node_id == deck.UNKNOWN
+    snapshot["machines"][0]["node_id"] = "<script>alert(1)</script>"
+    html = deck.render_deck(_empty_view(deck.control_plane_from_snapshot(snapshot)), nonce="nonce", now=NOW)
+    assert "<script>alert(1)</script>" not in html
+
+
+def test_failed_outcomes_and_rail_entries_carry_the_receipt_age(conn):
+    _insert(conn, NODE_A, "failure.new", 1, "run.dispatch.failed", ts=_ts(60), repo="same-repo")
+    (failed,) = _failed(conn)
+    assert failed.age_seconds == 60
+    stale = deck.LiveRun(
+        node_id=NODE_A,
+        run_id="ghost",
+        repo="stale-only",
+        seat="seat",
+        harness="claude",
+        state="run.started",
+        bucket="stale",
+        age_seconds=3600,
+        elapsed_seconds=3600,
+    )
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2),)),
+        live_runs=[stale],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[failed],
+        observers=[],
+        now=NOW,
+    )
+    assert [(entry.kind, entry.age_seconds) for entry in view.rail] == [("failed", 60), ("stale", 3600)]
+
+
+def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, db):
+        for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
+            body = {"action": "add", "node_id": node_id, "label": label}
+            assert _request(hub, "POST", "/nodes", headers=_bearer(), body=body)[0] == 200
+        conn = fleet_hub.open_db(db)
+        try:
+            fleet_hub_policy.save_policy(
+                conn, _policy_machines(), expected_version=1, actor="operator", reason="seed machines"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        _insert_telemetry(db, NODE_A, observed_at=now.isoformat())
+        _insert_telemetry(db, NODE_B, observed_at=(now - timedelta(hours=2)).isoformat())
+        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200, page
+
+        def card(name: str) -> str:
+            found = re.search(rf'data-card="{name}">.*?class="card-value">([^<]*)<', page, re.S)
+            assert found, name
+            return found.group(1)
+
+        assert card("working") == "0"
+        assert card("idle") == "4"
+        assert card("offline") == "1"
+        rows = re.findall(r"<tr data-status=.*?</tr>", page, re.S)
+        alpha = next(row for row in rows if ">Alpha<" in row)
+        beta = next(row for row in rows if ">Beta<" in row)
+        assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
+        assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
+        alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
+        assert "<td>stale telemetry</td>" in alerts_page

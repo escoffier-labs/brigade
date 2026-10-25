@@ -1,8 +1,8 @@
 """Opt-in scheduler scaffold for scheduled memory care (issue #759).
 
 ``brigade care install|status|uninstall`` writes and audits user-owned
-scheduler entries. Brigade never runs a daemon; the operator's crontab,
-systemd user timers, or Task Scheduler remains the trigger.
+scheduler entries. These care jobs use the host scheduler as their trigger.
+Runbook receipts record step exit codes independently of long-running services.
 
 Default entries match ``docs/scheduled-care.md``. Recipes that ship as
 memory-care runbooks invoke those runbooks so each scheduled fire writes a
@@ -22,7 +22,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
+from .care_launchers import explicit_workspace, runbook_argv
+from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
+from .isolated_exec import trusted_cwd
 
 CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
@@ -206,7 +209,7 @@ REPEATED_FAILURE_THRESHOLD = 2
 
 
 def _catalog_by_id() -> dict[str, CareEntry]:
-    return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES)}
+    return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, care_patrol.entry(CareEntry))}
 
 
 def _runbook_identity_key(entry: CareEntry) -> str:
@@ -340,11 +343,6 @@ def _uses_schtasks(backend: str) -> bool:
     return backend == SCHTASKS_BACKEND
 
 
-def _windows_path(value: Path | str) -> str:
-    """Emit a Windows path with single backslashes (no cron-style escaping)."""
-    return os.fspath(value).replace("/", "\\")
-
-
 def _schtasks_schedule_flags(schedule: str) -> str:
     """Map a five-field cron expression to schtasks /SC flags.
 
@@ -353,24 +351,6 @@ def _schtasks_schedule_flags(schedule: str) -> str:
     default care entries (#1021).
     """
     return care_schedules.schtasks_schedule_flags(schedule)
-
-
-def _schtasks_task_run(entry: CareEntry, *, workspace: Path) -> str:
-    workspace_text = _windows_path(workspace)
-    if " " in workspace_text or "\t" in workspace_text:
-        # Escape inner quotes so the outer /TR "..." stays one argv for schtasks.
-        cd_target = f'\\"{workspace_text}\\"'
-    else:
-        cd_target = workspace_text
-    if entry.kind == "runbook":
-        assert entry.runbook_rel is not None
-        body = f"brigade runbook run --approved {entry.runbook_rel} --target ."
-    else:
-        assert entry.shell is not None
-        body = entry.shell
-    # Bare "cmd" is not on Task Scheduler's search path ("The system cannot
-    # find the file specified" on windows-latest). Use the absolute console host.
-    return f"{SCHTASKS_CMD_EXE} /c cd /d {cd_target} && {body}"
 
 
 def _schtasks_task_name(entry: CareEntry) -> str:
@@ -383,7 +363,9 @@ def _schtasks_create_command(entry: CareEntry, *, workspace: Path) -> str:
     task_run = _schtasks_task_run(entry, workspace=workspace)
     # Official create flags: /TN /TR /SC [/MO|/D] [/ST] /RU /IT /F.
     # Do not emit /NP (needs elevation) or /RL /F:String.
-    return f'schtasks /Create /TN "{task_name}" /TR "{task_run}" {schedule_flags} {SCHTASKS_S4U_FLAGS} /F'
+    return _windows_create_command(
+        entry, command=task_run, name=task_name, schedule=schedule_flags, account=SCHTASKS_S4U_FLAGS
+    )
 
 
 def _schtasks_delete_command(entry: CareEntry) -> str:
@@ -534,9 +516,9 @@ def _systemd_environment_path(path_value: str) -> str:
     return f"Environment=PATH={path_value}"
 
 
-def _systemd_exec_start_runbook(runbook_rel: str) -> str:
-    argv = ["/usr/bin/env", "brigade", "runbook", "run", "--approved", runbook_rel, "--target", "."]
-    return "ExecStart=" + " ".join(_systemd_quote_value(arg) for arg in argv)
+def _systemd_exec_start_runbook(runbook_rel: str, workspace: Path) -> str:
+    argv = runbook_argv(runbook_rel, workspace)
+    return "ExecStart=" + " ".join(_systemd_quote_value(arg.replace("$", "$$")) for arg in argv)
 
 
 def _systemd_working_directory(workspace: Path) -> str:
@@ -549,15 +531,16 @@ def _cron_escape_path(value: str) -> str:
 
 
 def _cron_command(entry: CareEntry, *, workspace: Path) -> str:
-    quoted_workspace = _cron_escape_path(str(workspace))
     if entry.kind == "runbook":
         assert entry.runbook_rel is not None
-        quoted_rel = _cron_escape_path(entry.runbook_rel)
-        body = f'brigade runbook run --approved "{quoted_rel}" --target .'
+        workspace = workspace.expanduser().resolve()
+        cwd = trusted_cwd()
+        body = " ".join(f'"{_cron_escape_path(arg)}"' for arg in runbook_argv(entry.runbook_rel, workspace))
     else:
         assert entry.shell is not None
+        cwd = workspace
         body = entry.shell
-    return f'cd "{quoted_workspace}" && {body}'
+    return f'cd "{_cron_escape_path(str(cwd))}" && {body}'
 
 
 def _crontab_body(
@@ -566,7 +549,7 @@ def _crontab_body(
     home: Path | None = None,
     entries: tuple[CareEntry, ...] | None = None,
 ) -> str:
-    selected = entries if entries is not None else CARE_ENTRIES
+    selected = care_patrol.select(CARE_ENTRIES, None, "crontab", CareEntry) if entries is None else entries
     lines = [f"PATH={_path_prefix(home)}"]
     for entry in selected:
         lines.append(f"{entry.schedule} {_cron_command(entry, workspace=workspace)}")
@@ -640,30 +623,9 @@ def _ensure_memory_care_runbooks(target: Path) -> int:
 
 
 def _write_daily_observability_runbook(target: Path) -> int:
-    """Materialize the daily-observability runbook with binary pins when missing."""
-    dest = memory_cmd._memory_care_runbooks_dir(target) / DAILY_OBSERVABILITY_RUNBOOK_NAME
-    if dest.is_file():
-        return 0
-    temp = dest.parent / f".{DAILY_OBSERVABILITY_RUNBOOK_NAME}.init-tmp"
-    try:
-        from .localio import write_json as _write_json
-
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(temp, dict(DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD))
-        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
-        if validated is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-        if pins is None:
-            print(f"error: {pin_error}", file=sys.stderr)
-            return 2
-        validated["pins"] = pins
-        _write_json(dest, validated)
-        return 0
-    finally:
-        if temp.is_file():
-            temp.unlink()
+    return care_patrol.write_runbook(
+        target, MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
+    )
 
 
 def _write_memory_closeout_runbook(target: Path) -> int:
@@ -758,6 +720,7 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
     payload["last_receipt"] = _receipt_summary(receipts[0] if receipts else None)
     payload["consecutive_failures"] = consecutive
     payload["repeated_failure"] = consecutive >= REPEATED_FAILURE_THRESHOLD
+    payload.update(care_patrol.receipt_fields(target, entry, payload["last_receipt"]))
     return payload
 
 
@@ -1004,17 +967,8 @@ def _launchd_plists(
         label = f"dev.brigade.care.{identity}.{entry.entry_id}"
         payload: dict[str, Any] = {
             "Label": label,
-            "ProgramArguments": [
-                "/usr/bin/env",
-                "brigade",
-                "runbook",
-                "run",
-                "--approved",
-                entry.runbook_rel,
-                "--target",
-                ".",
-            ],
-            "WorkingDirectory": str(workspace),
+            "ProgramArguments": runbook_argv(entry.runbook_rel, workspace),
+            "WorkingDirectory": str(trusted_cwd()),
             "EnvironmentVariables": {"PATH": _path_prefix(home)},
         }
         # launchd supports interval timers directly; calendar recipes use their
@@ -1179,12 +1133,20 @@ def install(
         print(f"error: {runbook_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
             file=sys.stderr,
         )
         return 3
+    if backend == "crontab" and entry_ids:
+        print(
+            "error: care --entry is not supported on the crontab backend; "
+            "crontab remains one atomic managed block. Use systemd or launchd.",
+            file=sys.stderr,
+        )
+        return 2
     adopted: list[dict[str, Any]] = []
     if not entry_ids:
         if backend == "systemd":
@@ -1218,7 +1180,7 @@ def install(
     if _uses_schtasks(backend):
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
-    rc = _ensure_care_runbooks(target)
+    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
     if rc != 0:
         return rc
     if any(entry.entry_id == "memory-closeout" for entry in entries):
@@ -1237,13 +1199,6 @@ def install(
         )
 
     if backend == "crontab":
-        if entry_ids:
-            print(
-                "error: care --entry is not supported on the crontab backend; "
-                "crontab remains one atomic managed block. Use systemd or launchd.",
-                file=sys.stderr,
-            )
-            return 2
         return _install_crontab(
             target=target,
             dry_run=dry_run,
@@ -1400,7 +1355,7 @@ def _systemd_unit_bodies(
         service_name = f"brigade-care-{identity}-{entry.entry_id}.service"
         timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
         assert entry.kind == "runbook" and entry.runbook_rel is not None
-        exec_start = _systemd_exec_start_runbook(entry.runbook_rel)
+        exec_start = _systemd_exec_start_runbook(entry.runbook_rel, workspace)
         calendar_lines = [f"OnCalendar={value}" for value in entry.on_calendar.splitlines() if value.strip()]
         service_body = "\n".join(
             [
@@ -1409,7 +1364,7 @@ def _systemd_unit_bodies(
                 "",
                 "[Service]",
                 "Type=oneshot",
-                _systemd_working_directory(workspace),
+                _systemd_working_directory(trusted_cwd()),
                 _systemd_environment_path(path_value),
                 exec_start,
             ]
@@ -1596,6 +1551,9 @@ def _normalize_workspace_path(value: str) -> Path | None:
 
 
 def _workspace_from_care_body(body: str) -> Path | None:
+    explicit = explicit_workspace(body)
+    if explicit is not None:
+        return _normalize_workspace_path(explicit)
     for line in body.splitlines():
         match = _WORKSPACE_CD_RE.search(line)
         if match:
@@ -1851,6 +1809,7 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
         selected_entries = installed_systemd
     else:
         selected_entries = CARE_ENTRIES
+    selected_entries = care_patrol.select(selected_entries, None, "crontab" if crontab_enabled else "", CareEntry)
     entry_payloads = [_entry_status(target, entry) for entry in selected_entries]
     return {
         "enabled": crontab_enabled or systemd_enabled,
@@ -1881,6 +1840,7 @@ def status(
         print(f"error: {entry_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
@@ -1954,6 +1914,7 @@ def uninstall(
         print(f"error: {entry_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",

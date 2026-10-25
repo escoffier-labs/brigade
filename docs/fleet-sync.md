@@ -11,12 +11,12 @@ status of each phase.
 ## Shape
 
 - Each machine's **local run journal stays the source of truth**
-  (`.brigade/runs/<run>/events/*.jsonl`, digest-chained). A machine never
-  depends on the hub to do its own work.
+  (`.brigade/runs/<run>/events/*.jsonl`, digest-chained). Local journaling
+  continues during a hub outage. Hub-based model admission can still refuse launches.
 - A **single small hub** (`brigade fleet serve`) runs on a dedicated Proxmox
-  LXC CT, bound to its Tailscale IP, bearer-token auth, one SQLite file in WAL
+  LXC CT, bound to loopback behind Tailscale Serve HTTPS, bearer-token auth, one SQLite file in WAL
   mode. It is an aggregator (and, from Phase 4, a claim arbiter), not the
-  source of truth.
+  source of truth for local event history.
 - On every journal append a machine POSTs the event, denormalized with its
   identity (`node_id`, `repo`, `seat`, `harness`), to the hub. If the hub is
   unreachable the event is spooled locally and flushed in order on reconnect;
@@ -65,6 +65,32 @@ the persisted global override. An older Brigade cannot open the upgraded databas
 The override has no reset command. Set it explicitly to the desired value to
 change it again. Explicit null limits are rejected. For direct policy API writes,
 omitted reason and subscription fields remain even when enabling a provider.
+
+## Native launch model bindings
+
+A hub seat's canonical `model` can differ from the exact model ID accepted by
+its execution harness. `fleet models set` accepts separate `--brigade-model`
+and `--t3-model` bindings. `--t3-model` requires a `--t3-instance-id` binding and
+projects as `bindings.native.model` for T3. Brigade workers use only their
+`bindings.brigade` launch model. Without a launch override, execution falls back to the
+canonical ID. `--clear-t3-model` removes the T3 override.
+
+For a legacy roster that has not activated policy authority, use the current
+roster revision from `brigade fleet models list --json`:
+
+```bash
+brigade fleet models set opencode model-example seat-example --enable \
+  --reasoning medium --t3-instance-id instance-example \
+  --t3-model opencode/model-example --expect-revision <REVISION> --json
+```
+
+Enabling a seat or selecting a consumer default refuses retired canonical or
+native launch models. Policy activation merges native binding fields
+individually, preserving an existing instance ID without dropping the mapped
+launch model. Schema 32 stores `model_policy.t3_model` and `events.context`.
+Startup repairs either missing additive column even if the database already
+reports version 32. Upgrade the Hub before using the new T3 binding or
+[lifecycle reporter](fleet-t3-events.md).
 
 ## Trust model
 
@@ -132,9 +158,12 @@ Hub (`src/brigade/fleet_hub.py`):
   `--allow-admin-writes`); one event object or an array (max 1000), every
   event carrying the caller's `node_id` (403 otherwise); a batch with any
   invalid event is rejected whole; responds `{"accepted": n, "duplicate": m}`.
-- `GET /status` — admin or node token; latest event per `(node_id, run_id)`
-  for runs whose latest state is not terminal (`run.completed`,
-  `run.failed`, `run.interrupted`); `?all=1` includes terminal runs. A
+- `GET /status`: admin or node token. Latest event per `(node_id, run_id)`
+  for nonterminal runs received within 30 minutes. Terminal states include
+  `run.completed`, `run.failed`, `run.interrupted`, `run.orphaned`,
+  `verify.completed`, and external completion, failure, cancellation,
+  cancellation acknowledgement, or expiry, plus any state ending in
+  `.cancelled`, `.timed_out`, or `.timeout`. `?all=1` includes history. A
   terminal event that omitted `seat` keeps the last non-empty seat from
   earlier events on that run.
 - `GET /preference` — admin or node token; the one-row fleet run preference
@@ -191,17 +220,24 @@ after the journal write completes and the lock is released):
   a flush that delivers nothing leaves the file untouched.
 - The spool is capped at 16 MiB (oldest events dropped, logged on the
   `brigade.fleet` logger). A non-retryable 4xx (anything but
-  401/403/408/429) drops that batch as poison instead of retrying forever;
-  401, 403 (a credential bound to another node, or the admin token on a
+  401/403/408/429) rejects the whole batch, so the client bisects it: valid
+  sub-batches are delivered in order and each event the hub rejects on its
+  own moves to `<node_id>.rejected.jsonl` beside the spool (the newest 200
+  records, each with the event's sequence, digest, timestamp, and a
+  sanitized reason; bodies over 16 KiB are omitted). A transport failure
+  during bisection keeps every unprocessed event queued. 401, 403 (a credential bound to another node, or the admin token on a
   hub without `--allow-admin-writes`), 5xx, and network failures keep the
   spool.
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
-  sequence. `brigade fleet flush` drains it explicitly.
+  sequence on this journal path. The explicit `fleet events report` path sends
+  its own observation first, independently of a backlog, and returns a delivery
+  receipt. `brigade fleet flush` drains the shared spool explicitly.
 - Hub traffic never uses a proxy (#1154): the client's opener is built with
   an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
   the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
-  Serve where possible. Redirects are followed only within the same origin,
+  Serve for remote hubs. Remote cleartext HTTP is refused before credentials
+  are attached. Redirects are followed only within the same origin,
   compared with default ports normalized (`http://hub` and `http://hub:80`
   are one origin); a cross-origin 302 is refused instead of replaying the
   Authorization header to another host (#1157).
@@ -305,9 +341,12 @@ Harness coverage: Claude `SessionStart` / relevant `PostToolUse` / accepted
 tracker. Overlap warnings require matching repository identity and at least
 one identical dirty path. They are advisory only.
 
-The Command Deck renders a separate Interactive sessions panel and marks repo
-rows with exact live dirty-path overlap. Those rows never join `LiveRun`,
-station `busy`, cloud capacity, run collisions, or outcome history.
+The Command Deck's Activity panel separates managed jobs from reported agent
+sessions, grouped by node, harness, and session id. Each group's checkout
+memberships stay in native details. The first eight groups are visible, with
+the rest folded. At 500 memberships, the list may be capped and the session
+total is unknown. Exact live dirty-path overlap warns on job and repo rows.
+Presence never joins `LiveRun`, station `busy`, cloud capacity, or outcome history.
 
 ## Phase 3 surface
 
@@ -321,12 +360,15 @@ phone over Tailscale:
   elapsed, last event).
 - `GET /view/repos` — one row per observed repo: where it is running (node,
   seat/harness, state, elapsed), its claim (owner node, conductor, TTL
-  remaining), its last outcome, and a `collision` flag when two nodes have
-  live runs on one repo or a live run is not on the claim owner.
+  remaining), its last outcome, and neutral `parallel activity` details when
+  active runs on two machines report the same nonempty repo label. This does
+  not prove repository identity or conflicting files, and adds no attention
+  priority. Claim-owner differences remain visible in the claim and run columns.
 - Attention buckets: `failed`, `awaiting approval` (`run.paused`,
-  `approval.requested`, `approval.held`), `stale` (non-terminal with no event
-  for 30 min), `running`, `queued`, `interrupted`, `succeeded`. The default
-  sort surfaces the first three at the top, oldest first within a bucket.
+  `approval.requested`, `approval.held`), `unknown`, `stale` (non-terminal with no event
+  for 30 min, or a T3 observation older than 900 seconds), `running`, `queued`,
+  `interrupted`, `succeeded`. The default sort surfaces failed, awaiting approval,
+  unknown and stale runs at the top, oldest first within a bucket.
 - Query params: `sort=attention|age|node|repo|state|seat`, substring filters
   `node=`, `repo=`, `seat=` (matches seat or harness), `state=` (bucket or raw
   event type), `attention=1` (needs-attention only), `all=1` (include
@@ -649,8 +691,8 @@ FROM compared
 ORDER BY iso_week;
 ```
 
-Run the hub under a process supervisor on the CT, e.g.
-`brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
+Run the hub under a process supervisor on the CT, behind a same-host HTTPS proxy, e.g.
+`brigade fleet serve --host 127.0.0.1 --trust-forwarded-proto --token-file /etc/brigade/fleet-token`.
 
 ## Phase 4 surface (claims)
 
@@ -707,3 +749,174 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   intent that keeps honest clients from stealing each other's claims, not
   an authorization — any enrolled node may still `--force`, attributed to
   its own `node_id`.
+
+### Hub request and claim bounds
+
+The Hub checks declared request length before reading or parsing a JSON body.
+Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
+returns HTTP 400 and closes the connection, except that a Worklore DELETE with
+no body still succeeds. Transfer-Encoding and duplicate
+Content-Length headers are refused. Worklore retains its smaller 256 KiB body
+limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
+
+Before JSON decoding, regex scans check nesting and aggregate complexity.
+A document accepts at most 32 levels of containers, 32768 objects and arrays in
+total, and 131072 aggregate items. Each array element or object member counts as
+one item. Duplicate object keys count separately during the scan. Punctuation
+inside strings does not count. Decoded objects and arrays also accept at most
+1000 items each, with aggregate checks repeated after decoding. These checks
+cover fields that domain validators ignore. Violations return HTTP 400 before
+ingestion starts. An invalid item rejects the entire event batch. Existing event
+string bounds still apply.
+
+Each node may hold at most 1024 active claims. A new acquisition beyond that
+limit returns HTTP 409 with `reason=claim-cardinality-exceeded`. Direct API callers
+receive `ClaimCardinalityError`. Existing claims remain held. Retry, renewal,
+release, and replacement of an existing target stay available. The quota check
+runs after existing-target decisions inside the acquisition write transaction.
+Expired claims do not consume the active quota. An index on
+`claims(owner_node, expires_at)` supports the count and is created idempotently
+at startup, including on current-version databases, without a schema version bump.
+
+The response includes an empty `owner` object so deployed clients classify the
+409 as a definite refusal instead of falling back to local-only work. New fleet
+clients classify this refusal as `quota`. `repo_claim` raises
+`FleetClaimQuotaError`, a subclass of `FleetClaimHeldError`, before admitting
+work. An ambiguous initial acquire followed by quota refusal schedules cleanup
+fenced to the original holder token. CLI JSON includes the decision reason.
+A heartbeat quota refusal terminates the lease through the existing claim
+loss channel. The default policy cancels guarded work.
+
+The 1 MiB Worklore import ceiling predates these changes. A contract-shaped batch
+of 500 observations can serialize to about 4.27 MB and exceed it. This
+incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
+
+These request bounds leave GET payloads and fleet list clients unchanged.
+Claim fencing failures still return HTTP 503 on read paths, including `/status`.
+Result-set bounds, keyset pagination, and a current-status projection move to
+[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
+Retention, POST throttling, per-node fairness behind a proxy, and the fronting
+proxy runbook also remain deferred to that issue.
+
+
+## Adoption statistics collector and Deck page
+
+`GET /deck/stats` uses existing read-only browser enrollment, admin bearer or
+trusted proxy identity. It renders the latest snapshot and a weekly series from
+the Hub database through the shared Deck theme. Rendering makes no provider calls.
+`POST /stats` requires an enrolled node token whose node is in
+`fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
+enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the snapshot with the most successful sources per
+UTC day, then prefers recency, at most 402 rows within the 400-day retention window.
+HTTP 200 acknowledges validation and processing. It does not guarantee that the
+returned `snapshot_id` remains stored after same-day compaction. Daily activity
+and downloads can therefore come from an older snapshot with more successful
+sources, while weekly observations reflect a newer upload.
+`admin_stats_weeks` keeps the best observation for each of the latest 60 weeks.
+Complete observations beat partial ones, then the newest observation wins.
+Hub schema version 36 adds `admin_stats_snapshots` and `admin_stats_weeks`
+through the normal startup migration. Startup also preserves weekly history
+from the earlier branch schema when present.
+
+Configure the collector and Hub separately in the operator's fleet.toml:
+
+```toml
+[fleet.stats]
+collector_nodes = ["example-node"]  # Set on the Hub.
+database = "example-db"            # Set on the collector.
+# Optional collector settings, supplied by the operator:
+# account = "example-account"
+# worker = "example-worker"
+# status_panel = true             # Enable read-only Cloudflare status collection.
+# repository_head = "example-git-sha" # Expected source revision shown beside deployment.
+# analytics_token_env = "EXAMPLE_ANALYTICS_TOKEN"
+# database_id = "example-db-id"      # Select D1 REST instead of wrangler.
+# d1_token_env = "EXAMPLE_D1_TOKEN"
+# downloads_url = "https://example.invalid/downloads.json"
+```
+
+The collector uses its existing wrangler OAuth login for D1 reads when only
+`database` is set. Setting `database_id` selects D1 REST, using the account and
+the D1 Read token in the environment variable named by `d1_token_env`. GraphQL
+requires Account Analytics Read in the variable named by `analytics_token_env`.
+Both names may reference the same account token with both read permissions,
+injected by the approved secrets render. Wrangler receives neither configured
+token variable, standard Cloudflare API token variables, nor Brigade variables.
+Credentials never enter argv, snapshots, the Hub store or tool error messages.
+Run `brigade fleet stats collect` explicitly from an authorized collector node.
+`--no-publish` prints aggregates for inspection. It still reads configured sources.
+If all sources fail or none are configured, the command exits 1 without publishing
+or printing a snapshot. Partial snapshots retain only successful sources.
+
+The closed `brigade.admin-stats.v2` snapshot and page expose these fields:
+
+- `schema`, `snapshot_id`, `taken_at`, `source_set`.
+- `weeks`, `daily`, `downloads`, `digest`.
+- `weeks.week`, `weeks.partial`, `weeks.active_sources`, `weeks.retained_2d_sources`.
+- `weeks.retained_3d_sources`, `weeks.versions`, `weeks.upgrades`, `weeks.versions.version`.
+- `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
+- `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
+- `downloads.npm`.
+- `cloudflare`, `cloudflare.collected_at`, `cloudflare.credential`.
+- `cloudflare.worker_version`, `cloudflare.worker_published_at`, `cloudflare.repository_head`.
+- `cloudflare.d1_rows`, `cloudflare.last_purge`, `cloudflare.requests_24h`, `cloudflare.errors_24h`.
+
+The Hub continues to read retained v1 snapshots during the transition.
+
+The Cloudflare panel uses only fixed Wrangler reads (`deployments status`,
+`deployments list`, `versions list`, `d1 info`, and one fixed aggregate SELECT)
+and a fixed GraphQL viewer check plus the 24-hour Analytics query. The collector
+publishes normalized fields only. API tokens, raw CLI output, and error text do
+not enter the snapshot. A missing credential is labeled `credential unavailable`;
+failed cells and snapshots older than 15 minutes render as unknown. The panel
+follows the newest retained snapshot and is hidden when that snapshot carries no
+Cloudflare observation (the panel is off, or it is a v1 snapshot). Wrangler
+does not report a D1 purge event timestamp, so `cloudflare.last_purge` remains
+unknown until the Worker records that event. The latest retained observation
+date is not a purge timestamp.
+
+An operator-triggered mutating path is a separate follow-up, out of scope here.
+It would require an admin bearer, an exact argv preview before each action, a
+Brigade receipt for every action, and no unattended execution. Deploy, rollback,
+secret changes, migration application, and deletion remain denied.
+
+`weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
+nonnegative integers. Source counts below 5 become `null`, including zero.
+Gap checks compare only containing groups: active sources contain both retention
+groups and each version, 2+ day sources contain 3+ day sources, and each version
+contains its upgrade cells. A gap of 1 to 4 sources hides the week's source counts
+and both histograms. Excess version observations revealing 1 to 4 sources using
+multiple versions also hide the week, checked before and after removing small cells.
+Other small or unknown histogram cells lose their category names without hiding
+the week's totals or valid peers. The page always includes an "other (suppressed)"
+row with an unknown count in each histogram, even when no cells were omitted.
+It never reports the omitted cells' sum or whether any existed. Incomplete
+version or upgrade reads hide both histograms. These rules also apply to uploaded
+snapshots. Known retention counts must satisfy active >= 2+ day >= 3+ day sources.
+Each known version or upgrade count must not exceed the active-source total.
+The POST body ceiling is 4 MiB to cover the full 60-week schema maximum.
+The page renders `null` and missing observations as unknown. Worker request,
+Worker error and public download counts are event counts and may be zero.
+Weekly counts mean active sources, not people or installs. Retention is activity
+on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
+observed in time order within a week, restricted to increasing numeric releases.
+The current week and the oldest week truncated by the 90-day query are labelled partial.
+Source identities rotate weekly. Worker counts cover 30 completed UTC days.
+Each malformed version or upgrade cell is omitted individually, preserving valid cells
+subject to weekly suppression. Histograms over 100 versions or 200 upgrade
+pairs render as unknown. Development versions may use eight-digit date suffixes.
+`source_set` contains only `d1`, `worker` and `downloads` for successful reads.
+Nonempty weeks require `d1`, nonempty daily data requires `worker`, and known
+download counts require `downloads` in `source_set`.
+`digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
+sorted keys and compact separators. `snapshot_id` equals that digest.
+
+Controller and erasure contact: Solomon Neas. Contact the maintainer at the
+address in [SECURITY.md](../SECURITY.md). No hashes, install IDs, addresses,
+hostnames or deployment identifiers enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
+aggregate snapshots and weekly observations for 400 days and purges older rows
+on each accepted POST. Invalid stored payloads are skipped when rendering.
+Opt-in usage aggregates are not available yet. Future opt-in counts will
+undercount usage.
+Small-cell suppression is defense in depth for screenshots and shared views, not
+protection against an enrolled viewer on the operator's own Hub who can compare snapshots.

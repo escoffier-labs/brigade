@@ -83,8 +83,8 @@ attestation verify` in the release workflow rather than represented by an API bo
 Stable validation remains strict: every published component on a stable manifest must carry the full
 five-platform matrix with matching digests and provenance.
 
-Beta is the intentional development channel for the `0.28` preview line. It installs the newest
-non-yanked `brigade-cli==0.28.0.devYYYYMMDD` wheel from PyPI into the existing user-global pipx
+Beta is the intentional development channel for the `0.31` preview line. It installs the newest
+non-yanked `brigade-cli==0.31.0.devYYYYMMDD` wheel from PyPI into the existing user-global pipx
 environment, but reuses the last verified stable component manifest for native bytes, so beta and
 stable cannot install different native assets from two manifests at once.
 
@@ -107,7 +107,8 @@ Layout:
 
 - `<data-root>/brigade/components/` - component metadata directory
 - `<data-root>/brigade/bin/<executable>` - managed executables
-- `<data-root>/brigade/installed.json` - install state (future phases)
+- `<data-root>/brigade/installed.json` - installed component state written by setup
+  ([writer](../src/brigade/component_install.py), [schema](../src/brigade/component_state.py))
 - `<cache-root>/brigade/components/<sha256>/<asset_name>` - verified download cache
 
 Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive paths.
@@ -123,7 +124,7 @@ Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive path
 
 This policy owns one release and update contract. `brigade update --channel stable` resolves the
 latest immutable Brigade release, installs that exact CLI version, and runs setup against its
-verified manifest. Beta resolves the exact non-yanked PyPI `0.28.0.devYYYYMMDD` wheel while
+verified manifest. Beta resolves the exact non-yanked PyPI `0.31.0.devYYYYMMDD` wheel while
 retaining the verified stable release manifest. `brigade setup` resolves the running CLI's exact
 release manifest; offline automatic setup requires a verified exact-release cache. The bundled
 legacy manifest is available only with `--manifest-source standalone`.

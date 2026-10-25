@@ -6,12 +6,14 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from uuid import UUID
 
-from .contracts import NAME_RE, REF_RE, T3DispatchError
+from .contracts import CALLER_RE, NAME_RE, REF_RE, T3DispatchError
 
 RUNTIME_SCHEMA = "brigade.grokbot.t3-dispatch-runtime.v1"
 RUNTIME_KEYS = frozenset(
@@ -47,6 +49,17 @@ class Repository:
 
 
 @dataclass(frozen=True)
+class IntakePolicy:
+    label: str
+    queued_label: str
+    repositories: tuple[tuple[str, str], ...]
+    caller: str
+    gh_bin: str
+    max_per_pass: int
+    headroom: int
+
+
+@dataclass(frozen=True)
 class Runtime:
     enabled: bool
     t3_fleet_bin: str
@@ -63,16 +76,35 @@ class Runtime:
     ledger_path: Path
     wake_path: Path
     writable_paths: tuple[str, ...]
+    intake: IntakePolicy | None = None
+    hub_token_file: Path | None = None
+    hub_messaging_enabled: bool = False
+    hub_message_principal: str | None = None
+    hub_wake_target: str = "default"
+    hub_recipients: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    @property
+    def messaging_configured(self) -> bool:
+        return (
+            self.hub_messaging_enabled
+            and self.hub_message_principal == "agent:grokbot"
+            and self.hub_token_file is not None
+        )
 
 
 def _bad() -> T3DispatchError:
     return T3DispatchError("invalid_request")
 
 
+def require_posix_storage() -> None:
+    """The dispatch design requires POSIX owner-only storage, including SQLite sidecars."""
+    if sys.platform == "win32" or os.name != "posix":
+        raise T3DispatchError("unsupported-platform")
+
+
 def read_owner_file(path: Path, *, max_bytes: int) -> bytes:
     """Read a regular, owner-only, non-symlink file of bounded size."""
-    if os.name != "posix":
-        raise T3DispatchError("unavailable")
+    require_posix_storage()
     if not path.is_absolute():
         raise _bad()
     try:
@@ -143,10 +175,85 @@ def _repositories(value: object) -> Mapping[str, Repository]:
     return MappingProxyType(parsed)
 
 
+def _intake(value: object, repositories: Mapping[str, Repository], max_open: int) -> IntakePolicy:
+    keys = {"label", "queued_label", "repositories", "caller", "gh_bin", "max_per_pass", "headroom"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise _bad()
+    for key in ("label", "queued_label"):
+        if not isinstance(value[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,49}", value[key]):
+            raise _bad()
+    if value["label"] == value["queued_label"]:
+        raise _bad()
+    if not isinstance(value["caller"], str) or not CALLER_RE.fullmatch(value["caller"]):
+        raise _bad()
+    pairs = []
+    for repo_id in _names(value["repositories"]):
+        repo = repositories.get(repo_id)
+        if repo is None:
+            raise _bad()
+        match = re.fullmatch(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\.git", repo.remote)
+        if match is None:
+            raise _bad()
+        pairs.append((repo_id, f"{match[1]}/{match[2]}"))
+    return IntakePolicy(
+        label=value["label"],
+        queued_label=value["queued_label"],
+        repositories=tuple(pairs),
+        caller=value["caller"],
+        gh_bin=_abs(value["gh_bin"]),
+        max_per_pass=_int(value["max_per_pass"], 1, 5),
+        headroom=_int(value["headroom"], 1, max_open - 1),
+    )
+
+
+def _hub_recipients(value: object) -> Mapping[str, str]:
+    if not isinstance(value, dict) or len(value) > 16:
+        raise _bad()
+    parsed = {}
+    for name, node_id in value.items():
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name) or not isinstance(node_id, str):
+            raise _bad()
+        try:
+            UUID(name)
+        except ValueError:
+            pass
+        else:
+            raise _bad()
+        if re.fullmatch(r"agent:[a-z][a-z0-9._-]{0,62}", node_id) is None:
+            try:
+                if str(UUID(node_id)) != node_id:
+                    raise _bad()
+            except ValueError:
+                raise _bad() from None
+        parsed[name] = node_id
+    return MappingProxyType(parsed)
+
+
 def parse_runtime(payload: object) -> Runtime:
-    if not isinstance(payload, dict) or set(payload) != RUNTIME_KEYS:
+    if (
+        not isinstance(payload, dict)
+        or set(payload)
+        - {
+            "intake",
+            "hub_token_file",
+            "hub_wake_target",
+            "hub_recipients",
+            "hub_messaging_enabled",
+            "hub_message_principal",
+        }
+        != RUNTIME_KEYS
+    ):
         raise _bad()
     if payload["schema"] != RUNTIME_SCHEMA:
+        raise _bad()
+    messaging_enabled = _bool(payload.get("hub_messaging_enabled", False))
+    principal = payload.get("hub_message_principal")
+    if "hub_message_principal" in payload and principal != "agent:grokbot":
+        raise _bad()
+    if messaging_enabled and (principal != "agent:grokbot" or "hub_token_file" not in payload):
+        raise _bad()
+    wake_target = payload.get("hub_wake_target", "default")
+    if not isinstance(wake_target, str) or not CALLER_RE.fullmatch(wake_target):
         raise _bad()
     seats = _names(payload["seats"])
     default_seat = payload["default_seat"]
@@ -158,22 +265,30 @@ def parse_runtime(payload: object) -> Runtime:
     writable = payload["writable_paths"]
     if not isinstance(writable, list) or len(writable) > MAX_WRITABLE_PATHS:
         raise _bad()
+    repositories = _repositories(payload["repositories"])
+    max_open = _int(payload["max_open"], 1, 20)
     return Runtime(
+        hub_messaging_enabled=messaging_enabled,
+        hub_message_principal=principal,
+        hub_token_file=Path(_abs(payload["hub_token_file"])) if "hub_token_file" in payload else None,
+        hub_wake_target=wake_target,
+        hub_recipients=_hub_recipients(payload.get("hub_recipients", {})),
         enabled=_bool(payload["enabled"]),
         t3_fleet_bin=_abs(payload["t3_fleet_bin"]),
         git_bin=_abs(payload["git_bin"]),
-        repositories=_repositories(payload["repositories"]),
+        repositories=repositories,
         hosts=_names(payload["hosts"]),
         seats=seats,
         default_seat=default_seat,
         fallback_seat=fallback_seat,
         fleet_enrolled=_bool(payload["fleet_enrolled"]),
-        max_open=_int(payload["max_open"], 1, 20),
+        max_open=max_open,
         daily_limit=_int(payload["daily_limit"], 1, 200),
         prompt_max_bytes=_int(payload["prompt_max_bytes"], 1024, 32768),
         ledger_path=Path(_abs(payload["ledger_path"])),
         wake_path=Path(_abs(payload["wake_path"])),
         writable_paths=tuple(_abs(item) for item in writable),
+        intake=_intake(payload["intake"], repositories, max_open) if "intake" in payload else None,
     )
 
 
@@ -187,6 +302,7 @@ def load_runtime(path: Path) -> Runtime:
 
 def validate_runtime_reference(value: object) -> str:
     """Validate an instance-config `runtime_path` reference and return it unchanged."""
+    require_posix_storage()
     reference = _abs(value)
     load_runtime(Path(reference))
     return reference
