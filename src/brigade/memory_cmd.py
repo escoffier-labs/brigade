@@ -25,6 +25,7 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
+from .memory_paths import read_only_pattern as read_only_pattern, relative_path as _relative_path
 from .memory_search_diagnostics import _normalize_search_query, redundancy_from_entries
 from .card_identity import (
     CardIdentity,
@@ -85,6 +86,7 @@ class MemoryCareConfig:
     output_path: str = DEFAULT_OUTPUT_PATH
     enabled_checks: tuple[str, ...] = CHECKS
     max_card_bytes: int = MEMORY_CARD_BUDGET_BYTES
+    read_only_paths: tuple[str, ...] = ()
 
 
 def config_path(target: Path) -> Path:
@@ -161,6 +163,7 @@ def _format_config(config: MemoryCareConfig | None = None) -> str:
             f"output_path = {_toml_value(config.output_path)}",
             f"enabled_checks = {_toml_value(list(config.enabled_checks))}",
             f"max_card_bytes = {config.max_card_bytes}",
+            f"read_only_paths = {_toml_value(list(config.read_only_paths))}",
             "",
         ]
     )
@@ -189,13 +192,6 @@ def _positive_int(raw: object, *, field: str, default: int, minimum: int = 0) ->
     return raw
 
 
-def _relative_path(value: str, *, field: str) -> str:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or not value.strip():
-        raise ValueError(f"{field} must be a non-empty relative path without '..'")
-    return value.strip()
-
-
 def load_config(target: Path) -> MemoryCareConfig | None:
     path = config_path(target)
     if not path.is_file():
@@ -212,6 +208,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     index_paths = _string_list(data.get("index_paths"), field="index_paths", default=("MEMORY.md",))
     include_paths = _string_list(data.get("include_paths"), field="include_paths", default=())
     exclude_paths = _string_list(data.get("exclude_paths"), field="exclude_paths", default=("memory/cards/decay",))
+    read_only_paths = _string_list(data.get("read_only_paths"), field="read_only_paths", default=())
     enabled_checks = _string_list(data.get("enabled_checks"), field="enabled_checks", default=CHECKS, allowed=CHECKS)
     minimum_confidence = data.get("minimum_confidence", "medium")
     if not isinstance(minimum_confidence, str) or minimum_confidence not in CONFIDENCE_RANK:
@@ -227,6 +224,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         ("index_paths", index_paths),
         ("include_paths", include_paths),
         ("exclude_paths", exclude_paths),
+        ("read_only_paths", read_only_paths),
     ):
         for item in paths:
             _relative_path(item, field=field)
@@ -244,6 +242,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         max_card_bytes=_positive_int(
             data.get("max_card_bytes"), field="max_card_bytes", default=MEMORY_CARD_BUDGET_BYTES, minimum=1
         ),
+        read_only_paths=read_only_paths,
     )
 
 
@@ -395,6 +394,10 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
+    return bool(config.read_only_paths) and read_only_pattern(rel, config.read_only_paths) is not None
+
+
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
     paths: list[Path] = []
     for root_text in config.card_roots:
@@ -406,7 +409,7 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
                 continue
             if not path.is_file():
                 continue
-            rel = str(path.relative_to(target))
+            rel = path.relative_to(target).as_posix()
             if config.include_paths and not _path_matches(rel, config.include_paths):
                 continue
             if config.exclude_paths and _path_matches(rel, config.exclude_paths):
@@ -593,7 +596,10 @@ def _issue(
 def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     target = target.expanduser().resolve()
     today = _today()
+    # Read-only cards still count toward identity and collision data so a normal
+    # card that copies a protected ID is flagged; only their own issues are dropped.
     cards = _iter_cards(target, config)
+    read_only_card_count = 0
     linked = _index_links(target, config)
     linked_existing = {link for link in linked if (target / link).is_file()}
     issues: list[dict[str, Any]] = []
@@ -604,7 +610,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     enabled = set(config.enabled_checks)
     evidence_log = EvidenceLog(target)
     for path in cards:
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
         identity = card_identity(meta, rel)
@@ -612,6 +618,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         by_id.setdefault(card_id, []).append(rel)
         identities.append((rel, identity))
         identities_by_path[rel] = identity
+        if _is_read_only(config, rel):
+            read_only_card_count += 1
+            continue
         row = {
             "file": rel,
             "card_id": card_id,
@@ -810,6 +819,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     )
                 )
 
+    issues = [issue for issue in issues if not _is_read_only(config, str(issue.get("file") or ""))]
     for issue in issues:
         issue_identity = identities_by_path.get(str(issue.get("card_file") or ""))
         if issue_identity is not None:
@@ -850,6 +860,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "generated_at": _utc_iso(),
         "scan_date": today.isoformat(),
         "card_count": len(cards),
+        "read_only_card_count": read_only_card_count,
         "issue_count": len(issues),
         "refresh_queue_size": len(issues),
         "counts": dict(sorted(counts.items())),
@@ -1032,6 +1043,14 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": f"missing, run `brigade memory care init --target {target}`",
                 }
             )
+    if config.read_only_paths:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "memory_read_only_paths",
+                "detail": f"{len(config.read_only_paths)} active: {', '.join(config.read_only_paths)}",
+            }
+        )
     scan_path = _scan_path(target, config)
     queue_path = _queue_path(target, config)
     scan_payload = None
@@ -1158,6 +1177,7 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
         "enabled_checks": list(config.enabled_checks),
+        "read_only_paths": list(config.read_only_paths),
         "counts": (
             scan_payload["counts"]
             if isinstance(scan_payload, dict) and isinstance(scan_payload.get("counts"), dict)
@@ -1195,6 +1215,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"config_path: {payload['config_path']}")
     print(f"scan_path: {payload['scan_path']}")
     print(f"queue_path: {payload['queue_path']}")
+    if payload.get("read_only_paths"):
+        print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
     evidence_count = payload["counts"].get("unconsolidated-evidence", 0)
@@ -1323,8 +1345,9 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
     claimed_ids: IdentityIndex[str] = IdentityIndex()
     pending: list[tuple[Path, str, str, dict[str, Any]]] = []
+    # Every card claims its explicit ID so minting never reuses a read-only card's ID.
     for path in _iter_cards(target, config):
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         try:
             text = read_text_nofollow(path)
         except OSError:
@@ -1336,7 +1359,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         identity = card_identity(meta, rel)
         if identity.explicit:
             claimed_ids.claim(identity.card_id, rel)
-        pending.append((path, rel, text, meta))
+        if not _is_read_only(config, rel):
+            pending.append((path, rel, text, meta))
 
     for path, rel, text, meta in pending:
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
@@ -1813,11 +1837,11 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     except OSError:
         return {}
     frontmatter, _ = _parse_frontmatter(text)
-    identity = card_identity(frontmatter, str(path.relative_to(target)))
+    identity = card_identity(frontmatter, path.relative_to(target).as_posix())
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
-        "rel": str(path.relative_to(target)),
+        "rel": path.relative_to(target).as_posix(),
         "card_id": identity.card_id,
         "card_aliases": list(identity.aliases),
         "title": str(frontmatter.get("title") or path.stem),

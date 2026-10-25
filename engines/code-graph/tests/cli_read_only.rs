@@ -340,6 +340,100 @@ fn doctor_fresh_synced_repo_reports_fresh() {
 }
 
 #[test]
+fn doctor_text_reports_head_movement_and_language_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "doctor failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("head_moved=false"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "coverage.python: files=1 symbols=2 call_sites=1 resolved=1 unresolved=0 cross_file_edges=0"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn doctor_withholds_stale_resolver_coverage_until_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+    let conn = open_db(&db).unwrap();
+    graphtrail::store::meta::upsert(&conn, "resolver_version", "0").unwrap();
+    drop(conn);
+
+    for stale in [true, false] {
+        if !stale {
+            let sync = Command::new(graphtrail())
+                .current_dir(dir.path())
+                .args(["--db", &db.display().to_string(), "sync", "."])
+                .output()
+                .unwrap();
+            assert!(sync.status.success(), "sync failed: {sync:?}");
+        }
+        let expected_exit = if stale { 1 } else { 0 };
+        let expected_verdict = if stale { "STALE" } else { "FRESH" };
+        let output = Command::new(graphtrail())
+            .current_dir(dir.path())
+            .args(["--db", &db.display().to_string(), "doctor", "--json"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_exit), "{output:?}");
+        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(value["schema"]["needs_migration"], false);
+        assert_eq!(value["resolver"]["stale"], stale);
+        assert_eq!(value["verdict"], expected_verdict);
+        if stale {
+            assert_eq!(value["resolver"]["stored"], "0");
+            assert_eq!(value["coverage"], serde_json::json!({}));
+        } else {
+            assert_eq!(value["resolver"]["stored"], value["resolver"]["current"]);
+            assert_eq!(
+                value["coverage"]["python"],
+                serde_json::json!({
+                    "files": 1,
+                    "symbols": 2,
+                    "call_sites": 1,
+                    "resolved_call_sites": 1,
+                    "unresolved_call_sites": 0,
+                    "cross_file_edges": 0,
+                })
+            );
+        }
+
+        let output = Command::new(graphtrail())
+            .current_dir(dir.path())
+            .args(["--db", &db.display().to_string(), "doctor"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(expected_exit), "{output:?}");
+        let text = String::from_utf8(output.stdout).unwrap();
+        assert!(
+            text.contains(&format!("verdict: {expected_verdict}")),
+            "{text}"
+        );
+        if stale {
+            assert!(text.contains("stale=true"), "{text}");
+            assert!(!text.contains("coverage."), "{text}");
+        } else {
+            assert!(
+                text.contains(
+                    "coverage.python: files=1 symbols=2 call_sites=1 resolved=1 unresolved=0 cross_file_edges=0"
+                ),
+                "{text}"
+            );
+        }
+    }
+}
+
+#[test]
 fn doctor_new_file_reports_stale_exit_1() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());

@@ -78,11 +78,12 @@ def _render(name, target, python, monkeypatch):
     if base == "dot":
         monkeypatch.setattr(module, "require_local_platform", lambda: None)
         monkeypatch.setattr(module.grokbot_packs, "_load_instance_config", lambda *_: instance)
-        monkeypatch.setattr(module, "_load_config", lambda _: None)
+        # The Dot family passes its connector profile (#1943), so the stubs take keywords.
+        monkeypatch.setattr(module, "_load_config", lambda _, **__: None)
     else:
         monkeypatch.setattr(module, "_load_validated_instance", lambda _: instance)
     if base in {"dot", "t3"}:
-        monkeypatch.setattr(module, "load_runtime", lambda _: SimpleNamespace())
+        monkeypatch.setattr(module, "load_runtime", lambda _, **__: SimpleNamespace())
     if base == "t3":
         monkeypatch.setattr(module, "_hardening", lambda _: "NoNewPrivileges=yes\n")
     method = "render_unit"

@@ -3,7 +3,7 @@
 Summary:
 
 - Adds a staged-file scan before public pushes.
-- Dogfooded against a local checkout at `/home/example-user/work/private-repo`.
+- Dogfooded against a local checkout at `{{PRIVATE_CHECKOUT_PATH}}`.
 
 Notes to remove before publishing:
 

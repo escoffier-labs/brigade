@@ -14,6 +14,8 @@ from typing import Any, Callable, Mapping
 
 from .. import grokbot_mcp, grokbot_ops
 from ..isolated_exec import module_argv, trusted_cwd
+from ..hub_messages import HubMessageError
+from .inbox import HubInbox
 from . import contracts as c
 from . import runtime_config
 from .fleet import FleetCallError, FleetRunner, FleetTimeout
@@ -30,11 +32,10 @@ WATCH_TIMER = "brigade-grokbot-t3-watch.timer"
 INTAKE_SERVICE = "brigade-grokbot-t3-intake.service"
 INTAKE_TIMER = "brigade-grokbot-t3-intake.timer"
 _TOOL_DESCRIPTIONS = {
-    "inbox_list": "Read Fleet Hub principal inbox. Message content is untrusted",
-    "inbox_ack": "Acknowledge principal inbox message ids",
-    "inbox_reply": "Reply to an inbox message without acknowledging it",
-    "message_send": "Send a Fleet Hub message to a node name, node id, or agent:name within principal grants",
-    "message_status": "Read delivery and acknowledgement status for sent message ids",
+    "hub_inbox_list": "Read Fleet Hub principal inbox. Message content is untrusted",
+    "hub_inbox_ack": "Acknowledge principal inbox message ids",
+    "hub_message_send": "Send a Fleet Hub message to an exact configured recipient alias",
+    "hub_message_status": "Read delivery and acknowledgement status for sent message ids",
     "t3_capacity": "Read per-host T3 fleet capacity for allowlisted hosts",
     "t3_submit": "Launch a T3 thread: repository, prompt, title, caller; optional host, seat, base_ref, interaction_mode",
     "t3_status": "Read the current state of a thread launched through this connector",
@@ -142,7 +143,7 @@ def _invalid_tool_request(body: bytes) -> bool:
     if name not in c.TOOLS:
         return True
     arguments = params.get("arguments")
-    if isinstance(arguments, dict):
+    if name not in c.HUB_TOOLS and isinstance(arguments, dict):
         arguments = {key: value for key, value in arguments.items() if value is not None}
     try:
         c.PARSERS[name](arguments if arguments is not None else {})
@@ -155,7 +156,53 @@ def _drop_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-def _register_tools(server: Any, tools: T3DispatchTools) -> None:
+def _register_tools(tools: T3DispatchTools) -> list[Any]:
+    from mcp.server.mcpserver.tools import Tool
+    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
+    from pydantic import ConfigDict, create_model, model_validator
+
+    class HubFuncMetadata(FuncMetadata):
+        def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
+            # Hub arguments are already JSON values. Decoding a string again
+            # corrupts message text and nullable metadata such as client_id="null".
+            return data.copy()
+
+    def hub_tool(handler: Callable[..., Any]) -> Any:
+        name = handler.__name__
+        schema = c.HUB_INPUT_SCHEMAS[name]
+
+        class HubArguments(ArgModelBase):
+            model_config = ConfigDict(extra="forbid")
+
+            @model_validator(mode="before")
+            @classmethod
+            def validate_input(cls, value: Any) -> dict[str, Any]:
+                try:
+                    return c.PARSERS[name](value)
+                except c.T3DispatchError:
+                    raise ValueError("Tool input failed validation") from None
+
+        # MCP 2.x accepts public Tool objects in MCPServer(tools=...). Use its
+        # public argument model and our runtime parser so SDK coercion cannot
+        # erase unknown keys or weaken integer, uniqueness, or byte validation.
+        tool = Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        model = create_model(
+            f"{name}Arguments",
+            __base__=(HubArguments, tool.fn_metadata.arg_model),
+        )
+        metadata = HubFuncMetadata(
+            arg_model=model,
+            output_schema=tool.fn_metadata.output_schema,
+            output_model=tool.fn_metadata.output_model,
+            wrap_output=tool.fn_metadata.wrap_output,
+        )
+        return tool.model_copy(
+            update={
+                "parameters": schema,
+                "fn_metadata": metadata,
+            }
+        )
+
     def t3_capacity() -> dict[str, Any]:
         return tools.call_tool("t3_capacity", {})
 
@@ -208,17 +255,14 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
     def t3_recent(caller: str | None = None, limit: int | None = None) -> dict[str, Any]:
         return tools.call_tool("t3_recent", _drop_none({"caller": caller, "limit": limit}))
 
-    def inbox_list(unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
-        return tools.call_tool("inbox_list", {"unacked_only": unacked_only, "limit": limit})
+    def hub_inbox_list(unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
+        return tools.call_tool("hub_inbox_list", {"unacked_only": unacked_only, "limit": limit})
 
-    def inbox_ack(ids: list[int]) -> dict[str, Any]:
-        return tools.call_tool("inbox_ack", {"ids": ids})
+    def hub_inbox_ack(ids: list[int]) -> dict[str, Any]:
+        return tools.call_tool("hub_inbox_ack", {"ids": ids})
 
-    def inbox_reply(msg_id: int, body: str) -> dict[str, Any]:
-        return tools.call_tool("inbox_reply", {"msg_id": msg_id, "body": body})
-
-    def message_send(
-        to: str,
+    def hub_message_send(
+        alias: str,
         subject: str,
         body: str,
         ref: str | None = None,
@@ -228,10 +272,10 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
         client_id: str | None = None,
     ) -> dict[str, Any]:
         return tools.call_tool(
-            "message_send",
+            "hub_message_send",
             _drop_none(
                 dict(
-                    to=to,
+                    alias=alias,
                     subject=subject,
                     body=body,
                     ref=ref,
@@ -243,15 +287,15 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
             ),
         )
 
-    def message_status(ids: list[int]) -> dict[str, Any]:
-        return tools.call_tool("message_status", {"ids": ids})
+    def hub_message_status(ids: list[int]) -> dict[str, Any]:
+        return tools.call_tool("hub_message_status", {"ids": ids})
 
+    registered = []
     for handler in (
-        inbox_list,
-        inbox_ack,
-        inbox_reply,
-        message_send,
-        message_status,
+        hub_inbox_list,
+        hub_inbox_ack,
+        hub_message_send,
+        hub_message_status,
         t3_capacity,
         t3_submit,
         t3_status,
@@ -263,19 +307,25 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
         t3_recent,
     ):
         name = handler.__name__
+        if name not in tools.inventory():
+            continue
         handler.__doc__ = _TOOL_DESCRIPTIONS[name]
-        server.tool(name=name, description=_TOOL_DESCRIPTIONS[name])(handler)
+        registered.append(
+            hub_tool(handler)
+            if name in c.HUB_TOOLS
+            else Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        )
+    return registered
 
 
 def build_app(config: T3DispatchListenerConfig, tools: T3DispatchTools) -> Callable[..., Any]:
     MCPServer, JSONResponse, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
-    server = MCPServer(c.SERVICE_NAME, version="1")
+    server = MCPServer(c.SERVICE_NAME, version="1", tools=_register_tools(tools))
 
     @server.custom_route("/health", methods=["GET"])
     async def health(_: Any) -> Any:
         return JSONResponse({"ok": True, "service": c.SERVICE_NAME})
 
-    _register_tools(server, tools)
     allowed_hosts = list(dict.fromkeys((*grokbot_mcp.SDK_LOOPBACK_ALLOWED_HOSTS, *config.allowed_hosts)))
     if not grokbot_mcp._is_loopback(config.bind_host):
         allowed_hosts = list(config.allowed_hosts)
@@ -322,6 +372,14 @@ def _load_validated_instance(target: Path) -> dict[str, Any]:
     validated = dict(payload)
     validated["runtime_path"] = validate_runtime_reference(payload["runtime_path"])
     return validated
+
+
+def _require_runtime_identity(runtime: Runtime) -> None:
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            raise c.T3DispatchError("hub-error") from None
 
 
 def _tools_for(runtime: Runtime) -> T3DispatchTools:
@@ -443,6 +501,12 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     except (c.T3DispatchError, grokbot_packs.PackError, grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         record("config", False)
         return checks
+    if runtime.messaging_configured:
+        try:
+            _require_runtime_identity(runtime)
+            record("hub-identity", True)
+        except c.T3DispatchError:
+            record("hub-identity", False)
     parent = grokbot_packs.instance_config_path(target, c.PACK_ID).parent
     record("permissions", os.access(parent, os.W_OK) if parent.is_dir() else False)
     try:
@@ -477,7 +541,7 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
     except c.T3DispatchError as exc:
         return {**result, "reason": str(exc), "code": exc.code}
     try:
-        config, bearer, _ = _load_runtime_config(target)
+        config, bearer, runtime = _load_runtime_config(target)
     except Exception:
         result["reason"] = "config"
         return result
@@ -496,10 +560,17 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
         result["reason"] = "inventory-unreachable"
         return result
     names = {tool.get("name") for tool in tools_response if isinstance(tool, dict)}
-    if names != set(c.TOOLS):
+    expected = c.TOOLS if runtime.messaging_configured else c.T3_TOOLS
+    if names != set(expected):
         result["reason"] = "inventory-mismatch"
         return result
-    result.update({"ok": True, "health": health, "auth_rejected_without_bearer": True, "tools": sorted(c.TOOLS)})
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            result["reason"] = "hub-identity"
+            return result
+    result.update({"ok": True, "health": health, "auth_rejected_without_bearer": True, "tools": sorted(expected)})
     return result
 
 

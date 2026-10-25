@@ -151,16 +151,16 @@ Put that directory on `PATH` in every scheduled invocation.
 Crontab header (once per crontab file):
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
 systemd `[Service]` block (on every Brigade unit):
 
 ```ini
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ```
 
-Replace `/home/you` with your account home directory. Cron cannot expand `$HOME`.
+Replace `/ABSOLUTE_ACCOUNT_HOME` with your account's real absolute home directory before installing these entries. The placeholder is not a shell variable; cron cannot expand `$HOME` in these assignments.
 
 ### systemd user timers
 
@@ -248,7 +248,7 @@ On a workspace with several enabled producers, `brigade work scanners run --due 
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 15 6 * * * cd "WORKSPACE" && brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .
 ```
 
@@ -263,7 +263,7 @@ Description=Brigade daily memory care pass
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/sh -c 'brigade memory care scan --target . && brigade memory care import-issues --target . && brigade work brief --target . && brigade memory care closeout --target .'
 ```
 
@@ -336,7 +336,7 @@ Run this on a shorter cadence when writer harnesses produce handoffs throughout 
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 */30 * * * * cd "WORKSPACE" && brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .
 ```
 
@@ -351,7 +351,7 @@ Description=Brigade handoff ingest sweep
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=/bin/sh -c 'brigade handoff lint --strict --target . && brigade ingest --promote-cards --route-documents --target .'
 ```
 
@@ -426,7 +426,7 @@ Schedule rank first, then reconcile 30 to 60 minutes later so new verify receipt
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 7 * * 1 cd "WORKSPACE" && brigade outcome rank --target .
 30 7 * * 1 cd "WORKSPACE" && brigade outcome reconcile --target .
 ```
@@ -448,7 +448,7 @@ Description=Brigade weekly outcome rank
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade outcome rank --target .
 ```
 
@@ -475,7 +475,7 @@ Description=Brigade weekly outcome reconcile
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade outcome reconcile --target .
 ```
 
@@ -578,7 +578,7 @@ brigade center report build --target .
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 8 * * * cd "WORKSPACE" && brigade runbook run --approved ".brigade/memory-care/runbooks/daily-observability.json" --target .
 ```
 
@@ -593,7 +593,7 @@ Description=Brigade daily observability pass
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade runbook run --approved .brigade/memory-care/runbooks/daily-observability.json --target .
 ```
 
@@ -680,7 +680,7 @@ brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --appr
 ### Crontab
 
 ```cron
-PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 0 4 * * * cd "WORKSPACE" && brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 
@@ -695,7 +695,7 @@ Description=Brigade nightly maintenance runbook
 [Service]
 Type=oneshot
 WorkingDirectory=WORKSPACE
-Environment=PATH=/home/you/.local/bin:/usr/local/bin:/usr/bin:/bin
+Environment=PATH=/ABSOLUTE_ACCOUNT_HOME/.local/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=brigade runbook run .brigade/runbooks/nightly-maintenance.json --target . --approved
 ```
 

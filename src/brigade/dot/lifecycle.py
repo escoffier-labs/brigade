@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
+import os
 import re
 import time
 import urllib.error
@@ -21,14 +23,16 @@ from . import access_auth
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import DotTools, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
+from .hub_inbox import authenticated_authority
+from .profile import DOT, ConnectorProfile, profile_for
 from .runtime_config import Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
-from .state import BridgeState, call_label
+from .state import BridgeState, call_label, client_label
 
 MAX_HTTP_BYTES = 32768
-WATCH_SERVICE = "brigade-dot-watch.service"
-WATCH_TIMER = "brigade-dot-watch.timer"
+WATCH_SERVICE = DOT.watch_service
+WATCH_TIMER = DOT.watch_timer
 
 
 @dataclass(frozen=True)
@@ -47,14 +51,26 @@ class DotListenerConfig:
 class _DotGate:
     """Admit only metadata discovery and authenticated, bounded MCP POSTs."""
 
-    def __init__(self, app: Any, config: DotListenerConfig, verifier: AccessVerifier, recorder: Any = None):
+    def __init__(
+        self,
+        app: Any,
+        config: DotListenerConfig,
+        verifier: AccessVerifier,
+        recorder: Any = None,
+        *,
+        profile: ConnectorProfile = DOT,
+    ):
         self.app, self.config, self.verifier, self.recorder = app, config, verifier, recorder
+        self.profile = profile
 
-    async def record(self, label: str, ok: bool, started: float, error_code: str | None = None) -> None:
+    async def record(
+        self, label: str, ok: bool, started: float, error_code: str | None = None, client_name: str | None = None
+    ) -> None:
         if self.recorder is not None:
+            extra = {} if client_name is None else {"client_name": client_name}
             try:
                 await asyncio.to_thread(
-                    self.recorder, label, ok, (time.monotonic() - started) * 1000, error_code=error_code
+                    self.recorder, label, ok, (time.monotonic() - started) * 1000, error_code=error_code, **extra
                 )
             except Exception:
                 pass
@@ -141,19 +157,22 @@ class _DotGate:
         except TimeoutError:
             await self.reject(send, 408)
             return
-        started, label = time.monotonic(), "unparsed"
+        started, label, client_name = time.monotonic(), "unparsed", None
         try:
             request = json.loads(body, object_pairs_hook=unique_object)
             c.require(isinstance(request, dict))
             label = call_label(request.get("method"))
+            if request.get("method") == "initialize":
+                client_name = _client_name(request.get("params"))
             if request.get("method") == "tools/call":
                 params = request.get("params")
                 c.require(isinstance(params, dict))
                 name = params.get("name")
-                label = name if isinstance(name, str) and name in c.TOOLS else "tools/call"
-                validate_arguments(name, params.get("arguments", {}))
+                tools = self.profile.tools
+                label = name if isinstance(name, str) and name in tools else "tools/call"
+                validate_arguments(name, params.get("arguments", {}), tools=tools)
         except Exception:
-            await self.record(label, False, started, "invalid_request")
+            await self.record(label, False, started, "invalid_request", client_name)
             await self.reject(send, 400)
             return
         consumed = False
@@ -189,13 +208,18 @@ class _DotGate:
                     error = "rpc_" + str(reply["error"].get("code"))[:16]
             except ValueError:
                 pass
-            await self.record(label, error is None, started, error)
+            await self.record(label, error is None, started, error, client_name)
 
 
-def _server(config: DotListenerConfig, tools: DotTools) -> Any:
+def _client_name(params: Any) -> str | None:
+    info = params.get("clientInfo") if isinstance(params, dict) else None
+    return client_label(info.get("name")) if isinstance(info, dict) else None
+
+
+def _server(config: DotListenerConfig, tools: DotTools, profile: ConnectorProfile = DOT) -> Any:
     MCPServer, _, _, _ = grokbot_mcp._load_mcp()
-    server = MCPServer(c.SERVICE_NAME, version=c.SERVER_VERSION)
-    register_tools(server, tools)
+    server = MCPServer(profile.service_name, version=c.SERVER_VERSION)
+    register_tools(server, tools, profile)
     return server
 
 
@@ -206,10 +230,11 @@ def build_app(
     verifier: AccessVerifier,
     *,
     events_enabled: bool = True,
+    profile: ConnectorProfile = DOT,
 ) -> Callable[..., Any]:
     _, _, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
     c.require(verifier.validated is True, "authentication_inactive")
-    server = _server(config, tools)
+    server = _server(config, tools, profile)
     allowed = list(dict.fromkeys([*config.allowed_hosts, f"{config.bind_host}:{config.bind_port}"]))
     if grokbot_mcp._is_loopback(config.bind_host):
         allowed = list(dict.fromkeys([*allowed, *grokbot_mcp.SDK_LOOPBACK_ALLOWED_HOSTS]))
@@ -224,7 +249,11 @@ def build_app(
         ),
     )
     return _DotGate(
-        EventsApp(app, service, enabled=events_enabled), config, verifier, getattr(tools, "record_call", None)
+        EventsApp(app, service, enabled=events_enabled),
+        config,
+        verifier,
+        getattr(tools, "record_call", None),
+        profile=profile,
     )
 
 
@@ -253,9 +282,10 @@ def _load_config(
     bind: str | None = None,
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
+    profile: ConnectorProfile = DOT,
 ) -> tuple[DotListenerConfig, Runtime]:
     require_local_platform()
-    instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
+    instance = grokbot_packs._load_instance_config(target, profile.pack_id)
     host, port = grokbot_packs._parse_default_bind(bind if bind is not None else instance["bind"])
     hosts = instance["allowed_hosts"] if allowed_hosts is None else allowed_hosts
     origins = instance["allowed_origins"] if allowed_origins is None else allowed_origins
@@ -263,7 +293,7 @@ def _load_config(
         all(_valid_host(h) for h in hosts) and all(grokbot_mcp._valid_origin(o) for o in origins), "invalid_config"
     )
     config = DotListenerConfig(target.resolve(), host, port, tuple(hosts), tuple(origins), instance["runtime_path"])
-    return config, load_runtime(Path(config.runtime_path))
+    return config, load_runtime(Path(config.runtime_path), schema=profile.runtime_schema)
 
 
 def build_listener_from_target(
@@ -272,9 +302,16 @@ def build_listener_from_target(
     bind: str | None = None,
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
+    pack_id: str = c.PACK_ID,
 ) -> tuple[DotListenerConfig, DotTools, Runtime]:
-    config, runtime = _load_config(target, bind=bind, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins)
-    tools, _, _ = build_tools(runtime)
+    profile = profile_for(pack_id)
+    config, runtime = _load_config(
+        target, bind=bind, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins, profile=profile
+    )
+    # A hosted profile sharing Dot's Access app, token or state would let its credential reach Dot's tools.
+    if not profile.fleet_dispatch:
+        c.require(_isolated_from_dot(target, runtime), "not_isolated_from_dot")
+    tools, _, _ = build_tools(runtime, profile)
     return config, tools, runtime
 
 
@@ -288,19 +325,29 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
     # Fail startup when RS256 cannot be verified; otherwise every login would 401 behind a passing canary.
     access_auth._jwt()
     try:
+        if not tools.profile.fleet_dispatch:
+            tools.inbox.hub.require_identity()
         try:
             tools.state.prune_call_log()
         except c.DotError:
             pass
         tools.state.hub_set("inbox_backend", "hub")
+        fleet = tools.fleet
         service = EventService(
             tools.state,
-            fleet_status=tools.fleet.fleet_status,
-            hub=tools.inbox.hub if runtime.events_enabled else None,
+            fleet_status=fleet.fleet_status if fleet is not None else _no_fleet_status,
+            hub=tools.inbox.hub if runtime.events_enabled or not tools.profile.fleet_dispatch else None,
             hub_poll_seconds=runtime.hub.poll_seconds,
             callback_hosts=frozenset(runtime.callback_hosts),
         )
-        app = build_app(config, tools, service, AccessVerifier(runtime.auth), events_enabled=runtime.events_enabled)
+        app = build_app(
+            config,
+            tools,
+            service,
+            AccessVerifier(runtime.auth),
+            events_enabled=runtime.events_enabled,
+            profile=tools.profile,
+        )
         uvicorn.run(
             app,
             host=config.bind_host,
@@ -319,6 +366,10 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
         )
     finally:
         tools.state.close()
+
+
+def _no_fleet_status(request_id: str) -> dict[str, Any]:
+    return {"error": "fleet_unavailable"}
 
 
 def _base(config: DotListenerConfig) -> str:
@@ -340,7 +391,8 @@ def _probe(url: str, *, method: str = "GET", host: str | None = None, timeout: i
         return 0, None
 
 
-def doctor(target: Path) -> list[dict[str, str]]:
+def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
+    profile = profile_for(pack_id)
     checks: list[dict[str, str]] = []
 
     def record(name: str, action: Callable[[], Any]) -> None:
@@ -358,7 +410,7 @@ def doctor(target: Path) -> list[dict[str, str]]:
 
     record("dependency", dependencies)
     try:
-        config, runtime = _load_config(target)
+        config, runtime = _load_config(target, profile=profile)
         checks.append({"check": "config", "status": "ok"})
     except c.DotError as error:
         if error.code == "unsupported_on_windows":
@@ -380,23 +432,72 @@ def doctor(target: Path) -> list[dict[str, str]]:
     def fleet_check() -> bool:
         tools, state, _ = build_tools(runtime)
         try:
-            return tools.fleet.fleet_capacity().get("ok") is True
+            return tools.fleet is not None and tools.fleet.fleet_capacity().get("ok") is True
         finally:
             state.close()
 
-    record("t3-fleet", fleet_check)
+    if profile.fleet_dispatch:
+        record("t3-fleet", fleet_check)
+    else:
+        try:
+            authenticated_authority(runtime.hub)
+        except c.DotError as error:
+            checks.append({"check": "hub-identity", "status": "fail", "reason": error.code})
+        else:
+            checks.append({"check": "hub-identity", "status": "ok"})
+        record("isolation", lambda: _isolated_from_dot(target, runtime))
     record("endpoint", lambda: _probe(_base(config) + "/mcp", method="POST")[0] == 401)
     return checks
 
 
-def _registered_names(config: DotListenerConfig, tools: DotTools) -> set[str]:
-    return {tool.name for tool in asyncio.run(_server(config, tools).list_tools())}
+def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
+    """A hosted profile never shares Dot's Hub identity, inbox, state or Access application."""
+    if not grokbot_packs.instance_config_path(target, DOT.pack_id).exists():
+        return True
+    _, dot_runtime = _load_config(target, profile=DOT)
+    return (
+        runtime.hub.principal != dot_runtime.hub.principal
+        and not _same_location(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
+        and not _same_token(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
+        and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
+        and runtime.auth.audience != dot_runtime.auth.audience
+        and runtime.auth.resource != dot_runtime.auth.resource
+    )
 
 
-def canary(target: Path) -> dict[str, Any]:
-    result: dict[str, Any] = {"ok": False, "pack_id": c.PACK_ID}
+def _same_location(left: Path, right: Path) -> bool:
+    # Spellings like a/../b or a symlink name the same file; an unreadable pair counts as shared.
     try:
-        config, runtime = _load_config(target)
+        if left.exists() and right.exists():
+            return os.path.samefile(left, right)
+        return left.resolve() == right.resolve()
+    except OSError:
+        return True
+
+
+def _same_token(left: Path, right: Path) -> bool:
+    # Two files holding one Hub token are one credential; a token that exists but cannot be read counts as shared.
+    from brigade.fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+
+    if not (os.path.lexists(left) and os.path.lexists(right)):
+        return False
+    try:
+        tokens = read_message_token_file(str(left)), read_message_token_file(str(right))
+    except FleetMessageHubError:
+        return True
+    return hmac.compare_digest(tokens[0].encode("ascii"), tokens[1].encode("ascii"))
+
+
+def _registered_names(config: DotListenerConfig, tools: DotTools) -> set[str]:
+    profile = getattr(tools, "profile", DOT)
+    return {tool.name for tool in asyncio.run(_server(config, tools, profile).list_tools())}
+
+
+def canary(target: Path, *, pack_id: str = c.PACK_ID) -> dict[str, Any]:
+    profile = profile_for(pack_id)
+    result: dict[str, Any] = {"ok": False, "pack_id": profile.pack_id}
+    try:
+        config, runtime = _load_config(target, profile=profile)
     except c.DotError as error:
         return {**result, "reason": error.code if error.code == "unsupported_on_windows" else "config"}
     except Exception:
@@ -407,12 +508,12 @@ def canary(target: Path) -> dict[str, Any]:
     if status != 200 or not isinstance(metadata, dict) or metadata.get("resource") != runtime.auth.resource:
         return {**result, "reason": "metadata"}
     try:
-        tools, state, _ = build_tools(runtime)
+        tools, state, _ = build_tools(runtime, profile)
         try:
             names = _registered_names(config, tools)
         finally:
             state.close()
-        if names != c.TOOLS:
+        if names != profile.tools:
             return {**result, "reason": "inventory-mismatch"}
     except Exception:
         return {**result, "reason": "inventory-mismatch"}
@@ -425,11 +526,12 @@ def _hardening() -> str:
     return "NoNewPrivileges=yes\nUMask=0077\nPrivateTmp=no\n"
 
 
-def render_unit(target: Path, *, python: str | None = None) -> str:
+def render_unit(target: Path, *, python: str | None = None, pack_id: str = c.PACK_ID) -> str:
+    profile = profile_for(pack_id)
     target = target.expanduser().resolve()
     require_local_platform()
-    instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
-    load_runtime(Path(instance["runtime_path"]))
+    instance = grokbot_packs._load_instance_config(target, profile.pack_id)
+    load_runtime(Path(instance["runtime_path"]), schema=profile.runtime_schema)
     args = module_argv(
         "brigade",
         "run",
@@ -437,7 +539,7 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         "grokbot",
         "serve",
         "--pack",
-        c.PACK_ID,
+        profile.pack_id,
         "--target",
         str(target),
         "--bind",
@@ -449,8 +551,8 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
             args += [flag, value]
     command = " ".join(grokbot_ops._systemd_quote(arg) for arg in args)
     return (
-        "# Generated by brigade run cloud grokbot pack install-service.\n# Unit: brigade-dot.service\n"
-        "[Unit]\nDescription=Brigade Dot MCP listener\nAfter=network.target\n\n"
+        f"# Generated by brigade run cloud grokbot pack install-service.\n# Unit: {profile.unit_name}\n"
+        f"[Unit]\nDescription=Brigade {profile.label} MCP listener\nAfter=network.target\n\n"
         "[Service]\nType=simple\n"
         f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\n"
         f"ExecStart={command}\nRestart=on-failure\nRestartSec=5\n"
@@ -458,32 +560,43 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
     )
 
 
-def render_watch_units(target: Path, *, python: str | None = None) -> tuple[str, str]:
+def render_watch_units(target: Path, *, python: str | None = None, pack_id: str = c.PACK_ID) -> tuple[str, str]:
+    profile = profile_for(pack_id)
     target = target.expanduser().resolve()
-    _load_config(target)
-    args = module_argv("brigade.dot", "watch", "--target", str(target), python=python)
+    _load_config(target, profile=profile)
+    watch_args = ["watch", "--target", str(target)]
+    if profile is not DOT:
+        watch_args += ["--pack", profile.pack_id]
+    args = module_argv("brigade.dot", *watch_args, python=python)
     command = " ".join(grokbot_ops._systemd_quote(arg) for arg in args)
-    header = "# Generated by Brigade Dot watch installation.\n"
+    header = f"# Generated by Brigade {profile.label} watch installation.\n"
     service = (
-        header + "[Unit]\nDescription=Watch the Dot inbox and route\nAfter=network.target\n\n"
+        header + f"[Unit]\nDescription=Watch the {profile.label} inbox and route\nAfter=network.target\n\n"
         "[Service]\nType=oneshot\n"
         f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\n"
         f"ExecStart={command}\nTimeoutStartSec=180\n{_hardening()}"
     )
     timer = (
-        header + "[Unit]\nDescription=Watch Dot every five minutes\n\n[Timer]\nOnBootSec=5min\n"
-        f"OnUnitActiveSec=5min\nAccuracySec=30s\nUnit={WATCH_SERVICE}\n\n[Install]\nWantedBy=timers.target\n"
+        header + f"[Unit]\nDescription=Watch {profile.label} every five minutes\n\n[Timer]\nOnBootSec=5min\n"
+        f"OnUnitActiveSec=5min\nAccuracySec=30s\nUnit={profile.watch_service}\n\n[Install]\nWantedBy=timers.target\n"
     )
     return service, timer
 
 
-def write_unit(target: Path, out_dir: Path, *, force: bool = False, python: str | None = None) -> Path:
-    return _write_rendered(out_dir / "brigade-dot.service", render_unit(target, python=python), force=force)
+def write_unit(
+    target: Path, out_dir: Path, *, force: bool = False, python: str | None = None, pack_id: str = c.PACK_ID
+) -> Path:
+    profile = profile_for(pack_id)
+    rendered = render_unit(target, python=python, pack_id=pack_id)
+    return _write_rendered(out_dir / profile.unit_name, rendered, force=force)
 
 
-def write_watch_units(target: Path, out_dir: Path, *, force: bool = False, python: str | None = None) -> list[Path]:
-    service, timer = render_watch_units(target, python=python)
+def write_watch_units(
+    target: Path, out_dir: Path, *, force: bool = False, python: str | None = None, pack_id: str = c.PACK_ID
+) -> list[Path]:
+    profile = profile_for(pack_id)
+    service, timer = render_watch_units(target, python=python, pack_id=pack_id)
     return [
-        _write_rendered(out_dir / WATCH_SERVICE, service, force=force),
-        _write_rendered(out_dir / WATCH_TIMER, timer, force=force),
+        _write_rendered(out_dir / profile.watch_service, service, force=force),
+        _write_rendered(out_dir / profile.watch_timer, timer, force=force),
     ]

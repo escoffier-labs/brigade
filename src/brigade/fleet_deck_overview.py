@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlencode
 
-from . import fleet_action_page, fleet_action_sources, fleet_command_deck as deck
+from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
 from . import fleet_deck_activity as activity
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
@@ -268,25 +268,17 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
     return tuple(attention + collisions + stale + coverage)
 
 
-def _alert_html(alert: Alert, action_sources: frozenset[str] = frozenset()) -> str:
-    kind_class = alert.kind.replace(" ", "-")
-    detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
-    action = fleet_action_page.alert_link(alert.source_ref, action_sources)
-    return (
-        f'<li class="alert alert--{_esc(kind_class)}"><span class="alert-icon" aria-hidden="true">!</span>'
-        f'<div class="alert-body"><p class="alert-title"><span class="alert-kind">{_esc(alert.kind)}</span> '
-        f'{_esc(alert.title)}</p><p class="alert-detail">{_esc(detail)}</p>'
-        f'<p class="alert-since">{_esc(alert.since)}</p>{action}</div></li>'
-    )
-
-
-def render_alerts(view: DeckView, now: datetime, *, action_sources: frozenset[str] = frozenset()) -> str:
+def render_alert_line(view: DeckView, now: datetime) -> str:
     alerts = page_alerts(view, now)
-    items = "".join(_alert_html(alert, action_sources) for alert in alerts)
-    body = f'<ul class="alerts">{items}</ul>' if items else '<p class="empty">No active alerts</p>'
+    if not alerts:
+        return ""
+    counts: dict[str, int] = {}
+    for alert in alerts:
+        counts[alert.kind] = counts.get(alert.kind, 0) + 1
+    kinds = ", ".join(f"{count} {kind}" for kind, count in counts.items())
     return (
-        '<section class="panel" id="alerts" aria-labelledby="alerts-title"><header>'
-        f'<h2 id="alerts-title">Active alerts ({len(alerts)})</h2></header>{body}</section>'
+        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> · {_esc(kinds)} '
+        '<a href="/deck/alerts">Review</a></p>'
     )
 
 
@@ -310,6 +302,13 @@ def verdict_text(view: DeckView, now: datetime) -> str:
     return f"COVERAGE UNKNOWN ({unknown})" if unknown else deck.deck_verdict(view)
 
 
+def _verdict_display(verdict: str) -> str:
+    for original, display in (("NEEDS ATTENTION", "Needs attention"), ("COVERAGE UNKNOWN", "Coverage unknown")):
+        if verdict.startswith(original):
+            return display + verdict[len(original) :]
+    return "All clear" if verdict == "ALL CLEAR" else verdict
+
+
 def render_header(view: DeckView, now: datetime) -> str:
     verdict = verdict_text(view, now)
     tone = "attention" if verdict.startswith("NEEDS") else "unknown" if verdict.startswith("COVERAGE") else "clear"
@@ -322,8 +321,8 @@ def render_header(view: DeckView, now: datetime) -> str:
         )
     )
     return (
-        '<header class="page-head"><div><p class="crumbs">Fleet &rsaquo; Fleet overview</p>'
-        f'<h1>Fleet overview <span class="verdict-status verdict-status--{tone}">{_esc(verdict)}</span></h1>'
+        '<header class="page-head"><div>'
+        f'<h1>Fleet overview <span class="verdict-status verdict-status--{tone}">{_esc(_verdict_display(verdict))}</span></h1>'
         f'<p class="page-sub">{_esc(sub)}</p></div>'
         f'<p class="header-meta">Updated {_esc(now.strftime("%H:%M UTC"))} '
         '<a class="refresh-link" href="/deck">Refresh</a></p></header>'
@@ -345,7 +344,7 @@ def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *,
     model = run.launch_model or run.model
     model_attr = f' title="{_esc(model)}"' if model else ""
     return (
-        f'<li class="row" title="{_esc(run.run_id)}"><span class="dot dot--working" aria-hidden="true"></span>'
+        f'<li class="row" title="{_esc(run.run_id)}">'
         f'<div class="row-body"><p class="row-title"><a href="{_esc(href)}">{_esc(run.repo or UNKNOWN)}</a>'
         f'{state}</p><p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} '
         f"{_esc(seat)} · {_esc(station.label)}</p>{parallel}</div>"
@@ -360,7 +359,7 @@ def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> s
     counts = activity.queue_counts(queue)
     counts += deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
     rows = "".join(
-        '<li class="row"><span class="dot dot--offline" aria-hidden="true"></span><div class="row-body">'
+        '<li class="row"><div class="row-body">'
         f'<p class="row-title">{_esc(deck._cp_text(item.get("id")))}</p>'
         f'<p class="row-meta">blocked · {_esc(activity.REASONS.get(deck._cp_text(item.get("reason")), deck._cp_text(item.get("reason"))))}</p></div></li>'
         for item in queue.blocked_items
@@ -384,9 +383,10 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
     working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
         '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
-        '<div><h2 id="working-title">Activity</h2><p class="station-meta">Managed jobs occupy station slots. '
-        "Agent sessions report presence; they may be idle or overlap managed jobs. "
-        "Current presence means the Hub has an unexpired report.</p></div></header>"
+        '<div><h2 id="working-title">Activity</h2><details class="panel-help"><summary>About activity</summary>'
+        "<p>Managed jobs occupy station slots. Agent sessions report presence; they may be idle or overlap "
+        "managed jobs. Current presence means the Hub has an unexpired report.</p></details></div>"
+        '<a class="card-link" href="/view/machines">View runs</a></header>'
         f"<h3>Managed jobs ({count})</h3>{working}{render_sessions(view)}</section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
         f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section></div>"
@@ -445,7 +445,10 @@ def _seats_html(station: StationView, machine: MachineState | None, status: str)
         + '<span class="seg seg--off"></span>' * counts[2]
     )
     bar = f'<span class="{wrapper}" role="img" aria-label="{_esc(text)}">{segments}</span>'
-    return f'{bar}<span class="seat-text">{_esc(text)}</span>'
+    return (
+        f'<td title="{_esc(text)}">{bar}'
+        f'<span class="seat-text mono" aria-hidden="true">{station.busy} / {capacity}</span></td>'
+    )
 
 
 def _load_cell(machine: MachineState | None) -> str:
@@ -461,40 +464,77 @@ def _load_cell(machine: MachineState | None) -> str:
     return f'{percent}%<progress class="bar bar--thin" value="{percent}" max="100" aria-label="Load"></progress>'
 
 
-def _machine_row(view: DeckView, station: StationView, now: datetime) -> str:
+def machine_notes(station: StationView, machine: MachineState | None, status: str) -> tuple[tuple[str, bool], ...]:
+    """Status and positive claims notes in display order, before HTML escaping."""
+    notes: list[tuple[str, bool]] = []
+    if status == "stale":
+        notes.append(("stale", True))
+    elif status == "limited" and machine is not None:
+        notes.append((POLICY_LIMITS.get(machine.unused_reason, machine.state), False))
+    elif status == "offline" and station.enrolled:
+        notes.append(("offline", False))
+    elif status == "unknown":
+        notes.append(("no telemetry", False))
+    if machine is not None and machine.active_claims.isdigit():
+        try:
+            claims = int(machine.active_claims)
+        except ValueError:
+            claims = 0
+        if claims > 0:
+            notes.append((_plural(claims, "claim"), False))
+    return tuple(notes)
+
+
+def _machine_row(view: DeckView, station: StationView, now: datetime, *, show_notes: bool) -> str:
     machine = machine_for(view, station)
     status = station_status(station, machine)
     enrol = "" if station.enrolled else ' <span class="chip chip-muted">not enrolled</span>'
     os_name = machine.os if machine is not None else UNKNOWN
-    claims = machine.active_claims if machine is not None else UNKNOWN
     state = machine.state if machine is not None else UNKNOWN
     reason = machine.unused_reason if machine is not None else UNKNOWN
-    reason_html = f'<span class="sub">{_esc(reason)}</span>' if reason != UNKNOWN else ""
     telemetry = format_age(seconds_since(machine.last_observed_at, now)) if machine is not None else UNKNOWN
     last_run = "never" if station.last_heard is None else format_age(seconds_since(station.last_heard, now))
+    notes = " ".join(
+        f'<span class="tag{" tag--warn" if warn else ""}">{_esc(label)}</span>'
+        for label, warn in machine_notes(station, machine, status)
+    )
+    notes_cell = f"<td>{notes}</td>" if show_notes else ""
+    seen_class = " seen--stale" if status == "stale" else ""
+    seen = f"stale {telemetry}" if status == "stale" and telemetry != UNKNOWN else telemetry
     return (
-        f'<tr data-status="{status}"><td><span class="dot dot--{status}" aria-hidden="true"></span> '
+        f'<tr data-status="{_esc(status)}" title="state {_esc(state)} · reason {_esc(reason)} · '
+        f'last run {_esc(last_run)} · node {_esc(station.station.node_id)}"><td>'
         f'<span class="machine-name" title="{_esc(station.station.node_id)}">{_esc(station.label)}</span>{enrol}'
-        f'<span class="sub">{_esc(os_name)}</span></td>'
-        f"<td>{_seats_html(station, machine, status)}</td><td>{_load_cell(machine)}</td><td>{_esc(claims)}</td>"
-        f"<td>{_esc(state)}{reason_html}</td>"
-        f'<td>{_esc(telemetry)}<span class="sub">last run {_esc(last_run)}</span></td></tr>'
+        f'<span class="sub-inline">{_esc(os_name)}</span></td>'
+        f"{_seats_html(station, machine, status)}<td>{_load_cell(machine)}</td>{notes_cell}"
+        f'<td class="seen mono{seen_class}">{_esc(seen)}</td></tr>'
     )
 
 
 def render_machine_table(view: DeckView, now: datetime) -> str:
+    header = (
+        '<section class="panel" id="machines-table" aria-labelledby="machines-title"><header><div>'
+        f'<h2 id="machines-title">Machines ({len(view.stations)})</h2>'
+        '<p class="seat-legend" aria-hidden="true"><span class="legend-swatch legend-swatch--busy"></span>busy '
+        '<span class="legend-swatch legend-swatch--free"></span>idle '
+        '<span class="legend-swatch legend-swatch--off"></span>unavailable</p></div>'
+        '<a class="card-link" href="/view/machines">Machines board</a></header>'
+    )
     if not view.stations:
         return (
-            '<section class="panel" aria-labelledby="machines-title"><header>'
-            '<h2 id="machines-title">Machines (0)</h2></header>'
-            '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'
+            header
+            + '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'
         )
-    rows = "".join(_machine_row(view, station, now) for station in view.stations)
+    show_notes = any(
+        machine_notes(station, machine_for(view, station), station_status(station, machine_for(view, station)))
+        for station in view.stations
+    )
+    rows = "".join(_machine_row(view, station, now, show_notes=show_notes) for station in view.stations)
+    table_class = "machine-table" + ("" if show_notes else " machine-table--no-notes")
+    notes_header = '<th><span class="visually-hidden">Notes</span></th>' if show_notes else ""
     return (
-        '<section class="panel" id="machines-table" aria-labelledby="machines-title"><header>'
-        f'<h2 id="machines-title">Machines ({len(view.stations)})</h2></header>'
-        '<div class="table-wrap"><table class="machine-table"><thead><tr><th>Machine</th><th>Seats</th>'
-        "<th>Load</th><th>Claims</th><th>State</th><th>Telemetry</th></tr></thead>"
+        header + f'<div class="table-wrap"><table class="{table_class}"><thead><tr><th>Machine</th><th>Seats</th>'
+        f"<th>Load</th>{notes_header}<th>Seen</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div></section>"
     )
 
@@ -618,9 +658,9 @@ def render_overview(
         '<main class="deck-shell overview">',
         render_header(view, now),
         render_summary(view),
-        render_alerts(view, now, action_sources=action_sources),
-        render_work_lists(view, worklore_enabled=worklore_enabled),
+        render_alert_line(view, now),
         render_machine_table(view, now),
+        render_work_lists(view, worklore_enabled=worklore_enabled),
         render_cloud_workers(view),
         render_outcomes(view),
         "<details><summary>Control plane details</summary>"
@@ -635,109 +675,8 @@ def render_overview(
     return "\n".join(parts)
 
 
-# --- sidebar ----------------------------------------------------------------------
-
-
-NAV_ITEMS = (
-    ("overview", "/deck", "overview"),
-    ("repos", "/deck/repos", "repos"),
-    ("work", "/deck/work", "work"),
-    ("roster", "/deck/roster", "roster"),
-    ("policy", "/deck/policy", "policy"),
-    ("owners", "/deck/owners", "owners"),
-    ("ci", "/deck/ci", "CI"),
-    ("stats", "/deck/stats", "stats"),
-    ("boards", "/view/machines", "boards"),
-)
-
-
-def _tree_summary(station: StationView, status: str, machine_state: str = UNKNOWN) -> str:
-    if status == "offline":
-        return "not enrolled" if not station.enrolled else "offline"
-    if status == "stale":
-        return "stale"
-    if status == "limited":
-        return machine_state
-    if status == "unknown":
-        return "unknown"
-    return f"{station.busy} busy" if station.busy else "idle"
-
-
-def _tree_run(tile: Tile) -> str:
-    run = tile.run
-    return (
-        f'<li class="tree-run"><span class="tree-run-name">{_esc(run.repo or UNKNOWN)} · {_esc(run.seat or UNKNOWN)}'
-        f'</span><span class="tree-time">{_esc(format_age(run.elapsed_seconds))}</span></li>'
-    )
-
-
-def _machine_tree(view: DeckView) -> str:
-    rows = []
-    for station in view.stations:
-        machine = machine_for(view, station)
-        status = station_status(station, machine)
-        machine_state = POLICY_LIMITS.get(machine.unused_reason, machine.state) if machine is not None else UNKNOWN
-        runs = "".join(_tree_run(tile) for tile in station.tiles)
-        rows.append(
-            f'<li class="tree-row" data-filter-row title="{_esc(station.station.node_id)}"><div class="tree-line">'
-            f'<span class="dot dot--{status}" aria-hidden="true"></span>'
-            f'<span class="tree-label">{_esc(station.label)}</span>'
-            f'<span class="tree-meta">{_esc(_tree_summary(station, status, machine_state))}</span></div>'
-            + (f'<ul class="tree-children">{runs}</ul>' if runs else "")
-            + "</li>"
-        )
-    body = f'<ul class="tree-list">{"".join(rows)}</ul>' if rows else '<p class="tree-empty">No stations.</p>'
-    return (
-        '<section class="tree" aria-labelledby="tree-machines"><h2 id="tree-machines" class="tree-heading">'
-        f'Machines <span class="nav-count">{len(view.stations)}</span></h2>{body}</section>'
-    )
-
-
-def _cloud_tree(view: DeckView) -> str:
-    rows = "".join(
-        '<li class="tree-row" data-filter-row><div class="tree-line">'
-        f'<span class="tree-label">{_esc(worker.provider)}</span>'
-        f'<span class="tree-meta">{worker.used}/{worker.limit}'
-        + ("" if worker.circuit_state == "closed" else f" · {_esc(worker.circuit_state)}")
-        + "</span></div></li>"
-        for worker in view.cloud_workers
-    )
-    body = f'<ul class="tree-list">{rows}</ul>' if rows else '<p class="tree-empty">None configured.</p>'
-    return (
-        '<section class="tree" aria-labelledby="tree-cloud"><h2 id="tree-cloud" class="tree-heading">'
-        f'Cloud <span class="nav-count">{len(view.cloud_workers)}</span></h2>{body}</section>'
-    )
-
-
-def _sidebar_foot(view: DeckView, now: datetime) -> str:
-    plane = view.control_plane
-    ages = [] if plane is None else [seconds_since(machine.last_observed_at, now) for machine in plane.machines]
-    known = [age for age in ages if age is not None]
-    text = f"Hub telemetry {format_age(min(known))} ago" if known else "Hub telemetry unknown"
-    return f'<p class="sidebar-foot">{_esc(text)}</p>'
-
-
 def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklore_enabled: bool) -> str:
-    """Brand, page nav, and (when a view is available) the machine and cloud trees.
+    """Delegate to the shared sidebar without a module-level circular import."""
+    from . import fleet_deck_sidebar
 
-    Pages that do not build a ``DeckView`` pass ``None`` and get the nav only.
-    """
-    links = []
-    for key, href, label in NAV_ITEMS:
-        if key == "work" and not worklore_enabled:
-            continue
-        current = ' aria-current="page"' if key == active else ""
-        count = (
-            f' <span class="nav-count">{len(view.stations)}</span>' if key == "overview" and view is not None else ""
-        )
-        links.append(f'<a href="{href}"{current}>{label}{count}</a>')
-    parts = [
-        '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'
-        '<p class="brand-name">Brigade Fleet Hub</p><p class="brand-sub">self-hosted</p></div>',
-        f'<nav class="deck-nav" aria-label="Command Deck">{"".join(links)}</nav>',
-    ]
-    if view is not None:
-        parts += ['<div class="tree-filter" data-tree-filter></div>', _machine_tree(view), _cloud_tree(view)]
-        parts.append(_sidebar_foot(view, now))
-    parts.append("</aside>")
-    return "".join(parts)
+    return fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
