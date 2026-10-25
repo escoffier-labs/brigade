@@ -467,6 +467,9 @@ def run_file(
                 clock=clock,
             )
             try:
+                # The child owns its duplicate. Do not let a worker retain our
+                # log handle if its bounded shutdown wait cannot complete.
+                stream.close()
                 returncode = _wait_for_process(
                     process,
                     timeout_seconds=timeout_seconds,

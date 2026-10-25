@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Managed Cursor command hooks with an explicit command type are recognized without duplicate callbacks.
+- Incomplete runs without infrastructure-only attribution score -1 during outcome capture, matching the scoring policy.
 - Skill validation accepts folded and literal YAML block scalars, including chomping and explicit indentation indicators, while continuing to reject unsupported nesting.
 - Fleet Machines and Repos boards use the shared Deck sidebar, navigation, and Resources while preserving board filters and pivot query state in dark and light themes. Wide tables scroll within their wrappers, and board refresh timing stays synchronized with its label.
 
@@ -65,6 +67,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The content guard detects and redacts private hostnames in equals-form host options, including single- and double-hyphen options and compound host-related keys, while preserving code-expression and arbitrary-assignment skips.
 - The content guard recognizes host-related keys after YAML sequence markers, including indented items and compound keys, while preserving its code-expression and public-suffix skips.
 - Content guard detects host-key assignments after batch `@set` and `set /a`, shell declaration flags, `declare` and `local`, and earlier assignments on the same line.
+
 
 ### Added
 

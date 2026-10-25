@@ -423,13 +423,12 @@ def _hostname_option_context(before: str, after: str) -> bool:
 
 
 def _normalized_shell_assignments(before: str) -> str:
-    """Treat balanced expansions in declaration values as opaque word parts."""
+    """Treat complete declaration assignment values as opaque shell words."""
     if not re.match(r"\s*(?:-[ \t]+)?(?:export|readonly|declare|local|@?set)\b", before, re.IGNORECASE):
         return before
 
-    def closed(index: int, delimiter: str) -> tuple[int, bool] | None:
+    def closed(index: int, delimiter: str) -> int | None:
         delimiters = [delimiter]
-        expanded = delimiter in {"}", ")", "`"}
         while index < len(before):
             delimiter = delimiters[-1]
             char = before[index]
@@ -437,7 +436,7 @@ def _normalized_shell_assignments(before: str) -> str:
                 delimiters.pop()
                 index += 1
                 if not delimiters:
-                    return index, expanded
+                    return index
                 continue
             if delimiter == "'":
                 index += 1
@@ -448,12 +447,11 @@ def _normalized_shell_assignments(before: str) -> str:
             nested = None
             width = 1
             if before.startswith("${", index):
-                nested, width, expanded = "}", 2, True
+                nested, width = "}", 2
             elif before.startswith("$(", index):
-                nested, width, expanded = ")", 2, True
+                nested, width = ")", 2
             elif char in "\"'`" and not (delimiter == '"' and char == "'"):
                 nested = char
-                expanded = expanded or char == "`"
             elif char == "(" and delimiter == ")":
                 nested = delimiter
             if nested is not None:
@@ -469,18 +467,16 @@ def _normalized_shell_assignments(before: str) -> str:
         if assignment.start() < position:
             continue
         index = assignment.end()
-        expanded = False
         while index < len(before) and not before[index].isspace():
             char = before[index]
             nested = None
             width = 1
             if before.startswith("${", index):
-                nested, width, expanded = "}", 2, True
+                nested, width = "}", 2
             elif before.startswith("$(", index):
-                nested, width, expanded = ")", 2, True
+                nested, width = ")", 2
             elif char in "\"'`":
                 nested = char
-                expanded = expanded or char == "`"
             elif char == "\\":
                 if index + 1 == len(before):
                     return before
@@ -494,12 +490,13 @@ def _normalized_shell_assignments(before: str) -> str:
                 parsed = closed(index + width, nested)
                 if parsed is None:
                     return before
-                index, nested_expansion = parsed
-                expanded = expanded or nested_expansion
+                index = parsed
             else:
                 index += 1
         pieces.append(before[position : assignment.end()])
-        pieces.append("value" if expanded else before[assignment.end() : index])
+        # Every successfully consumed word is opaque, including literal braces.
+        # Keep the final empty host assignment open for the hostname matcher.
+        pieces.append("value" if index > assignment.end() else "")
         position = index
     pieces.append(before[position:])
     return "".join(pieces)
