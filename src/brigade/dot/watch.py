@@ -12,9 +12,10 @@ from typing import Any
 
 from .access_auth import METADATA_PATH
 from .contracts import DotError
-from .hub_inbox import sender_name
+from .hub_inbox import authenticated_authority, sender_name
 from brigade.fleet_client_message_credentials import FleetMessageHubError, MessageAuthority
 from .lifecycle import DotListenerConfig, _base, _load_config, _probe
+from .profile import DOT, ConnectorProfile, profile_for
 from .runtime_config import Runtime
 
 STALE_AFTER = timedelta(minutes=30)
@@ -43,7 +44,7 @@ def table_exists(connection, name):
     )
 
 
-def route_alerts(now, failed, last_wake, last_call, state):
+def route_alerts(now, failed, last_wake, last_call, state, label="Dot"):
     route = state.setdefault("route", {})
     alerts, notes = [], []
     if failed:
@@ -54,8 +55,8 @@ def route_alerts(now, failed, last_wake, last_call, state):
                 {
                     "kind": "route_down",
                     "key": key,
-                    "title": "Dot bridge: route down",
-                    "text": "Failing probe(s): " + key + ". Dot cannot reach the bridge while this lasts.",
+                    "title": label + " bridge: route down",
+                    "text": "Failing probe(s): " + key + ". " + label + " cannot reach the bridge while this lasts.",
                 }
             )
         else:
@@ -105,7 +106,7 @@ def save_state(path, state):
     os.replace(temporary, path)
 
 
-def decide(now, unacked, last_call, open_requests, state):
+def decide(now, unacked, last_call, open_requests, state, label="Dot", idle_kind="dot_idle"):
     alerts, notes = [], []
     stale = [row for row in unacked if now - parse_time(row[1]) >= STALE_AFTER]
     if stale:
@@ -113,7 +114,7 @@ def decide(now, unacked, last_call, open_requests, state):
         key = str(message_id)
         previous = state["inbox"].get(key)
         text = (
-            f"Dot inbox: {len(stale)} unacked message(s) older than 30 min "
+            f"{label} inbox: {len(stale)} unacked message(s) older than 30 min "
             f"({len(unacked)} unacked total). Oldest #{message_id} "
             f'"{(subject or "(no subject, from " + sender + ")")[:120]}", '
             f"age {age_text(now - parse_time(created_at))}."
@@ -121,21 +122,21 @@ def decide(now, unacked, last_call, open_requests, state):
         if previous is not None and now - parse_time(previous) < REALERT_AFTER:
             notes.append(f"stale_inbox deduped for #{message_id} (last alert {previous})")
         else:
-            alerts.append({"kind": "stale_inbox", "key": key, "title": "Dot bridge: stale inbox", "text": text})
+            alerts.append({"kind": "stale_inbox", "key": key, "title": label + " bridge: stale inbox", "text": text})
     pending = open_requests > 0 or bool(unacked)
     if last_call is None:
-        notes.append("dot_idle skipped: no call history")
+        notes.append(f"{idle_kind} skipped: no call history")
     elif now - parse_time(last_call) > IDLE_AFTER and pending:
         if state["idle"].get("last_call") == last_call:
-            notes.append(f"dot_idle already alerted for last call {last_call}")
+            notes.append(f"{idle_kind} already alerted for last call {last_call}")
         else:
             alerts.append(
                 {
-                    "kind": "dot_idle",
+                    "kind": idle_kind,
                     "key": last_call,
-                    "title": "Dot bridge: Dot idle",
+                    "title": f"{label} bridge: {label} idle",
                     "text": (
-                        f"No Dot bridge call for {age_text(now - parse_time(last_call))} "
+                        f"No {label} bridge call for {age_text(now - parse_time(last_call))} "
                         f"(last {last_call}) while {open_requests} fleet request(s) are "
                         f"unterminated and {len(unacked)} inbox message(s) are unacked."
                     ),
@@ -169,8 +170,18 @@ def read_bridge(
             value = connection.execute(
                 "SELECT MAX(timestamp) FROM wake_attempts WHERE source LIKE ?", ("hub-inbox:" + scope + ":%",)
             ).fetchone()[0]
+        local_error = connection.execute("SELECT value FROM hub_state WHERE key='last_hub_poll_error'").fetchone()
     authority.validate()
-    credential = any(hub.get(key) == "hub_credential_invalid" for key in ("last_sync_error", "last_reconcile_error"))
+    identity_errors = {
+        "hub_credential_invalid",
+        "hub_credential_changed",
+        "hub_identity_invalid",
+        "hub_unauthorized",
+        "hub_forbidden",
+    }
+    credential = any(hub.get(key) in identity_errors for key in ("last_sync_error", "last_reconcile_error")) or bool(
+        local_error and local_error[0] in identity_errors
+    )
     wake = None if value is None else datetime.fromtimestamp(value, timezone.utc)
     return unacked, last_call, pending, hub.get("last_sync_ok_at"), credential, wake
 
@@ -185,14 +196,21 @@ def probe_route(config: DotListenerConfig, runtime: Runtime) -> list[str]:
     return failed
 
 
-def send(command: tuple[str, ...], alert: dict[str, Any], *, authority: MessageAuthority | None = None) -> int | None:
+def send(
+    command: tuple[str, ...],
+    alert: dict[str, Any],
+    *,
+    authority: MessageAuthority | None = None,
+    profile: ConnectorProfile = DOT,
+) -> int | None:
+    pack = profile.pack_id
     payload = json.dumps(
         {
             "title": alert["title"],
             "body": alert["text"],
             "level": "warn",
-            "source": "dot-inbox-watch",
-            "tags": ["dot", "dot-bridge"],
+            "source": f"{pack}-inbox-watch",
+            "tags": [pack, f"{pack}-bridge"],
         }
     )
     if authority is not None:
@@ -210,7 +228,9 @@ def send(command: tuple[str, ...], alert: dict[str, Any], *, authority: MessageA
         return None
 
 
-def _credential_health(runtime: Runtime, now: datetime, dry_run: bool) -> dict[str, Any]:
+def _credential_health(
+    runtime: Runtime, now: datetime, dry_run: bool, profile: ConnectorProfile = DOT
+) -> dict[str, Any]:
     """Report unusable credentials without reading any message-derived state."""
     path = runtime.paths.state_dir / "inbox-watch-health.json"
     previous = None
@@ -228,13 +248,13 @@ def _credential_health(runtime: Runtime, now: datetime, dry_run: bool) -> dict[s
         alert = {
             "kind": "hub_credential_invalid",
             "key": "last_credential_alert",
-            "title": "Dot bridge: hub credential invalid",
-            "text": "The hub message token file is unusable. Inbox sync is failing until it is repaired.",
+            "title": profile.label + " bridge: hub credential invalid",
+            "text": "The hub credential or authenticated principal is invalid. Inbox sync is failing until it is repaired.",
         }
         if dry_run or runtime.notify_command is None:
             alert["result"] = "would_send" if dry_run else "skipped"
         else:
-            code = send(runtime.notify_command, alert)
+            code = send(runtime.notify_command, alert, profile=profile)
             failed = code != 0
             alert["result"] = "sent" if code == 0 else f"send_failed:{code}"
             if not failed:
@@ -250,17 +270,31 @@ def _credential_health(runtime: Runtime, now: datetime, dry_run: bool) -> dict[s
     }
 
 
-def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool = False) -> dict[str, Any]:
+def run_watch_once(
+    target: Path, *, now: datetime | None = None, dry_run: bool = False, pack_id: str = DOT.pack_id
+) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     try:
-        config, runtime = _load_config(target)
+        profile = profile_for(pack_id)
+        config, runtime = _load_config(target, profile=profile)
         try:
             authority = MessageAuthority.capture(str(runtime.hub.message_token_file))
         except FleetMessageHubError as error:
             if error.code not in {"token_file_invalid", "admin_token_refused"}:
                 raise
-            return _credential_health(runtime, now, dry_run)
-        return _run_scoped_watch(config, runtime, authority, now, dry_run)
+            return _credential_health(runtime, now, dry_run, profile)
+        identity_error = None
+        if not profile.fleet_dispatch:
+            try:
+                authenticated_authority(runtime.hub, authority=authority)
+            except DotError as error:
+                if error.code != "hub_unavailable":
+                    return _credential_health(runtime, now, dry_run, profile)
+                identity_error = error.code
+        result = _run_scoped_watch(config, runtime, authority, now, dry_run, profile)
+        if identity_error is not None:
+            result.update(ok=False, error=identity_error)
+        return result
     except DotError as error:
         return {
             "ok": False,
@@ -271,21 +305,34 @@ def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool =
 
 
 def _run_scoped_watch(
-    config: DotListenerConfig, runtime: Runtime, authority: MessageAuthority, now: datetime, dry_run: bool
+    config: DotListenerConfig,
+    runtime: Runtime,
+    authority: MessageAuthority,
+    now: datetime,
+    dry_run: bool,
+    profile: ConnectorProfile = DOT,
 ) -> dict[str, Any]:
+    checks, label = profile.watch_checks, profile.label
     scope = authority.scope
     unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime, authority=authority)
     state_path = runtime.paths.state_dir / ("inbox-watch-" + scope + ".json")
     state = load_state(state_path)
-    alerts, notes, stale = decide(now, unacked, last_call, pending, state)
+    alerts, notes, stale = decide(now, unacked, last_call, pending, state, label, profile.idle_kind)
+    # Polling health also applies to profiles without webhook wakes.
+    alerts = [
+        alert
+        for alert in alerts
+        if (alert["kind"] == profile.idle_kind and "idle" in checks) or alert["kind"] in checks
+    ]
     sync = state.setdefault("sync", {})
     key = "last_credential_alert" if credential else "last_alert"
-    if credential or sync_at is None or now - parse_time(sync_at) > timedelta(minutes=15):
+    sync_stale = "hub_sync_stale" in checks and (sync_at is None or now - parse_time(sync_at) > timedelta(minutes=15))
+    if (credential and "hub_credential_invalid" in checks) or sync_stale:
         previous = sync.get(key)
         if previous is None or now - parse_time(previous) >= REALERT_AFTER:
             kind = "hub_credential_invalid" if credential else "hub_sync_stale"
             text = (
-                "The hub message token file is unusable. Inbox sync is failing until it is repaired. "
+                "The hub credential or authenticated principal is invalid. Inbox sync is failing until it is repaired. "
                 if credential
                 else "No successful hub inbox sync in 15 minutes. "
             )
@@ -293,13 +340,15 @@ def _run_scoped_watch(
                 {
                     "kind": kind,
                     "key": key,
-                    "title": "Dot bridge: " + kind.replace("_", " "),
+                    "title": label + " bridge: " + kind.replace("_", " "),
                     "text": text + "Last successful sync: " + (sync_at or "never"),
                 }
             )
         else:
             notes.append(("hub_credential_invalid" if credential else "hub_sync_stale") + " deduped")
-    more, more_notes = route_alerts(now, probe_route(config, runtime), last_wake, last_call, state)
+    failed_probes = probe_route(config, runtime) if "route_down" in checks else []
+    wake = last_wake if "wake_unanswered" in checks else None
+    more, more_notes = route_alerts(now, failed_probes, wake, last_call, state, label)
     alerts += more
     notes += more_notes
     failed, sent = False, False
@@ -308,7 +357,7 @@ def _run_scoped_watch(
         if dry_run or runtime.notify_command is None:
             alert["result"] = "would_send" if dry_run else "skipped"
             continue
-        code = send(runtime.notify_command, alert, authority=authority)
+        code = send(runtime.notify_command, alert, authority=authority, profile=profile)
         alert["result"] = "sent" if code == 0 else f"send_failed:{code}"
         if code != 0:
             failed = True
@@ -346,6 +395,7 @@ def _run_scoped_watch(
 
 
 COLUMNS = ("id", "ts", "tool", "ok", "duration_ms", "request_id", "arg_summary", "error_code")
+OPTIONAL_COLUMNS = ("client_name",)
 
 
 def load(state_dir, since, tool, limit):
@@ -359,11 +409,14 @@ def load(state_dir, since, tool, limit):
             clauses.append("tool = ?")
             params.append(tool)
         where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
-        query = f"SELECT {','.join(COLUMNS)} FROM call_log{where} ORDER BY id DESC"
+        # client_name is additive; a database the listener has not upgraded yet lacks it.
+        present = {row[1] for row in connection.execute("PRAGMA table_info(call_log)")}
+        columns = COLUMNS + tuple(name for name in OPTIONAL_COLUMNS if name in present)
+        query = f"SELECT {','.join(columns)} FROM call_log{where} ORDER BY id DESC"
         if limit is not None:
             query += " LIMIT ?"
             params.append(limit)
-        rows = [dict(zip(COLUMNS, row, strict=True)) for row in connection.execute(query, params)]
+        rows = [dict(zip(columns, row, strict=True)) for row in connection.execute(query, params)]
     finally:
         connection.close()
     rows.reverse()

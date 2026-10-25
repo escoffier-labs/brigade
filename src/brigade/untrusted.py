@@ -39,6 +39,7 @@ SOURCE_KINDS = (
     "skill",
     "handoff",
     "peer-message",
+    "desktop-local",
 )
 
 _MARKER_MAX = 80

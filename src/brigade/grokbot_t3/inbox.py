@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import builtins
+from collections import Counter
 import json
 import time
 from typing import Any, Iterator
 
+from .. import fleet_client_messages
+from ..fleet_client import FleetClientError
 from ..fleet_client_message_credentials import MessageAuthority
 from ..hub_messages import HubMessageError, MessageOperations, inbox_page, legacy_message
 from .contracts import PUBLIC_RESULT_LIMIT
@@ -20,6 +23,26 @@ ACK_TIMEOUT_SECONDS = 5.0
 
 
 class HubInbox(MessageOperations):
+    def capture(self, *, deadline: float | None = None) -> MessageAuthority:
+        # Each operation proves the exact credential it will retain for all nested IO.
+        authority = super().capture()
+        try:
+            self.require_authority(authority)
+            timeout = POLL_TIMEOUT_SECONDS
+            if deadline is not None:
+                timeout = min(timeout, deadline - time.monotonic())
+                if timeout <= 0:
+                    raise HubMessageError("hub_unavailable")
+            try:
+                evidence = fleet_client_messages.identity(authority=authority, timeout=timeout)
+            finally:
+                self.require_authority(authority)
+            if evidence != {"principal": "agent:grokbot"}:
+                raise HubMessageError("hub_credential_invalid")
+        except (FleetClientError, OSError, ValueError, AttributeError):
+            raise HubMessageError("hub_credential_invalid") from None
+        return authority
+
     def notification_scope(self) -> str:
         # Compatibility snapshot accessor. Operations pass the captured authority instead.
         return self.capture().scope
@@ -28,8 +51,36 @@ class HubInbox(MessageOperations):
         self.require_authority(authority)
         try:
             return super()._call(action, *args, authority=authority, **kwargs)
+        except HubMessageError as error:
+            if error.code == "hub_unauthorized" or (error.code == "hub_forbidden" and error.hub_code is None):
+                # Remote revocation invalidates prior results even if the token file is unchanged.
+                raise HubMessageError("hub_credential_invalid") from None
+            raise
         finally:
             self.require_authority(authority)
+
+    def status(self, ids: builtins.list[int]) -> dict[str, Any]:
+        with self._operation_scope() as authority:
+            value = self._call("sent", ids=ids, authority=authority)
+            self._require(isinstance(value.get("messages"), list), "hub_unavailable")
+            self._require(
+                all(
+                    isinstance(row, dict) and isinstance(row.get("recipient"), (str, type(None)))
+                    for row in value["messages"]
+                ),
+                "hub_unavailable",
+            )
+            recipients = self.recipients
+            counts = Counter(recipients.values())
+            names = {recipient: name for name, recipient in recipients.items() if counts[recipient] == 1}
+            keys = ("id", "subject", "created_at", "acked_at", "reply_to")
+            # Match the raw destination before any shared alias projection loses it.
+            return dict(
+                messages=[
+                    dict(to=names.get(row.get("recipient")), **{key: row.get(key) for key in keys})
+                    for row in value["messages"]
+                ]
+            )
 
     def pages(
         self,
@@ -39,10 +90,32 @@ class HubInbox(MessageOperations):
         max_pages: int = POLL_MAX_PAGES,
         timeout: float = POLL_TIMEOUT_SECONDS,
         budget: float = POLL_BUDGET_SECONDS,
-        authority: MessageAuthority | None = None,
         deadline: float | None = None,
     ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
-        authority = self.capture() if authority is None else authority
+        poll_deadline = time.monotonic() + budget
+        deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
+        return self._trusted_pages(
+            after=after,
+            unacked=unacked,
+            max_pages=max_pages,
+            timeout=timeout,
+            budget=budget,
+            authority=self.capture(deadline=deadline),
+            deadline=deadline,
+        )
+
+    def _trusted_pages(
+        self,
+        *,
+        authority: MessageAuthority,
+        after: int = 0,
+        unacked: bool = True,
+        max_pages: int = POLL_MAX_PAGES,
+        timeout: float = POLL_TIMEOUT_SECONDS,
+        budget: float = POLL_BUDGET_SECONDS,
+        deadline: float | None = None,
+    ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
+        # Only private nested operations may reuse the already proved authority.
         poll_deadline = time.monotonic() + budget
         deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
         return self._pages(
@@ -76,13 +149,25 @@ class HubInbox(MessageOperations):
         limit: int = 20,
         *,
         deadline: float | None = None,
-        authority: MessageAuthority | None = None,
     ) -> dict[str, Any]:
-        authority = self.capture() if authority is None else authority
+        poll_deadline = time.monotonic() + POLL_BUDGET_SECONDS
+        deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
+        return self._list(unacked_only, limit, deadline=deadline, authority=self.capture(deadline=deadline))
+
+    def _list(
+        self,
+        unacked_only: bool = True,
+        limit: int = 20,
+        *,
+        deadline: float | None = None,
+        authority: MessageAuthority,
+    ) -> dict[str, Any]:
+        poll_deadline = time.monotonic() + POLL_BUDGET_SECONDS
+        deadline = poll_deadline if deadline is None else min(deadline, poll_deadline)
         rows = []
         complete = False
         try:
-            for page, _ in self.pages(unacked=unacked_only, authority=authority, deadline=deadline):
+            for page, _ in self._trusted_pages(unacked=unacked_only, authority=authority, deadline=deadline):
                 rows.extend(page)
                 complete = not page
         except HubMessageError as error:
@@ -149,7 +234,7 @@ class HubInbox(MessageOperations):
         remaining = deadline - time.monotonic()
         if not remaining_ids and remaining > 0:
             try:
-                listing = self.list(limit=1, deadline=deadline, authority=authority)
+                listing = self._list(limit=1, deadline=deadline, authority=authority)
             except HubMessageError as error:
                 if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
                     raise

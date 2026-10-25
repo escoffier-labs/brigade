@@ -27,22 +27,57 @@ from brigade.hub_messages import (
 )
 
 from .contracts import MESSAGE_BODY, THREAD, DotError, _text, require
+from .profile import DOT, ConnectorProfile
 from .runtime_config import HubConfig
 from .state import BridgeState, _iso, utc_now
 
 _UNCAPTURED = object()
 
 
+def authenticated_authority(hub: HubConfig, *, authority: MessageAuthority | None = None) -> MessageAuthority:
+    """Authenticate the active principal using the supported message identity operation."""
+    try:
+        authority = MessageAuthority.capture(str(hub.message_token_file)) if authority is None else authority
+        evidence = fleet_client_messages.identity(authority=authority)
+        authority.validate()
+    except FleetClientError as error:
+        code = getattr(error, "code", None)
+        if code == "hub_unavailable" or (getattr(error, "status", None) or 0) >= 500:
+            raise DotError("hub_unavailable") from None
+        if code == "token_scope_changed":
+            raise DotError("hub_credential_changed") from None
+        if code in {"token_file_invalid", "admin_token_refused"}:
+            raise DotError("hub_credential_invalid") from None
+        raise DotError("hub_identity_invalid") from None
+    require(evidence.get("principal") == hub.principal, "hub_identity_invalid")
+    return authority
+
+
 class HubInbox(MessageOperations):
-    def __init__(self, state: BridgeState, hub: HubConfig, *, clock: Callable[[], datetime] = utc_now) -> None:
+    def __init__(
+        self,
+        state: BridgeState,
+        hub: HubConfig,
+        *,
+        clock: Callable[[], datetime] = utc_now,
+        profile: ConnectorProfile = DOT,
+        messaging_enabled: bool = True,
+    ) -> None:
         super().__init__(token_file=str(hub.message_token_file), recipients=hub.recipients, clock=clock)
         self.state, self.config = state, hub
+        self.profile = profile
+        self.messaging_enabled = messaging_enabled
+        self._startup_authority: MessageAuthority | None = None
         self._sync_lock = threading.Lock()
         self._reconcile_lock = threading.Lock()
 
     def capture(self, *, agent: bool = True) -> MessageAuthority:
         try:
-            return MessageAuthority.capture(str(self.config.message_token_file) if agent else None, node_only=not agent)
+            authority = MessageAuthority.capture(
+                str(self.config.message_token_file) if agent else None, node_only=not agent
+            )
+            self.require_authority(authority)
+            return authority
         except FleetClientError:
             raise DotError("hub_credential_invalid") from None
 
@@ -50,8 +85,18 @@ class HubInbox(MessageOperations):
         """Compatibility snapshot accessor, never used to validate or select nested authority."""
         return self.capture(agent=agent).scope
 
+    def require_identity(self) -> None:
+        """Fail startup closed unless the credential authenticates as the configured principal."""
+        authority = authenticated_authority(self.config, authority=self.capture())
+        self.require_authority(authority)
+        if not self.profile.fleet_dispatch:
+            self._startup_authority = authority
+
     def require_authority(self, authority: MessageAuthority) -> None:
         try:
+            if self._startup_authority is not None:
+                self._startup_authority.validate()
+                require(authority.scope == self._startup_authority.scope, "hub_credential_changed")
             authority.validate()
         except FleetClientError as error:
             raise DotError(
@@ -162,7 +207,7 @@ class HubInbox(MessageOperations):
     def reconcile(self) -> None:
         authority = self.capture()
         scope = authority.scope
-        node_authority = self.capture(agent=False)
+        node_authority = self.capture(agent=False) if self.profile.fleet_dispatch else None
         # Independent of foreground sync; never hold its lock during network IO.
         if not self._reconcile_lock.acquire(blocking=False):
             return
@@ -196,7 +241,8 @@ class HubInbox(MessageOperations):
                     (scope, _iso(self.clock() - timedelta(days=90))),
                 )
             self.require_authority(authority)
-            self._sweep_node_replies(node_authority)
+            if node_authority is not None:
+                self._sweep_node_replies(node_authority)
             self.require_authority(authority)
         finally:
             self._reconcile_lock.release()
@@ -322,9 +368,15 @@ class HubInbox(MessageOperations):
         return True
 
     def flush_pending(self) -> None:
+        if not self.messaging_enabled:
+            self.capture()  # Still reject a changed startup scope while sends are paused.
+            return
         first_error: DotError | None = None
         captured = []
-        for key, agent in (("agent_spool_pending", True), ("node_spool_pending", False)):
+        credentials = [("agent_spool_pending", True)]
+        if self.profile.fleet_dispatch:
+            credentials.append(("node_spool_pending", False))
+        for key, agent in credentials:
             try:
                 captured.append((key, agent, self.capture(agent=agent)))
             except DotError as error:
@@ -343,7 +395,8 @@ class HubInbox(MessageOperations):
                         continue
                 self.require_authority(authority)
                 self.state.hub_set(key, "1", scope=scope)
-                self._call("flush_credential", agent=agent, authority=authority, lock_timeout=0.1)
+                diagnostic = {} if self.profile.fleet_dispatch else {"warn_inactive": False}
+                self._call("flush_credential", agent=agent, authority=authority, lock_timeout=0.1, **diagnostic)
                 self.require_authority(authority)
             except DotError as error:
                 first_error = first_error or error

@@ -73,6 +73,10 @@ _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
 class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class MessageForbidden(MessageError):
     """A principal lacks permission for the requested recipient."""
@@ -99,7 +103,7 @@ class MessageQuotaError(MessageError):
 
     def __init__(self, message: str, *, code: str, recipient: str | None = None) -> None:
         super().__init__(message)
-        self.code = code
+        self.code: str = code
         self.recipient = recipient
 
 
@@ -145,6 +149,8 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
         extras[field] = value
     kind = raw.get("kind")
     if kind is not None:
+        if kind == "operator_question":
+            raise MessageError("operator_question is reserved for hub-created operator questions")
         if not isinstance(kind, str) or kind not in KINDS:
             raise MessageError("kind must be message, question, or completion")
         if kind != "message":
@@ -258,6 +264,17 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
     )
     if not was_in_transaction:
         conn.commit()
+
+
+def unread_count(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, int]:
+    """Count one inbox without fetching bodies or writing retention cleanup."""
+    if set(raw) - {"action"}:
+        raise MessageError("count accepts no arguments")
+    count = conn.execute(
+        "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL AND created_at>=?",
+        (recipient, _expiry_cutoff()),
+    ).fetchone()[0]
+    return {"unread_count": int(count)}
 
 
 def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
@@ -578,6 +595,9 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
             "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
             (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
         )
+        from . import fleet_hub_message_keys
+
+        fleet_hub_message_keys.revoke(conn, principal_id)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -611,6 +631,18 @@ def send(
     sender: str,
     reply_to: int | None = None,
 ) -> dict[str, Any]:
+    return _send(conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender))
+
+
+def _send(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    sender: str,
+    extras: dict[str, str],
+    reply_to: int | None = None,
+) -> dict[str, Any]:
+    """Insert validated metadata. Only question creation supplies the reserved kind."""
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
     body = _text(raw.get("body"), "body", BODY_LIMIT)
@@ -621,7 +653,6 @@ def send(
     if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    extras = _metadata(raw, sender=sender)
     message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
@@ -914,6 +945,7 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 
 
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+    _metadata(raw, sender=sender)
     _prune_expired(conn)
     message_id = raw.get("id")
     if not _sqlite_integer(message_id):
@@ -984,58 +1016,33 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Station claims return one page bounded by row count and by serialized size,
-# so the response always fits the client's cap. Rows sort by target. Cursor
-# paging over a live claims table is not stable without hub-side snapshots, so
-# a cut list says so with truncated and total instead (full paging: #1901).
-CLAIMS_PAGE_DEFAULT = 200
-CLAIMS_PAGE_MAX = 500
-CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
-
-
-def _claims_page_limit(raw: dict[str, Any]) -> int:
-    limit = raw.get("limit", CLAIMS_PAGE_DEFAULT)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CLAIMS_PAGE_MAX:
-        raise MessageError(f"claims limit must be an integer from 1 to {CLAIMS_PAGE_MAX}")
-    return limit
-
-
-def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
-    ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
-    page: list[dict[str, Any]] = []
-    size = 0
-    oversized = 0
-    for row in ordered:
-        if len(page) >= limit:
-            break
-        row_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
-        if row_size > CLAIMS_PAGE_MAX_BYTES:
-            # A single row over the budget would push the response past the
-            # client's cap; leave it out and count it rather than fail.
-            oversized += 1
-            continue
-        if size + row_size > CLAIMS_PAGE_MAX_BYTES:
-            break
-        page.append(row)
-        size += row_size
-    return {
-        "claims": page,
-        "truncated": len(page) < len(ordered),
-        "total": len(ordered),
-        "oversized": oversized,
-    }
-
-
-def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
+def _station_read(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, snapshot_write: bool = False
+) -> dict[str, Any]:
     """Read-only directory/claims for message credentials, without admin access."""
     from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
+    from . import fleet_hub_paging as paging
 
     action = raw["action"]
-    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit"}
+    allowed = {"action", "all", "limit", "cursor"} | ({"filter"} if action == "who" else set())
     include_all = raw.get("all", False)
     query = raw.get("filter", "")
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
         raise MessageError("invalid station read arguments")
+
+    limit = paging.page_limit(raw)
+    snapshot = paging.load(conn, raw, caller=caller)
+
+    if snapshot is not None:
+        stored_snapshot, offsets, snapshot_id = snapshot
+        return paging.snapshot_page(
+            conn,
+            stored_snapshot,
+            offsets,
+            snapshot_id,
+            limit=limit,
+            snapshot_write=snapshot_write,
+        )
 
     # Load the caller's grants once; checking every row with require_granted
     # would issue one query per claim or session.
@@ -1044,8 +1051,20 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     def permitted(recipient: str) -> bool:
         return grants.permits(patterns, caller, recipient)
 
+    active_nodes = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL")}
+    active_principals = {
+        str(row[0])
+        for row in conn.execute("SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL")
+    }
+
+    def visible(key: str, row: dict[str, Any]) -> bool:
+        if key == "claims":
+            return permitted(str(row["owner_node"]))
+        identity = str(row["principal_id"] if key == "principals" else row["node_id"])
+        active = active_principals if key == "principals" else active_nodes
+        return identity in active and permitted(identity)
+
     if action == "claims":
-        limit = _claims_page_limit(raw)
         if not caller.startswith("agent:"):
             rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
         else:
@@ -1054,7 +1073,10 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
                 for row in fleet_hub.list_claims(conn, include_all=include_all)
                 if permitted(row["owner_node"])
             ]
-        return _claims_page(rows, limit=limit)
+        rows.sort(key=lambda row: str(row.get("target", "")))
+        return paging.page(
+            conn, raw, {"claims": rows}, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write
+        )
 
     nodes = [
         {"node_id": str(row[0])}
@@ -1084,10 +1106,11 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         )
     ]
     needle = query.casefold()
-    return {
+    data = {
         key: [row for row in rows if any(needle in str(value).casefold() for value in row.values())]
         for key, rows in (("nodes", nodes), ("principals", principals), ("sessions", sessions))
     }
+    return paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
 
 
 def handle(
@@ -1097,20 +1120,95 @@ def handle(
     caller: str | None,
     open_conn: Callable[[], sqlite3.Connection] | None = None,
     source_ip: str = "",
+    authenticated_generation: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if action in ("question_create", "question_status", "question_desktop"):
+        from . import fleet_hub_questions
+
+        return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
     if isinstance(action, str) and action.startswith("events_"):
         return fleet_hub_events.handle(conn, raw, caller=caller)
+    if action in ("keys_publish", "keys_get", "manifests_get"):
+        from . import fleet_hub_identity, fleet_hub_message_keys
+
+        if action == "keys_publish":
+
+            def publish_key() -> dict[str, Any]:
+                if authenticated_generation is not None:
+                    from .fleet_hub_questions import _generation
+
+                    if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                        raise MessageAuthError("key publication credential generation changed")
+                return fleet_hub_message_keys.publish(conn, raw, caller=caller)
+
+            return 201, _as_active_principal(conn, caller, publish_key)
+
+        def read_mesh() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("mesh read credential generation changed")
+            if action == "manifests_get":
+                return fleet_hub_identity.manifests(conn, raw)
+            return fleet_hub_message_keys.get(conn, raw, caller=caller)
+
+        result = _as_active_principal(conn, caller, read_mesh, read_only=True)
+        if action == "manifests_get":
+            return 200, result
+        return (200, result) if result else (404, {"error": "key not found"})
     if action in ("who", "claims"):
-        return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+        from .fleet_hub_paging import SnapshotWriteRequired
+
+        def read_station(*, snapshot_write: bool = False) -> dict[str, Any]:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("station read credential generation changed")
+            return _station_read(conn, raw, caller=caller, snapshot_write=snapshot_write)
+
+        try:
+            result = _as_active_principal(conn, caller, read_station, read_only=True)
+        except SnapshotWriteRequired:
+            # Small reads never take write admission. Rebuild a new snapshot
+            # after BEGIN IMMEDIATE so its data and authorization are current,
+            # and concurrent snapshot writers cannot race the storage caps.
+            result = _as_active_principal(conn, caller, lambda: read_station(snapshot_write=True))
+        return 200, result
+    if action == "identity":
+        if set(raw) != {"action"}:
+            raise MessageError("identity accepts only action")
+        return 200, _as_active_principal(conn, caller, lambda: {"principal": caller}, read_only=True)
+    if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
+
+        def insert_reply() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("reply credential generation changed")
+            if action == "reply":
+                return reply(conn, raw, sender=caller)
+            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))
+
+        # Hold the write lock from credential comparison through insertion and
+        # the question audit trigger, including the alternate send/reply_to path.
+        message = _as_active_principal(conn, caller, insert_reply)
+        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
+    if action == "count":
+        return 200, _as_active_principal(
+            conn, caller, lambda: unread_count(conn, raw, recipient=caller), read_only=True
+        )
     if action == "list":
         connection_state = _ConnectionState()
         return 200, _as_active_principal(
@@ -1129,7 +1227,4 @@ def handle(
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
-    if action == "reply":
-        message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
-        return (201, {"message": message}) if message else (404, {"error": "message not found"})
-    raise MessageError("action must be send, list, sent, ack, reply, who, or claims")
+    raise MessageError("action must be send, list, sent, count, ack, reply, who, claims, or identity")

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -9,16 +10,16 @@ from brigade import cli, localio, outcome as outcome_core
 from brigade import telemetry_export
 
 _RUN_ONLY_OTEL_ROW = json.loads(
-    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"x_ai","gen_ai.request.model":"grok-4.5","gen_ai.response.finish_reasons":["end_turn"],"gen_ai.response.model":"grok-4.5"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":null,"exit_code":0,"mapping":{"mapping_version":1,"name":"otel-genai","upstream_revision":"opentelemetry-semconv-1.43.0"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.otel_genai_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"OK","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
+    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"x_ai","gen_ai.request.model":"grok-4.5","gen_ai.response.finish_reasons":["end_turn"],"gen_ai.response.model":"grok-4.5"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":null,"exit_code":0,"mapping":{"mapping_version":1,"name":"otel-genai","upstream_repository":"open-telemetry/semantic-conventions-genai","upstream_revision":"9ffc7e00c639be7712e544e3e54331e885dccf84","upstream_revision_date":"2026-10-21"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.otel_genai_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"OK","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
 )
 _RUN_ONLY_OPENINFERENCE_ROW = json.loads(
-    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","llm.model_name":"grok-4.5","openinference.span.kind":"AGENT"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":null,"exit_code":0,"mapping":{"mapping_version":1,"name":"openinference","upstream_revision":"audited-2026-07-12"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.openinference_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"OK","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
+    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","llm.model_name":"grok-4.5","llm.request.model_name":"grok-4.5","llm.response.model_name":"grok-4.5","openinference.span.kind":"AGENT"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":null,"exit_code":0,"mapping":{"mapping_version":2,"name":"openinference","upstream_repository":"Arize-ai/openinference","upstream_revision":"python-openinference-semantic-conventions-v0.1.41","upstream_revision_date":"2026-10-01"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.openinference_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"OK","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
 )
 _RUN_ONLY_OTEL_FAILED_ROW = json.loads(
-    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","error.type":"process_error","gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"x_ai","gen_ai.request.model":"grok-4.5","gen_ai.response.finish_reasons":["end_turn"],"gen_ai.response.model":"grok-4.5"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":"process_error","exit_code":1,"mapping":{"mapping_version":1,"name":"otel-genai","upstream_revision":"opentelemetry-semconv-1.43.0"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.otel_genai_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"ERROR","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
+    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","error.type":"process_error","gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"x_ai","gen_ai.request.model":"grok-4.5","gen_ai.response.finish_reasons":["end_turn"],"gen_ai.response.model":"grok-4.5"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":"process_error","exit_code":1,"mapping":{"mapping_version":1,"name":"otel-genai","upstream_repository":"open-telemetry/semantic-conventions-genai","upstream_revision":"9ffc7e00c639be7712e544e3e54331e885dccf84","upstream_revision_date":"2026-10-21"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.otel_genai_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"ERROR","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
 )
 _RUN_ONLY_OPENINFERENCE_FAILED_ROW = json.loads(
-    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","llm.model_name":"grok-4.5","openinference.span.kind":"AGENT"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":"process_error","exit_code":1,"mapping":{"mapping_version":1,"name":"openinference","upstream_revision":"audited-2026-07-12"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.openinference_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"ERROR","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
+    '{"adapter":"acpx","attributes":{"brigade.adapter.name":"acpx","brigade.seat.name":"worker","llm.model_name":"grok-4.5","llm.request.model_name":"grok-4.5","llm.response.model_name":"grok-4.5","openinference.span.kind":"AGENT"},"duration_seconds":2.0,"effective_model":"grok-4.5","end_time":"2026-01-01T00:00:02Z","error_type":"process_error","exit_code":1,"mapping":{"mapping_version":2,"name":"openinference","upstream_repository":"Arize-ai/openinference","upstream_revision":"python-openinference-semantic-conventions-v0.1.41","upstream_revision_date":"2026-10-01"},"name":"brigade.run.worker","reasoning":null,"requested_model":"grok-4.5","schema":"brigade.openinference_projection.v1","seat":"worker","span_id":"dc8c20677f4f195d","start_time":"2026-01-01T00:00:00Z","status":"ERROR","stop_reason":"end_turn","trace_id":"9f319429aa7ee1e464fb955454290143"}'
 )
 
 
@@ -226,6 +227,99 @@ def test_multiprovider_cli_does_not_guess_provider(tmp_path, capsys):
     )
     assert cli.main(["receipts", "export", "otel-genai", "--target", str(tmp_path)]) == 0
     assert "gen_ai.provider.name" not in json.loads(capsys.readouterr().out)["attributes"]
+
+
+def _set_models(tmp_path, **models):
+    path = tmp_path / ".brigade" / "runs" / "run-1" / "worker-results.json"
+    payload = json.loads(path.read_text())
+    result = payload["results"][0]
+    for key, value in models.items():
+        if value is None:
+            result.pop(key, None)
+        else:
+            result[key] = value
+    path.write_text(json.dumps(payload))
+
+
+def test_routed_model_exports_requested_and_effective_names(tmp_path):
+    _run(tmp_path)
+    _set_models(tmp_path, requested_model="example-model-latest", effective_model="example-model-2026-01")
+    oi = _rows(tmp_path, "openinference")[0]["attributes"]
+    assert oi["llm.request.model_name"] == "example-model-latest"
+    assert oi["llm.response.model_name"] == "example-model-2026-01"
+    assert oi["llm.model_name"] == "example-model-2026-01"
+    otel = _rows(tmp_path, "otel-genai")[0]["attributes"]
+    assert otel["gen_ai.request.model"] == "example-model-latest"
+    assert otel["gen_ai.response.model"] == "example-model-2026-01"
+
+
+@pytest.mark.parametrize(
+    "requested,effective,expected",
+    [
+        ("example-model", None, {"llm.request.model_name": "example-model", "llm.model_name": "example-model"}),
+        (None, "example-model", {"llm.response.model_name": "example-model", "llm.model_name": "example-model"}),
+        (None, None, {}),
+    ],
+)
+def test_openinference_model_names_omit_unknown_sides(tmp_path, requested, effective, expected):
+    _run(tmp_path)
+    _set_models(tmp_path, requested_model=requested, effective_model=effective)
+    attrs = _rows(tmp_path, "openinference")[0]["attributes"]
+    model_keys = {key: value for key, value in attrs.items() if key.startswith("llm.")}
+    assert model_keys == expected
+
+
+def test_mappings_pin_upstream_revisions():
+    otel = telemetry_export.OTEL_MAPPING
+    assert otel["upstream_repository"] == "open-telemetry/semantic-conventions-genai"
+    assert len(otel["upstream_revision"]) == 40
+    int(otel["upstream_revision"], 16)
+    assert localio.parse_iso_datetime(otel["upstream_revision_date"] + "T00:00:00Z") is not None
+    oi = telemetry_export.OPENINFERENCE_MAPPING
+    assert oi["upstream_repository"] == "Arize-ai/openinference"
+    assert oi["upstream_revision"].startswith("python-openinference-semantic-conventions-v")
+    assert localio.parse_iso_datetime(oi["upstream_revision_date"] + "T00:00:00Z") is not None
+
+
+def _all_projection_rows(tmp_path, projection):
+    verify_id = "20260101-000000-work-verify-doc"
+    _run(
+        tmp_path,
+        verify_receipts=[{"run_id": verify_id, "status": "completed", "commands": [{"command": "pytest -q"}]}],
+    )
+    worker_results = tmp_path / ".brigade" / "runs" / "run-1" / "worker-results.json"
+    payload = json.loads(worker_results.read_text())
+    payload["results"][0]["ok"] = False
+    worker_results.write_text(json.dumps(payload))
+    _verify_receipt(
+        tmp_path,
+        verify_id,
+        harness_session={"harness": "claude", "fingerprint": "0123456789abcdef"},
+    )
+    _write_outcomes(
+        tmp_path,
+        _outcome_payload(evidence_ref=str(tmp_path / ".brigade" / "work" / "verify-runs" / verify_id / "receipt.json")),
+    )
+    return _rows(tmp_path, projection)
+
+
+@pytest.mark.parametrize("projection", ["otel-genai", "openinference"])
+@pytest.mark.parametrize(
+    "removed_attribute",
+    [None, "brigade.harness.session.harness", "brigade.harness.session.fingerprint"],
+)
+def test_mapping_doc_lists_every_exported_attribute(tmp_path, projection, removed_attribute):
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "telemetry-mapping.md").read_text()
+    if removed_attribute is not None:
+        doc = doc.replace(f"`{removed_attribute}`", "")
+    rows = _all_projection_rows(tmp_path, projection)
+    names = {row["name"] for row in rows}
+    assert any("verify" in name for name in names) and any("outcome" in name for name in names)
+    keys = {key for row in rows for key in row["attributes"]}
+    missing = sorted(key for key in keys if f"`{key}`" not in doc)
+    assert missing == ([] if removed_attribute is None else [removed_attribute])
+    for mapping in (telemetry_export.OTEL_MAPPING, telemetry_export.OPENINFERENCE_MAPPING):
+        assert mapping["upstream_revision"] in doc
 
 
 def test_verify_tool_projection_contracts(tmp_path):

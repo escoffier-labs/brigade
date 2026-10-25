@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/klauspost/compress/zstd"
 )
 
 type Options struct {
@@ -118,6 +119,21 @@ func ListJSONLFiles(root string, include func(string) bool) ([]string, error) {
 			return nil, err
 		}
 	}
+	// Prefer the plain representation, including explicit compressed-file inputs.
+	selected := make(map[string]bool, len(files))
+	for _, path := range files {
+		plain := LogicalJSONLPath(path)
+		if plain != path && include(plain) {
+			if info, err := os.Stat(plain); err == nil && !info.IsDir() {
+				path = plain
+			}
+		}
+		selected[path] = true
+	}
+	files = files[:0]
+	for path := range selected {
+		files = append(files, path)
+	}
 	sort.Strings(files)
 	return files, nil
 }
@@ -197,12 +213,32 @@ func scanJSONL(path string, each func(RawEvent) error) error {
 		return err
 	}
 	defer f.Close()
+	var reader io.Reader = f
+	compressed := LogicalJSONLPath(path) != path
 	var ordinal int64
-	return EachLine(f, MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
+	warn := func(err error) error {
+		return each(RawEvent{Path: path, Ordinal: ordinal, Object: map[string]any{"_warning": "zstd: " + err.Error()}})
+	}
+	if compressed {
+		decoder, err := zstd.NewReader(f, zstd.WithDecoderConcurrency(1))
+		if err != nil {
+			return warn(err)
+		}
+		defer decoder.Close()
+		reader = decoder
+	}
+	// Only decoder/read errors become per-file warnings. Consumer errors, such
+	// as an output write failure, must still abort the import.
+	var callbackErr error
+	emit := func(ev RawEvent) error {
+		callbackErr = each(ev)
+		return callbackErr
+	}
+	err = EachLine(reader, MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
 		ordinal++
 		if tooLong {
 			warning := fmt.Sprintf("line too long (%d bytes > %d limit), skipped", size, MaxLineBytes)
-			return each(RawEvent{Path: path, Ordinal: ordinal, Object: map[string]any{"_warning": warning}})
+			return emit(RawEvent{Path: path, Ordinal: ordinal, Object: map[string]any{"_warning": warning}})
 		}
 		line := append([]byte(nil), raw...)
 		if strings.TrimSpace(string(line)) == "" {
@@ -210,10 +246,23 @@ func scanJSONL(path string, each func(RawEvent) error) error {
 		}
 		var obj map[string]any
 		if err := json.Unmarshal(line, &obj); err != nil {
-			return each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: map[string]any{"_warning": "malformed json: " + err.Error()}})
+			return emit(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: map[string]any{"_warning": "malformed json: " + err.Error()}})
 		}
-		return each(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: obj})
+		return emit(RawEvent{Path: path, Ordinal: ordinal, Line: line, Object: obj})
 	})
+	if err != nil && compressed && callbackErr == nil {
+		return warn(err)
+	}
+	return err
+}
+
+// LogicalJSONLPath keeps session identity stable when a JSONL file is compressed.
+// Physical paths remain in raw references and the scan manifest.
+func LogicalJSONLPath(path string) string {
+	if strings.HasSuffix(strings.ToLower(path), ".jsonl.zst") {
+		return path[:len(path)-len(".zst")]
+	}
+	return path
 }
 
 func DefaultInclude(path string) bool {

@@ -140,6 +140,13 @@ INSTALL_ROWS = [
         id="current-config-with-newer-version-is-untouched",
     ),
     pytest.param(
+        "future-event",
+        "future schema events are preserved while installing project hooks",
+        {"version": 2, "hooks": {"sessionStart": [FOREIGN], "futureEvent": []}},
+        {**_all_events(PROJECT), "sessionStart": [FOREIGN, PROJECT], "futureEvent": []},
+        id="future-version-unknown-event-is-preserved",
+    ),
+    pytest.param(
         "at-limit",
         "r4344044551 P2: the size limit is inclusive",
         _padded(LIMIT),
@@ -239,6 +246,20 @@ REFUSED_ROWS = [
         "must be a list",
         id="event-not-list",
     ),
+    pytest.param(
+        "future-event-not-list",
+        "invalid document",
+        {"version": 2, "hooks": {"futureEvent": {}}},
+        "must be a list",
+        id="future-version-event-not-list",
+    ),
+    pytest.param(
+        "future-event-bad-definition",
+        "r4344258655 P2",
+        {"version": 2, "hooks": {"futureEvent": [{}]}},
+        "command or prompt",
+        id="future-version-event-bad-definition",
+    ),
     *[
         pytest.param(
             event,
@@ -286,6 +307,13 @@ def test_project_install_write_failures_return_text_and_keep_the_original(tmp_pa
 OWNERSHIP_ROWS = [
     pytest.param(
         "valid", "project owns the event", {"version": 1, "hooks": _all_events(PROJECT)}, set(EVENTS), id="valid"
+    ),
+    pytest.param(
+        "future-version",
+        "future schema event names do not invalidate known project ownership",
+        {"version": 2, "hooks": {"sessionStart": [PROJECT], "futureEvent": []}},
+        {"sessionStart"},
+        id="future-version-preserves-project-ownership",
     ),
     pytest.param(
         "one-event",
@@ -536,6 +564,19 @@ USER_ROWS = [
         )
         for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
     ],
+    *[
+        pytest.param(
+            {"hooks": {"sessionStart": [LEGACY], event: entries}},
+            "conflict",
+            id=f"versionless-unknown-{event}",
+        )
+        for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
+    ],
+    pytest.param(
+        {"version": 2, "hooks": {"sessionStart": [FOREIGN, LEGACY], "futureEvent": []}},
+        "repaired",
+        id="future-version-unknown-event-is-preserved",
+    ),
     pytest.param({"hooks": {"sessionStart": [FOREIGN, LEGACY]}}, "repaired", id="older-release-document-is-repaired"),
     pytest.param({"hooks": {"beforeSubmitPrompt": [FOREIGN]}}, "repaired", id="foreign-document-without-version"),
     pytest.param({"version": "1", "hooks": {}}, "conflict", id="string-version"),
@@ -574,7 +615,7 @@ def test_user_scope_hook_document_validation(tmp_path, monkeypatch, capsys, rout
         return
     assert rc == 0
     doc = json.loads(path.read_text())
-    assert doc["version"] == 1
+    assert doc["version"] == (initial.get("version", 1) if isinstance(initial, dict) else 1)
     for event, entries in initial["hooks"].items():
         assert doc["hooks"][event][: len(entries)] == entries
     assert all(LEGACY in doc["hooks"][event] for event in EVENTS)
