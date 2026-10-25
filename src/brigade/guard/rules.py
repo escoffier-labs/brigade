@@ -176,7 +176,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="bearer-token",
         category="secret",
-        pattern=r"\bBearer\s+[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-])\b",
+        pattern=r"\bBearer\s+[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
         replacement="Bearer [redacted-secret]",
         description="Bearer token.",
         flags=re.IGNORECASE,
