@@ -274,6 +274,7 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 # Independently developed migrations can reserve the same schema version.
 # Register nullable additions here so current-version databases self-heal too.
 _ADDITIVE_COLUMNS = (
+    ("fleet_messages", "sealed_reply_to", "ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER"),
     ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
     ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
     ("fleet_messages", "content_state", "ALTER TABLE fleet_messages ADD COLUMN content_state TEXT"),
@@ -303,6 +304,10 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for table, column, ddl in _ADDITIVE_COLUMNS
         if table not in created and column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     )
+    if "sealed_reply_to" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_messages)")}:
+        missing.append(
+            "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND reply_to IS NOT NULL"
+        )
     missing.extend(ddl for kind, ddl in absent if kind == "index")
     # Index repair shares the current-version self-heal transaction and its
     # read-only fast path. Claim fencing tables retain their strict validation.
@@ -311,6 +316,10 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for name, ddl in _ADDITIVE_INDEXES
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
     )
+    if ("index", "fleet_messages_sealed_acked") not in existing:
+        missing.append(
+            "CREATE INDEX IF NOT EXISTS fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'"
+        )
     from . import fleet_hub_questions
 
     missing.extend(fleet_hub_questions.missing_schema(conn))
@@ -1928,8 +1937,15 @@ def make_server(
         raise FleetHubError(str(exc)) from exc
     if require_sealed or os.environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1":
         policy = dataclasses.replace(policy, require_sealed=True)
-    init_db(Path(db_path)).close()
-    from . import fleet_admin_stats
+    conn = init_db(Path(db_path))
+    from . import fleet_admin_stats, fleet_hub_identity
+
+    try:
+        fleet_hub_identity.validate_storage_policy(fleet_hub_identity.identity(conn), policy)
+    except ValueError as exc:
+        raise FleetHubError(str(exc)) from exc
+    finally:
+        conn.close()
 
     fleet_admin_stats.maintain(Path(db_path).expanduser())
     return BoundedThreadingHTTPServer(

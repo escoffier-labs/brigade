@@ -193,6 +193,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             conn.execute(f"ALTER TABLE fleet_messages ADD COLUMN {column} TEXT")
     if "envelope_bytes" not in columns:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER")
+    if "sealed_reply_to" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER")
+    conn.execute(
+        "UPDATE fleet_messages SET sealed_reply_to=reply_to WHERE envelope IS NOT NULL AND sealed_reply_to IS NULL AND reply_to IS NOT NULL"
+    )
     conn.execute("UPDATE fleet_messages SET client_id='legacy-' || id WHERE client_id IS NULL")
     conn.execute("UPDATE fleet_messages SET received_at=created_at WHERE received_at IS NULL")
     rows = conn.execute(
@@ -228,6 +233,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute(
         "CREATE INDEX IF NOT EXISTS fleet_messages_unacked_recipient "
         "ON fleet_messages (recipient) WHERE acked_at IS NULL"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'"
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_created_at ON fleet_messages (created_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_reply_to ON fleet_messages (reply_to)")
@@ -365,7 +373,7 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
 
 def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE id=?",
         (message_id,),
     ).fetchone()
@@ -723,6 +731,11 @@ def _send(
             original = _fetch(conn, reply_to)
             if original is None or original["recipient"] != sender or original["sender"] != recipient:
                 raise MessageError("reply_to must identify an inbox message from the recipient")
+            if envelope is not None and original["kind"] == "operator_question":
+                raise MessageError(
+                    "sealed replies to legacy operator questions are unavailable until sealed question support",
+                    code="sealed_question_reply_unavailable",
+                )
         from .fleet_hub_message_grants import require_granted, require_recipient_cap
 
         require_granted(conn, sender, recipient)
@@ -755,8 +768,8 @@ def _send(
             raise MessageQuotaError("sender message quota exceeded", code="message_sender_quota")
         created_at = enqueued_at
         cursor = conn.execute(
-            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state,sealed_reply_to) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sender,
                 recipient,
@@ -775,6 +788,7 @@ def _send(
                 raw["envelope"] if envelope is not None else None,
                 len(raw["envelope"]) if envelope is not None else None,
                 "sealed" if envelope is not None else None,
+                reply_to if envelope is not None else None,
             ),
         )
         message_id = cursor.lastrowid
@@ -828,7 +842,7 @@ def _query_inbox_rows(
 ) -> list[tuple[Any, ...]]:
     _prune_expired(conn)
     return conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -856,7 +870,7 @@ def list_messages(
     wait_ms = _validate_wait_ms(raw.get("wait_ms", 0))
     wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -965,7 +979,7 @@ def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[
         condition = "id>?"
         params.append(after)
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,"
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,"
         "sender_label,thread,kind,envelope,envelope_bytes,content_state FROM fleet_messages WHERE sender=? AND "
         + condition
         + " ORDER BY id LIMIT 100",

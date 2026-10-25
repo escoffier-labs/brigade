@@ -7,10 +7,13 @@ import hashlib
 import json
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .fleet_hub_message_keys import decode_binary
 from .fleet_hub_messages import MessageConflict, MessageError
+
+if TYPE_CHECKING:
+    from .fleet_hub_sealed import StoragePolicy
 
 # Same upper bound as the existing Hub JSON request body.
 MAX_STATEMENT_BYTES = 8 * 1024 * 1024
@@ -58,10 +61,45 @@ def identity(conn: sqlite3.Connection) -> dict[str, Any] | None:
     return {"identity": value, "migration": json.loads(migration[0])} if migration else value
 
 
-def upload_identity(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
+def validate_storage_policy(raw: Any, policy: StoragePolicy | None = None) -> None:
+    """Check advertised policy without changing or verifying signed bytes.
+
+    Older opaque statements may omit these fields. Supplied fields must be
+    exact, bounded types and agree with the frozen runtime enforcement.
+    """
+    if raw is None:
+        return
+    value = raw.get("identity", raw)
+    for field in ("require_sealed", "max_envelope_bytes"):
+        if field not in value:
+            continue
+        supplied = value[field]
+        valid = (
+            type(supplied) is bool
+            if field == "require_sealed"
+            else type(supplied) is int and 1 <= supplied <= 96 * 1024
+        )
+        if not valid:
+            raise MessageError(f"invalid identity {field}")
+        enforced = (
+            None
+            if policy is None
+            else (policy.require_sealed if field == "require_sealed" else min(policy.max_envelope_bytes, 96 * 1024))
+        )
+        if policy is not None and supplied != enforced:
+            raise MessageError(
+                f"identity {field} disagrees with runtime storage policy; "
+                "use compatible runtime configuration or upload a new admin-signed identity"
+            )
+
+
+def upload_identity(
+    conn: sqlite3.Connection, raw: Any, *, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any]:
     _blob(raw)
     value = raw.get("identity", raw)
     blob = _blob(value)
+    validate_storage_policy(value, storage_policy)
     public = decode_binary(value.get("hub_sig_pub"), 32)
     expected = (
         "h_"

@@ -166,7 +166,8 @@ def policy_from_environment(environ: Mapping[str, str]) -> StoragePolicy:
 
 
 def prepare(raw: dict[str, Any], *, sender: str, reply_to: int | None, policy: StoragePolicy) -> dict[str, Any]:
-    if set(raw) - {"action", "envelope", "reply_to", "id"}:
+    allowed = {"action", "envelope", "id"} if raw.get("action") == "reply" else {"action", "envelope", "reply_to"}
+    if set(raw) - allowed:
         raise MessageError("an envelope cannot accompany plaintext or routing fields")
     text = raw["envelope"]
     if not isinstance(text, str):
@@ -219,11 +220,17 @@ def admit(conn: sqlite3.Connection, sender: str, size: int, policy: StoragePolic
             raise MessageQuotaError("hub sealed storage is full", code="hub_storage_full")
 
 
-def purge_content(conn: sqlite3.Connection) -> None:
+PURGE_BATCH_SIZE = 32
+
+
+def purge_content(conn: sqlite3.Connection) -> int:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
-    for message_id, text in conn.execute(
-        "SELECT id,envelope FROM fleet_messages WHERE content_state='sealed' AND acked_at<=?", (cutoff,)
-    ).fetchall():
+    rows = conn.execute(
+        "SELECT id,envelope FROM fleet_messages WHERE content_state='sealed' AND acked_at<=? "
+        "ORDER BY acked_at,id LIMIT ?",
+        (cutoff, PURGE_BATCH_SIZE),
+    ).fetchall()
+    for message_id, text in rows:
         value = json.loads(text)
         value.pop("ct")
         value.pop("recipients")
@@ -232,6 +239,8 @@ def purge_content(conn: sqlite3.Connection) -> None:
             "UPDATE fleet_messages SET envelope=?,envelope_bytes=?,content_state='content_expired' WHERE id=?",
             (tombstone, len(tombstone), message_id),
         )
+
+    return len(rows)
 
 
 def digest(text: str) -> str:

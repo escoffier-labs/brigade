@@ -226,6 +226,7 @@ def make_handler(
     probes a provider per render.
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
+    storage_policy = storage_policy or fleet_hub_sealed.StoragePolicy()
 
     class _Handler(RejectedUploadMixin):
         server_version = "brigade-fleet-hub/1"
@@ -1790,7 +1791,10 @@ def make_handler(
                 if parsed is None:
                     return
                 if path == "/mesh/identity":
-                    status, body_payload = 200, fleet_hub_identity.upload_identity(conn, parsed)
+                    status, body_payload = (
+                        200,
+                        fleet_hub_identity.upload_identity(conn, parsed, storage_policy=storage_policy),
+                    )
                 elif path == "/mesh/statements":
                     status, body_payload = 200, fleet_hub_identity.upload_statement(conn, parsed)
                 elif path == "/events":

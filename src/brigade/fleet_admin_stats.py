@@ -377,12 +377,20 @@ def _prune(conn: sqlite3.Connection, now: datetime) -> None:
 
 def maintain(db_path: Path) -> None:
     """Delete expired aggregates independently of collection and page reads."""
-    from . import fleet_hub
+    from . import fleet_hub, fleet_hub_sealed
 
     conn = fleet_hub.open_db(db_path)
     try:
         with conn:
             _prune(conn, datetime.now(timezone.utc))
+        while True:
+            # Release the writer lock between bounded batches, including at
+            # startup. Ciphertext never accumulates in one unbounded list.
+            with conn:
+                conn.execute("BEGIN IMMEDIATE")
+                purged = fleet_hub_sealed.purge_content(conn)
+            if purged < fleet_hub_sealed.PURGE_BATCH_SIZE:
+                break
     finally:
         conn.close()
 
