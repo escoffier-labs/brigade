@@ -1276,9 +1276,9 @@ jobs:
           fi
           "$mesh_python" -m pip install -e '.[dev,mesh]'
           if [ "$CRYPTO" = floor ]; then
-            "$mesh_python" -m pip install --only-binary cryptography 'cryptography==48.0.0'
+            "$mesh_python" -m pip install --only-binary cryptography 'cryptography==50.0.2'
           else
-            "$mesh_python" -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+            "$mesh_python" -m pip install --upgrade --only-binary cryptography 'cryptography>=50.0.2,<52'
           fi
           if [ "$RUNNER_OS_NAME" = Windows ]; then
             cygpath -w "$PWD/$py" >> "$GITHUB_PATH"
@@ -1346,9 +1346,9 @@ jobs:
           "${{ steps.python.outputs.python-path }}" -m venv .venv
           .venv/bin/python -m pip install -e '.[dev,mesh]'
           if [ "$CRYPTO" = floor ]; then
-            .venv/bin/python -m pip install --only-binary cryptography 'cryptography==48.0.0'
+            .venv/bin/python -m pip install --only-binary cryptography 'cryptography==50.0.2'
           else
-            .venv/bin/python -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+            .venv/bin/python -m pip install --upgrade --only-binary cryptography 'cryptography>=50.0.2,<52'
           fi
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
