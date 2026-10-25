@@ -50,6 +50,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
 
     findings: list[Finding] = []
     occupied: list[tuple[int, int]] = []
+    root_spans: list[tuple[int, int]] = []
 
     for rule in active_policy.all_rules():
         regex = re.compile(rule.pattern, rule.flags)
@@ -70,6 +71,15 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             if _inside_ranges(start, end, skipped_ranges):
                 continue
             if _overlaps(start, end, occupied):
+                continue
+            # A built-in root path can contain credentials. Keep their
+            # independent policy decisions without changing other precedence.
+            if any(
+                start < root_end
+                and end > root_start
+                and not (rule.category == "secret" and root_start <= start and end <= root_end)
+                for root_start, root_end in root_spans
+            ):
                 continue
 
             line = _line_for_offset(line_starts, start)
@@ -107,7 +117,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     allowed_by=allowed_by,
                 )
             )
-            occupied.append((start, end))
+            if rule.id == "root-path" and not any(rule is custom_rule for custom_rule in active_policy.custom_rules):
+                root_spans.append((start, end))
+            else:
+                occupied.append((start, end))
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -126,7 +139,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             )
         )
 
-    redacted = _apply_edits(text, _edits_for(findings))
+    redacted = _apply_edits(text, _edits_for(findings, root_spans))
 
     include_opf = active_options.include_opf or active_policy.opf_backend.enabled
     opf_device = active_options.opf_device or active_policy.opf_backend.device
@@ -530,11 +543,26 @@ def _overlaps(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
     return any(start < prev_end and end > prev_start for prev_start, prev_end in occupied)
 
 
-def _edits_for(findings: list[Finding]) -> list[TextEdit]:
+def _edits_for(findings: list[Finding], root_spans: list[tuple[int, int]]) -> list[TextEdit]:
+    # Findings retain original offsets, but overlapping replacements cannot
+    # both use those offsets. A masking root edit already covers its secrets.
+    masked_roots = [
+        (finding.start, finding.end)
+        for finding in findings
+        if finding.rule_id == "root-path"
+        and finding.category == "infrastructure"
+        and finding.redacts
+        and (finding.start, finding.end) in root_spans
+    ]
     return [
         TextEdit(finding.start, finding.end, finding.replacement)
         for finding in findings
-        if finding.redacts and finding.start < finding.end
+        if finding.redacts
+        and finding.start < finding.end
+        and not (
+            finding.category == "secret"
+            and any(start <= finding.start and finding.end <= end for start, end in masked_roots)
+        )
     ]
 
 
