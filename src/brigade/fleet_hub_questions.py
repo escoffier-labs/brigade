@@ -9,9 +9,12 @@ import re
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fleet_hub_messages as messages
+
+if TYPE_CHECKING:
+    from .fleet_hub_sealed import StoragePolicy
 
 QUESTION_LIMIT = 4096
 _REQUEST_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
@@ -138,12 +141,15 @@ def validate_create(raw: dict[str, Any]) -> tuple[str, int, str]:
     return question, timeout, request_id
 
 
-def _expire(conn: sqlite3.Connection, now: str) -> None:
+def _expire(conn: sqlite3.Connection, now: str, *, storage_policy: StoragePolicy | None = None) -> None:
     conn.execute(
         "UPDATE fleet_questions SET status='timeout' WHERE status='pending' AND deadline<=?",
         (now,),
     )
-    cutoff = (datetime.fromisoformat(now) - timedelta(days=messages.RETENTION_DAYS)).isoformat()
+    cutoff = (
+        datetime.fromisoformat(now)
+        - timedelta(days=storage_policy.retention_days if storage_policy is not None else messages.RETENTION_DAYS)
+    ).isoformat()
     conn.execute("DELETE FROM fleet_questions WHERE created_at<?", (cutoff,))
 
 
@@ -186,7 +192,15 @@ def _fetch(conn: sqlite3.Connection, question_id: str) -> tuple[Any, ...]:
     return row
 
 
-def _create(conn: sqlite3.Connection, raw: dict[str, Any], caller: str, generation: str, now: str) -> dict[str, Any]:
+def _create(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    caller: str,
+    generation: str,
+    now: str,
+    *,
+    storage_policy: StoragePolicy | None = None,
+) -> dict[str, Any]:
     question, timeout, request_id = validate_create(raw)
     digest = hashlib.sha256(json.dumps([question, timeout], ensure_ascii=False).encode("utf-8")).hexdigest()
     existing = conn.execute(
@@ -231,6 +245,7 @@ def _create(conn: sqlite3.Connection, raw: dict[str, Any], caller: str, generati
         },
         sender=caller,
         extras={"kind": "operator_question"},
+        storage_policy=storage_policy,
     )
     conn.execute(
         "INSERT INTO fleet_questions(question_id,caller,generation,request_id,payload_hash,operator,question,message_id,created_at,deadline) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -240,7 +255,12 @@ def _create(conn: sqlite3.Connection, raw: dict[str, Any], caller: str, generati
 
 
 def handle(
-    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, authenticated_generation: str | None
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    caller: str,
+    authenticated_generation: str | None,
+    storage_policy: StoragePolicy | None = None,
 ) -> tuple[int, dict[str, Any]]:
     def operation() -> dict[str, Any]:
         generation = _generation(conn, caller)
@@ -258,9 +278,9 @@ def handle(
                 raise messages.MessageError("question_id is invalid")
             if action == "question_desktop":
                 messages._text(raw.get("answer"), "answer", messages.BODY_LIMIT)
-        _expire(conn, now)
+        _expire(conn, now, storage_policy=storage_policy)
         if action == "question_create":
-            return _create(conn, raw, caller, generation, now)
+            return _create(conn, raw, caller, generation, now, storage_policy=storage_policy)
         question_id = raw["question_id"]
         owner = conn.execute(
             "SELECT caller,generation FROM fleet_questions WHERE question_id=?", (question_id,)

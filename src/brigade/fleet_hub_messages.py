@@ -162,7 +162,7 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
     return extras
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
+def ensure_schema(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None) -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fleet_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,11 +247,15 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_message_grants
 
     fleet_hub_message_grants.ensure_schema(conn)
-    _prune_expired(conn)
+    if storage_policy is None:
+        _prune_expired(conn)
+    else:
+        _prune_expired(conn, storage_policy=storage_policy)
 
 
-def _expiry_cutoff() -> str:
-    return (datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)).isoformat()
+def _expiry_cutoff(storage_policy: StoragePolicy | None = None) -> str:
+    days = storage_policy.retention_days if storage_policy is not None else RETENTION_DAYS
+    return (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
 
 
 def _sqlite_integer(value: Any, *, allow_zero: bool = False) -> TypeGuard[int]:
@@ -263,14 +267,14 @@ def _sqlite_integer(value: Any, *, allow_zero: bool = False) -> TypeGuard[int]:
     )
 
 
-def _prune_expired(conn: sqlite3.Connection) -> None:
+def _prune_expired(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None) -> None:
     from .fleet_hub_sealed import purge_content
 
     was_in_transaction = conn.in_transaction
     if not was_in_transaction:
         conn.execute("BEGIN IMMEDIATE")
     purge_content(conn)
-    cutoff = _expiry_cutoff()
+    cutoff = _expiry_cutoff(storage_policy)
     conn.execute(
         "UPDATE fleet_messages SET reply_to=NULL WHERE reply_to IN "
         "(SELECT id FROM fleet_messages WHERE created_at < ?)",
@@ -285,33 +289,38 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
-def unread_count(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, int]:
+def unread_count(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str, storage_policy: StoragePolicy | None = None
+) -> dict[str, int]:
     """Count one inbox without fetching bodies or writing retention cleanup."""
     if set(raw) - {"action"}:
         raise MessageError("count accepts no arguments")
     count = conn.execute(
         "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL AND created_at>=?",
-        (recipient, _expiry_cutoff()),
+        (recipient, _expiry_cutoff(storage_policy)),
     ).fetchone()[0]
     return {"unread_count": int(count)}
 
 
-def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
+def unread_counts(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None) -> dict[str, int]:
     """Unread message totals keyed by enrolled machine identity for the fleet board."""
-    _prune_expired(conn)
+    _prune_expired(conn, storage_policy=storage_policy)
     counts = {
         str(recipient): int(count)
         for recipient, count in conn.execute(
             "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
             "JOIN nodes ON nodes.node_id=message.recipient "
-            "WHERE message.acked_at IS NULL AND nodes.revoked_at IS NULL GROUP BY message.recipient"
+            "WHERE message.acked_at IS NULL AND nodes.revoked_at IS NULL AND message.created_at>=? GROUP BY message.recipient",
+            (_expiry_cutoff(storage_policy),),
         )
     }
     conn.commit()
     return counts
 
 
-def agent_unread_counts(conn: sqlite3.Connection, limit: int = AGENT_UNREAD_LIMIT) -> tuple[dict[str, int], bool]:
+def agent_unread_counts(
+    conn: sqlite3.Connection, limit: int = AGENT_UNREAD_LIMIT, *, storage_policy: StoragePolicy | None = None
+) -> tuple[dict[str, int], bool]:
     """Unread totals for at most ``limit`` active agent principals, in principal order.
 
     Grouped over the unacked index. The flag is true when more principals have
@@ -321,9 +330,9 @@ def agent_unread_counts(conn: sqlite3.Connection, limit: int = AGENT_UNREAD_LIMI
     rows = conn.execute(
         "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
         "JOIN fleet_message_principals AS principal ON principal.principal_id=message.recipient "
-        "WHERE message.acked_at IS NULL AND principal.revoked_at IS NULL GROUP BY message.recipient "
+        "WHERE message.acked_at IS NULL AND principal.revoked_at IS NULL AND message.created_at>=? GROUP BY message.recipient "
         "ORDER BY message.recipient LIMIT ?",
-        (limit + 1,),
+        (_expiry_cutoff(storage_policy), limit + 1),
     ).fetchall()
     return {str(recipient): int(count) for recipient, count in rows[:limit]}, len(rows) > limit
 
@@ -371,11 +380,13 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
     return result
 
 
-def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
+def _fetch(
+    conn: sqlite3.Connection, message_id: int, *, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any] | None:
     row = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
-        "FROM fleet_messages WHERE id=?",
-        (message_id,),
+        "FROM fleet_messages WHERE id=? AND created_at>=?",
+        (message_id, _expiry_cutoff(storage_policy)),
     ).fetchone()
     return _row(row) if row else None
 
@@ -447,7 +458,7 @@ def _as_active_principal(
         raise
 
 
-def _enqueued_at(value: Any) -> str:
+def _enqueued_at(value: Any, *, storage_policy: StoragePolicy | None = None) -> str:
     now = datetime.now(timezone.utc)
     if value is None:
         return now.isoformat()
@@ -463,7 +474,7 @@ def _enqueued_at(value: Any) -> str:
         stamp = stamp.astimezone(timezone.utc)
     except OverflowError as exc:
         raise MessageError("enqueued_at is outside the supported timestamp range") from exc
-    if stamp < now - timedelta(days=RETENTION_DAYS):
+    if stamp < now - timedelta(days=storage_policy.retention_days if storage_policy is not None else RETENTION_DAYS):
         raise MessageError("message expired before delivery")
     if stamp > now + MAX_FUTURE_SKEW:
         raise MessageFutureTimestamp("enqueued_at is too far in the future")
@@ -684,7 +695,7 @@ def _send(
         subject = body = ""
         reference = None
         extras = {"kind": envelope["kind"]}
-        enqueued_at = _enqueued_at(envelope["created_at"])
+        enqueued_at = _enqueued_at(envelope["created_at"], storage_policy=policy)
         message_hash = sealed.digest(raw["envelope"])
     else:
         if policy.require_sealed:
@@ -694,7 +705,7 @@ def _send(
         body = _text(raw.get("body"), "body", BODY_LIMIT)
         reference = _text(raw.get("ref"), "ref", REF_LIMIT, required=False)
         client_id = _text(raw.get("client_id"), "client_id", 64, required=False) or secrets.token_hex(16)
-        enqueued_at = _enqueued_at(raw.get("enqueued_at"))
+        enqueued_at = _enqueued_at(raw.get("enqueued_at"), storage_policy=policy)
         priority = raw.get("priority", "normal")
         if not isinstance(priority, str) or priority not in PRIORITIES:
             raise MessageError("priority must be low, normal, high, or urgent")
@@ -704,7 +715,7 @@ def _send(
     if opened:
         conn.execute("BEGIN IMMEDIATE")
     try:
-        _prune_expired(conn)
+        _prune_expired(conn, storage_policy=storage_policy)
         now = datetime.now(timezone.utc)
         if not _active_principal(conn, sender):
             raise MessageAuthError("sender is not an active hub principal")
@@ -718,7 +729,7 @@ def _send(
                     code="message_client_id_conflict",
                     message_id=int(existing[0]),
                 )
-            existing_row = _fetch(conn, int(existing[0])) or {}
+            existing_row = _fetch(conn, int(existing[0]), storage_policy=storage_policy) or {}
             if opened:
                 conn.commit()
                 _notify_recipient(recipient)
@@ -728,7 +739,7 @@ def _send(
         if reply_to is not None:
             if not _sqlite_integer(reply_to):
                 raise MessageError("reply_to must be a positive integer within SQLite's range")
-            original = _fetch(conn, reply_to)
+            original = _fetch(conn, reply_to, storage_policy=storage_policy)
             if original is None or original["recipient"] != sender or original["sender"] != recipient:
                 raise MessageError("reply_to must identify an inbox message from the recipient")
             if envelope is not None and original["kind"] == "operator_question":
@@ -798,7 +809,7 @@ def _send(
             "INSERT INTO fleet_message_sends(sender,client_id,received_at) VALUES(?,?,?)",
             (sender, client_id, now.isoformat()),
         )
-        result = _fetch(conn, message_id) or {}
+        result = _fetch(conn, message_id, storage_policy=storage_policy) or {}
         # Same transaction as the insert, so an event exists exactly when the message does.
         fleet_hub_events.record_message_created(conn, result)
         if opened:
@@ -839,14 +850,15 @@ def _query_inbox_rows(
     recipient: str,
     after: int,
     unacked: bool,
+    storage_policy: StoragePolicy | None = None,
 ) -> list[tuple[Any, ...]]:
-    _prune_expired(conn)
+    _prune_expired(conn, storage_policy=storage_policy)
     return conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
-        "FROM fleet_messages WHERE recipient=? AND id>? "
+        "FROM fleet_messages WHERE recipient=? AND id>? AND created_at>=? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
-        (recipient, after),
+        (recipient, after, _expiry_cutoff(storage_policy)),
     ).fetchall()
 
 
@@ -858,9 +870,10 @@ def list_messages(
     open_conn: Callable[[], sqlite3.Connection] | None = None,
     source_ip: str = "",
     connection_state: _ConnectionState | None = None,
+    storage_policy: StoragePolicy | None = None,
 ) -> dict[str, Any]:
     opened = not conn.in_transaction
-    _prune_expired(conn)
+    _prune_expired(conn, storage_policy=storage_policy)
     after = raw.get("after", 0)
     if not _sqlite_integer(after, allow_zero=True):
         raise MessageError("after must be a non-negative integer within SQLite's range")
@@ -871,10 +884,10 @@ def list_messages(
     wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
-        "FROM fleet_messages WHERE recipient=? AND id>? "
+        "FROM fleet_messages WHERE recipient=? AND id>? AND created_at>=? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
-        (recipient, after),
+        (recipient, after, _expiry_cutoff(storage_policy)),
     ).fetchall()
     if opened:
         conn.commit()
@@ -921,7 +934,7 @@ def list_messages(
                     reopened_conn,
                     recipient,
                     lambda reopened_conn=reopened_conn: _query_inbox_rows(
-                        reopened_conn, recipient=recipient, after=after, unacked=unacked
+                        reopened_conn, recipient=recipient, after=after, unacked=unacked, storage_policy=storage_policy
                     ),
                 )
             finally:
@@ -961,14 +974,16 @@ def _message_page(rows: list[tuple[Any, ...]], *, after: int) -> dict[str, Any]:
     return {"messages": messages, "next_cursor": messages[-1]["id"] if messages else after}
 
 
-def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any]:
-    _prune_expired(conn)
+def sent(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any]:
+    _prune_expired(conn, storage_policy=storage_policy)
     if set(raw) - {"action", "after", "ids"} or ("after" in raw and "ids" in raw):
         raise MessageError("sent accepts either after or ids")
     after = raw.get("after", 0)
     if not _sqlite_integer(after, allow_zero=True):
         raise MessageError("after must be a non-negative integer within SQLite's range")
-    params: list[Any] = [sender]
+    params: list[Any] = [sender, _expiry_cutoff(storage_policy)]
     if "ids" in raw:
         ids = raw["ids"]
         if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(_sqlite_integer(i) for i in ids):
@@ -980,7 +995,7 @@ def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[
         params.append(after)
     rows = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,COALESCE(sealed_reply_to,reply_to),created_at,acked_at,acked_by,"
-        "sender_label,thread,kind,envelope,envelope_bytes,content_state FROM fleet_messages WHERE sender=? AND "
+        "sender_label,thread,kind,envelope,envelope_bytes,content_state FROM fleet_messages WHERE sender=? AND created_at>=? AND "
         + condition
         + " ORDER BY id LIMIT 100",
         params,
@@ -988,21 +1003,23 @@ def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[
     return _message_page(rows, after=after)
 
 
-def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[str, Any] | None:
+def ack(
+    conn: sqlite3.Connection, message_id: Any, *, recipient: str, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any] | None:
     opened = not conn.in_transaction
-    _prune_expired(conn)
+    _prune_expired(conn, storage_policy=storage_policy)
     if not _sqlite_integer(message_id):
         raise MessageError("id must be a positive integer within SQLite's range")
     now = datetime.now(timezone.utc).isoformat()
     conn.execute(
         "UPDATE fleet_messages SET acked_at=COALESCE(acked_at,?), acked_by=COALESCE(acked_by,?) "
-        "WHERE id=? AND recipient=?",
-        (now, recipient, message_id, recipient),
+        "WHERE id=? AND recipient=? AND created_at>=?",
+        (now, recipient, message_id, recipient, _expiry_cutoff(storage_policy)),
     )
     if opened:
         conn.commit()
     return (
-        _fetch(conn, message_id)
+        _fetch(conn, message_id, storage_policy=storage_policy)
         if conn.execute("SELECT 1 FROM fleet_messages WHERE id=? AND recipient=?", (message_id, recipient)).fetchone()
         else None
     )
@@ -1017,19 +1034,19 @@ def reply(
             raise MessageError("id must be a positive integer within SQLite's range")
         return send(conn, raw, sender=sender, reply_to=message_id, storage_policy=storage_policy)
     _metadata(raw, sender=sender)
-    _prune_expired(conn)
+    _prune_expired(conn, storage_policy=storage_policy)
     message_id = raw.get("id")
     if not _sqlite_integer(message_id):
         raise MessageError("id must be a positive integer within SQLite's range")
-    original = _fetch(conn, message_id)
+    original = _fetch(conn, message_id, storage_policy=storage_policy)
     if original is None or original["recipient"] != sender:
         client_id = _text(raw.get("client_id"), "client_id", 64, required=False)
         if not client_id:
             return None
         accepted = conn.execute(
             "SELECT recipient,subject,reference,priority,thread FROM fleet_messages "
-            "WHERE sender=? AND client_id=? AND reply_to IS NULL",
-            (sender, client_id),
+            "WHERE sender=? AND client_id=? AND reply_to IS NULL AND created_at>=?",
+            (sender, client_id, _expiry_cutoff(storage_policy)),
         ).fetchone()
         if accepted is None:
             return None
@@ -1056,7 +1073,7 @@ def reply(
             reply_to=message_id,
             storage_policy=storage_policy,
         )
-        return _fetch(conn, message["id"])
+        return _fetch(conn, message["id"], storage_policy=storage_policy)
     subject = raw.get("subject")
     if subject is None:
         prefixed = f"Re: {original['subject']}"
@@ -1086,7 +1103,7 @@ def reply(
         reply_to=message_id,
         storage_policy=storage_policy,
     )
-    return _fetch(conn, message["id"])
+    return _fetch(conn, message["id"], storage_policy=storage_policy)
 
 
 def _station_read(
@@ -1209,7 +1226,9 @@ def handle(
     if action in ("question_create", "question_status", "question_desktop"):
         from . import fleet_hub_questions
 
-        return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
+        return fleet_hub_questions.handle(
+            conn, raw, caller=caller, authenticated_generation=authenticated_generation, storage_policy=storage_policy
+        )
     if isinstance(action, str) and action.startswith("events_"):
         return fleet_hub_events.handle(conn, raw, caller=caller)
     if action in ("keys_publish", "keys_get", "manifests_get"):
@@ -1299,22 +1318,28 @@ def handle(
 
                 if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
                     raise MessageAuthError("lookup credential generation changed")
-            _prune_expired(conn)
+            _prune_expired(conn, storage_policy=storage_policy)
             if set(raw) != {"action", "client_id"}:
                 raise MessageError("sent_lookup requires only client_id")
             client_id = _text(raw.get("client_id"), "client_id", 64)
             found = conn.execute(
-                "SELECT id FROM fleet_messages WHERE sender=? AND client_id=?", (caller, client_id)
+                "SELECT id FROM fleet_messages WHERE sender=? AND client_id=? AND created_at>=?",
+                (caller, client_id, _expiry_cutoff(storage_policy)),
             ).fetchone()
-            return _fetch(conn, int(found[0])) if found else None
+            return _fetch(conn, int(found[0]), storage_policy=storage_policy) if found else None
 
         found = _as_active_principal(conn, caller, lookup)
         return (200, {"message": found}) if found else (404, {"error": "message not found", "code": "not_found"})
     if action == "sent":
-        return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
+        return 200, _as_active_principal(
+            conn, caller, lambda: sent(conn, raw, sender=caller, storage_policy=storage_policy)
+        )
     if action == "count":
         return 200, _as_active_principal(
-            conn, caller, lambda: unread_count(conn, raw, recipient=caller), read_only=True
+            conn,
+            caller,
+            lambda: unread_count(conn, raw, recipient=caller, storage_policy=storage_policy),
+            read_only=True,
         )
     if action == "list":
         connection_state = _ConnectionState()
@@ -1328,10 +1353,13 @@ def handle(
                 open_conn=open_conn,
                 source_ip=source_ip,
                 connection_state=connection_state,
+                storage_policy=storage_policy,
             ),
             connection_state=connection_state,
         )
     if action == "ack":
-        message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
+        message = _as_active_principal(
+            conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller, storage_policy=storage_policy)
+        )
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
     raise MessageError("action must be send, list, sent, count, ack, reply, who, claims, or identity")

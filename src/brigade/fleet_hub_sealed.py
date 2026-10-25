@@ -142,17 +142,20 @@ class StoragePolicy:
     max_envelope_bytes: int = 96 * 1024
     sender_storage_bytes: int = 1024**3
     fleet_storage_bytes: int | None = None
+    retention_days: int = 90
 
     def __post_init__(self) -> None:
+        if type(self.retention_days) is not int or not 1 <= self.retention_days <= 3650:
+            raise ValueError("message routing retention_days must be an integer from 1 to 3650")
         for value in (self.max_envelope_bytes, self.sender_storage_bytes, self.fleet_storage_bytes):
             if value is not None and (type(value) is not int or value < 1):
                 raise ValueError("sealed storage limits must be positive integers")
 
 
 def policy_from_environment(environ: Mapping[str, str]) -> StoragePolicy:
-    """Read startup-only storage caps; never rewrite operator-signed identity."""
+    """Read startup-only storage policy; never rewrite operator-signed identity."""
     values: dict[str, Any] = {"require_sealed": environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1"}
-    for field in ("max_envelope_bytes", "sender_storage_bytes", "fleet_storage_bytes"):
+    for field in ("max_envelope_bytes", "sender_storage_bytes", "fleet_storage_bytes", "retention_days"):
         name = "BRIGADE_FLEET_MESSAGES_" + field.upper()
         if name in environ:
             try:
@@ -162,6 +165,8 @@ def policy_from_environment(environ: Mapping[str, str]) -> StoragePolicy:
                 values[field] = int(text)
             except ValueError:
                 raise ValueError(f"{name} must be a positive integer") from None
+    if "retention_days" in values and values["retention_days"] > 3650:
+        raise ValueError("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS must be an integer from 1 to 3650")
     return StoragePolicy(**values)
 
 

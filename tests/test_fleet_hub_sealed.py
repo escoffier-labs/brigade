@@ -878,3 +878,248 @@ def test_compatible_identity_and_opaque_fields_are_preserved(hub):
         server.server_close()
         assert fleet_hub_identity.identity(hub) == statement
         assert hub.execute("SELECT value FROM hub_meta WHERE key='identity'").fetchone()[0] == before
+
+
+@pytest.mark.parametrize("days", [90, 30, 180])
+def test_routing_retention_admission_and_visibility(hub, monkeypatch, days):
+    from brigade import fleet_hub_sealed as sealed
+
+    policy = sealed.StoragePolicy(retention_days=days)
+    now = datetime.now(timezone.utc)
+    retained = []
+    for index, sealed_row in enumerate((False, True)):
+        stamp = (now - timedelta(days=days - 1)).isoformat()
+        raw = (
+            {"envelope": envelope(client_id=f"retained-{index}", created_at=stamp)}
+            if sealed_row
+            else {"to": "node-b", "subject": "Legacy", "body": "Body", "enqueued_at": stamp}
+        )
+        retained.append(
+            messages.handle(hub, {"action": "send", **raw}, caller="node-a", storage_policy=policy)[1]["message"]
+        )
+        expired = (now - timedelta(days=days + 1)).isoformat()
+        raw = (
+            {"envelope": envelope(client_id=f"expired-{index}", created_at=expired)}
+            if sealed_row
+            else {"to": "node-b", "subject": "Legacy", "body": "Body", "enqueued_at": expired}
+        )
+        with pytest.raises(messages.MessageError, match="expired before delivery"):
+            messages.handle(hub, {"action": "send", **raw}, caller="node-a", storage_policy=policy)
+    # Tombstones obey the same routing lifetime. Simulate a cleanup backlog to
+    # prove visibility itself, rather than relying on deletion to hide rows.
+    hub.execute(
+        "UPDATE fleet_messages SET acked_at=? WHERE id=?", ((now - timedelta(days=8)).isoformat(), retained[1]["id"])
+    )
+    hub.commit()
+    messages._prune_expired(hub, storage_policy=policy)
+    assert (
+        hub.execute("SELECT content_state FROM fleet_messages WHERE id=?", (retained[1]["id"],)).fetchone()[0]
+        == "content_expired"
+    )
+    monkeypatch.setattr(messages, "_prune_expired", lambda *args, **kwargs: None)
+    for expired in (False, True):
+        if expired:
+            hub.execute("UPDATE fleet_messages SET created_at=?", ((now - timedelta(days=days + 1)).isoformat(),))
+            hub.commit()
+
+        def call(raw, caller="node-b"):
+            return messages.handle(hub, raw, caller=caller, storage_policy=policy)
+
+        assert call({"action": "count"})[1]["unread_count"] == (0 if expired else 1)
+        assert len(call({"action": "list"})[1]["messages"]) == (0 if expired else 2)
+        assert len(call({"action": "sent"}, "node-a")[1]["messages"]) == (0 if expired else 2)
+        assert call({"action": "sent_lookup", "client_id": "retained-1"}, "node-a")[0] == (404 if expired else 200)
+        assert messages.unread_counts(hub, storage_policy=policy) == ({} if expired else {"node-b": 1})
+    assert call({"action": "ack", "id": retained[0]["id"]})[0] == 404
+    assert call({"action": "reply", "id": retained[0]["id"], "body": "Reply"})[0] == 404
+    with pytest.raises(messages.MessageError, match="reply_to"):
+        call({"action": "send", "to": "node-a", "subject": "Reply", "body": "Body", "reply_to": retained[0]["id"]})
+    assert hub.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 2
+    hub.execute("UPDATE fleet_messages SET created_at=?", ((now - timedelta(days=days - 1)).isoformat(),))
+    hub.commit()
+    assert call({"action": "ack", "id": retained[0]["id"]})[0] == 200
+    status, result = call({"action": "reply", "id": retained[1]["id"], "body": "Retained reply"})
+    assert status == 201 and result["message"]["reply_to"] == retained[1]["id"]
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "True", "1.5", " 30", "+30", "3651", ""])
+def test_routing_retention_invalid_environment_refuses_startup(tmp_path, monkeypatch, value):
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS", value)
+    with pytest.raises(fleet_hub.FleetHubError, match="RETENTION_DAYS"):
+        fleet_hub.make_server("127.0.0.1", 0, tmp_path / "hub.db", "fixture-admin")
+    assert not (tmp_path / "hub.db").exists()
+
+
+def test_routing_retention_policy_types_and_bounds():
+    from brigade.fleet_hub_sealed import StoragePolicy, policy_from_environment
+
+    assert StoragePolicy().retention_days == 90
+    for days in (1, 30, 180, 3650):
+        assert policy_from_environment({"BRIGADE_FLEET_MESSAGES_RETENTION_DAYS": str(days)}).retention_days == days
+    for days in (True, False, 0, -1, 3651, 30.0, "30"):
+        with pytest.raises(ValueError, match="retention"):
+            StoragePolicy(retention_days=days)
+
+
+def test_routing_retention_restart_migration_preserves_older_rows(hub, monkeypatch):
+    from brigade import fleet_hub_sealed as sealed
+
+    old = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    value = send(hub, envelope())
+    hub.execute("UPDATE fleet_messages SET created_at=?", (old,))
+    hub.execute("PRAGMA user_version=0")
+    hub.commit()
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS", "180")
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    server = fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+    server.server_close()
+    assert (
+        messages.handle(
+            hub,
+            {"action": "sent_lookup", "client_id": value["client_id"]},
+            caller="node-a",
+            storage_policy=sealed.StoragePolicy(retention_days=180),
+        )[0]
+        == 200
+    )
+
+
+@pytest.mark.parametrize("days", [30, 180])
+def test_routing_retention_question_adapter_and_maintenance(hub, monkeypatch, days):
+    from pathlib import Path
+    from brigade import fleet_admin_stats as stats, fleet_hub_questions as questions, fleet_hub_sealed as sealed
+
+    policy = sealed.StoragePolicy(retention_days=days)
+    messages.add_principal(hub, {"name": "operator"})
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", "agent:operator")
+    prior = send(hub, envelope())
+    old = (datetime.now(timezone.utc) - timedelta(days=days - 1)).isoformat()
+    hub.execute("UPDATE fleet_messages SET created_at=?", (old,))
+    hub.commit()
+    generation = questions._generation(hub, "node-a")
+    result = messages.handle(
+        hub,
+        {"action": "question_create", "question": "Proceed?", "request_id": "retention-question"},
+        caller="node-a",
+        authenticated_generation=generation,
+        storage_policy=policy,
+    )[1]
+    assert hub.execute("SELECT 1 FROM fleet_messages WHERE id=?", (prior["id"],)).fetchone()
+    hub.execute("UPDATE fleet_questions SET created_at=?", (old,))
+    hub.commit()
+    stats.maintain(Path(hub.execute("PRAGMA database_list").fetchone()[2]), storage_policy=policy)
+    assert hub.execute("SELECT COUNT(*) FROM fleet_questions").fetchone()[0] == 1
+    assert (
+        messages.handle(
+            hub,
+            {"action": "question_status", "question_id": result["question_id"]},
+            caller="node-a",
+            authenticated_generation=generation,
+            storage_policy=policy,
+        )[0]
+        == 200
+    )
+    expired = (datetime.now(timezone.utc) - timedelta(days=days + 1)).isoformat()
+    hub.execute("UPDATE fleet_questions SET created_at=?", (expired,))
+    hub.execute("UPDATE fleet_messages SET created_at=?", (expired,))
+    hub.commit()
+    stats.maintain(Path(hub.execute("PRAGMA database_list").fetchone()[2]), storage_policy=policy)
+    assert hub.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
+    assert hub.execute("SELECT COUNT(*) FROM fleet_questions").fetchone()[0] == 0
+
+
+def test_routing_retention_two_frozen_hubs_with_longpoll_and_sweeper(tmp_path, monkeypatch):
+    import time
+    from brigade import fleet_admin_stats as stats, fleet_hub_sealed as sealed
+    from tests.test_fleet_hub_message_keys import request
+
+    servers, threads, connections, tokens = [], [], [], []
+    stop = threading.Event()
+    sweepers = []
+    try:
+        for days in (30, 180):
+            path = tmp_path / f"hub-{days}.db"
+            conn = fleet_hub.init_db(path)
+            connections.append(conn)
+            _, sender_token = fleet_hub.add_node(conn, "node-a")
+            _, recipient_token = fleet_hub.add_node(conn, "node-b")
+            tokens.append((sender_token, recipient_token))
+            monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS", str(days))
+            server = fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+            servers.append(server)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            threads.append(thread)
+            thread.start()
+        monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS", "1")
+        old = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+        raw = {"action": "send", "to": "node-b", "subject": "Older", "body": "Body", "enqueued_at": old}
+        assert request(servers[0].server_address, "POST", "/messages", tokens[0][0], raw)[0] == 400
+        assert request(servers[1].server_address, "POST", "/messages", tokens[1][0], raw)[0] == 201
+        after = connections[1].execute("SELECT MAX(id) FROM fleet_messages").fetchone()[0]
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            waits = [
+                pool.submit(
+                    request,
+                    server.server_address,
+                    "POST",
+                    "/messages",
+                    token[1],
+                    {"action": "list", "after": after if index else 0, "wait_ms": 1500},
+                )
+                for index, (server, token) in enumerate(zip(servers, tokens, strict=True))
+            ]
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline:
+                with messages._WAKE_LOCK:
+                    if messages._ACTIVE_WAITERS.get("node-b", 0) == 2:
+                        break
+                stop.wait(0.005)
+            else:
+                pytest.fail("both Hub long polls did not enter waiting")
+            for conn in connections:
+                # The older envelope becomes visible only on a reopened poll
+                # connection. Cleanup must retain it only on the 180-day Hub.
+                messages.send(
+                    conn,
+                    {**raw, "client_id": "wake-older"},
+                    sender="node-a",
+                    storage_policy=sealed.StoragePolicy(retention_days=180),
+                )
+            assert waits[0].result(timeout=3)[1]["messages"] == []
+            assert len(waits[1].result(timeout=3)[1]["messages"]) == 1
+        # Existing hourly maintenance uses each handler's frozen policy even
+        # after the environment has changed. Inject rows to age without a read.
+        for conn in connections:
+            messages.send(
+                conn,
+                {**raw, "client_id": "maintenance-older"},
+                sender="node-a",
+                storage_policy=sealed.StoragePolicy(retention_days=180),
+            )
+        monkeypatch.setattr(stats, "RETENTION_INTERVAL_SECONDS", 0.01)
+        for index, server in enumerate(servers):
+            sweepers.append(
+                stats.start_retention_sweeper(
+                    tmp_path / f"hub-{(30, 180)[index]}.db",
+                    stop=stop,
+                    storage_policy=server.RequestHandlerClass.message_storage_policy,
+                )
+            )
+        deadline = time.monotonic() + 3
+        while (
+            time.monotonic() < deadline and connections[0].execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0]
+        ):
+            stop.wait(0.01)
+        assert connections[0].execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
+        assert connections[1].execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 3
+    finally:
+        stop.set()
+        for sweeper in sweepers:
+            sweeper.join(timeout=3)
+        for server in servers:
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=3)
+        for conn in connections:
+            conn.close()

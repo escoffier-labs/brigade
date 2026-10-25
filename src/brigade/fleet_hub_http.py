@@ -229,6 +229,7 @@ def make_handler(
     storage_policy = storage_policy or fleet_hub_sealed.StoragePolicy()
 
     class _Handler(RejectedUploadMixin):
+        message_storage_policy = storage_policy
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
@@ -739,10 +740,12 @@ def make_handler(
                 )
                 nodes = node_summary(board.runs)
                 unread_counts = (
-                    fleet_hub_messages.unread_counts(conn) if self._authorized() and view == "machines" else {}
+                    fleet_hub_messages.unread_counts(conn, storage_policy=storage_policy)
+                    if self._authorized() and view == "machines"
+                    else {}
                 )
                 agent_unread_counts, agent_unread_more = (
-                    fleet_hub_messages.agent_unread_counts(conn)
+                    fleet_hub_messages.agent_unread_counts(conn, storage_policy=storage_policy)
                     if self._authorized() and view == "machines"
                     else ({}, False)
                 )

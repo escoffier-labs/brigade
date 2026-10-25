@@ -598,7 +598,7 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
                     raise
 
 
-def _apply_schema(conn: sqlite3.Connection) -> None:
+def _apply_schema(conn: sqlite3.Connection, *, storage_policy: fleet_hub_sealed.StoragePolicy | None = None) -> None:
     """Create or upgrade every hub table. Caller holds BEGIN IMMEDIATE."""
     from . import fleet_hub_claims
 
@@ -697,7 +697,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # v26 -> v28 added messages and named principals; v28 -> v29 adds
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
-    fleet_hub_messages.ensure_schema(conn)
+    fleet_hub_messages.ensure_schema(conn, storage_policy=storage_policy)
     from . import fleet_hub_questions
 
     # v42 -> v43: audited operator questions and terminal-answer trigger.
@@ -728,7 +728,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
-def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
+def _init_schema(
+    conn: sqlite3.Connection, db_path: Path, *, storage_policy: fleet_hub_sealed.StoragePolicy | None = None
+) -> None:
     """Apply hub schema under BEGIN IMMEDIATE with locked-database backoff.
 
     Same-process callers already queue on ``_migration_lock``. Cross-process
@@ -774,7 +776,7 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
                 fleet_hub_events.ensure_schema(conn)
                 fleet_hub_claims.validate_schema(conn)
             else:
-                _apply_schema(conn)
+                _apply_schema(conn, storage_policy=storage_policy)
             conn.commit()
         except sqlite3.OperationalError as exc:
             conn.rollback()
@@ -892,7 +894,7 @@ def _secure_hub_database_storage(db_path: Path) -> None:
                 raise FleetHubError(f"could not secure fleet hub database file: {type(exc).__name__}") from exc
 
 
-def init_db(db_path: Path) -> sqlite3.Connection:
+def init_db(db_path: Path, *, storage_policy: fleet_hub_sealed.StoragePolicy | None = None) -> sqlite3.Connection:
     """Open the hub database and create/migrate its schema.
 
     Called once at server startup (``make_server``, before the socket serves
@@ -908,7 +910,7 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     try:
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
-            _init_schema(conn, resolved)
+            _init_schema(conn, resolved, storage_policy=storage_policy)
         _secure_hub_database_storage(resolved)
     except BaseException:
         conn.close()
@@ -1937,7 +1939,7 @@ def make_server(
         raise FleetHubError(str(exc)) from exc
     if require_sealed or os.environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1":
         policy = dataclasses.replace(policy, require_sealed=True)
-    conn = init_db(Path(db_path))
+    conn = init_db(Path(db_path), storage_policy=policy)
     from . import fleet_admin_stats, fleet_hub_identity
 
     try:
@@ -1947,7 +1949,7 @@ def make_server(
     finally:
         conn.close()
 
-    fleet_admin_stats.maintain(Path(db_path).expanduser())
+    fleet_admin_stats.maintain(Path(db_path).expanduser(), storage_policy=policy)
     return BoundedThreadingHTTPServer(
         (host, port),
         make_handler(
@@ -2021,7 +2023,11 @@ def run(
     from .fleet_hub_events_dispatch import start_dispatcher
 
     events_thread = start_dispatcher(Path(db_path).expanduser(), sweeper_stop)
-    stats_thread = fleet_admin_stats.start_retention_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
+    stats_thread = fleet_admin_stats.start_retention_sweeper(
+        Path(db_path).expanduser(),
+        stop=sweeper_stop,
+        storage_policy=getattr(getattr(server, "RequestHandlerClass", None), "message_storage_policy", None),
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

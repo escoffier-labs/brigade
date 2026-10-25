@@ -11,9 +11,12 @@ import sqlite3
 import threading
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fleet_client, toml_compat
+
+if TYPE_CHECKING:
+    from .fleet_hub_sealed import StoragePolicy
 
 SCHEMA = "brigade.admin-stats.v2"
 LEGACY_SCHEMA = "brigade.admin-stats.v1"
@@ -375,14 +378,20 @@ def _prune(conn: sqlite3.Connection, now: datetime) -> None:
         SELECT week FROM admin_stats_weeks ORDER BY week DESC LIMIT 60)""")
 
 
-def maintain(db_path: Path) -> None:
+def maintain(db_path: Path, *, storage_policy: StoragePolicy | None = None) -> None:
     """Delete expired aggregates independently of collection and page reads."""
-    from . import fleet_hub, fleet_hub_sealed
+    from . import fleet_hub, fleet_hub_messages, fleet_hub_sealed
 
     conn = fleet_hub.open_db(db_path)
     try:
         with conn:
             _prune(conn, datetime.now(timezone.utc))
+            fleet_hub_messages._prune_expired(conn, storage_policy=storage_policy)
+            # Retention only: deadline/status transitions remain in the question adapter.
+            conn.execute(
+                "DELETE FROM fleet_questions WHERE created_at<?",
+                (fleet_hub_messages._expiry_cutoff(storage_policy),),
+            )
         while True:
             # Release the writer lock between bounded batches, including at
             # startup. Ciphertext never accumulates in one unbounded list.
@@ -395,14 +404,16 @@ def maintain(db_path: Path) -> None:
         conn.close()
 
 
-def start_retention_sweeper(db_path: Path, *, stop: threading.Event) -> threading.Thread:
+def start_retention_sweeper(
+    db_path: Path, *, stop: threading.Event, storage_policy: StoragePolicy | None = None
+) -> threading.Thread:
     """Run hourly maintenance with a separate connection for each pass."""
     from .fleet_hub import FleetHubError
 
     def loop() -> None:
         while not stop.wait(RETENTION_INTERVAL_SECONDS):
             try:
-                maintain(db_path)
+                maintain(db_path, storage_policy=storage_policy)
             except (sqlite3.Error, FleetHubError):
                 # Retry a locked or temporarily unavailable database next tick.
                 continue

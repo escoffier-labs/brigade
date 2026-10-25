@@ -1325,8 +1325,25 @@ sealed message is acked and keeps the signed header and signature as a
 `content_expired` tombstone, so routing, retries (D5) and audits stay
 verifiable. Unacked mail has a hard TTL: 90 days on the Python hub (the
 existing `RETENTION_DAYS`, configurable) and 14 days on Hub Lite (D12).
-Routing rows and tombstones expire with the existing retention. Static keys
-give no forward secrecy, so a key stolen later opens every copy that still
+Routing rows and tombstones expire with the existing retention.
+
+On the Python hub, `BRIGADE_FLEET_MESSAGES_RETENTION_DAYS` selects routing
+retention at startup. It accepts decimal integers from 1 through 3650,
+defaulting to 90 days. Invalid values refuse startup before binding. Each
+server freezes its own policy, including startup migration and hourly
+maintenance. Restart to change it. The policy applies equally to plaintext
+legacy rows, sealed rows, tombstones, and legacy operator-question audit rows.
+New mail older than this window is refused. Reads, counts, acknowledgments
+and reply lookup exclude expired routing rows even before cleanup removes
+them. Direct library callers without a policy retain the 90-day default.
+The seven-day post-ack ciphertext purge, statistics retention, and ten-minute
+directory snapshot TTL are separate policies.
+
+Routing cleanup uses the existing SQL sweep, without a row batch limit.
+Ciphertext cleanup processes at most 32 envelopes per batch, with commits
+between maintenance batches.
+
+Static keys give no forward secrecy, so a key stolen later opens every copy that still
 exists. Deletion protects only against a later compromise of an honest hub. A
 malicious hub can keep copies forever and cannot be made to delete them.
 
