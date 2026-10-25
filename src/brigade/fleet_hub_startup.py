@@ -84,10 +84,18 @@ def make_server(
     else:
         deck_config = fleet_command_deck.DeckConfig()
     try:
-        policy = storage_policy or fleet_hub_sealed.policy_from_environment(os.environ)
+        # Explicit policies override numeric settings, but the sealing flag
+        # must still be validated and may only strengthen enforcement.
+        environment = (
+            os.environ
+            if storage_policy is None
+            else {"BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED": os.environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", "")}
+        )
+        environment_policy = fleet_hub_sealed.policy_from_environment(environment)
+        policy = storage_policy or environment_policy
     except ValueError as exc:
         raise hub.FleetHubError(str(exc)) from exc
-    if require_sealed or os.environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1":
+    if require_sealed or environment_policy.require_sealed:
         policy = dataclasses.replace(policy, require_sealed=True)
     # Upgrade schema without applying an unvalidated runtime retention policy.
     # Direct-library hub.init_db callers retain their historical pruning default.

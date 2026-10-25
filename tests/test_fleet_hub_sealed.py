@@ -1347,3 +1347,125 @@ def test_startup_retention_rolls_back_on_failure(hub, monkeypatch, startup_forei
     with pytest.raises(sqlite3.OperationalError, match="injected startup"):
         fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin", storage_policy=StoragePolicy(retention_days=1))
     assert hub.execute("SELECT * FROM fleet_messages").fetchall() == before
+
+
+@pytest.mark.parametrize("action", ["send", "reply"])
+@pytest.mark.parametrize("mismatch", ["from", "client_id", None])
+def test_sealed_reply_link_matches_routed_parent(hub, action, mismatch):
+    hub.execute("PRAGMA foreign_keys=ON")
+    parent = send(hub, envelope(client_id="parent"))
+    other = send(hub, envelope(client_id="other-parent"))
+    link = {"hub": json.loads(parent["envelope"])["hub"], "from": "node-a", "client_id": "parent"}
+    if mismatch == "from":
+        link["from"] = "node-c"
+    elif mismatch == "client_id":
+        link["client_id"] = other["client_id"]
+    raw = {
+        "action": action,
+        "id" if action == "reply" else "reply_to": parent["id"],
+        "envelope": envelope("node-b", "node-a", "bound-reply", in_reply_to=link),
+    }
+    tables = ("fleet_messages", "fleet_message_sends", "fleet_events")
+    before = {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables}
+    charge = hub.execute("SELECT SUM(envelope_bytes) FROM fleet_messages").fetchone()[0]
+    if mismatch is not None:
+        with pytest.raises(messages.MessageError) as caught:
+            messages.handle(hub, raw, caller="node-b")
+        assert caught.value.code == "envelope_reply_mismatch"
+        assert {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables} == before
+        assert hub.execute("SELECT SUM(envelope_bytes) FROM fleet_messages").fetchone()[0] == charge
+        return
+    status, result = messages.handle(hub, raw, caller="node-b")
+    assert status == 201
+    reply = result["message"]
+    assert reply["reply_to"] == parent["id"] and reply["envelope"] == raw["envelope"]
+    old = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+    hub.execute("UPDATE fleet_messages SET created_at=? WHERE id=?", (old, parent["id"]))
+    hub.commit()
+    for principal, seed in (("node-a", 1), ("node-b", 2)):
+        publish(
+            hub,
+            record(principal, seed=seed + 10, prev_kid=record(principal, seed=seed)["kid"], prev_sig=binary(bytes(64))),
+        )
+    assert messages.handle(hub, raw, caller="node-b")[1]["message"] == reply
+    assert hub.execute("SELECT 1 FROM fleet_messages WHERE id=?", (parent["id"],)).fetchone() is None
+    assert hub.execute("SELECT COUNT(*) FROM fleet_message_sends WHERE sender='node-b'").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize(("value", "required"), [(None, False), ("", False), ("0", False), ("1", True)])
+def test_require_sealed_environment_valid_values(value, required):
+    from brigade.fleet_hub_sealed import policy_from_environment
+
+    environ = {} if value is None else {"BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED": value}
+    assert policy_from_environment(environ).require_sealed is required
+
+
+@pytest.mark.parametrize("value", ["true", "yes", "True", "TRUE", " 1", "1 ", "0 ", " ", "false", "2"])
+def test_require_sealed_environment_rejects_noncanonical_values(value):
+    from brigade.fleet_hub_sealed import policy_from_environment
+
+    with pytest.raises(ValueError, match="REQUIRE_SEALED.*0.*1"):
+        policy_from_environment({"BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED": value})
+
+
+@pytest.mark.parametrize("provided_policy", [False, True])
+@pytest.mark.parametrize("existing_db", [False, True])
+def test_require_sealed_invalid_startup_precedes_database_and_socket(
+    hub, tmp_path, monkeypatch, provided_policy, existing_db
+):
+    from pathlib import Path
+
+    from brigade.fleet_hub_sealed import StoragePolicy
+
+    send(hub, envelope())
+    old = (datetime.now(timezone.utc) - timedelta(days=91)).isoformat()
+    hub.execute("UPDATE fleet_messages SET created_at=?,acked_at=?", (old, old))
+    hub.commit()
+    path = Path(hub.execute("PRAGMA database_list").fetchone()[2]) if existing_db else tmp_path / "uncreated.db"
+    before = path.read_bytes() if existing_db else None
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", "1 ")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid sealing environment reached database initialization or socket construction")
+
+    monkeypatch.setattr(fleet_hub, "init_db", forbidden)
+    monkeypatch.setattr(fleet_hub, "BoundedThreadingHTTPServer", forbidden)
+    with pytest.raises(fleet_hub.FleetHubError, match="REQUIRE_SEALED.*0.*1"):
+        fleet_hub.make_server(
+            "127.0.0.1", 0, path, "fixture-admin", storage_policy=StoragePolicy() if provided_policy else None
+        )
+    assert (path.read_bytes() if path.exists() else None) == before
+
+
+@pytest.mark.parametrize(
+    ("value", "base_required", "flag", "required"),
+    [
+        (None, False, False, False),
+        ("", True, False, True),
+        ("0", True, False, True),
+        ("1", False, False, True),
+        ("0", False, True, True),
+    ],
+)
+def test_require_sealed_environment_preserves_explicit_policy_overlay(
+    tmp_path, monkeypatch, value, base_required, flag, required
+):
+    from brigade.fleet_hub_sealed import StoragePolicy
+
+    if value is None:
+        monkeypatch.delenv("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", raising=False)
+    else:
+        monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", value)
+    # Explicit policy still overrides numeric environment settings.
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGES_RETENTION_DAYS", "invalid")
+    policy = StoragePolicy(require_sealed=base_required, retention_days=180)
+    server = fleet_hub.make_server(
+        "127.0.0.1", 0, tmp_path / "overlay.db", "fixture-admin", storage_policy=policy, require_sealed=flag
+    )
+    try:
+        effective = server.RequestHandlerClass.message_storage_policy
+        assert effective.require_sealed is required
+        assert effective.retention_days == 180
+        assert policy.require_sealed is base_required
+    finally:
+        server.server_close()

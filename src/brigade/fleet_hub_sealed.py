@@ -154,7 +154,10 @@ class StoragePolicy:
 
 def policy_from_environment(environ: Mapping[str, str]) -> StoragePolicy:
     """Read startup-only storage policy; never rewrite operator-signed identity."""
-    values: dict[str, Any] = {"require_sealed": environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1"}
+    require_sealed = environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED", "")
+    if require_sealed not in {"", "0", "1"}:
+        raise ValueError("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED must be unset, empty, 0, or 1")
+    values: dict[str, Any] = {"require_sealed": require_sealed == "1"}
     for field in ("max_envelope_bytes", "sender_storage_bytes", "fleet_storage_bytes", "retention_days"):
         name = "BRIGADE_FLEET_MESSAGES_" + field.upper()
         if name in environ:

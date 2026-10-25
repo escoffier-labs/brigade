@@ -750,6 +750,13 @@ def _send(
                     "sealed replies to legacy operator questions are unavailable until sealed question support",
                     code="sealed_question_reply_unavailable",
                 )
+            if envelope is not None:
+                link = envelope["in_reply_to"]
+                if link["from"] != original["sender"] or link["client_id"] != original["client_id"]:
+                    raise MessageError(
+                        "signed in_reply_to must match the routed parent sender and client_id",
+                        code="envelope_reply_mismatch",
+                    )
         from .fleet_hub_message_grants import require_granted, require_recipient_cap
 
         require_granted(conn, sender, recipient)
