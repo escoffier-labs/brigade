@@ -298,8 +298,8 @@ def test_repos_route_keeps_the_deck_navigation(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         status, page = _get(hub, "/deck/repos")
         assert status == 200
-        assert f'<a href="/deck/policy">{NAV_ICONS["policy"]}policy</a>' in page
-        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}roster</a>' in page
+        assert '<a href="/deck/policy">Staged / active policy</a>' in page
+        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}Settings</a>' in page
 
 
 # --- live-run text ------------------------------------------------------------

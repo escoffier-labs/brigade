@@ -895,12 +895,12 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
     assert _request(hub, "POST", "/events", headers=_bearer(), body=[event])[0] == 200
     status, headers, page = _request(hub, "GET", f"/view/{view}?{urlencode(query)}", headers=_bearer())
     assert status == 200
-    assert '<div class="shell" data-active="boards">' in page
+    assert f'<div class="shell" data-active="{"repos" if view == "repos" else "boards"}">' in page
     assert '<div class="shell-main"><main class="deck-shell fleet-board">' in page
     sidebar = re.search(r'<aside class="shell-sidebar"[^>]*>(.*?)</aside>', page, re.S)
     assert sidebar is not None
     assert page.count('<nav class="deck-nav" aria-label="Command Deck">') == 1
-    assert 'href="/view/machines" aria-current="page"' in sidebar[1]
+    assert f'href="{"/deck/repos" if view == "repos" else "/view/machines"}" aria-current="page"' in sidebar[1]
     for route in ["/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/deck/owners"]:
         assert f'href="{route}"' in sidebar[1]
     for label in ["Resources", "Docs", "Report a bug", "Star on GitHub", 'class="sidebar-meta"', "sidebar-version"]:
@@ -910,7 +910,7 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
     assert "--canvas: #0a0a0a;" in page
     assert "prefers-color-scheme: light" in page
     assert '<body class="deck"' in page
-    assert f"<h1>{view.title()} board</h1>" in page
+    assert f"<h1>{'Work / Runs by machine' if view == 'machines' else 'Repositories'}</h1>" in page
     assert '<header class="page-head">' in page
     assert "background: #fff" not in page
     nonce = re.search(r"'nonce-([^']+)'", headers["content-security-policy"])[1]
@@ -918,7 +918,8 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
         assert re.findall(rf"<{tag}([^>]*)>", page) == [f' nonce="{nonce}"']
     assert '<meta http-equiv="refresh" content="17">' in page
     assert "Refreshes every 17s" in page
-    assert "setInterval(tick, 1000)" in page and 'data-filter-all="1"' in page
+    assert "setInterval(tick, 1000)" in page
+    assert "<summary>Advanced filters</summary>" in page
     pivots = re.search(r'<nav class="board-nav" aria-label="Board views">(.*?)</nav>', page)[1]
     for name in ["machines", "repos"]:
         link = re.search(rf'<a href="([^"]+)"([^>]*)>{name} board</a>', pivots)

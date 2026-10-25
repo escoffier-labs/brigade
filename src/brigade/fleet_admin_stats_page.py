@@ -23,6 +23,11 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
         age = now.astimezone(timezone.utc) - collected_at
         stale = age > timedelta(minutes=15) or age < -timedelta(minutes=5)
     body = '<main class="deck-shell"><h1>Adoption statistics</h1><section class="panel">'
+    if not latest and not view["weeks"]:
+        body += "<h2>No adoption observations available</h2><p>Collection may be unconfigured or not yet reported. Missing and privacy-suppressed data do not establish zero activity.</p>"
+    else:
+        body += f"<h2>Observed adoption data</h2><p>Weekly observations: {len(view['weeks'])}. Latest snapshot: {escape(str(latest['taken_at'])) if latest else 'unavailable'}.</p>"
+    body += '</section><details><summary>Snapshot and methodology</summary><section class="panel">'
     body += "<p>Counts describe active sources, not people or installs. Source cells below 5 are suppressed. Related retention and histogram counts may also be hidden to prevent disclosure by subtraction. "
     body += "Unknown includes suppressed cells and unavailable data. Retention means activity on 2+ or 3+ distinct days within one week. "
     body += "Possible upgrades link versions observed in time order within the same week. Weekly source identities rotate.</p>"
@@ -75,6 +80,7 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
             body += "<p>other (suppressed): unknown</p></div>"
         body += "</article>"
     body += "</section>"
+    body += "</details>"
     if cloudflare:
         # A stale observation renders every cell as unknown, never old values.
         shown = None if stale else cloudflare

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Sequence
 
 from . import fleet_action_page, fleet_command_deck as deck, fleet_deck_activity as activity, ui_theme
-from .fleet_deck_overview import _esc, page_alerts
+from .fleet_deck_overview import Alert, _esc, page_alerts
 
 
 def render_alerts_page(
@@ -17,22 +18,7 @@ def render_alerts_page(
     action_sources: frozenset[str] = frozenset(),
 ) -> str:
     alerts = page_alerts(view, now)
-    rows = []
-    for alert in alerts:
-        detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
-        action = fleet_action_page.alert_link(alert.source_ref, action_sources, alert.title)
-        rows.append(
-            f"<tr><td>{_esc(alert.kind)}</td><td>{_esc(alert.title)}"
-            f'<span class="alert-detail">{_esc(detail)}</span></td>'
-            f"<td>{_esc(alert.since)}</td><td>{action}</td></tr>"
-        )
-    content = (
-        '<div class="table-wrap"><table class="alerts-table"><thead><tr>'
-        '<th>Kind</th><th>Subject</th><th>When</th><th><span class="visually-hidden">Action</span></th>'
-        "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
-        if rows
-        else '<p class="empty">No active alerts</p>'
-    )
+    content = render_alert_rows(alerts, action_sources=action_sources)
     body = (
         '<main class="deck-shell alerts-page"><header class="page-head"><div><h1>Alerts</h1>'
         f'<p class="page-sub">{len(alerts)} open</p></div></header>'
@@ -48,3 +34,20 @@ def render_alerts_page(
         worklore_enabled=worklore_enabled,
         extra_css=ui_theme.ALERTS_CSS,
     )
+
+
+def render_alert_rows(alerts: Sequence[Alert], *, action_sources: frozenset[str] = frozenset()) -> str:
+    """Keep subject, state, age and the actual action together at every width."""
+    rows = []
+    for alert in alerts:
+        detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
+        action = fleet_action_page.alert_link(alert.source_ref, action_sources, alert.title)
+        if not action:
+            action = '<span class="station-meta">Inspect evidence below</span>'
+        rows.append(
+            '<li class="alert-row"><div><span class="attention-kind">' + _esc(alert.kind) + "</span>"
+            f'<h3>{_esc(alert.title)}</h3><p class="alert-age">{_esc(alert.since)}</p></div>'
+            f'<div class="alert-action">{action}</div>'
+            f'<details class="alert-evidence"><summary>Evidence</summary><p class="alert-detail">{_esc(detail)}</p></details></li>'
+        )
+    return '<ul class="alert-rows">' + "".join(rows) + "</ul>" if rows else '<p class="empty">No active alerts</p>'

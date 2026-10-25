@@ -839,7 +839,7 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
         assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
         # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
-        assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}overview <span class="nav-count">' in root
+        assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}Overview</a>' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
             ("/view/machines", "Fleet: Machines"),
@@ -900,7 +900,8 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         _seed_claim(hub, "repo-b", node=NODE_B)
         _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
         # Fixed station order follows the config, not events.
-        assert body.index(NODE_B[:12]) < body.index("Alpha")
+        machine_rows = body.split('id="machines-table"', 1)[1].split("</section>", 1)[0]
+        assert machine_rows.index(NODE_B[:12]) < machine_rows.index("Alpha")
         # Unnamed station falls back to the enrolled label then node id prefix.
         heading = f'title="{NODE_B}"'
         assert heading in body and "BravoBox" in body
@@ -937,7 +938,7 @@ def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path,
         assert "Same repo label on Alpha, Beta" in deck_body
         assert "File overlap unknown" in deck_body
         alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
-        rail = alerts_page.split("<tbody>")[1].split("</tbody>")[0]
+        rail = alerts_page.split('<ul class="alert-rows">')[1].split("</ul>")[0]
         assert "shared" not in rail and "parallel" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
         repo_rows = repos_body.split("<tbody>")[1].split("<tr>")[1:]
@@ -1713,4 +1714,4 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
         assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
         alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
-        assert "<td>stale telemetry</td>" in alerts_page
+        assert 'class="attention-kind">stale telemetry</span>' in alerts_page

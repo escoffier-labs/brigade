@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
-from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_hub, fleet_hub_policy, fleet_owners_page, fleet_policy
 from brigade.fleet_owners import Holding, Overlap, OwnersView
@@ -414,5 +413,5 @@ def test_owners_link_is_in_the_navigation_of_every_deck_page_and_board(tmp_path,
             assert status == 200, path
             assert 'href="/deck/owners"' in body, path
         _, _, body = _request(hub, "/deck/owners", headers=_bearer())
-        assert f'<a href="/deck/owners" aria-current="page">{NAV_ICONS["owners"]}owners</a>' in body
+        assert '<a href="/deck/repos" aria-current="page">' in body
         assert '<a href="/deck" aria-current="page">' not in body

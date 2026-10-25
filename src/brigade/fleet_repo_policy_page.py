@@ -376,15 +376,14 @@ def render(
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Repos</h1></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
-        '<section class="panel" aria-labelledby="repo-policy"><header>'
-        '<h2 id="repo-policy">Repository policy</h2>'
-        f'<p class="panel-count">{len(rows)} target(s)</p></header>'
-        f"{state}{blocks}</section>"
         '<section class="repo-panel" aria-label="Repository coordination">'
         "<h2>Claims and live runs</h2>"
         + fleet_command_deck.repo_coordination_table(view)
-        + '</section><footer><a href="/view/machines">machines board</a> '
-        '<a href="/view/repos">repos board</a></footer></main>'
+        + "</section><details><summary>Repository policy and metadata</summary>"
+        '<section class="panel" aria-labelledby="repo-policy"><header><h2 id="repo-policy">Repository policy</h2>'
+        f'<p class="panel-count">{len(rows)} target(s)</p></header>{state}{blocks}</section></details>'
+        '<footer><a href="/view/machines">Runs</a> <a href="/view/repos">Repository board</a> '
+        '<a href="/deck/ci">CI</a> <a href="/deck/owners">Ownership</a></footer></main>'
     )
     # No meta refresh: a 10-second reload would collapse every open repository
     # while an operator is reading it.

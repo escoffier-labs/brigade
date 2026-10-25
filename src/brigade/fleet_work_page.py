@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import fleet_command_deck as deck
 from . import worklore_store
+from .fleet_deck_overview import format_age, seconds_since
 from .worklore_validate import WorkloreValidationError, safe_https_url
 
 PAGE_SIZE = 25
@@ -105,12 +106,9 @@ def _references(item: Mapping[str, Any]) -> str:
     return "".join(parts)
 
 
-def _item(item: Mapping[str, Any]) -> str:
+def _item(item: Mapping[str, Any], *, now: datetime) -> str:
     fields = (
         ("Description", "description", DESCRIPTION_LIMIT),
-        ("Blocker", "blocker", BLOCKER_LIMIT),
-        ("Scope", "scope", TEXT_LIMIT),
-        ("Stored status", "status", TEXT_LIMIT),
         ("Execution mode", "execution_mode", TEXT_LIMIT),
         ("Version", "version", TEXT_LIMIT),
         ("Updated at (work-record update time)", "updated_at", TEXT_LIMIT),
@@ -119,24 +117,33 @@ def _item(item: Mapping[str, Any]) -> str:
     facts = "".join(
         f'<dt>{label}</dt><dd class="work-text">{_text(item.get(key), limit=limit)}</dd>'
         for label, key, limit in fields
+        if item.get(key) is not None and item.get(key) != ""
     )
     burn = item.get("burn_eligible")
-    burn_text = "true" if burn is True else "false" if burn is False else "unknown"
+    burn_fact = f"<dt>Burn eligible</dt><dd>{'true' if burn else 'false'}</dd>" if isinstance(burn, bool) else ""
+    scope = f"<p>Repository / scope: {_text(item['scope'])}</p>" if item.get("scope") else ""
+    blocker = f"<p>Blocker: {_text(item['blocker'], limit=BLOCKER_LIMIT)}</p>" if item.get("blocker") else ""
+    age = format_age(seconds_since(str(item.get("updated_at") or ""), now))
     return (
         '<article class="work-item panel"><h2>'
-        + _text(item.get("title"))
-        + '</h2><dl class="tile-facts">'
+        + _text(item.get("title") or "Untitled task")
+        + "</h2>"
+        + scope
+        + f"<p>Stored status: {_text(item.get('status') or 'unknown')} · record age: {_text(age)}</p>"
+        + blocker
+        + '<details><summary>Task details</summary><dl class="tile-facts">'
         + facts
-        + f"<dt>Burn eligible</dt><dd>{burn_text}</dd></dl>"
+        + burn_fact
+        + "</dl>"
         + _references(item)
-        + "</article>"
+        + "</details></article>"
     )
 
 
 def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
     """Render plain stored fields. No description parsing or execution inference."""
     items = page.get("items") or []
-    blocks = "".join(_item(item) for item in items[:PAGE_SIZE])
+    blocks = "".join(_item(item, now=now) for item in items[:PAGE_SIZE])
     if not blocks:
         blocks = '<section class="panel"><p class="empty">No Worklore tasks on this page.</p></section>'
     pagination = '<nav class="pager" aria-label="Worklore pages"><a href="/deck/work">First page</a>'
@@ -153,9 +160,9 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
         "<p>Read-only view of stored Worklore tasks. captured / manual / burn_eligible=false records describe captured work "
         "configured for manual execution and excluded from burn selection. Execution state is not inferred "
         "from these fields or from descriptions.</p>"
-        f'<p class="station-meta">At most {PAGE_SIZE} tasks per page; description previews are limited to '
+        f'<details><summary>Projection limits</summary><p class="station-meta">At most {PAGE_SIZE} tasks per page; description previews are limited to '
         f"{DESCRIPTION_LIMIT} characters, blockers to {BLOCKER_LIMIT}, other text to {TEXT_LIMIT}, "
-        f"and reference summaries to {REFERENCE_LIMIT} per task. Truncation is marked.</p></section>"
+        f"and reference summaries to {REFERENCE_LIMIT} per task. Truncation is marked.</p></details></section>"
         + pagination
         + blocks
         + pagination
@@ -191,7 +198,7 @@ def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime,
     stamp, freshness = deck.snapshot_freshness(
         group.snapshot_observed_at, now=now, stale_after_seconds=stale_after_seconds
     )
-    blocks = "".join(_item(item) for item in page["items"][:PAGE_SIZE])
+    blocks = "".join(_item(item, now=now) for item in page["items"][:PAGE_SIZE])
     blocks += "".join(
         '<article class="panel"><h2>Unavailable work reference</h2><p>Work ID: '
         + _text(work_id)

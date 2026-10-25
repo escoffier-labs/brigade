@@ -114,7 +114,7 @@ def render(view: dict[str, Any], *, nonce: str) -> str:
         )
     if not view["repositories"]:
         body.append(
-            '<section class="panel"><h2>No CI observations yet</h2><p>Run node reconciliation to populate repository heads, workflows and checks.</p></section>'
+            '<section class="panel"><h2>No CI observations yet</h2><p>Collection has not reported repository heads, workflows or checks. This is not a passing result. Run node reconciliation to populate repository heads, workflows and checks.</p></section>'
         )
     body.append("</div></main>")
     return fleet_command_deck._document(

@@ -914,7 +914,8 @@ def make_handler(
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
             alerts_page = path == "/deck/alerts"
-            if path not in ("/", "/deck") and not (repos_page or alerts_page):
+            capacity_page = path == "/deck/capacity"
+            if path not in ("/", "/deck") and not (repos_page or alerts_page or capacity_page):
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
@@ -1032,6 +1033,10 @@ def make_handler(
                     nonce=nonce,
                     now=now,
                 )
+            elif capacity_page:
+                from .fleet_deck_overview import render_capacity_page
+
+                page = render_capacity_page(view, now, nonce=nonce, worklore_enabled=worklore_http.enabled())
             elif alerts_page:
                 page = fleet_deck_alerts.render_alerts_page(
                     view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), action_sources=action_sources

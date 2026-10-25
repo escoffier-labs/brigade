@@ -16,7 +16,6 @@ from urllib.parse import urlencode
 
 import pytest
 
-from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_hub, fleet_hub_policy, fleet_policy, fleet_policy_page
 
@@ -1499,10 +1498,9 @@ def test_policy_route_rejects_an_oversized_or_wrong_media_type_body(tmp_path):
 def test_deck_nav_links_to_the_policy_page(tmp_path):
     with _RouteHub(tmp_path) as hub:
         bearer = {"Authorization": f"Bearer {hub.token}"}
-        assert f'<a href="/deck/policy">{NAV_ICONS["policy"]}policy</a>' in hub.request("GET", "/", headers=bearer)[2]
+        assert '<a href="/deck/policy">Staged / active policy</a>' in hub.request("GET", "/", headers=bearer)[2]
         assert (
-            f'<a href="/deck/policy">{NAV_ICONS["policy"]}policy</a>'
-            in hub.request("GET", "/deck/roster", headers=bearer)[2]
+            '<a href="/deck/policy">Staged / active policy</a>' in hub.request("GET", "/deck/roster", headers=bearer)[2]
         )
 
 

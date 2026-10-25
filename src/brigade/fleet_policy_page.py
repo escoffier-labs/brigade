@@ -1107,7 +1107,7 @@ def _identity_panel(view: PolicyView) -> str:
     links = " ".join(f'<a href="#consumer-{_esc(row.name)}">{_esc(row.name)}</a>' for row in view.consumers)
     consumer_html = f'<p class="hint">consumers: {links}</p>' if links else ""
     return (
-        '<section class="panel" aria-labelledby="identity"><header><h2 id="identity">Effective policy</h2></header>'
+        '<section class="panel" aria-labelledby="identity"><header><h2 id="identity">Policy document identity</h2></header>'
         f'<dl class="tile-facts">{body}</dl>{consumer_html}{_inventory_note(inventory)}</section>'
     )
 
@@ -1263,7 +1263,7 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
         current = values.get(f"role_{role}", stored)
         label = ROLE_LABELS.get(role, role)
         seat_obj = next((s for s in view.seats if s.name == current), None)
-        cost_txt = f" &middot; cost {_esc(seat_obj.cost_class)}" if seat_obj else ""
+        cost_txt = f" · cost {seat_obj.cost_class}" if seat_obj else ""
         hint = f"policy role key: {role}{cost_txt}"
         control = _seat_options(
             f"role_{role}",
@@ -1874,22 +1874,26 @@ def render(
     if error:
         parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
     if not editable:
-        parts.append('<p class="banner">read-only: enroll with the fleet token to edit</p>')
-    parts.append(_identity_panel(view))
+        parts.append(
+            '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'
+        )
     parts.append(_activation_panel(view))
+    parts.append("<h2>" + ("Active policy" if view.activation.active else "Staged policy, not active") + "</h2>")
+    parts.append("<details><summary>Document identity and inventory</summary>" + _identity_panel(view) + "</details>")
     parts.append(_plan_panel(plan, activation=view.activation, draft=draft, review=review if editable else None))
     parts.append(_defaults_form(view, editable=editable, csrf=csrf, draft=draft))
-    parts.append(_seat_table(view))
+    parts.append("<details><summary>Seat matrix and model settings</summary>" + _seat_table(view))
     if editable:
         seat_forms = "".join(_seat_form(view, row, csrf=csrf, draft=draft) for row in view.seats)
         parts.append(
             '<section class="panel" aria-labelledby="seat-edit"><header><h2 id="seat-edit">Edit a seat</h2>'
             f'<p class="panel-count">{len(view.seats)} seat(s)</p></header>{seat_forms}</section>'
         )
+    parts.append("</details>")
     parts.append(_consumer_section(view, editable=editable, csrf=csrf, draft=draft))
     parts.append(_repository_section(view, editable=editable, csrf=csrf, draft=draft))
-    parts.append(_sessions_section(view))
-    parts.append(_history_section(view, editable=editable, csrf=csrf))
+    parts.append("<details><summary>Session acknowledgements and audit history</summary>" + _sessions_section(view))
+    parts.append(_history_section(view, editable=editable, csrf=csrf) + "</details>")
     parts.append("</main>")
     return fleet_command_deck._document(
         "\n".join(parts), nonce=nonce, now=now, title="Policy", refresh=False, active="policy"

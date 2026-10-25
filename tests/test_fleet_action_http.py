@@ -138,7 +138,7 @@ def test_deck_optional_action_links_fail_without_losing_read_only_page(tmp_path,
         targets.sync(conn, "node-fixture", [{**target, "subjects": [source]}])
         conn.close()
         code, _, body = request_http(address, "/deck/alerts")
-        assert code == 200 and ">Fix</a>" in body
+        assert code == 200 and ">Prepare repair</a>" in body
         monkeypatch.setattr(targets, "linked_subjects", broken_links)
         code, _, body = request_http(address, "/deck/alerts")
         assert len(calls) == 1
@@ -147,7 +147,7 @@ def test_deck_optional_action_links_fail_without_losing_read_only_page(tmp_path,
             assert code == 500 and "hub database error" in body
         else:
             assert code == 200 and "Alerts" in body
-            assert ">Fix</a>" not in body and "/deck/actions/compose?" not in body
+            assert ">Prepare repair</a>" not in body and "/deck/actions/compose?" not in body
 
 
 @pytest.mark.parametrize(

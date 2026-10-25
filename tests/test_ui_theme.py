@@ -243,7 +243,7 @@ def test_form_labels_are_not_uppercase():
 
 def test_sidebar_resources_hide_on_narrow_screens():
     narrow = ui_theme.BASE_CSS.split("@media (max-width: 900px)")[1].split("@media")[0]
-    hide = re.search(r"([^{}]+)\{ display: none; \}", narrow).group(1)
+    hide = " ".join(re.findall(r"([^{}]+)\{ display: none; \}", narrow))
     assert ".resources" in hide and ".sidebar-meta" in hide
 
 

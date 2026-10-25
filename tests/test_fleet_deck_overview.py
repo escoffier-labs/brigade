@@ -192,7 +192,7 @@ def _card_value(html: str, name: str) -> str:
 def test_cards_count_busy_idle_stale_offline_and_not_enrolled():
     html = overview.render_summary(_mixed_view())
     assert _card_value(html, "working") == "2"
-    assert "of 22 slots" in html
+    assert "of 22 configured slots" in html
     assert '<progress class="bar" value="2" max="22"' in html
     assert _card_value(html, "idle") == "8"
     assert _card_value(html, "offline") == "2"
@@ -396,8 +396,8 @@ def _render_alerts(view, now, **kwargs):
 def test_alert_section_renders_cards_count_and_empty_state():
     html = _render_alerts(_alert_view(), NOW)
     assert 'class="deck-shell alerts-page"' in html and "7 open" in html
-    assert html.count("<tr>") == 8
-    assert "<td>collision</td>" in html
+    assert html.count('class="alert-row"') == 7
+    assert 'class="attention-kind">collision</span>' in html
     assert "held by linux-a, live on shared" in html
     assert "first observed 2h 0m ago" in html
     assert "</section>" not in html.split("<section", 1)[1].rsplit("</section>", 1)[0]
@@ -508,7 +508,7 @@ def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     assert html.count('class="row"') == 2
     assert 'href="/view/machines?node=11111111-1111-4111-8111-111111111111&amp;repo=skillet"' in html
     assert "seat-a · linux-a" in html
-    assert 'class="row-time">2m<' in html
+    assert 'class="row-time">2m elapsed<br>evidence 5s ago<' in html
     assert 'class="badge ' in html
 
 
@@ -781,14 +781,13 @@ def test_a_draining_machine_is_unavailable_and_counts_toward_neither_card():
     assert "4 unavailable" in row and ' idle"' not in row and "seg--free" not in row
     assert row.count("seg--off") == 4
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">draining<' in sidebar and 'data-status="limited"' in sidebar
+    assert "tree-meta" not in sidebar
+    assert 'class="tag">draining<' in row and 'data-status="limited"' in row
 
 
 def test_the_limited_summary_escapes_the_machine_state():
     plane = _plane([_machine("linux-a", NODE_A, state=HOSTILE)])
-    html = overview.render_sidebar(
-        _view([_station(NODE_A, "linux-a", 2)], plane=plane), "overview", NOW, worklore_enabled=True
-    )
+    html = overview.render_machine_table(_view([_station(NODE_A, "linux-a", 2)], plane=plane), NOW)
     assert HOSTILE not in html and "&lt;script&gt;" in html
 
 
@@ -850,7 +849,8 @@ def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
     assert idle == 8 and _card_value(summary, "idle") == str(idle)
     assert _card_value(summary, "offline") == "0"
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">unknown<' in sidebar and 'data-status="unknown"' in sidebar
+    assert "tree-meta" not in sidebar
+    assert 'data-status="unknown"' in unmatched and "no telemetry" in unmatched
 
 
 def test_unknown_station_with_busy_runs_reports_busy_and_unknown_seats():
@@ -955,11 +955,11 @@ def test_overview_body_orders_sections_and_folds_control_plane_details():
     html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
     order = [
         'class="page-head"',
-        'aria-label="Fleet summary"',
         'class="alert-line"',
-        'id="machines-table"',
+        'aria-label="Fleet summary"',
         'aria-labelledby="working-title"',
         'id="interactive-sessions"',
+        'id="machines-table"',
         'id="cloud-workers"',
         'id="timeline"',
         "<summary>Control plane details</summary>",
@@ -986,8 +986,8 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     view = _mixed_view()
     html = overview.render_sidebar(view, "repos", NOW, worklore_enabled=False)
     assert '<nav class="deck-nav" aria-label="Command Deck">' in html
-    assert f'<a href="/deck/repos" aria-current="page">{NAV_ICONS["repos"]}repos</a>' in html
-    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview <span class="nav-count">3</span></a>' in html
+    assert f'<a href="/deck/repos" aria-current="page">{NAV_ICONS["repos"]}Repositories</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}Overview</a>' in html
     assert html.count("aria-current") == 1
     assert "/deck/work" not in html
     for href in ("/deck/roster", "/deck/policy", "/view/machines"):
@@ -995,35 +995,32 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     assert 'href="/deck/work"' in overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
 
 
-def test_sidebar_machine_tree_shows_dots_summaries_children_and_cloud():
-    cloud = (
-        deck.CloudWorker("claude", 0, 4, "closed", ()),
-        deck.CloudWorker("cursor", 1, 3, "open", ()),
-    )
+def test_sidebar_omits_inventories_and_capacity_retains_machine_and_cloud_evidence():
+    cloud = (deck.CloudWorker("claude", 0, 4, "closed", ()), deck.CloudWorker("cursor", 1, 3, "open", ()))
     view = _view(_mixed_view().stations, plane=_mixed_view().control_plane, cloud_workers=cloud)
-    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert "data-tree-filter" in html and "<input" not in html
-    assert 'Machines <span class="nav-count">3</span>' in html
-    assert 'class="tree-meta">2 busy<' in html
-    assert 'class="tree-meta">stale<' in html and 'class="tree-meta">not enrolled<' in html
-    assert "skillet · seat-a" in html and "canary-repo · seat-a" in html and ">2m<" in html
-    assert 'Cloud <span class="nav-count">2</span>' in html
-    assert 'class="tree-meta">0/4<' in html and 'class="tree-meta">1/3 · open<' in html
-    assert html.count("data-filter-row") == 5
-    assert 'class="mono sidebar-telemetry">telemetry 1m<' in html
+    sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert "data-tree-filter" not in sidebar and "tree-list" not in sidebar
+    assert 'class="mono sidebar-telemetry">telemetry 1m<' in sidebar
+    html = overview.render_capacity_page(view, NOW, nonce="n", worklore_enabled=True)
+    assert "Machines (3)" in html and "2 busy, 8 idle" in html
+    assert 'data-status="stale"' in html and "not enrolled" in html
+    assert "0/4" in html and "1/3" in html and "circuit: open" in html
+    assert "Usable for selected work: unknown" in html
 
 
 def test_sidebar_without_a_view_is_navigation_only():
     html = overview.render_sidebar(None, "roster", NOW, worklore_enabled=False)
     assert "tree-list" not in html and "data-tree-filter" not in html and "sidebar-telemetry" not in html
-    assert f'<a href="/deck/roster" aria-current="page">{NAV_ICONS["roster"]}roster</a>' in html
-    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview</a>' in html
+    assert f'<a href="/deck/roster" aria-current="page">{NAV_ICONS["roster"]}Settings</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}Overview</a>' in html
 
 
 def test_sidebar_footer_says_unknown_without_telemetry_and_escapes_labels():
     html = overview.render_sidebar(_view([_station(NODE_A, HOSTILE, 2)]), "overview", NOW, worklore_enabled=True)
     assert "telemetry unknown" in html
-    assert HOSTILE not in html and "&lt;script&gt;" in html
+    assert HOSTILE not in html
+    table = overview.render_machine_table(_view([_station(NODE_A, HOSTILE, 2)]), NOW)
+    assert HOSTILE not in table and "&lt;script&gt;" in table
 
 
 def test_shell_wraps_sidebar_and_body_and_ships_a_constant_filter_script():
@@ -1139,7 +1136,7 @@ def test_policy_disabled_and_draining_machines_are_limited_with_the_policy_word(
         assert overview.summarize(view).idle == "0"
         rows = _rows(overview.render_machine_table(view, NOW))
         assert "4 unavailable" in rows[0]
-        assert f">{word}<" in overview.render_sidebar(view, "overview", NOW, worklore_enabled=False)
+        assert f">{word}<" in rows[0]
 
 
 def test_action_links_require_concrete_server_registered_subjects():
@@ -1147,9 +1144,9 @@ def test_action_links_require_concrete_server_registered_subjects():
 
     view = _mixed_view()
     source = canonical({"kind": "telemetry", "node_id": NODE_B})
-    assert ">Fix</a>" not in _render_alerts(view, NOW)
+    assert ">Prepare repair</a>" not in _render_alerts(view, NOW)
     rendered = _render_alerts(view, NOW, action_sources=frozenset({source}))
-    assert rendered.count(">Fix</a>") == 1
+    assert rendered.count(">Prepare repair</a>") == 1
     assert "/deck/actions/compose?" in rendered
     assert all(not alert.source_ref for alert in overview.page_alerts(view, NOW) if alert.kind == "coverage")
 
@@ -1179,7 +1176,7 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
     assert f"{name} · " in activity and "current presence" in activity
     assert "unexpired report" in activity
     assert html.count('id="interactive-sessions"') == 1
-    assert html.index('id="machines-table"') < html.index('aria-labelledby="working-title"')
+    assert html.index('aria-labelledby="working-title"') < html.index('id="machines-table"')
     assert "one, two" in activity
     assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
     assert HOSTILE not in activity
@@ -1319,7 +1316,7 @@ def test_every_nav_item_has_an_icon_and_a_text_label():
 
     html = overview.render_sidebar(_mixed_view(), "overview", NOW, worklore_enabled=True)
     for key, _href, label in NAV_ITEMS:
-        assert NAV_ICONS[key] + label in html
+        assert NAV_ICONS.get(key, NAV_ICONS["boards"]) + label in html
 
 
 @pytest.mark.parametrize(
@@ -1424,7 +1421,7 @@ def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero(
     view = replace(view, rail=rail)
     line = overview.render_alert_line(view, NOW)
     assert "<strong>8 alerts</strong>" in line
-    assert "2 failed, 1 unknown, 1 integration, 1 blocked, 1 collision, 1 stale telemetry, 1 coverage" in line
+    assert "2 failed" not in line  # Subject rows now carry each state, rather than a second aggregate inventory.
     assert '<a href="/deck/alerts">Review</a>' in line
     assert Counter(alert.kind for alert in overview.page_alerts(view, NOW))["failed"] == 2
     clear = replace(
@@ -1437,13 +1434,13 @@ def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero(
     assert len(overview.page_alerts(single, NOW)) == 1
     assert "<strong>1 alert</strong>" in overview.render_alert_line(single, NOW)
     page = overview.render_overview(view, NOW, worklore_enabled=True)
-    assert 'class="alert-detail"' not in page and 'class="alerts"' not in page
+    assert page.count('class="alert-row"') == 8 and "external.failed" in page
     markers = [
         'class="page-head"',
-        'aria-label="Fleet summary"',
         'class="alert-line"',
-        'id="machines-table"',
+        'aria-label="Fleet summary"',
         'aria-labelledby="working-title"',
+        'id="machines-table"',
     ]
     assert [page.index(marker) for marker in markers] == sorted(page.index(marker) for marker in markers)
 
@@ -1482,8 +1479,9 @@ def test_sidebar_state_words_replace_dots_on_the_whole_deck_and_version_has_titl
     page = deck.render_deck(_mixed_view(), nonce="n", now=NOW)
     assert 'class="dot' not in page
     sidebar = page.split("<aside", 1)[1].split("</aside>", 1)[0]
+    machines = page.split('id="machines-table"', 1)[1]
     for status in ("working", "stale", "offline"):
-        assert f'data-status="{status}"' in sidebar
+        assert f'data-status="{status}"' in machines
     assert f'<span class="mono sidebar-version" title="v{brigade.__version__}">v{brigade.__version__}</span>' in sidebar
-    assert 'class="tree-meta">stale<' in sidebar
-    assert 'class="tree-meta">not enrolled<' in sidebar
+    assert "tree-meta" not in sidebar
+    assert "stale" in machines and "not enrolled" in machines

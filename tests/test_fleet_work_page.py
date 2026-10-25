@@ -640,9 +640,9 @@ def test_observed_home_shows_snapshot_freshness_without_changing_active_slots(tm
     else:
         assert config.observed_work_groups[0].snapshot_observed_at.isoformat() in body
     assert "Recent observation metadata does not establish live activity" in body
-    assert "of 1 slots" in body and "1 busy, 0 unknown" in body
+    assert "of 1 configured slots" in body and "1 busy, 0 unknown" in body
     without_group = deck.render_deck(replace(view, observed_work_groups=()), nonce="test", now=now)
-    assert "of 1 slots" in without_group and "1 busy, 0 unknown" in without_group
+    assert "of 1 configured slots" in without_group and "1 busy, 0 unknown" in without_group
 
 
 def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch):

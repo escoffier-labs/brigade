@@ -1734,8 +1734,8 @@ def repo_coordination_table(view: DeckView) -> str:
     rows = "".join(
         "<tr>"
         f"<td>{_esc(row.target or UNKNOWN)}</td>"
-        f"<td>{_esc(_owner_text(row.claim))}</td>"
-        f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else ''}</td>"
+        f"<td>{_esc(_owner_text(row.claim) or 'No active claim')}</td>"
+        f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else 'No active claim'}</td>"
         f"<td>{_esc(', '.join(f'{labels.get(run.node_id, run.node_id[:12])}:{run.state}' for run in row.live))}</td>"
         f'<td class="{"flag" if row.interactive_overlap else ""}">{_esc(_repo_flags(row))}</td>'
         "</tr>"

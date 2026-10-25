@@ -212,9 +212,9 @@ def alert_link(source_ref: str, action_sources: frozenset[str], title: str = "th
     return (
         '<a href="/deck/actions/compose?'
         + esc(urlencode({"source": source_ref}))
-        + '" aria-label="Have an agent fix '
+        + '" aria-label="Prepare repair prompt for '
         + esc(title)
-        + '">Fix</a>'
+        + '">Prepare repair</a>'
     )
 
 

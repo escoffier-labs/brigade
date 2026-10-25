@@ -119,7 +119,7 @@ def station_status(station: StationView, machine: MachineState | None) -> str:
 
 
 def free_seats(station: StationView, machine: MachineState | None) -> int:
-    """Seats that can take work now: capacity minus live runs, capped by the hub's slots."""
+    """Spare configured seats, capped by reported slots; not verified work eligibility."""
     base = max(station.station.capacity - station.busy, 0)
     if machine is not None and machine.available_slots.isdigit():
         base = min(base, int(machine.available_slots))
@@ -166,18 +166,36 @@ def _card(name: str, title: str, value: str, sub: str, bar: str = "") -> str:
 
 def render_summary(view: DeckView) -> str:
     summary = summarize(view)
+    running = sum(tile.run.bucket == "running" for station in view.stations for tile in station.tiles)
     working_bar = (
         f'<progress class="bar" value="{summary.busy}" max="{summary.total}" aria-label="Busy slots"></progress>'
         if summary.total > 0
         else ""
     )
+    queue = (
+        view.control_plane.queue if view.control_plane is not None and "queue" in view.control_plane.present else None
+    )
+    not_ready = (
+        str(sum(int(deck._cp_text(item["count"])) for item in queue.exclusions) + len(queue.blocked_items))
+        if queue is not None and queue.blocked_known
+        else UNKNOWN
+    )
     return (
         '<section class="cards" aria-label="Fleet summary">'
-        + _card("working", "Managed jobs", str(summary.busy), f"of {summary.total} slots", working_bar)
-        + _card("idle", "Idle", summary.idle, "free slots, fresh telemetry")
-        + _card("offline", "Offline", summary.offline, "stale or offline")
+        + _card(
+            "working",
+            "Running",
+            str(running),
+            f"{summary.busy} reported jobs of {summary.total} configured slots",
+            working_bar,
+        )
         + _card("queued", "Ready to run", summary.queued, "queue eligibility")
+        + _card("not-ready", "Not ready", not_ready, "excluded or blocked; review reasons")
         + "</section>"
+        + "<details><summary>Configured capacity counts</summary>"
+        + _card("idle", "Spare configured slots", summary.idle, "fresh telemetry; usability not verified")
+        + _card("offline", "Offline", summary.offline, "stale or offline")
+        + "</details>"
     )
 
 
@@ -272,13 +290,21 @@ def render_alert_line(view: DeckView, now: datetime) -> str:
     alerts = page_alerts(view, now)
     if not alerts:
         return ""
-    counts: dict[str, int] = {}
-    for alert in alerts:
-        counts[alert.kind] = counts.get(alert.kind, 0) + 1
-    kinds = ", ".join(f"{count} {kind}" for kind, count in counts.items())
     return (
-        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> · {_esc(kinds)} '
-        '<a href="/deck/alerts">Review</a></p>'
+        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> <a href="/deck/alerts">Review</a></p>'
+    )
+
+
+def render_attention(view: DeckView, now: datetime, *, action_sources: frozenset[str]) -> str:
+    from .fleet_deck_alerts import render_alert_rows
+
+    alerts = page_alerts(view, now)
+    return (
+        '<section class="panel" aria-labelledby="attention-title"><header><h2 id="attention-title">Needs attention</h2>'
+        '<a href="/deck/alerts">View all alerts</a></header>'
+        + render_alert_line(view, now)
+        + render_alert_rows(alerts, action_sources=action_sources)
+        + "</section>"
     )
 
 
@@ -348,7 +374,7 @@ def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *,
         f'<div class="row-body"><p class="row-title"><a href="{_esc(href)}">{_esc(run.repo or UNKNOWN)}</a>'
         f'{state}</p><p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} '
         f"{_esc(seat)} · {_esc(station.label)}</p>{parallel}</div>"
-        f'<span class="row-time">{_esc(format_age(run.elapsed_seconds))}</span></li>'
+        f'<span class="row-time">{_esc(format_age(run.elapsed_seconds))} elapsed<br>evidence {_esc(format_age(run.age_seconds))} ago</span></li>'
     )
 
 
@@ -387,7 +413,7 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
         "<p>Managed jobs occupy station slots. Agent sessions report presence; they may be idle or overlap "
         "managed jobs. Current presence means the Hub has an unexpired report.</p></details></div>"
         '<a class="card-link" href="/view/machines">View runs</a></header>'
-        f"<h3>Managed jobs ({count})</h3>{working}{render_sessions(view)}</section>"
+        f"<h3>Managed jobs ({count})</h3>{working}<details><summary>Reported session presence</summary>{render_sessions(view)}</details></section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
         f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section></div>"
     )
@@ -657,12 +683,13 @@ def render_overview(
     parts = [
         '<main class="deck-shell overview">',
         render_header(view, now),
+        render_attention(view, now, action_sources=action_sources),
         render_summary(view),
-        render_alert_line(view, now),
-        render_machine_table(view, now),
         render_work_lists(view, worklore_enabled=worklore_enabled),
-        render_cloud_workers(view),
-        render_outcomes(view),
+        '<p class="station-meta">Configured seats and telemetry describe reported capacity. Usable for selected work: unknown. Authentication, provider readiness, policy eligibility and shared quotas are not verified here. <a href="/deck/capacity">Capacity details</a></p>',
+        render_machine_table(view, now),
+        "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
+        "<details><summary>Recent outcomes</summary>" + render_outcomes(view) + "</details>",
         "<details><summary>Control plane details</summary>"
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
         + "</details>",
@@ -680,3 +707,31 @@ def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklor
     from . import fleet_deck_sidebar
 
     return fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+
+
+def render_capacity_page(view: DeckView, now: datetime, *, nonce: str, worklore_enabled: bool) -> str:
+    """Existing frozen Deck projection, with no extra collection or admission."""
+    body = (
+        '<main class="deck-shell overview capacity-page"><header class="page-head"><div><h1>Capacity</h1>'
+        '<p class="page-sub">Configured capacity and reported observations</p></div></header>'
+        '<section class="panel"><h2>Usable for selected work: unknown</h2>'
+        "<p>Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p></section>"
+        + render_machine_table(view, now)
+        + render_cloud_workers(view)
+        + '<section class="panel"><h2>GitHub reads / Octopool</h2><p>Availability not observed. No quota, reset time, cache accounting or pool scope is published in this Deck projection.</p></section>'
+        + "<details><summary>Control plane details</summary>"
+        + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
+        + "</details></main>"
+    )
+    from . import ui_theme
+
+    return deck._document(
+        body,
+        nonce=nonce,
+        now=now,
+        title="Capacity",
+        active="capacity",
+        view=view,
+        worklore_enabled=worklore_enabled,
+        extra_css=ui_theme.OVERVIEW_CSS,
+    )

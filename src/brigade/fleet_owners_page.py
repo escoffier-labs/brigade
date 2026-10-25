@@ -137,10 +137,12 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
         f"document (revision {deck._esc(revision)}) and describes responsibility. It does not block claims, "
         "dispatch, or merges.</p></section>"
         + cards
+        + ("<details><summary>Unmatched holdings (ownership unconfigured)</summary>" if not view.charters else "")
         + '<section class="panel"><h2>Unassigned</h2><p>Live items that no charter matches.</p>'
         + unassigned_note
         + _table(view.unassigned, empty="Nothing unassigned.")
         + "</section>"
+        + ("</details>" if not view.charters else "")
         + '<section class="panel"><h2>Overlaps</h2><p>Items that more than one charter matches. '
         "Edit a charter to resolve one.</p>" + _overlaps(view.overlaps) + "</section></main>"
     )

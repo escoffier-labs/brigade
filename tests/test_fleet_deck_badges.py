@@ -296,7 +296,7 @@ def test_row_snapshot() -> None:
         '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">'
         '<span class="badge badge-icon" role="img" title="opencode" aria-label="OpenCode">' + oc.svg + "</span> "
         "muse13 · Example</p></div>"
-        '<span class="row-time">10s</span></li>'
+        '<span class="row-time">10s elapsed<br>evidence 10s ago</span></li>'
     )
 
 
