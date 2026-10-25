@@ -566,7 +566,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     coverage = _workflow_job_section(text, "coverage")
     protected = _workflow_job_section(text, "test")
     assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
-    assert "--cov=brigade --cov-report=\n" in shards
+    assert '--cov="$PWD/src/brigade" --cov-report=\n' in shards
     assert "--cov-report=term" not in shards
     assert "--cov-branch" not in shards
     assert "uses: actions/upload-artifact@v7" in shards
