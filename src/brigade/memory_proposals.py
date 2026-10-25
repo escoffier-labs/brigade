@@ -10,7 +10,7 @@ import re
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from urllib.parse import unquote, urlsplit
 
 from . import config as brigade_config, evidence_redaction, localio, memory_cmd, provenance, trust_gate
@@ -133,10 +133,18 @@ def _configuration(target: Path) -> tuple[memory_cmd.MemoryCareConfig, dict[str,
             "depth": cfg.selection.depth if cfg else "repo",
             "harnesses": cfg.selection.harnesses if cfg else [],
         },
-        "care_config": dict(vars(care)),
+        "care_config": {k: v for k, v in vars(care).items() if k != "read_only_paths" or v},
     }
     # JSON roundtrip gives stable arrays rather than in-memory tuple comparisons.
     return care, json.loads(io.json_bytes(binding))
+
+
+def _refuse_read_only(care: memory_cmd.MemoryCareConfig, paths: Iterable[str]) -> None:
+    """Refuse any card path covered by ``read_only_paths``, naming the pattern."""
+    for path in paths:
+        pattern = memory_cmd.read_only_pattern(path, care.read_only_paths)
+        if pattern is not None:
+            raise ProposalError(f"{path} is read-only: it matches read_only_paths pattern {pattern}")
 
 
 def _finding(target: Path, care: memory_cmd.MemoryCareConfig, issue_id: str) -> dict[str, Any]:
@@ -568,7 +576,9 @@ def _derive_merge_provenance(after: str, sources: list[dict[str, Any]], survivor
         source_producer="brigade",
         origin="workspace",
         repository_id=repositories[0]["id"],
-        repository_revision=repositories[0].get("revision") if repositories[0] == repositories[1] else None,
+        repository_revision=repositories[0].get("revision")
+        if all(r == repositories[0] for r in repositories)
+        else None,
         session_id=None,
         session_harness=None,
         collection_id="memory-proposals",
@@ -734,8 +744,30 @@ def _locked(target: Path) -> Iterator[None]:
 
 
 @_boundary(2)
-def create_payload(*, target: Path, issue_id: str, survivor: str, relation: str, reason: str) -> dict[str, Any]:
+def create_payload(
+    *,
+    target: Path,
+    relation: str,
+    reason: str,
+    issue_id: str | None = None,
+    survivor: str | None = None,
+    source_paths: list[str] | None = None,
+    ops: list[dict[str, Any]] | None = None,
+    anchor_blocks: bool = False,
+) -> dict[str, Any]:
+    if relation == "consolidate":
+        from . import memory_proposal_v2
+
+        return memory_proposal_v2.create_payload(
+            target=target,
+            source_paths=[] if source_paths is None else source_paths,
+            ops=[] if ops is None else ops,
+            anchor_blocks=anchor_blocks,
+            reason=reason,
+        )
     target = _target(target)
+    if issue_id is None or survivor is None:
+        raise ProposalError("issue and survivor are required for v1")
     survivor = io.relative(survivor)
     reason = _reason(reason)
     if relation not in ("merge", "supersede"):
@@ -743,8 +775,11 @@ def create_payload(*, target: Path, issue_id: str, survivor: str, relation: str,
     care, binding = _configuration(target)
     _outside_roots(_root(target), target, care)
     issue = _finding(target, care, issue_id)
+    _refuse_read_only(care, [survivor, *issue["evidence_references"]])
     proposal_id = "proposal-" + uuid.uuid4().hex
     proposal = _compose(target, care, issue, binding, survivor, relation, reason, proposal_id)
+    # apply refuses every mutation path, index files included, so refuse them here too.
+    _refuse_read_only(care, [m["path"] for m in proposal["mutations"]])
     config_names = (
         brigade_config.CONFIG_REL_PATH,
         *[f"{d}/config.json" for d in brigade_config.LEGACY_WORKSPACE_DIRNAMES],
@@ -792,7 +827,11 @@ def _load(target: Path, proposal_id: str, digest: str | None = None) -> dict[str
         raise ProposalError("invalid proposal ID")
     path = _root(target) / proposal_id / "revision-1.json"
     proposal = io.read_object(path, private=True)
-    if proposal.get("schema") != SCHEMA or proposal.get("revision") != 1 or proposal.get("id") != proposal_id:
+    if (
+        proposal.get("schema") not in (SCHEMA, "brigade.memory-proposal.v2")
+        or proposal.get("revision") != 1
+        or proposal.get("id") != proposal_id
+    ):
         raise ProposalError("unsupported proposal revision")
     actual = proposal.get("digest")
     if not isinstance(actual, str) or not HEX.fullmatch(actual):
@@ -834,6 +873,11 @@ def _validate_binding(target: Path, proposal: dict[str, Any]) -> memory_cmd.Memo
 
 
 def _validate_live(target: Path, proposal: dict[str, Any]) -> None:
+    if proposal["schema"] == "brigade.memory-proposal.v2":
+        from .memory_proposal_v2 import validate_live
+
+        validate_live(target, proposal)
+        return
     care = _validate_binding(target, proposal)
     for mutation in proposal["mutations"]:
         raw = io.read_bytes(target / io.relative(mutation["path"]), limit=io.MAX_CARD_BYTES, absent=True)
@@ -891,7 +935,7 @@ def _decision(target: Path, proposal: dict[str, Any], label: str) -> dict[str, A
         if (
             event.get("schema") == trust_gate.EVENT_SCHEMA
             and event.get("schema_version") == 1
-            and event.get("content_scope") == SCHEMA
+            and event.get("content_scope") == proposal["schema"]
             and event.get("operator_command")
             == f"operator:brigade memory proposal {'review' if label == 'edit-accepted' else 'reject'}"
         ):
@@ -941,7 +985,7 @@ def _review(target: Path, proposal_id: str, digest: str, reason: str, *, reject:
                 from_label="pending-edit",
                 to_label=label,
                 envelope_content_hash=digest,
-                content_scope=SCHEMA,
+                content_scope=proposal["schema"],
                 operator_command=f"operator:brigade memory proposal {'reject' if reject else 'review'}",
                 evidence={**_decision_evidence(proposal), "reason": reason},
             )
@@ -1107,6 +1151,9 @@ def apply_payload(*, target: Path, proposal_id: str, digest: str) -> dict[str, A
         already = _already_applied(target, proposal)
         if already:
             return already
+        # After the replay check so a committed proposal stays idempotent, and before
+        # _validate_live so the operator sees the pattern, not a generic config drift error.
+        _refuse_read_only(memory_cmd._config_or_default(target), [m["path"] for m in proposal["mutations"]])
         _validate_live(target, proposal)
         operation_id = "memory-proposal-" + uuid.uuid4().hex
         domain = {

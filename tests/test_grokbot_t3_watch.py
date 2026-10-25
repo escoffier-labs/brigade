@@ -629,7 +629,7 @@ def test_pass_budget_leaves_room_for_the_slowest_row():
 
 @pytest.mark.parametrize(
     "elapsed,enabled,expected_timeout,failed",
-    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, None, 0)],
+    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, 1, 0)],
 )
 def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
     setup, monkeypatch, elapsed, enabled, expected_timeout, failed
@@ -638,7 +638,18 @@ def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
 
     tmp_path, targets, ledger = setup
     _record(ledger, "r1", state="succeeded")
-    runtime = SimpleNamespace(enabled=enabled, hub_token_file=tmp_path / "principal.token")
+    runtime = SimpleNamespace(enabled=enabled, hub_token_file=tmp_path / "principal.token", messaging_configured=True)
+    _owner_file(runtime.hub_token_file, "x" * 64)
+    from brigade import fleet_client, fleet_client_messages as messages
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-id")
+
+    def request(endpoint, credential, body, **kwargs):
+        assert body == {"action": "identity"}
+        return 200, {"principal": "agent:grokbot"}
+
+    monkeypatch.setattr(messages, "_request", request)
     monkeypatch.setattr(watch, "_wake_hub_inbox", lambda **kwargs: None)
     post = Post([])
     flushed = []
@@ -665,4 +676,34 @@ def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
     else:
         assert len(flushed) == 1
         assert flushed[0]["token_file"] == str(runtime.hub_token_file)
+        assert flushed[0]["authority"].token_file == str(runtime.hub_token_file)
         assert flushed[0]["lock_timeout"] == pytest.approx(expected_timeout)
+        assert flushed[0]["warn_inactive"] is False
+
+
+@pytest.mark.parametrize("configured", [False, None])
+def test_disabled_messaging_makes_zero_background_hub_calls(setup, monkeypatch, configured):
+    from types import SimpleNamespace
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    runtime = SimpleNamespace(
+        enabled=True, hub_token_file=tmp_path / "principal.token", messaging_configured=configured
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled messaging touched Hub")
+
+    monkeypatch.setattr(watch, "HubInbox", forbidden)
+    monkeypatch.setattr(watch, "call_message", forbidden)
+    post = Post([])
+    summary = watch.run_watch_once(
+        runner=Runner({}),
+        runtime=runtime,
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "wake.jsonl",
+        post=post,
+    )
+    assert summary == {"checked": 0, "woken": 1, "failed": 0}
+    assert len(post.calls) == 1

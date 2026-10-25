@@ -4,6 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+
+	"github.com/klauspost/compress/zstd"
 	"os"
 	"path/filepath"
 	"strings"
@@ -300,5 +305,124 @@ func TestGenerateSkipsUnchangedFiles(t *testing.T) {
 	}
 	if inc.Records >= full.Records {
 		t.Fatalf("incremental records (%d) should be fewer than full (%d)", inc.Records, full.Records)
+	}
+}
+
+func writeZstd(t *testing.T, path string, content []byte) {
+	t.Helper()
+	encoder, err := zstd.NewWriter(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	if err := os.WriteFile(path, encoder.EncodeAll(content, nil), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGenerateCompressedSessionParity(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+	content := []byte("{\"type\":\"event_msg\",\"payload\":{\"role\":\"user\",\"message\":\"searchable event\"}}\ninvalid json\n\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plain, plainResult := parseRecords(t, path, sources.Options{})
+	writeZstd(t, path+".zst", content)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	compressed, result := parseRecords(t, dir, sources.Options{})
+	if len(compressed) != 1 {
+		t.Fatalf("compressed records = %d, want 1", len(compressed))
+	}
+	if !reflect.DeepEqual(plain[0].Item.ExternalID, compressed[0].Item.ExternalID) || !reflect.DeepEqual(plain[0].Collection, compressed[0].Collection) || plain[0].Item.Text != compressed[0].Item.Text || plain[0].Raw.Hash != compressed[0].Raw.Hash || *plain[0].Raw.Ordinal != *compressed[0].Raw.Ordinal {
+		t.Fatalf("compressed record changed identity or content: plain=%+v compressed=%+v", plain[0], compressed[0])
+	}
+	if compressed[0].Raw.Path != path+".zst" {
+		t.Fatalf("raw path = %q", compressed[0].Raw.Path)
+	}
+	if len(result.Warnings) != len(plainResult.Warnings) || len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], "malformed json") {
+		t.Fatalf("warnings = %v", result.Warnings)
+	}
+}
+
+func TestGenerateCompressedDiscoveryPrefersPlainAndExcludesSidecars(t *testing.T) {
+	dir := t.TempDir()
+	content := []byte("{\"type\":\"event_msg\",\"payload\":{\"message\":\"keep session\"}}\n")
+	path := filepath.Join(dir, "session.jsonl")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A broken compressed twin must not be read while the plain file exists.
+	if err := os.WriteFile(path+".zst", []byte("corrupt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"session.metadata.jsonl", "session.sidecar.jsonl", "session.metadata.jsonl.zst", "session.sidecar.jsonl.zst"} {
+		writeZstd(t, filepath.Join(dir, name), content)
+	}
+	nested := filepath.Join(dir, "nested")
+	if err := os.Mkdir(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeZstd(t, filepath.Join(nested, "other.jsonl.zst"), content)
+	recs, result := parseRecords(t, dir, sources.Options{})
+	if len(recs) != 2 || len(result.Files) != 2 || len(result.Warnings) != 0 {
+		t.Fatalf("records=%d result=%+v", len(recs), result)
+	}
+	for _, file := range result.Files {
+		if strings.Contains(file.Path, "session.jsonl") && file.Path != path {
+			t.Fatalf("selected compressed twin: %+v", file)
+		}
+	}
+	// Explicit file imports follow the same preference.
+	recs, result = parseRecords(t, path+".zst", sources.Options{})
+	if len(recs) != 1 || len(result.Files) != 1 || result.Files[0].Path != path {
+		t.Fatalf("explicit twin import: %+v", result)
+	}
+}
+
+func TestGenerateCorruptCompressedFileWarnsAndContinues(t *testing.T) {
+	for _, truncated := range []bool{false, true} {
+		t.Run(fmt.Sprint(truncated), func(t *testing.T) {
+			dir := t.TempDir()
+			bad := filepath.Join(dir, "a-bad.jsonl.zst")
+			if truncated {
+				writeZstd(t, bad, []byte("{\"type\":\"event_msg\",\"payload\":{\"message\":\"partial\"}}\n"))
+				data, err := os.ReadFile(bad)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(bad, data[:len(data)-5], 0o600); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := os.WriteFile(bad, []byte("corrupt zstd"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			good := filepath.Join(dir, "z-good.jsonl.zst")
+			writeZstd(t, good, []byte("{\"type\":\"event_msg\",\"payload\":{\"message\":\"healthy session\"}}\n"))
+			recs, result := parseRecords(t, dir, sources.Options{})
+			found := false
+			for _, rec := range recs {
+				found = found || rec.Item.Text == "healthy session"
+			}
+			if !found || len(result.Warnings) != 1 || !strings.Contains(result.Warnings[0], bad) || !strings.Contains(result.Warnings[0], "zstd") {
+				t.Fatalf("healthy=%v result=%+v", found, result)
+			}
+		})
+	}
+}
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func TestGenerateCompressedWriterFailureIsFatal(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session.jsonl.zst")
+	writeZstd(t, path, []byte("{\"type\":\"event_msg\",\"payload\":{\"message\":\"event\"}}\n"))
+	want := errors.New("output failed")
+	_, err := Generate(path, sources.Options{}, failingWriter{want})
+	if !errors.Is(err, want) {
+		t.Fatalf("error = %v, want writer failure", err)
 	}
 }

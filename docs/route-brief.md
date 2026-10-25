@@ -20,7 +20,8 @@ plans it.
    artifacts they need and produce, and optional while/until locks. The router
    drops stages whose required inputs nothing produces, holds locked stages, and
    topo-sorts the rest into parallel waves. The algorithm is adapted from
-   [alp-river](https://github.com/alp82/alp-river) (MIT, Alper Ortac).
+   [alp-river](https://github.com/alp82/alp-river) (MIT, Alper Ortac), since
+   renamed [forge](https://github.com/alp82/forge).
 3. **Plan coverage.** The plan prompt carries the route and asks the orchestrator
    to tag each assignment with `covers: ["<stage>", ...]`. A parsed plan that
    misses required stages gets one corrective retry. Coverage gaps are recorded in

@@ -519,6 +519,114 @@ class MissingLeakShapeTests(unittest.TestCase):
                 text = before + host + after
                 self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
 
+    def test_url_interpolated_member_expressions_stay_code_shaped(self) -> None:
+        """#1918: the URL-context acceptance must not run before interpolation
+        rejection, or a formatted-URL member expression becomes a finding."""
+        for text in (
+            'f"https://{db.local}/path"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local}/path"',  # content-guard: allow private-hostname
+            "f'https://{db.local}/path'",  # content-guard: allow private-hostname
+            'url = f"https://{db.local}/api"',  # content-guard: allow private-hostname
+            'rf"https://{db.local}/path"',  # content-guard: allow private-hostname
+            'fr"https://{db.local}/path"',  # content-guard: allow private-hostname
+            # A triple-quoted formatted string, and an earlier field.
+            'f"""https://{cfg.db.local}/path"""',  # content-guard: allow private-hostname
+            'f"https://{d[1:2]}/{cfg.db.local}"',  # content-guard: allow private-hostname
+            # Whitespace, '=', conversions, format specs, and an escaped brace before the field.
+            'f"https://{ cfg.db.local }/p"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local=}/p"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local!r}/p"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local:>{width}}/p"',  # content-guard: allow private-hostname
+            'f"https://{{{cfg.db.local}}}/p"',  # content-guard: allow private-hostname
+            # Common expression positions for the f-string itself.
+            'requests.get(f"https://{cfg.db.local}/x")',  # content-guard: allow private-hostname
+            'urls = [f"https://{cfg.db.local}/x"]',  # content-guard: allow private-hostname
+            'return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
+            'get(url=f"https://{cfg.db.local}/x")',  # content-guard: allow private-hostname
+            'x = 1; return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                result = scan_text(text)
+                self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
+                redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertEqual(redacting.redacted_text, text)
+
+    def test_quoted_hosts_inside_url_interpolation_still_match(self) -> None:
+        for text in (
+            "f\"{fetch('https://db.home/path')}\"",  # content-guard: allow private-hostname
+            "f\"https://{lookup('db.home')}/path\"",  # content-guard: allow private-hostname
+            # A literal brace or an escaped quote earlier in the expression.
+            "f\"https://{lookup('{','db.home')}/path\"",  # content-guard: allow private-hostname
+            "f\"https://{lookup('can\\'t','db.home')}/path\"",  # content-guard: allow private-hostname
+            # Doubled braces are literal text, not an expression (#1962).
+            'print(f"{{")  # see https://db.home/x',  # content-guard: allow private-hostname
+            # An f-prefix inside an ordinary string does not open a field.
+            'hint = "start with f\'{name"; url = "https://db.home/x"',  # content-guard: allow private-hostname
+            # Comment text is not lexed, and a format spec is literal text.
+            "# start with f'{name; see https://db.home/x",  # content-guard: allow private-hostname
+            'f"result={value:https://db.home/path}"',  # content-guard: allow private-hostname
+            # A comment inside a multi-line field, and a backslash before a doubled brace.
+            'x = f"""{(\n  a # see https://db.home/x\n)}"""',  # content-guard: allow private-hostname
+            'rf"https://\\{{db.home}}/path"',  # content-guard: allow private-hostname
+            # A line inside an earlier line's triple-quoted ordinary string.
+            'hint = """\nf"{(use https://db.home/x\n"""',  # content-guard: allow private-hostname
+            # Incomplete f-string examples in other comment forms, backtick spans,
+            # and backslash-continued strings never close a field.
+            '// start with f"{(use https://db.home/x',  # content-guard: allow private-hostname
+            'Use `f"{(use` then https://db.home/x',  # content-guard: allow private-hostname
+            's = "abc \\\nf"{(use https://db.home/x"',  # content-guard: allow private-hostname
+            # A complete-looking example in a comment is still comment text.
+            '// f"{(use https://db.home/x)}"',  # content-guard: allow private-hostname
+            # Only a field holding the host alone is skipped; anything else in a
+            # formatted URL keeps the URL detection main already had.
+            "f\"https://{resolve('https://fallback.invalid',db.home)}/path\"",  # content-guard: allow private-hostname
+            'rf"\\"https://{db.home}/path\\""',  # content-guard: allow private-hostname
+            's = f"""\nhttps://{db.home}/p\n"""',  # content-guard: allow private-hostname
+            'f"https://{db.home[0]}/p"',  # content-guard: allow private-hostname
+            'f"https://{db.home or x}/p"',  # content-guard: allow private-hostname
+            '"https://{db.home}/p"',  # content-guard: allow private-hostname
+            "`https://${db.home}/p`",  # content-guard: allow private-hostname
+            # f-string text inside an ordinary string or a comment is not an f-string.
+            "hint = 'f\"https://{db.home}/path\"'",  # content-guard: allow private-hostname
+            '# f"https://{db.home}/path"',  # content-guard: allow private-hostname
+            '// f"https://{db.home}/path"',  # content-guard: allow private-hostname
+            # A nested f-string inside another literal keeps main's detection.
+            "f\"https://{f'{db.home}'}/\"",  # content-guard: allow private-hostname
+            # A complete f-string example in prose or after a line-start comment.
+            'REM f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'Use f"https://{db.home}/x" for that.',  # content-guard: allow private-hostname
+            '; f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '; url = f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '* f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '-- f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '<!-- f"https://{db.home}/x" -->',  # content-guard: allow private-hostname
+            'For example, f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '(see f"https://{db.home}/x")',  # content-guard: allow private-hostname
+            'Note: f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '[f"https://{db.home}/x"](link)',  # content-guard: allow private-hostname
+            '{"url": f"https://{db.home}/x"}',  # content-guard: allow private-hostname
+            'base + f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'Please return f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'const x = 1; /* sample = f"https://{db.home}/x" */',  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+                redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertNotIn("db.home", redacting.redacted_text)  # content-guard: allow private-hostname
+
+    def test_literal_url_hostname_context_still_matches(self) -> None:
+        # Controls from the existing detection surface, next to the new skips.
+        for text in (
+            "https://db.home/path",  # content-guard: allow private-hostname
+            '"https://db.home/path"',  # content-guard: allow private-hostname
+            # An f-string or brace elsewhere on the line must not hide the URL host.
+            'print(f"x"); cfg = {"url": "https://db.home/x"}',  # content-guard: allow private-hostname
+            'requests.get(f"{base}/x", json={"cb": "https://db.home/cb"})',  # content-guard: allow private-hostname
+            '{"f": 1, "cfg": {"url": "https://db.home/x"}}',  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
     def test_nested_interpolation_remains_code_shaped(self) -> None:
         result = scan_text(
             'lines.append(f\'token_file = "{(self.home / "node.token").as_posix()}"\')'  # content-guard: allow private-hostname

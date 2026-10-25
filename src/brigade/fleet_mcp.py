@@ -7,13 +7,21 @@ from time import monotonic, sleep
 from typing import Any
 
 from . import fleet_client, fleet_client_messages as messages, mcp_server
-from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS
+from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS, MessageError
+from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
+_CURSOR_RESTART_HINT = (
+    "the paging cursor expired or is not valid for this caller; restart the walk without a cursor, "
+    "then send the same filter and all with every continuation"
+)
 _SAFE_ERROR_CODES = frozenset(
     {
         "hub_unavailable",
+        "paging_snapshot_capacity",
+        "paging_continuation_unsupported",
+        "paging_cursor_expired",
         "message_recipient_not_permitted",
         "message_sender_recipient_quota",
         "message_recipient_quota",
@@ -35,9 +43,26 @@ def tool_specs() -> list[dict[str, Any]]:
     limit = {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}
     definitions = [
         (
+            "fleet_ask_user",
+            "Ask the configured operator, recording an answer or timeout on the hub.",
+            {
+                "question": text,
+                "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 120, "default": 60},
+                "request_id": text,
+            },
+            ["question"],
+        ),
+        (
             "fleet_who",
-            "List interactive sessions and permitted active recipients.",
-            {"filter": {"type": "string"}, "all": boolean},
+            "List sessions and permitted recipients; pass next_cursor as cursor, with the same filter and all, "
+            "to continue a snapshot. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
+            {
+                "filter": {"type": "string"},
+                "all": boolean,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
+            },
             [],
         ),
         (
@@ -49,17 +74,28 @@ def tool_specs() -> list[dict[str, Any]]:
                 "reply_to": text,
                 "kind": {"type": "string", "enum": ["message", "question", "completion"]},
                 "thread": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
             },
             ["to", "body"],
         ),
         (
             "fleet_inbox",
-            "Read inbox messages without acknowledging them; optionally wait for unread mail.",
+            "Read inbox messages without acknowledging them; optionally wait or count unread mail without bodies.",
             {
                 "wait_secs": {"type": "integer", "minimum": 0, "maximum": 120, "default": 0},
                 "unacked_only": {"type": "boolean", "default": True},
                 "limit": limit,
                 "after": text,
+                "count_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return only unread_count for the whole inbox, ignoring wait, cursor and page options.",
+                },
             },
             [],
         ),
@@ -72,7 +108,16 @@ def tool_specs() -> list[dict[str, Any]]:
         (
             "fleet_reply",
             "Reply to an inbox message, durably spooling when offline.",
-            {"id": text, "body": text},
+            {
+                "id": text,
+                "body": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
+            },
             ["id", "body"],
         ),
         (
@@ -83,10 +128,12 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_claims",
-            "List repository claims without changing ownership; truncated is true when the list was cut.",
+            "List a stable snapshot of repository claims; pass next_cursor as cursor, with the same all, to continue. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "all": boolean,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
             },
             [],
         ),
@@ -95,6 +142,11 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": name,
             "description": description,
+            "annotations": {
+                "readOnlyHint": name in {"fleet_who", "fleet_inbox", "fleet_sent", "fleet_claims"},
+                # Sending adds a record. Ack changes existing unread state.
+                "destructiveHint": name == "fleet_ack",
+            },
             "inputSchema": {
                 "type": "object",
                 "properties": properties,
@@ -125,6 +177,10 @@ def _validate(value: Any, schema: dict[str, Any]) -> None:
     if kind == "string" and len(value) < schema.get("minLength", 0):
         raise _InvalidArguments("Invalid tool arguments: a required string is empty.")
     if "enum" in schema and value not in schema["enum"]:
+        if value == "operator_question":
+            raise _InvalidArguments(
+                "Invalid tool arguments: operator_question is reserved for hub-created operator questions."
+            )
         raise _InvalidArguments("Invalid tool arguments: unsupported value.")
     if kind == "array":
         if not schema["minItems"] <= len(value) <= schema["maxItems"]:
@@ -279,6 +335,13 @@ def _page_limit(payload: dict[str, Any], limit: int) -> dict[str, Any]:
 
 
 def _tool_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, AskUserError):
+        return {
+            "error": str(exc),
+            "code": exc.code,
+            "request_id": exc.request_id,
+            **({"question_id": exc.question_id} if exc.question_id else {}),
+        }
     if isinstance(exc, messages.FleetMessageHubError):
         status = exc.status if isinstance(exc.status, int) and 400 <= exc.status <= 599 else None
         code = exc.code if isinstance(exc.code, str) and exc.code in _SAFE_ERROR_CODES else "hub_rejected"
@@ -292,28 +355,39 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
                 "message_timestamp_future",
             }
         )
-        return {
+        body = {
             "error": "Fleet hub operation failed.",
             "code": code,
             "status": status,
             "transient": transient,
             "permanent": not transient,
         }
+        if code == "paging_cursor_expired":
+            # Retrying the same cursor can never succeed; the caller has to start over.
+            body["hint"] = _CURSOR_RESTART_HINT
+        return body
     return {"error": "Fleet operation failed. Check hub connectivity and credential permissions."}
 
 
 class FleetMcp:
-    def __init__(self, *, token_file: str | None = None) -> None:
+    def __init__(self, *, token_file: str | None = None, events: bool = False) -> None:
         self.token_file = token_file
+        self._ask_user = AskUser()
+        self.events = events
 
     def callbacks(self) -> dict[str, Any]:
-        return {
+        callbacks: dict[str, Any] = {
             "server_name": "brigade-fleet",
             "list_resources": lambda: [],
             "read_resource": lambda _uri: (None, None),
             "list_tools": tool_specs,
             "call_tool": self.call,
         }
+        if self.events:
+            from .fleet_mcp_events import FleetEvents
+
+            callbacks["extension"] = FleetEvents(self._authority).extension()
+        return callbacks
 
     def call(self, name: str, arguments: dict[str, Any]) -> tuple[object, bool]:
         try:
@@ -333,7 +407,7 @@ class FleetMcp:
                 _message_id(arguments["after"], allow_zero=True)
             payload = self._call(name, arguments, ids, message_id, reply_to)
             return _frame(payload), False
-        except _InvalidArguments as exc:
+        except (_InvalidArguments, MessageError) as exc:
             return {"error": str(exc)}, True
         except Exception as exc:
             # Upstream failures may contain URLs, credentials, or attacker-controlled text.
@@ -348,10 +422,18 @@ class FleetMcp:
     ) -> dict[str, Any]:
         # One captured credential for the whole tool call, as the message layer requires.
         authority = self._authority()
-        if name == "fleet_who":
-            return _frame_directory(messages._online({"action": "who", **args}, authority=authority))
-        if name == "fleet_claims":
-            return _frame_directory(messages._online({"action": "claims", **args}, authority=authority))
+        if name == "fleet_ask_user":
+            return self._ask_user.ask(authority=authority, **args)
+        if name in {"fleet_who", "fleet_claims"}:
+            action = "who" if name == "fleet_who" else "claims"
+            payload = messages._online({"action": action, "limit": 200, **args}, authority=authority)
+            if payload.get("truncated") is True and "next_cursor" not in payload:
+                raise messages.FleetMessageHubError(
+                    "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
+                )
+            # The hub-issued continuation token is protocol data, not peer text.
+            cursor = payload.pop("next_cursor", None)
+            return {**_frame_directory(payload), "next_cursor": cursor}
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],
@@ -362,6 +444,7 @@ class FleetMcp:
                 kind=args.get("kind"),
                 thread=args.get("thread"),
                 reply_to=reply_to,
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_reply":
@@ -372,6 +455,7 @@ class FleetMcp:
                 subject=None,
                 reference=None,
                 priority="normal",
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_ack":
@@ -390,6 +474,8 @@ class FleetMcp:
             return _page_limit(
                 messages.sent(after=int(args.get("after", "0")), authority=authority), args.get("limit", 100)
             )
+        elif args.get("count_only", False):
+            return messages.unread_count(authority=authority)
         else:
             return _page_limit(
                 poll_inbox(
@@ -407,9 +493,14 @@ class FleetMcp:
 
 
 def serve_mcp(
-    *, http: bool = False, host: str | None = None, port: int | None = None, token_file: str | None = None
+    *,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+    token_file: str | None = None,
+    events: bool = False,
 ) -> int:
-    callbacks = FleetMcp(token_file=token_file).callbacks()
+    callbacks = FleetMcp(token_file=token_file, events=events).callbacks()
     if http:
         return mcp_server.run_http_from_env(host=host, port=port, default_port=DEFAULT_PORT, **callbacks)
     if host is not None or port is not None:
@@ -430,8 +521,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--principal-token-file", help="Protected message principal token file (same as msg --token-file)."
     )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="Serve MCP Events (events/list, events/subscribe, events/unsubscribe); the hub must enable them too.",
+    )
     parser.set_defaults(
         func=lambda args: serve_mcp(
-            http=args.http, host=args.host, port=args.port, token_file=args.principal_token_file
+            http=args.http,
+            host=args.host,
+            port=args.port,
+            token_file=args.principal_token_file,
+            events=args.events,
         )
     )

@@ -5,15 +5,17 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
 from brigade import cli, localio, work_cmd
 from brigade.work_cmd import claiming, dispatch_apply as apply, dispatch_state as store
-from tests.test_work_dispatch import _tasks, dispatch_target  # noqa: F401
+from tests.test_work_dispatch import _tasks, dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.test_work_dispatch_apply import apply_target  # noqa: F401
 
 
+@requires_dispatch_apply
 def test_non_race_claim_refusal_is_not_retried_as_infrastructure(apply_target, monkeypatch, capsys):
     def refuse(*args, **kwargs):
         raise claiming.ClaimError("start gate refused", reason="not_ready", exit_code=2)
@@ -133,6 +135,7 @@ def _watch(target, capsys, *options):
     return store.root(target) / payload["dispatch_id"]
 
 
+@requires_dispatch_apply
 def test_watch_refills_capacity_records_ticks_and_drains(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"], ["c.py"]])
     directory = _watch(apply_target, capsys, "--max", "1", "--interval", "0.2", "--max-total", "3", "--drain-wait")
@@ -149,6 +152,7 @@ def test_watch_refills_capacity_records_ticks_and_drains(apply_target, fake_watc
 
 @pytest.mark.parametrize("drain", [False, True])
 @pytest.mark.parametrize("signame", ["SIGTERM", "SIGINT"])
+@requires_dispatch_apply
 def test_watch_signals_stop_launches_and_restore_handlers(apply_target, fake_watch, capsys, drain, signame):
     import signal
 
@@ -169,6 +173,7 @@ def test_watch_signals_stop_launches_and_restore_handlers(apply_target, fake_wat
     assert store.read(directory / "session.json")["close_reason"] == signame
 
 
+@requires_dispatch_apply
 def test_watch_version_change_closes_without_another_launch(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     fake_watch.module.installed_version = lambda: "changed" if fake_watch.clock[0] > 0 else "test-version"
@@ -177,6 +182,7 @@ def test_watch_version_change_closes_without_another_launch(apply_target, fake_w
     assert store.read(directory / "session.json")["close_reason"] == "version-changed"
 
 
+@requires_dispatch_apply
 def test_watch_idle_sleeps_and_holds_lease(apply_target, fake_watch, capsys):
     _tasks(apply_target, [])
     checked = []
@@ -195,6 +201,7 @@ def test_watch_idle_sleeps_and_holds_lease(apply_target, fake_watch, capsys):
         pass
 
 
+@requires_dispatch_apply
 def test_watch_spawn_delay_can_be_interrupted_before_next_launch(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     fake_watch.hooks.append(lambda: fake_watch.stop() if fake_watch.launches else None)
@@ -202,6 +209,7 @@ def test_watch_spawn_delay_can_be_interrupted_before_next_launch(apply_target, f
     assert len(fake_watch.launches) == 1
 
 
+@requires_dispatch_apply
 def test_watch_spawn_delay_spans_ticks(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     _watch(apply_target, capsys, "--max", "1", "--max-total", "2", "--spawn-delay", "1", "--interval", "0.2")
@@ -218,6 +226,7 @@ def test_watch_rejects_invalid_modes_before_receipts(dispatch_target, options, c
     assert not store.sessions(dispatch_target)
 
 
+@requires_dispatch_apply
 def test_watch_deadline_is_session_wide_and_sleeps_when_idle(apply_target, fake_watch, capsys):
     _tasks(apply_target, [])
     directory = _watch(apply_target, capsys, "--deadline", "0.3", "--interval", "0.2")
@@ -228,6 +237,7 @@ def test_watch_deadline_is_session_wide_and_sleeps_when_idle(apply_target, fake_
     assert denied[0]["payload"]["dimension"] == "wall_clock_seconds"
 
 
+@requires_dispatch_apply
 def test_watch_waits_for_pinned_wave_to_exist(apply_target, fake_watch, capsys):
     _tasks(apply_target, [])
     fake_watch.hooks.append(fake_watch.stop)
@@ -245,6 +255,7 @@ def test_event_append_refuses_bounds_without_damaging_prefix(tmp_path, monkeypat
     assert (tmp_path / "events.jsonl").read_bytes() == original
 
 
+@requires_dispatch_apply
 def test_watch_does_not_restart_exhausted_infrastructure_task_each_tick(apply_target, fake_watch, monkeypatch, capsys):
     def fail(engine, path, row, session):
         if row["state"] == "running" and fake_watch.clock[0] >= row["launched_at"] + 0.5:
@@ -277,6 +288,7 @@ def test_watch_does_not_restart_exhausted_infrastructure_task_each_tick(apply_ta
     assert len(fake_watch.launches) == 3
 
 
+@requires_dispatch_apply
 def test_watch_spaces_resumed_prelaunch_intents(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     assert (
@@ -297,6 +309,7 @@ def test_watch_spaces_resumed_prelaunch_intents(apply_target, fake_watch, capsys
     assert fake_watch.launches[1][1] - fake_watch.launches[0][1] >= 1
 
 
+@requires_dispatch_apply
 def test_watch_does_not_report_unspawned_run_directory_as_launch(apply_target, fake_watch, monkeypatch, capsys):
     def interrupted(engine, path, row, session):
         store.transition(path, row, "workspace_ready", run_id="reserved", run_dir=str(apply_target / "reserved"))
@@ -324,6 +337,7 @@ def test_watch_pause_never_sleeps_negative_when_clock_crosses_boundary(apply_tar
     assert sum(sleeps) <= 0.1
 
 
+@requires_dispatch_apply
 def test_watch_deadline_drain_does_not_cancel_children(apply_target, fake_watch, monkeypatch, capsys):
     def cancel(*args, **kwargs):
         pytest.fail("drain must observe the running child without cancellation")
@@ -342,6 +356,7 @@ def test_watch_deadline_drain_does_not_cancel_children(apply_target, fake_watch,
     assert store.intents(apply_target)[0][1]["state"] == "completed"
 
 
+@requires_dispatch_apply
 def test_later_invocation_keeps_detached_watch_children_after_deadline(apply_target, fake_watch, monkeypatch, capsys):
     def cancel(*args, **kwargs):
         pytest.fail("an expired watch must not cancel detached children on later reconciliation")
@@ -362,6 +377,7 @@ def test_later_invocation_keeps_detached_watch_children_after_deadline(apply_tar
 
 
 @pytest.mark.parametrize("signame", ["SIGINT", "SIGTERM"])
+@requires_dispatch_apply
 def test_second_signal_ends_drain_wait_and_records_close(apply_target, fake_watch, capsys, signame):
     import signal
 
@@ -389,6 +405,7 @@ def test_second_signal_ends_drain_wait_and_records_close(apply_target, fake_watc
 
 
 @pytest.mark.parametrize("failure_at", ["advance", "reconcile"])
+@requires_dispatch_apply
 def test_watch_records_tick_error_and_continues_without_canceling_siblings(
     apply_target, fake_watch, monkeypatch, capsys, failure_at
 ):
@@ -458,6 +475,7 @@ def test_watch_records_tick_error_and_continues_without_canceling_siblings(
 
 
 @pytest.mark.parametrize("state", ["claimed", "workspace_ready"])
+@requires_dispatch_apply
 def test_watch_close_reports_claimed_prelaunch_intents(apply_target, fake_watch, monkeypatch, capsys, state):
     def interrupted(engine, path, row, session):
         apply.locking._claim_task(engine.target, row["task_id"], actor=row["seat"], claim_id=row["claim_id"])
@@ -473,6 +491,7 @@ def test_watch_close_reports_claimed_prelaunch_intents(apply_target, fake_watch,
     assert task["claim"]
 
 
+@requires_dispatch_apply
 def test_watch_real_child_releases_each_intent_once_and_reports_outcome(apply_target, monkeypatch, capsys):
     from pathlib import Path
 
@@ -553,6 +572,7 @@ def test_watch_pause_does_not_rescan_history_or_poll_metadata_on_every_wake(appl
     assert len(versions) <= 1
 
 
+@requires_dispatch_apply
 def test_watch_ceiling_counts_launches_within_one_tick(apply_target, fake_watch, capsys):
     _tasks(apply_target, [["a.py"], ["b.py"], ["c.py"]])
     directory = _watch(apply_target, capsys, "--max", "3", "--max-total", "1")
@@ -560,6 +580,7 @@ def test_watch_ceiling_counts_launches_within_one_tick(apply_target, fake_watch,
     assert store.read(directory / "session.json")["launched"] == 1
 
 
+@requires_dispatch_apply
 def test_watch_ceiling_includes_resumed_reserved_children(apply_target, monkeypatch, capsys):
     import subprocess
 
@@ -597,6 +618,7 @@ def test_watch_ceiling_includes_resumed_reserved_children(apply_target, monkeypa
     assert sum(row["state"] == "launching" and not row["pid"] for _, row in rows) == 1
 
 
+@requires_dispatch_apply
 def test_watch_restart_excludes_bootstrapped_child_from_fresh_budget(apply_target, monkeypatch, capsys):
     import subprocess
     from pathlib import Path
@@ -668,10 +690,54 @@ def test_watch_rejects_invalid_pid_launch_evidence(apply_target, capsys, pid, so
         assert not watcher.snapshot()[row["intent_id"]][0]
 
 
-def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch):
+@pytest.mark.parametrize("path_ctime", ["native", "birthtime"])
+def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch, path_ctime):
     directory = store.root(tmp_path) / "dispatch-cache"
     directory.mkdir(parents=True)
-    store.event(directory, "work.dispatch.planned", {})
+    log = directory / "events.jsonl"
+    platform_os = SimpleNamespace(**vars(os))
+    if path_ctime == "birthtime":
+        platform_os.name = "nt"
+        original_stat = type(log).stat
+
+        def path_stat(path, **kwargs):
+            stat = original_stat(path, **kwargs)
+            if path != log:
+                return stat
+            # Emulate path creation time differing from handle change time on Windows.
+            stat = SimpleNamespace(**{field: getattr(stat, field) for field in dir(stat) if field.startswith("st_")})
+            stat.st_ctime_ns = 0
+            return stat
+
+        monkeypatch.setattr(type(log), "stat", path_stat)
+
+    def handle_identity(fd):
+        stat = os.fstat(fd)
+        return tuple(getattr(stat, field) for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+    writer_identity = None
+
+    def synced(fd):
+        nonlocal writer_identity
+        os.fsync(fd)
+        writer_identity = handle_identity(fd)
+
+    platform_os.fsync = synced
+    monkeypatch.setattr(store, "os", platform_os)
+
+    def append(name, payload):
+        error = None
+        try:
+            store.event(directory, name, payload)
+        except ValueError as exc:
+            error = str(exc)
+        with log.open("rb") as stream:
+            read_identity = handle_identity(stream.fileno())
+        assert error is None and writer_identity == read_identity, (
+            f"append_error={error}; writer_identity={writer_identity}; read_identity={read_identity}"
+        )
+
+    append("work.dispatch.planned", {})
     validate = store.events
     scans = []
 
@@ -682,14 +748,14 @@ def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "events", counted)
     with store.dispatch_lock(tmp_path):
         for tick in range(30):
-            store.event(directory, "work.dispatch.tick", {"tick": tick})
+            append("work.dispatch.tick", {"tick": tick})
     assert len(scans) == 1
     assert len(validate(directory)) == 31
     with store.dispatch_lock(tmp_path):
-        store.event(directory, "work.dispatch.closed", {})
+        append("work.dispatch.closed", {})
     assert len(scans) == 2
-    store.event(directory, "work.dispatch.closed", {})
-    store.event(directory, "work.dispatch.closed", {})
+    append("work.dispatch.closed", {})
+    append("work.dispatch.closed", {})
     assert len(scans) == 4
     assert len(validate(directory)) == 34
 
@@ -727,6 +793,7 @@ def test_event_lease_revalidates_unexpected_file_changes(tmp_path, change):
 
 
 @pytest.mark.parametrize("bound", ["count", "bytes"])
+@requires_dispatch_apply
 def test_watch_closes_before_parent_event_capacity_is_exhausted(apply_target, fake_watch, capsys, monkeypatch, bound):
     _tasks(apply_target, [[f"file-{i}.py"] for i in range(20)])
     monkeypatch.setattr(store, "MAX_EVENT_LINE_BYTES", 1024)
@@ -750,6 +817,7 @@ def test_watch_closes_before_parent_event_capacity_is_exhausted(apply_target, fa
     assert all(row["state"] == "completed" for _, row in store.intents(apply_target))
 
 
+@requires_dispatch_apply
 def test_watch_persists_close_receipt_when_log_has_no_room(apply_target, fake_watch, monkeypatch, capsys):
     _tasks(apply_target, [])
 
@@ -992,6 +1060,7 @@ def exit_after_observation(apply_target, fake_watch, monkeypatch):
     return drains
 
 
+@requires_dispatch_apply
 def test_drain_finalizes_child_that_exits_after_the_last_observation(
     apply_target, fake_watch, exit_after_observation, capsys
 ):
@@ -1013,6 +1082,7 @@ def test_drain_finalizes_child_that_exits_after_the_last_observation(
     assert finalized == [intent["intent_id"]]
 
 
+@requires_dispatch_apply
 def test_drain_hard_interrupt_skips_the_quiescence_reconcile(apply_target, fake_watch, exit_after_observation, capsys):
     _tasks(apply_target, [["a.py"]])
     fake_watch.interrupt = True

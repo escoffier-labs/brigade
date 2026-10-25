@@ -31,6 +31,11 @@ def _validate_spool_lock_timeout(timeout: float | None) -> None:
         raise client.FleetClientError("invalid fleet spool lock timeout")
 
 
+def _spool_lock_name(path: Path) -> str:
+    """The lock file `_spool_lock(path)` takes: the one name every holder of that spool must use."""
+    return path.name + ".lock"
+
+
 @contextmanager
 def _spool_lock(path: Path, *, timeout: float | None = None) -> Iterator[int | None]:
     """Guard a spool across processes and threads.
@@ -44,7 +49,7 @@ def _spool_lock(path: Path, *, timeout: float | None = None) -> Iterator[int | N
     client._validate_spool_lock_timeout(timeout)
     deadline = None if timeout is None else client.time.monotonic() + timeout
     dir_fd = client._ensure_private_dir(path.parent)
-    lock_name = path.name + ".lock"
+    lock_name = _spool_lock_name(path)
     try:
         if deadline is None:
             client._SPOOL_PROCESS_LOCK.acquire()
