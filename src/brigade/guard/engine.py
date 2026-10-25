@@ -572,7 +572,7 @@ def _js_template_code_position(prefix: str, *, template_text: bool = False) -> b
             first_word = False
             index = word.end()
             continue
-        if char.isdigit():
+        if char in "0123456789":
             number = _JS_NUMBER.match(prefix, index)
             assert number is not None
             frame.value("number")
