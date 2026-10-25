@@ -16,11 +16,13 @@
 #                      (closes the forward-scrub gap: a clean tip can still
 #                      sit on top of commits that leak in their diffs)
 #
-# For brand-new branches (remote SHA all-zero) the history scan derives the
+# For every non-deletion push the history scan derives the
 # exclusion set from `git ls-remote <url>` rather than local tracking refs,
 # which can be stale. Only commits not reachable from any advertised ref are
 # scanned, batched into one guard history process per policy via --revs-stdin.
 set -euo pipefail
+# Never use local replacement objects as evidence of published ancestry.
+export GIT_NO_REPLACE_OBJECTS=1
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -74,12 +76,6 @@ if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
     RUN_EXTERNAL content_guard.git_scan \
       --history --revs-stdin --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
   }
-  RUN_HISTORY_RANGE() {
-    local range="$1"
-    local pol="$2"
-    RUN_EXTERNAL content_guard.git_scan \
-      --history --range "$range" --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
-  }
 else
   POLICY="${CONTENT_GUARD_POLICY:-public-repo}"
   if ! command -v brigade >/dev/null 2>&1; then
@@ -94,11 +90,6 @@ else
   RUN_HISTORY() {
     local pol="$1"
     brigade guard git --history --revs-stdin --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
-  }
-  RUN_HISTORY_RANGE() {
-    local range="$1"
-    local pol="$2"
-    brigade guard git --history --range "$range" --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
   }
 fi
 
@@ -121,15 +112,13 @@ note_rc() {
 ADVERTISED_REFS=""
 REMOTE_ENUMERATED=0
 
-prepare_new_branch_ranges() {
+prepare_remote_ranges() {
   local needs_remote=0
   local _lref lsha _rref rsha
   while read -r _lref lsha _rref rsha; do
     [[ -z "${lsha:-}" || "$lsha" =~ ^0+$ ]] && continue
-    if [[ "$rsha" =~ ^0+$ ]]; then
-      needs_remote=1
-      break
-    fi
+    needs_remote=1
+    break
   done < <(printf '%s\n' "$STDIN_REFS")
   [[ "$needs_remote" -eq 1 ]] || return 0
 
@@ -143,66 +132,107 @@ prepare_new_branch_ranges() {
   # Keep peeled annotated-tag lines (`refs/tags/<name>^{}`), which --refs
   # suppresses. The peeled commit can be present locally even when the tag
   # object is not, and it still marks that commit as already public.
-  if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL" 2>&1)"; then
-    echo "pre-push: [history] failed to enumerate advertised refs for $REMOTE_URL" >&2
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && echo "pre-push:   $line" >&2
-    done <<<"$advertised"
+  # Transport diagnostics remain on stderr; only stdout contains ref records.
+  if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL")"; then
+    echo "pre-push: [history] failed to enumerate advertised refs" >&2
     PLUMBING_ERR=1
     return
   fi
+  # A shallow graph cannot prove that every unpublished ancestor is scanned.
+  if [[ "$(git rev-parse --is-shallow-repository)" != false ]]; then
+    echo "pre-push: [history] complete local history is required" >&2
+    PLUMBING_ERR=1
+    return
+  fi
+  # Legacy grafts also replace ancestry, independently of replacement refs.
+  if [[ -n "${GIT_GRAFT_FILE+x}" || -s "$(git rev-parse --git-path info/grafts)" ]]; then
+    echo "pre-push: [history] grafted local ancestry cannot be verified" >&2
+    PLUMBING_ERR=1
+    return
+  fi
+  local sha ref extra
+  while read -r sha ref extra; do
+    [[ -z "$sha" ]] && continue
+    if [[ ! "$sha" =~ ^[0-9a-f]{40}$ && ! "$sha" =~ ^[0-9a-f]{64}$ ]] ||
+       [[ -z "$ref" || -n "$extra" ]] ||
+       { [[ "$ref" != HEAD ]] && ! git check-ref-format "${ref%\^\{\}}"; }; then
+      echo "pre-push: [history] malformed destination advertisement" >&2
+      PLUMBING_ERR=1
+      return
+    fi
+  done <<<"$advertised"
+  # Bind the push's expected old values to this destination, never a cached
+  # tracking ref or a caller-supplied SHA from another repository.
+  local actual
+  while read -r _lref lsha _rref rsha; do
+    [[ -z "${lsha:-}" || "$lsha" =~ ^0+$ ]] && continue
+    actual="$(printf '%s\n' "$advertised" | awk -v ref="$_rref" '$2 == ref {print $1}')"
+    if { [[ "$rsha" =~ ^0+$ ]] && [[ -n "$actual" ]]; } ||
+       { [[ ! "$rsha" =~ ^0+$ ]] && [[ "$actual" != "$rsha" ]]; }; then
+      echo "pre-push: [history] stale or unverifiable destination ref $_rref" >&2
+      PLUMBING_ERR=1
+      return
+    fi
+  done < <(printf '%s\n' "$STDIN_REFS")
   ADVERTISED_REFS="$advertised"
   REMOTE_ENUMERATED=1
 }
 
 scan_with() {
   local pol="$1"
-  local new_revs new_count range
+  local new_revs new_count
   RUN_TIP "$pol"
   note_rc
   while read -r _lref lsha _rref rsha; do
     [[ -z "${lsha:-}" || "$lsha" =~ ^0+$ ]] && continue   # branch deletion
-    if [[ "$rsha" =~ ^0+$ ]]; then
-      [[ "$REMOTE_ENUMERATED" -eq 1 ]] || continue
-      if ! git rev-parse -q --verify "${lsha}^{commit}" >/dev/null; then
-        echo "pre-push: [history] local commit $lsha does not resolve" >&2
-        PLUMBING_ERR=1
-        continue
-      fi
-      if ! new_revs="$(
-        printf '%s\n' "$ADVERTISED_REFS" |
-          awk 'NF { print "^" $1 }' |
-          git rev-list --ignore-missing "$lsha" --stdin
-      )"; then
-        echo "pre-push: [history] failed to resolve local history for $lsha" >&2
-        PLUMBING_ERR=1
-        continue
-      fi
-      if [[ -z "$new_revs" ]]; then
-        echo "pre-push: [history] no new commits to scan for $lsha"
-        continue
-      fi
-      new_count="$(printf '%s\n' "$new_revs" | grep -c .)"
-      echo "pre-push: [history] scanning introduced content in $new_count new commit(s) for ${_lref:-$lsha}"
-      # Batch the exact new-commit set into ONE guard history process via
-      # --revs-stdin. Revisions are data on stdin, not argv: no shell
-      # splitting, no option injection, one process per policy regardless
-      # of how many commits are new.
-      RUN_HISTORY "$pol" <<<"$new_revs"
-      note_rc
-    else
-      range="$rsha..$lsha"
-      echo "pre-push: [history] scanning introduced content in $range"
-      RUN_HISTORY_RANGE "$range" "$pol"
-      note_rc
+    [[ "$REMOTE_ENUMERATED" -eq 1 ]] || continue
+    if ! git rev-parse -q --verify "${lsha}^{commit}" >/dev/null; then
+      echo "pre-push: [history] local commit $lsha does not resolve" >&2
+      PLUMBING_ERR=1
+      continue
     fi
+    if ! git rev-list "$lsha" >/dev/null; then
+      echo "pre-push: [history] incomplete local ancestry for $lsha" >&2
+      PLUMBING_ERR=1
+      continue
+    fi
+    if ! new_revs="$(
+      printf '%s\n' "$ADVERTISED_REFS" |
+        awk 'NF { print "^" $1 }' |
+        git rev-list --ignore-missing "$lsha" --stdin
+    )"; then
+      echo "pre-push: [history] failed to resolve local history for $lsha" >&2
+      PLUMBING_ERR=1
+      continue
+    fi
+    if [[ -z "$new_revs" ]]; then
+      echo "pre-push: [history] no new commits to scan for $lsha"
+      continue
+    fi
+    new_count="$(printf '%s\n' "$new_revs" | grep -c .)"
+    echo "pre-push: [history] scanning introduced content in $new_count new commit(s) for ${_lref:-$lsha}"
+    # Batch the exact new-commit set into ONE guard history process via
+    # --revs-stdin. Revisions are data on stdin, not argv: no shell
+    # splitting, no option injection, one process per policy regardless
+    # of how many commits are new.
+    RUN_HISTORY "$pol" <<<"$new_revs"
+    note_rc
   done < <(printf '%s\n' "$STDIN_REFS")
 }
 
-prepare_new_branch_ranges
+prepare_remote_ranges
 scan_with "$POLICY"
 if [[ -n "$EXTRA_POLICY" && -f "$EXTRA_POLICY" ]]; then
   scan_with "$EXTRA_POLICY"
+fi
+
+# Do not accept an exclusion snapshot that changed while scanning.
+if [[ "$REMOTE_ENUMERATED" -eq 1 ]]; then
+  if ! current="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL")" ||
+     [[ "$current" != "$ADVERTISED_REFS" ]]; then
+    echo "pre-push: [history] destination refs changed or could not be reverified" >&2
+    PLUMBING_ERR=1
+  fi
 fi
 
 if (( SCANNER_ERR > 0 )); then

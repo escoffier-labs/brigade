@@ -144,6 +144,25 @@ def _seed_remote(remote: Path, repo: Path, ref: str = "refs/heads/main") -> str:
     return sha
 
 
+def _hook_shell():
+    if os.name != "nt":
+        return "bash"
+    # Windows' default bash.exe can be the WSL bridge. These native hook
+    # tests require the executable shipped with the verified Git installation.
+    git = shutil.which("git")
+    assert git, "native hook verification requires installed Git for Windows"
+    git_path = Path(git).resolve()
+    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=15)
+    assert ".windows." in version.lower(), version
+    candidates = [root / "bin/bash.exe" for root in git_path.parents if (root / "cmd/git.exe").is_file()]
+    assert candidates, "Git for Windows installation does not contain bin/bash.exe"
+    bash = candidates[0]
+    assert bash.is_file() and os.access(bash, os.X_OK), f"Git Bash is not executable: {bash}"
+    kernel = subprocess.check_output([str(bash), "-c", "uname -s"], text=True, timeout=15).strip()
+    assert kernel.startswith(("MINGW", "MSYS")), f"expected native Git Bash, got {kernel}"
+    return str(bash)
+
+
 def _run_hook(
     repo: Path,
     remote: str,
@@ -153,7 +172,7 @@ def _run_hook(
 ) -> subprocess.CompletedProcess:
     env = _git_env(repo)
     env["CONTENT_GUARD_EXTRA_POLICY"] = str(extra_policy or repo / "no-private-policy.json")
-    argv = ["bash", str(_HOOK), remote]
+    argv = [_hook_shell(), _HOOK.as_posix(), remote]
     if url is not None:
         argv.append(url)
     return subprocess.run(
@@ -239,7 +258,7 @@ class PrePushHookFunctionalTests(unittest.TestCase):
             self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
             self.assertIn("scanning introduced content in 3 new commit(s)", proc.stdout)
 
-    def test_existing_branch_range_unchanged(self) -> None:
+    def test_existing_branch_scans_unpublished_commits(self) -> None:
         with TemporaryDirectory() as tmp:
             repo = Path(tmp)
             remote = _bare_remote(tmp)
@@ -255,7 +274,8 @@ class PrePushHookFunctionalTests(unittest.TestCase):
                 url=str(remote),
             )
             self.assertEqual(proc.returncode, 1, msg=proc.stdout + proc.stderr)
-            self.assertIn(f"{rsha}..{leak}", proc.stdout)
+            self.assertIn("scanning introduced content in 1 new commit(s)", proc.stdout)
+            self.assertIn(leak[:12], proc.stdout)
 
     def test_branch_deletion_is_skipped(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -510,22 +530,7 @@ if __name__ == "__main__":
 
 @pytest.fixture(scope="module")
 def external_hook_shell():
-    if os.name != "nt":
-        return "bash"
-    # Windows' default bash.exe can be the WSL bridge. These native hook
-    # tests require the executable shipped with the verified Git installation.
-    git = shutil.which("git")
-    assert git, "native hook verification requires installed Git for Windows"
-    git_path = Path(git).resolve()
-    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=15)
-    assert ".windows." in version.lower(), version
-    candidates = [root / "bin/bash.exe" for root in git_path.parents if (root / "cmd/git.exe").is_file()]
-    assert candidates, "Git for Windows installation does not contain bin/bash.exe"
-    bash = candidates[0]
-    assert bash.is_file() and os.access(bash, os.X_OK), f"Git Bash is not executable: {bash}"
-    kernel = subprocess.check_output([str(bash), "-c", "uname -s"], text=True, timeout=15).strip()
-    assert kernel.startswith(("MINGW", "MSYS")), f"expected native Git Bash, got {kernel}"
-    return str(bash)
+    return _hook_shell()
 
 
 @pytest.mark.parametrize("mode", ["tip", "range", "revs-stdin"])
@@ -592,7 +597,10 @@ def test_external_hook_runs_configured_scanner(tmp_path, mode, shadow, external_
         remote = (tmp_path / "unused.git").as_posix()
     elif mode == "range":
         refs = f"refs/heads/main {after} refs/heads/main {before}\n"
-        remote = (tmp_path / "unused.git").as_posix()
+        remote_path = tmp_path / "remote.git"
+        _git(tmp_path, "init", "--bare", "-q", str(remote_path))
+        _git(repo, "push", "-q", str(remote_path), f"{before}:refs/heads/main")
+        remote = remote_path.as_posix()
     else:
         remote_path = tmp_path / "remote.git"
         _git(tmp_path, "init", "--bare", "-q", str(remote_path))
@@ -625,10 +633,6 @@ def test_external_hook_runs_configured_scanner(tmp_path, mode, shadow, external_
     else:
         history = next(row for row in rows if "--history" in row["argv"])
         assert Path(history["cwd"]).resolve().samefile(repo)
-        if mode == "range":
-            assert history["argv"][:3] == ["--history", "--range", f"{before}..{after}"]
-            assert len(history["argv"]) == 5
-        else:
-            assert history["argv"][:2] == ["--history", "--revs-stdin"]
-            assert len(history["argv"]) == 4
-            assert history["stdin"].strip() == after
+        assert history["argv"][:2] == ["--history", "--revs-stdin"]
+        assert len(history["argv"]) == 4
+        assert history["stdin"].strip() == after

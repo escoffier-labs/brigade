@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Store sealed Hub messages with retry lookup, post-ack content purge, storage quotas, and optional required sealing (#2045).
+- Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
+
 - Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
 - Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
 - Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
@@ -68,6 +70,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The content guard detects and redacts private hostnames in equals-form host options, including single- and double-hyphen options and compound host-related keys, while preserving code-expression and arbitrary-assignment skips.
 - The content guard recognizes host-related keys after YAML sequence markers, including indented items and compound keys, while preserving its code-expression and public-suffix skips.
 - Content guard detects host-key assignments after batch `@set` and `set /a`, shell declaration flags, `declare` and `local`, and earlier assignments on the same line.
+- The content guard keeps JavaScript URL template fields such as `https://${cfg.db.host}/path` code-shaped while still detecting literal hosts in quoted expressions, escaped fields, comments, and ordinary strings.
 
 
 ### Added

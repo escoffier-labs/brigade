@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from brigade import cli, release_cmd, security_cmd
 
@@ -18,10 +19,10 @@ def test_security_template_audit_covers_templates_docs_and_allowlisted_examples(
     payload = json.loads(capsys.readouterr().out)
     assert payload["finding_count"] == 0
     assert {
-        "src/brigade/templates/workspace/AGENTS.md",
-        "src/brigade/templates/codex/skills/demo/SKILL.md",
-        "docs/template.md",
-    } <= set(payload["scanned_files"])
+        Path("src/brigade/templates/workspace/AGENTS.md"),
+        Path("src/brigade/templates/codex/skills/demo/SKILL.md"),
+        Path("docs/template.md"),
+    } <= {Path(name) for name in payload["scanned_files"]}
 
 
 def test_security_template_audit_flags_private_values_and_integrates_with_release(tmp_path, capsys):

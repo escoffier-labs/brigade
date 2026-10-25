@@ -757,6 +757,13 @@ class MissingLeakShapeTests(unittest.TestCase):
             'return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
             'get(url=f"https://{cfg.db.local}/x")',  # content-guard: allow private-hostname
             'x = 1; return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
+            # JavaScript template fields hold expressions too (#1962).
+            "`https://${db.home}/p`",  # content-guard: allow private-hostname
+            "`https://${cfg.db.local}/p`",  # content-guard: allow private-hostname
+            "const url = `https://${ cfg.db.local }/p`;",  # content-guard: allow private-hostname
+            "fetch(`https://${cfg.db.local}/p`)",  # content-guard: allow private-hostname
+            "`https://${prefix}/${cfg.db.local}/p`",  # content-guard: allow private-hostname
+            r"`https://\\${cfg.db.local}/p`",  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -798,7 +805,18 @@ class MissingLeakShapeTests(unittest.TestCase):
             'f"https://{db.home[0]}/p"',  # content-guard: allow private-hostname
             'f"https://{db.home or x}/p"',  # content-guard: allow private-hostname
             '"https://{db.home}/p"',  # content-guard: allow private-hostname
-            "`https://${db.home}/p`",  # content-guard: allow private-hostname
+            # JavaScript quoted expressions and escaped fields remain literal.
+            "`https://${lookup('db.home')}/p`",  # content-guard: allow private-hostname
+            "`https://${fetch('https://db.home/p')}`",  # content-guard: allow private-hostname
+            "`https://${fetch('https://${db.home}/p')}`",  # content-guard: allow private-hostname
+            "`https://${'db.home'}/p`",  # content-guard: allow private-hostname
+            r"`https://\${db.home}/p`",  # content-guard: allow private-hostname
+            # Template-like text in ordinary strings, comments, and prose.
+            '"https://${db.home}/p"',  # content-guard: allow private-hostname
+            "hint = '`https://${db.home}/p`'",  # content-guard: allow private-hostname
+            "// const url = `https://${db.home}/p`",  # content-guard: allow private-hostname
+            "const x = 1; /* url = `https://${db.home}/p` */",  # content-guard: allow private-hostname
+            "Use `https://${db.home}/p` for that.",  # content-guard: allow private-hostname
             # f-string text inside an ordinary string or a comment is not an f-string.
             "hint = 'f\"https://{db.home}/path\"'",  # content-guard: allow private-hostname
             '# f"https://{db.home}/path"',  # content-guard: allow private-hostname
@@ -836,6 +854,9 @@ class MissingLeakShapeTests(unittest.TestCase):
             'print(f"x"); cfg = {"url": "https://db.home/x"}',  # content-guard: allow private-hostname
             'requests.get(f"{base}/x", json={"cb": "https://db.home/cb"})',  # content-guard: allow private-hostname
             '{"f": 1, "cfg": {"url": "https://db.home/x"}}',  # content-guard: allow private-hostname
+            "`https://db.home/${path}`",  # content-guard: allow private-hostname
+            "`https://${prefix}/db.home/p`",  # content-guard: allow private-hostname
+            "const x = `${name}`; const url = `https://db.home/p`",  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})

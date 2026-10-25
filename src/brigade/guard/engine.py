@@ -51,6 +51,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     findings: list[Finding] = []
     occupied: list[tuple[int, int, str]] = []
     root_spans: list[tuple[int, int]] = []
+    js_fields: set[int] | None = None
 
     for rule in active_policy.all_rules():
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
@@ -63,12 +64,14 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 match.group(0), _line_at(text, start, end)
             ):
                 continue
-            if (
-                rule.id == "private-hostname"
-                and not any(rule is custom_rule for custom_rule in active_policy.custom_rules)
-                and not _hostname_context(text, start, end)
+            if rule.id == "private-hostname" and not any(
+                rule is custom_rule for custom_rule in active_policy.custom_rules
             ):
-                continue
+                if js_fields is None:
+                    js_fields = set()
+                    _js_template_code_position(text, field_positions=js_fields)
+                if not _hostname_context(text, start, end, js_fields):
+                    continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
             # Earlier detectors can occupy part of an expanded root path.
@@ -310,6 +313,485 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
 
 
+_JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_JS_LINE_END = re.compile(r"[\r\n\u2028\u2029]")
+# Exhaustive reserved tokens, including strict/future reserved words. Only the
+# explicit roles below may consume them; unsupported grammar retains detection.
+_JS_RESERVED_WORDS = frozenset(
+    "await break case catch class const continue debugger default delete do else enum export extends false "
+    "finally for function if implements import in instanceof interface let new null package private protected "
+    "public return static super switch this throw true try typeof var void while with yield".split()
+)
+_JS_VALUE_WORDS = frozenset({"false", "null", "super", "this", "true"})
+
+
+class _JSCode:
+    """Locally proven lexical roles; uncertainty never consumes a literal."""
+
+    def __init__(self, kind: str = "root", anchor: bool = False):
+        self.kind = kind
+        self.operand = True
+        self.anchor = anchor
+        self.previous = ""
+        self.member = False
+        self.async_head = False
+        self.tag = False
+        self.binding = False
+        self.parameters = False
+        self.body = ""
+        self.questions = 0
+        self.control = False
+        self.key = kind == "object"
+        self.bindings: set[str] = set()
+        self.keywords: frozenset[str] = frozenset()
+
+    def value(self, token: str) -> None:
+        self.operand = False
+        self.previous = token
+        self.async_head = False
+        self.member = False
+        self.binding = False
+        self.parameters = False
+        self.body = ""
+        self.control = False
+
+
+def _js_regex_end(text: str, start: int) -> int | None:
+    index = start + 1
+    in_class = False
+    while index < len(text):
+        char = text[index]
+        if char in "\r\n\u2028\u2029":
+            return None
+        if char == "\\":
+            if index + 1 < len(text) and text[index + 1] in "\r\n\u2028\u2029":
+                return None
+            index += 2
+            continue
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        elif char == "/" and not in_class:
+            index += 1
+            while index < len(text) and text[index] in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                index += 1
+            return index
+        index += 1
+    return None
+
+
+def _js_template_code_position(
+    prefix: str, *, template_text: bool = False, field_positions: set[int] | None = None
+) -> bool:
+    """Recognize bounded expression positions with one iterative lexical walk.
+
+    The same token transitions handle code before a template and code inside
+    completed template literals. Unknown syntax retains hostname detection.
+    """
+    if prefix.lstrip().startswith(("<!--", ";", "*")) or (
+        field_positions is None and prefix.lstrip().startswith(("//", "--", "#"))
+    ):
+        return False
+    frames: list[_JSCode | str] = [_JSCode()]
+    contextual: dict[str, list[bool]] = {"await": [], "yield": [], "let": []}
+    template_depth = 0
+    eligible_templates: set[int] = set()
+
+    def leave_scope(code: _JSCode) -> None:
+        for contextual_name in code.bindings - code.keywords:
+            contextual[contextual_name].pop()
+        for contextual_name in code.keywords:
+            contextual[contextual_name].pop()
+
+    def binding_follows(index: int) -> bool:
+        # Sloppy-script 'let' can be an identifier. Prove a declaration's next
+        # binding token rather than guessing from the word alone.
+        while index < len(prefix):
+            if prefix[index].isspace():
+                index += 1
+            elif prefix.startswith("/*", index):
+                end = prefix.find("*/", index + 2)
+                if end == -1:
+                    return False
+                index = end + 2
+            else:
+                following = _JS_WORD.match(prefix, index)
+                return following is not None and (
+                    following.group() not in _JS_RESERVED_WORDS or following.group() in {"await", "yield", "let"}
+                )
+        return False
+
+    index = 0
+    first_word = True
+    while index < len(prefix):
+        frame = frames[-1]
+        char = prefix[index]
+        if isinstance(frame, str):
+            if char == "\\":
+                index += 2
+            elif frame != "`" and char in "\r\n":
+                return False
+            elif char == frame:
+                if frame == "`":
+                    template_depth -= 1
+                    eligible_templates.discard(len(frames) - 1)
+                frames.pop()
+                parent = frames[-1]
+                assert isinstance(parent, _JSCode)
+                parent.value("literal")
+                index += 1
+            elif frame == "`" and prefix.startswith("${", index):
+                if field_positions is not None and len(frames) - 1 in eligible_templates:
+                    position = index + 2
+                    while position < len(prefix) and prefix[position].isspace():
+                        position += 1
+                    field_positions.add(position)
+                frames.append(_JSCode("interpolation", True))
+                index += 2
+            else:
+                index += 1
+            continue
+        # An expression-bodied async arrow ends at its enclosing expression's
+        # delimiter. Its keyword role must not leak into the following code.
+        if frame.kind == "async-arrow" and char in ";,)]}":
+            if frame.operand or frame.questions:
+                return False
+            frames.pop()
+            leave_scope(frame)
+            parent = frames[-1]
+            assert isinstance(parent, _JSCode)
+            parent.value("value")
+            continue
+        if char.isspace():
+            index += 1
+            continue
+        # Preserve general-text comment exclusions, including the established
+        # conservative interpretation of whitespace-followed '--'.
+        if (
+            char == "#"
+            or prefix.startswith("//", index)
+            or (prefix.startswith("--", index) and (index + 2 == len(prefix) or prefix[index + 2].isspace()))
+        ):
+            if field_positions is None:
+                return False
+            line_end = _JS_LINE_END.search(prefix, index)
+            if line_end is None:
+                return False
+            index = line_end.end()
+            continue
+        if prefix.startswith("/*", index):
+            end = prefix.find("*/", index + 2)
+            if end == -1:
+                return False
+            index = end + 2
+            continue
+        # A pending binding or control delimiter cannot start a regex/string.
+        # Do not consume quotes after malformed or unproven keyword contexts.
+        if frame.control and char != "(":
+            return False
+        if frame.binding and _JS_WORD.match(prefix, index) is None:
+            if not ((frame.parameters and char in "(*") or (frame.body and char == "{")):
+                return False
+        if char in "\"'`":
+            if char == "`":
+                if (
+                    field_positions is not None
+                    and template_depth == 0
+                    and not frame.member
+                    and (
+                        (frame.operand and frame.anchor)
+                        or (frame.tag and (frame.anchor or not prefix[index - 1 : index].isspace()))
+                        or (first_word and not prefix[:index].strip())
+                    )
+                ):
+                    eligible_templates.add(len(frames))
+                template_depth += 1
+            frames.append(char)
+            index += 1
+            first_word = False
+            continue
+        if char == "/":
+            if frame.operand:
+                regex_end = _js_regex_end(prefix, index)
+                if regex_end is None:
+                    return False
+                frame.value("literal")
+                index = regex_end
+            else:
+                frame.operand = True
+                frame.previous = "/"
+                frame.async_head = False
+                frame.tag = False
+                index += 2 if prefix.startswith("/=", index) else 1
+            continue
+        if word := _JS_WORD.match(prefix, index):
+            token = word.group()
+            if frame.member or (frame.kind == "object" and frame.key and frame.operand):
+                frame.value(token)
+            elif token in {"const", "let", "var"} and frame.previous in {"", ";", "("}:
+                if token == "let" and not binding_follows(word.end()):
+                    if not contextual["let"] or not contextual["let"][-1] or not frame.operand:
+                        return False
+                    frame.value(token)
+                else:
+                    frame.binding = True
+                    frame.operand = True
+                    frame.previous = token
+            elif frame.binding:
+                if token in _JS_RESERVED_WORDS and token not in {"await", "yield", "let"}:
+                    return False
+                if token in contextual and token not in frame.bindings:
+                    frame.bindings.add(token)
+                    if token not in frame.keywords:
+                        contextual[token].append(True)
+                body, parameters = frame.body, frame.parameters
+                frame.value(token)
+                frame.body, frame.parameters = body, parameters
+            elif token in {"function", "class"}:
+                if not frame.operand:
+                    return False
+                frame.body = "expression" if frame.anchor and frame.operand else "declaration"
+                frame.parameters = token == "function"
+                frame.binding = True
+                frame.previous = token
+                frame.operand = True
+            elif token in {"if", "while", "for", "with", "switch", "catch"}:
+                if not frame.operand:
+                    return False
+                frame.previous = token
+                frame.operand = True
+                frame.control = True
+                frame.tag = False
+            elif token in {"return", "throw"}:
+                if frame.previous not in {"", ";"}:
+                    return False
+                frame.operand = frame.anchor = True
+                frame.previous = token
+                frame.tag = False
+            elif token in {"delete", "void", "typeof", "new"}:
+                if not frame.operand:
+                    return False
+                frame.previous = token
+                frame.tag = False
+            elif token in {"in", "instanceof"} or (token == "of" and frame.kind == "for" and not frame.operand):
+                if frame.operand:
+                    return False
+                frame.operand = True
+                frame.previous = token
+                frame.tag = False
+            elif token in {"await", "yield", "let"}:
+                # A contextual word is an identifier only with a proven binding
+                # in the active lexical scopes. A generator's yield role wins
+                # over any binding outside that function. Unknown roles retain
+                # detection before a slash can consume literal delimiters.
+                if not contextual[token] or not contextual[token][-1]:
+                    return False
+                if not frame.operand:
+                    return False
+                frame.value(token)
+            elif token in {"else", "do"} and frame.operand:
+                frame.previous = token
+                frame.tag = False
+            elif token in _JS_VALUE_WORDS:
+                if not frame.operand:
+                    return False
+                tag = frame.anchor
+                frame.value(token)
+                frame.tag = tag
+            elif token in _JS_RESERVED_WORDS:
+                return False
+            else:
+                # Other contextual spellings (as/from/get/set/using) are
+                # identifiers here. Their unrecognized grammar cannot supply
+                # an operand or statement role through a reserved-word guess.
+                if not frame.operand:
+                    return False
+                tag = frame.anchor or (first_word and len(frames) == 1)
+                frame.value(token)
+                frame.async_head = token == "async"
+                frame.tag = tag
+            first_word = False
+            index = word.end()
+            continue
+        if char in "0123456789":
+            number = _JS_NUMBER.match(prefix, index)
+            assert number is not None
+            frame.value("number")
+            frame.tag = False
+            index = number.end()
+            continue
+        pair = prefix[index : index + 2]
+        if pair in {"++", "--"}:
+            frame.previous = pair
+            frame.tag = False
+            index += 2
+            continue
+        if char == "." or pair == "?.":
+            if frame.operand:
+                return False
+            frame.member = True
+            frame.previous = "."
+            index += 2 if pair == "?." else 1
+            continue
+        if pair == "=>":
+            if frame.previous == "async-parameters":
+                child = _JSCode("async-arrow", True)
+                child.body = "expression"
+                child.keywords = frozenset({"await"})
+                contextual["await"].append(False)
+                frames.append(child)
+                index += 2
+                continue
+            frame.operand = frame.anchor = True
+            frame.body = "expression"
+            frame.previous = "=>"
+            frame.tag = False
+            index += 2
+            continue
+        if char == "(":
+            if frame.parameters:
+                kind = "parameters"
+                frame.parameters = False
+            elif frame.async_head:
+                kind = "async-parameters"
+            elif frame.control:
+                kind = "for" if frame.previous == "for" else "control"
+            else:
+                kind = "group" if frame.operand else "call"
+            frame.control = False
+            frames.append(_JSCode(kind, kind in {"call", "async-parameters"} or frame.anchor))
+            index += 1
+            continue
+        if char == "[":
+            frames.append(_JSCode("array", frame.operand or frame.anchor))
+            index += 1
+            continue
+        if char == "{":
+            if frame.body:
+                kind = "expression-body" if frame.body.endswith("expression") else "block"
+            elif frame.operand and (frame.anchor or frame.kind in {"group", "interpolation"}):
+                kind = "object"
+            elif frame.operand:
+                kind = "block"
+            else:
+                return False
+            child = _JSCode(kind)
+            if frame.body.startswith("generator-"):
+                child.keywords = frozenset({"yield"})
+                contextual["yield"].append(False)
+            frames.append(child)
+            index += 1
+            continue
+        if char in ")]}":
+            if len(frames) == 1:
+                return False
+            kind = frame.kind
+            allowed = {
+                ")": {"parameters", "async-parameters", "for", "control", "group", "call"},
+                "]": {"array"},
+                "}": {"object", "expression-body", "block", "interpolation"},
+            }
+            if kind not in allowed[char]:
+                return False
+            frames.pop()
+            leave_scope(frame)
+            parent = frames[-1]
+            index += 1
+            if kind == "interpolation":
+                assert parent == "`"
+                continue
+            assert isinstance(parent, _JSCode)
+            if kind == "parameters":
+                parent.previous = ")"
+            elif kind == "async-parameters":
+                parent.value("async-parameters")
+                parent.tag = False
+            elif kind in {"control", "for", "block"}:
+                parent.operand = True
+                parent.anchor = False
+                parent.previous = ";"
+                parent.tag = False
+                parent.body = ""
+            else:
+                parent.value(")" if char == ")" else "value")
+                parent.tag = False
+            continue
+        if char == "?":
+            if frame.operand or not frame.anchor:
+                return False
+            frame.questions += 1
+            frame.operand = True
+        elif char == ":":
+            if frame.questions:
+                frame.questions -= 1
+                frame.anchor = frame.operand = True
+            elif frame.kind == "object" and frame.key and not frame.operand:
+                frame.key = False
+                frame.anchor = frame.operand = True
+            else:
+                return False
+        elif char == ";":
+            frame.operand = True
+            frame.anchor = False
+            frame.binding = False
+            frame.body = ""
+        elif char == ",":
+            if frame.kind not in {"call", "array", "object", "parameters", "for"} and not frame.anchor:
+                return False
+            frame.operand = True
+            frame.anchor = frame.kind in {"call", "array"}
+            frame.key = frame.kind == "object"
+        elif char == "=":
+            frame.operand = frame.anchor = True
+            index += 1 if pair in {"==", "!="} else 0
+        elif char == "*" and frame.previous == "function" and frame.body:
+            frame.body = "generator-" + frame.body
+        elif char in "+-*%&|!~^<>":
+            frame.operand = True
+        else:
+            return False
+        frame.previous = char
+        frame.async_head = False
+        frame.tag = False
+        frame.member = False
+        index += 1
+    if template_text:
+        return frames[-1] == "`"
+    if any(isinstance(frame, str) or frame.kind == "interpolation" for frame in frames):
+        return False
+    frame = frames[-1]
+    assert isinstance(frame, _JSCode)
+    if frame.member:
+        return False
+    if frame.operand and frame.anchor:
+        return True
+    if frame.tag:
+        return frame.anchor or not prefix[-1:].isspace()
+    return not prefix.strip()
+
+
+def _whole_js_template_field(before: str, after: str) -> bool:
+    """Whether a match is the entire expression of an unescaped `${...}` field."""
+    opener = before.rstrip()
+    if not opener.endswith("${") or not re.match(r"\s*\}", after):
+        return False
+    stem = opener[:-2]
+    if (len(stem) - len(stem.rstrip("\\"))) % 2:
+        return False
+    # A quote may open a literal inside an earlier expression. Keep detecting
+    # its contents rather than treating its `${...}` text as a template field.
+    match = re.search(r"""`(?:\\.|[^`\\"'])*$""", stem)
+    if match is None:
+        return False
+    if not _js_template_code_position(stem[: match.start()]):
+        return False
+    # Reuse the same lexical walk through this field: interpolation comments
+    # and literals cannot lend their `${...}` text a template-text role.
+    return _js_template_code_position(stem, template_text=True)
+
+
 def _hostname_option_context(before: str, after: str) -> bool:
     """Recognize this option's command context, not every later shell argument."""
     if not re.search(r"(?:^|\s)--?" + _HOSTNAME_KEY + r"=\s*$", before, re.IGNORECASE):
@@ -502,7 +984,7 @@ def _normalized_shell_assignments(before: str) -> str:
     return "".join(pieces)
 
 
-def _hostname_context(text: str, start: int, end: int) -> bool:
+def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | None = None) -> bool:
     """Keep textual hosts while avoiding unquoted attribute expressions.
 
     This is a lexical heuristic, not a source parser. Bare dotted identifiers,
@@ -516,7 +998,11 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
         # A replacement field holding only the host is an expression even in a
         # formatted URL (#1918). Any other URL context keeps matching.
-        return not _whole_fstring_field(before, after)
+        if _whole_fstring_field(before, after):
+            return False
+        if js_fields is not None:
+            return not (start in js_fields and bool(re.match(r"\s*\}", after)))
+        return not _whole_js_template_field(text[:start], after)
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
     if re.search(r"\bf[\"'][^\n]*\{[^}]*$", _normalized_shell_assignments(before), re.IGNORECASE):
