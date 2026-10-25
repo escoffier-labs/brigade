@@ -227,7 +227,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
             r"\b(?:(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
             r"|xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,}"
             r"|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\b"
-            r"|(?-i:AIza[A-Za-z0-9_-]{30,}|glpat-[A-Za-z0-9_-]{16,})(?![\w-]))"
+            r"|(?-i:(?:AIza[A-Za-z0-9_-]{30,}|glpat-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])))"
         ),
         replacement="[redacted-secret]",
         description="Credential with a well-known provider token prefix.",

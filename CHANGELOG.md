@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
+- Receipt telemetry documents every exported attribute and distinguishes requested and effective OpenInference model names while preserving content privacy (#1978).
 - Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
 - Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
 

@@ -49,10 +49,11 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     allow_values = set(active_policy.allow_values)
 
     findings: list[Finding] = []
-    occupied: list[tuple[int, int]] = []
+    occupied: list[tuple[int, int, str]] = []
     root_spans: list[tuple[int, int]] = []
 
     for rule in active_policy.all_rules():
+        is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
         regex = re.compile(rule.pattern, rule.flags)
         for match in regex.finditer(text):
             start, end = match.span()
@@ -70,14 +71,29 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
-            if _overlaps(start, end, occupied):
+            # Earlier detectors can occupy part of an expanded root path.
+            # Retain its independent decision when it fully encloses them;
+            # ordinary and partial-overlap precedence stays unchanged.
+            if any(
+                start < prev_end
+                and end > prev_start
+                and not (is_root_path and start <= prev_start and prev_end <= end)
+                and not (
+                    rule.category in {"secret", "pii"}
+                    and rule.category != prev_category
+                    and any(
+                        root_start <= min(start, prev_start) and max(end, prev_end) <= root_end
+                        for root_start, root_end in root_spans
+                    )
+                )
+                for prev_start, prev_end, prev_category in occupied
+            ):
                 continue
-            # A built-in root path can contain credentials. Keep their
-            # independent policy decisions without changing other precedence.
+            # Keep nested secret and PII decisions independent of root policy.
             if any(
                 start < root_end
                 and end > root_start
-                and not (rule.category == "secret" and root_start <= start and end <= root_end)
+                and not (rule.category in {"secret", "pii"} and root_start <= start and end <= root_end)
                 for root_start, root_end in root_spans
             ):
                 continue
@@ -117,10 +133,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     allowed_by=allowed_by,
                 )
             )
-            if rule.id == "root-path" and not any(rule is custom_rule for custom_rule in active_policy.custom_rules):
+            if is_root_path:
                 root_spans.append((start, end))
             else:
-                occupied.append((start, end))
+                occupied.append((start, end, rule.category))
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -545,25 +561,42 @@ def _overlaps(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
 
 def _edits_for(findings: list[Finding], root_spans: list[tuple[int, int]]) -> list[TextEdit]:
     # Findings retain original offsets, but overlapping replacements cannot
-    # both use those offsets. A masking root edit already covers its secrets.
+    # both use those offsets. A masking root edit covers all contained edits.
     masked_roots = [
-        (finding.start, finding.end)
+        finding
         for finding in findings
         if finding.rule_id == "root-path"
         and finding.category == "infrastructure"
         and finding.redacts
         and (finding.start, finding.end) in root_spans
     ]
-    return [
+    edits = [
         TextEdit(finding.start, finding.end, finding.replacement)
         for finding in findings
         if finding.redacts
         and finding.start < finding.end
-        and not (
-            finding.category == "secret"
-            and any(start <= finding.start and finding.end <= end for start, end in masked_roots)
+        and not any(
+            root is not finding and root.start <= finding.start and finding.end <= root.end for root in masked_roots
         )
     ]
+    # Independent nested detectors can overlap without either decision being
+    # discarded. Mask their union once, using original source offsets. Keep
+    # adjacent edits separate and preserve ordinary non-root precedence.
+    selected: list[TextEdit] = []
+    for edit in sorted(edits, key=lambda item: (item.start, -item.end)):
+        if (
+            selected
+            and edit.start < selected[-1].end
+            and any(
+                root_start <= selected[-1].start and max(selected[-1].end, edit.end) <= root_end
+                for root_start, root_end in root_spans
+            )
+        ):
+            previous = selected[-1]
+            selected[-1] = TextEdit(previous.start, max(previous.end, edit.end), previous.replacement)
+        else:
+            selected.append(edit)
+    return selected
 
 
 def _apply_edits(text: str, edits: list[TextEdit]) -> str:

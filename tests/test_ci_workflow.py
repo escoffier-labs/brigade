@@ -1850,6 +1850,25 @@ def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expe
     assert report["summary"].startswith("windows pytest: files=2 regressions=")
 
 
+@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version"])
+def test_mesh_install_bounds_match_package_metadata(job):
+    import ast
+
+    metadata = (ROOT / "pyproject.toml").read_text()
+    requirements = []
+    for extra in ("mesh", "dev"):
+        match = re.search(rf"^{extra} = (\[.*\])$", metadata, re.MULTILINE)
+        assert match is not None
+        requirements.append(next(item for item in ast.literal_eval(match[1]) if item.startswith("cryptography")))
+    assert requirements[0] == requirements[1]
+    bounds = re.fullmatch(r"cryptography>=(\d+\.\d+\.\d+),(<\d+)", requirements[0])
+    assert bounds is not None
+    floor, ceiling = bounds.groups()
+    section = _workflow_job_section((ROOT / ".github/workflows/ci.yml").read_text(), job)
+    assert f"--only-binary cryptography 'cryptography=={floor}'" in section
+    assert f"--upgrade --only-binary cryptography 'cryptography>={floor},{ceiling}'" in section
+
+
 def test_mesh_jobs_are_protected_and_path_filtered():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
