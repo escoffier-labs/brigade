@@ -41,10 +41,10 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_launch = cloud_sub.add_parser(
         "launch",
-        help="Launch a Cursor Cloud or Jules session from a private prompt file.",
+        help="Launch a Codex Cloud, Cursor Cloud, or Jules session from a private prompt file.",
     )
     p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
-    p_launch.add_argument("--provider", required=True, choices=("cursor-cloud", "jules"))
+    p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "jules"))
     p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
     p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
     p_launch.add_argument(
@@ -56,18 +56,20 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_launch.add_argument(
         "--starting-branch",
         default=None,
-        help="Jules starting branch. Rejected for Cursor Cloud.",
+        help="Jules starting branch. Rejected for Codex Cloud and Cursor Cloud.",
     )
-    p_launch.add_argument("--title", default=None, help="Jules session title. Rejected for Cursor Cloud.")
+    p_launch.add_argument(
+        "--title", default=None, help="Jules session title. Rejected for Codex Cloud and Cursor Cloud."
+    )
     p_launch.add_argument(
         "--auto-create-pr",
         action="store_true",
-        help="Opt in to provider autoCreatePR. Default is off.",
+        help="Opt in to provider autoCreatePR. Default is off. Rejected for Codex Cloud.",
     )
     p_launch.add_argument(
         "--no-plan-approval",
         action="store_true",
-        help="Jules: skip requirePlanApproval. Default for headless conductor launches. Rejected for Cursor Cloud.",
+        help="Jules: skip requirePlanApproval. Default for headless conductor launches. Rejected for Codex and Cursor Cloud.",
     )
     p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
 
@@ -574,24 +576,49 @@ def dispatch(args) -> int:
             print("error: register requires --task-id (or Claude --session-id and --repo)", file=sys.stderr)
             return 2
         try:
-            entry = cloud_tracker.register(
-                target,
-                provider=args.provider,
-                task_id=args.task_id,
-                label=args.label,
-                prompt_hash=args.prompt_hash,
-                session_id=args.session_id,
-                repo=args.repo,
-                commit=args.commit,
-                pr=args.pr,
-                branch=args.branch,
-                expected_artifact=(
-                    {"kind": "branch", "pattern": args.branch or "codex/*"}
-                    if args.artifact_kind == "branch"
-                    else {"kind": "diff"}
-                ),
-            )
-        except (ValueError, OSError) as exc:
+            entry = None
+            if args.provider == "codex-cloud":
+                from .. import codex_cloud
+
+                codex_cloud.require_hub_lease_storage()
+                entry = next(
+                    (
+                        row
+                        for row in cloud_tracker.load_registry(target)["entries"]
+                        if row.get("provider") == "codex-cloud" and row.get("task_id") == args.task_id
+                    ),
+                    None,
+                )
+            if entry is None:
+                entry = cloud_tracker.register(
+                    target,
+                    provider=args.provider,
+                    task_id=args.task_id,
+                    label=args.label,
+                    prompt_hash=args.prompt_hash,
+                    session_id=args.session_id,
+                    repo=args.repo,
+                    commit=args.commit,
+                    pr=args.pr,
+                    branch=args.branch,
+                    expected_artifact=(
+                        {"kind": "branch", "pattern": args.branch or "codex/*"}
+                        if args.artifact_kind == "branch"
+                        else {"kind": "diff"}
+                    ),
+                )
+            if args.provider == "codex-cloud":
+                from .. import codex_cloud
+
+                codex_cloud.acquire_registered_task_lease(
+                    target,
+                    task_id=str(entry["task_id"]),
+                    label=str(entry["label"]),
+                    prompt_hash=entry.get("prompt_hash"),
+                    repo=args.repo or codex_cloud._repo_from_cwd(target),
+                )
+                entry = {key: value for key, value in entry.items() if key != "lease_holder"}
+        except (ValueError, OSError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
         if args.json:
@@ -745,7 +772,7 @@ def dispatch(args) -> int:
 
 
 def _dispatch_launch(args, target: Path) -> int:
-    """Launch Cursor Cloud or Jules from a private prompt file, then register on bind."""
+    """Launch a hosted task from a private prompt file and register it."""
     from .. import cloud_tracker, cursor_cloud, jules_cloud
 
     provider = args.provider
@@ -765,6 +792,28 @@ def _dispatch_launch(args, target: Path) -> int:
             as_json=args.json,
             exit_code=2,
         )
+    if provider == "codex-cloud" and (
+        args.starting_branch is not None
+        or args.title is not None
+        or bool(getattr(args, "no_plan_approval", False))
+        or args.auto_create_pr
+    ):
+        return _emit_launch_payload(
+            {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
+            as_json=args.json,
+            exit_code=2,
+        )
+    if provider == "codex-cloud":
+        from .. import codex_cloud
+
+        try:
+            codex_cloud.require_hub_lease_storage()
+        except OSError:
+            return _emit_launch_payload(
+                {"ok": False, "provider": provider, "label": label, "reason": "secure-owner-store-unavailable"},
+                as_json=args.json,
+                exit_code=2,
+            )
     try:
         prompt = _read_prompt_file(Path(args.prompt_file))
     except ValueError:
@@ -774,6 +823,19 @@ def _dispatch_launch(args, target: Path) -> int:
             exit_code=2,
         )
     prompt_hash = cloud_tracker.prompt_hash(prompt)
+    if provider == "codex-cloud":
+        from .. import codex_cloud
+
+        try:
+            codex_result = codex_cloud.launch_task(prompt, target=target, repo=args.repo, label=label)
+        except (ValueError, OSError) as exc:
+            return _emit_launch_payload(
+                {"ok": False, "provider": provider, "label": label, "reason": str(exc)},
+                as_json=args.json,
+                exit_code=2,
+            )
+        payload = _public_launch_payload(provider=provider, label=label, prompt_hash=prompt_hash, result=codex_result)
+        return _emit_launch_payload(payload, as_json=args.json, exit_code=0 if codex_result["ok"] else 1)
     api_key = _resolve_launch_key(provider)
     if not api_key:
         return _emit_launch_payload(
@@ -891,20 +953,22 @@ def _read_prompt_file(path: Path) -> str:
 def _public_launch_payload(*, provider: str, label: str, prompt_hash: str, result: Any) -> dict[str, Any]:
     """Build the public launch contract. Holder and prompt text never appear."""
     payload: dict[str, Any] = {
-        "ok": bool(result.ok),
+        "ok": bool(result.get("ok")) if provider == "codex-cloud" else bool(result.ok),
         "provider": provider,
         "label": label,
         "prompt_hash": prompt_hash,
-        "reason": result.reason,
+        "reason": result.get("reason") if provider == "codex-cloud" else result.reason,
     }
     if provider == "cursor-cloud":
         payload["task_id"] = result.agent_id
         payload["run_id"] = result.run_id
-    else:
+    elif provider == "jules":
         payload["task_id"] = result.session_id
         payload["session_id"] = result.session_id
         payload["source_name"] = result.source_name
         payload["starting_branch"] = result.starting_branch
+    else:
+        payload["task_id"] = result.get("task_id")
     return payload
 
 
@@ -917,7 +981,14 @@ def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: i
         extra = f" run={payload['run_id']}" if payload.get("run_id") else ""
         print(f"launched {payload.get('provider')} task={payload.get('task_id')}{extra}")
         return exit_code
-    print(f"error: {payload.get('reason', 'launch-failed')}", file=sys.stderr)
+    extra = ""
+    if payload.get("provider") == "codex-cloud":
+        from .. import codex_cloud
+
+        task_id = payload.get("task_id")
+        if isinstance(task_id, str) and codex_cloud.parse_task_id(task_id) == task_id:
+            extra = f" task={task_id}"
+    print(f"error: {payload.get('reason', 'launch-failed')}{extra}", file=sys.stderr)
     return exit_code
 
 

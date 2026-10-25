@@ -14,13 +14,17 @@ import hashlib
 import json
 import os
 import re
+import stat
+import sys
 import time
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
-from . import cloud_tracker, fleet_client, localio, proc
+from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
 
 SUBMIT_TIMEOUT = 120.0
 POLL_TIMEOUT = 60.0
@@ -83,6 +87,20 @@ def _hub_configured() -> bool:
     return bool(fleet_client.load_fleet_config().get("hub_url"))
 
 
+def _require_private_lease_storage() -> None:
+    # Current Windows helpers cannot establish an owner-only ACL boundary.
+    if sys.platform == "win32":
+        raise OSError("secure-owner-store-unavailable")
+
+
+def require_hub_lease_storage() -> bool:
+    """Refuse unsupported Hub storage before admission, provider work, or recovery."""
+    configured = _hub_configured()
+    if configured:
+        _require_private_lease_storage()
+    return configured
+
+
 def _repo_from_cwd(cwd: Path | None) -> str | None:
     """Return an ``owner/repo`` string from the cwd's GitHub origin, if known."""
     try:
@@ -98,6 +116,356 @@ def _repo_from_cwd(cwd: Path | None) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _preflight_registry(register_target: Path | None) -> bool:
+    """Confirm registry-directory durability without reading or rewriting its live file."""
+    if register_target is None:
+        return True
+    from . import cloud_tracker
+
+    descriptor: int | None = None
+    created_sidecar: Path | None = None
+    cleanup_ok = True
+    try:
+        registry_dir = cloud_tracker.registry_path(Path(register_target)).parent
+        registry_dir.mkdir(parents=True, exist_ok=True)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        for _ in range(4):
+            candidate = registry_dir / f".registry-preflight-{uuid4().hex}"
+            try:
+                descriptor = os.open(os.fspath(candidate), flags, 0o600)
+            except FileExistsError:
+                continue
+            created_sidecar = candidate
+            break
+        if descriptor is None:
+            return False
+        written = os.write(descriptor, b"brigade-registry-preflight\n")
+        if written != len(b"brigade-registry-preflight\n"):
+            return False
+        os.fsync(descriptor)
+    except Exception:
+        return False
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                cleanup_ok = False
+        if created_sidecar is not None:
+            try:
+                created_sidecar.unlink()
+            except OSError:
+                cleanup_ok = False
+    return cleanup_ok
+
+
+def _lease_recovery_path(target: Path, lease_id: str) -> Path:
+    digest = hashlib.sha256(lease_id.encode("utf-8")).hexdigest()
+    return cloud_tracker.registry_path(target).parent / "codex-leases" / f"{digest}.json"
+
+
+def _validate_recovery_directory(info: os.stat_result, *, private: bool) -> None:
+    if not stat.S_ISDIR(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+        raise OSError("unsafe lease recovery directory")
+    if os.name == "posix" and (info.st_uid != os.getuid() or info.st_mode & (0o077 if private else 0o022)):
+        raise OSError("lease recovery directory must be owned and private")
+
+
+@contextmanager
+def _lease_recovery_directory(target: Path, *, create: bool) -> Iterator[int]:
+    """Hold each no-follow parent; persist every child directory before use."""
+    _require_private_lease_storage()
+    workspace = Path(target).expanduser().resolve()
+    with ExitStack() as stack:
+        anchor = dirfd.open_directory_chain(workspace)
+        stack.callback(os.close, anchor)
+        _validate_recovery_directory(os.fstat(anchor), private=False)
+        parent = anchor
+        chain = []
+        for component in (".brigade", "cloud", "codex-leases"):
+            if create:
+                try:
+                    dirfd.mkdir_child(parent, component, 0o700)
+                except FileExistsError:
+                    pass
+            child = dirfd.open_child_directory(parent, component)
+            stack.callback(os.close, child)
+            _validate_recovery_directory(os.fstat(child), private=component == "codex-leases")
+            if create:
+                # Also retries an earlier directory publication whose fsync failed.
+                dirfd.fsync_directory(parent)
+            chain.append((parent, component, child))
+            parent = child
+        yield parent
+        for ancestor, component, child in chain:
+            live = dirfd.stat_child(ancestor, component)
+            opened = os.fstat(child)
+            _validate_recovery_directory(live, private=component == "codex-leases")
+            _validate_recovery_directory(opened, private=component == "codex-leases")
+            if (live.st_dev, live.st_ino) != (opened.st_dev, opened.st_ino):
+                raise OSError("lease recovery directory changed")
+        current = dirfd.open_directory_chain(workspace)
+        stack.callback(os.close, current)
+        before, after = os.fstat(anchor), os.fstat(current)
+        _validate_recovery_directory(after, private=False)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise OSError("lease recovery workspace changed")
+
+
+def _read_lease_recovery_record(parent: int, name: str, descriptor: int) -> dict[str, Any]:
+    before = os.fstat(descriptor)
+    bug_io._regular(before, private=True)
+    if before.st_size < 0 or before.st_size > 4096:
+        raise ValueError("lease recovery record exceeds size bound")
+    raw = bytearray()
+    while len(raw) <= 4096:
+        chunk = os.read(descriptor, 4097 - len(raw))
+        if not chunk:
+            break
+        raw.extend(chunk)
+    after = os.fstat(descriptor)
+    bug_io._regular(after, private=True)
+    live = dirfd.stat_child(parent, name)
+    bug_io._regular(live, private=True)
+    if (
+        len(raw) > 4096
+        or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        != (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
+        or (after.st_dev, after.st_ino) != (live.st_dev, live.st_ino)
+    ):
+        raise OSError("lease recovery record changed")
+    record = json.loads(raw)
+    if not isinstance(record, dict) or set(record) != {"schema", "lease_id", "holder"}:
+        raise ValueError("invalid lease recovery record")
+    return record
+
+
+def _recovery_file_flags(flags: int) -> int:
+    return flags | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_BINARY", 0)
+
+
+def _persist_lease_holder(target: Path, lease_id: str, holder: str | None) -> None:
+    """Publish one private, immutable capability before submitting provider work."""
+    _require_private_lease_storage()
+    if not isinstance(holder, str) or not holder:
+        raise ValueError("cloud lease holder unavailable")
+    record = {"schema": "brigade.codex-lease-recovery/1", "lease_id": lease_id, "holder": holder}
+    raw = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+    if len(raw) > 4096:
+        raise ValueError("lease recovery record exceeds size bound")
+    name = _lease_recovery_path(target, lease_id).name
+    with _lease_recovery_directory(target, create=True) as parent:
+        created = True
+        try:
+            descriptor = dirfd.open_child_file(
+                parent,
+                name,
+                _recovery_file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL),
+                0o600,
+                share_write=False,
+            )
+        except FileExistsError:
+            created = False
+            descriptor = dirfd.open_child_file(
+                parent,
+                name,
+                _recovery_file_flags(os.O_RDWR),
+                share_write=False,
+            )
+        try:
+            bug_io._regular(os.fstat(descriptor), private=True)
+            if created:
+                offset = 0
+                while offset < len(raw):
+                    written = os.write(descriptor, raw[offset:])
+                    if written <= 0:
+                        raise OSError("lease recovery record write failed")
+                    offset += written
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if _read_lease_recovery_record(parent, name, descriptor) != record:
+                raise OSError("lease recovery record conflicts with holder")
+            # Partial exclusive creations are never accepted as recovery records.
+            # No provider work starts unless the complete file and name are durable.
+            os.fsync(descriptor)
+            dirfd.fsync_directory(parent)
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            if _read_lease_recovery_record(parent, name, descriptor) != record:
+                raise OSError("lease recovery record changed during publication")
+        finally:
+            os.close(descriptor)
+
+
+def _recover_lease_holder(target: Path, lease_id: str) -> str | None:
+    try:
+        _require_private_lease_storage()
+        name = _lease_recovery_path(target, lease_id).name
+        with _lease_recovery_directory(target, create=False) as parent:
+            descriptor = dirfd.open_child_file(parent, name, _recovery_file_flags(os.O_RDONLY))
+            try:
+                record = _read_lease_recovery_record(parent, name, descriptor)
+            finally:
+                os.close(descriptor)
+        if record.get("schema") != "brigade.codex-lease-recovery/1" or record.get("lease_id") != lease_id:
+            return None
+        holder = record.get("holder")
+        return holder if isinstance(holder, str) and holder else None
+    except (OSError, ValueError, UnicodeError):
+        return None
+
+
+def _attach_registered_lease_holder(target: Path, task_id: str, holder: str) -> None:
+    with cloud_tracker.registry_lock(target):
+        registry = cloud_tracker.load_registry(target)
+        entry = next(
+            (
+                row
+                for row in registry["entries"]
+                if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id
+            ),
+            None,
+        )
+        if isinstance(entry, dict) and not entry.get("lease_holder"):
+            entry["lease_holder"] = holder
+            cloud_tracker.save_registry(target, registry)
+
+
+def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str, Any]:
+    """Submit one task from stdin and bind its Codex provider lease."""
+    from . import cloud_tracker
+
+    try:
+        hub_configured = require_hub_lease_storage()
+    except OSError:
+        return {"ok": False, "reason": "secure-owner-store-unavailable"}
+    if not _preflight_registry(target):
+        return {"ok": False, "reason": "registry-unwritable"}
+    env_id = resolve_environment_id(CONFIGURED_SELECTOR, target=target)
+    prompt_hash = cloud_tracker.prompt_hash(prompt)
+    canonical_repo = repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    lease_id: str | None = None
+    holder: str | None = None
+    if hub_configured:
+        admission = fleet_client.admit_cloud(
+            "codex",
+            repo=canonical_repo,
+            label=cloud_tracker.lease_label("codex", canonical_repo, prompt_hash),
+            prompt_hash=prompt_hash,
+            ttl_seconds=300,
+        )
+        lease_id = admission.lease.get("lease_id") if isinstance(admission.lease, dict) else None
+        if not admission.granted or not isinstance(lease_id, str):
+            return {"ok": False, "reason": admission.reason if not admission.granted else "no-lease"}
+        holder = admission.holder
+        try:
+            _persist_lease_holder(target, lease_id, holder)
+        except Exception:  # noqa: BLE001 - no provider work exists yet
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+            return {"ok": False, "reason": "lease-recovery-unwritable"}
+
+    try:
+        result = proc.run(
+            ["codex", "cloud", "exec", "--env", env_id, "-"],
+            timeout=SUBMIT_TIMEOUT,
+            cwd=target,
+            stdin=prompt.encode("utf-8"),
+        )
+    except Exception:  # noqa: BLE001 - submission errors release the unbound lease
+        if lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return {"ok": False, "reason": "submit-failed"}
+    task_id = parse_task_id(result.stdout) or parse_task_id(result.stderr)
+    if result.code == 124 and task_id is None:
+        return {"ok": False, "reason": "uncertain"}
+    if task_id is None and result.code not in (0, 124):
+        if lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return {"ok": False, "reason": "submit-failed"}
+    if task_id is None:
+        return {"ok": False, "reason": "uncertain"}
+    if lease_id is not None:
+        bound = fleet_client.bind_cloud(
+            lease_id, provider_task_id=task_id, holder=holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
+        )
+        if not bound.granted:
+            return {"ok": False, "reason": "bind-failed", "task_id": task_id}
+    try:
+        entry = cloud_tracker.register(
+            target,
+            provider="codex-cloud",
+            task_id=task_id,
+            label=label,
+            prompt_hash=prompt_hash,
+            lease_holder=holder,
+            environment_audit=environment_audit_ref(CONFIGURED_SELECTOR, env_id),
+        )
+    except Exception:  # noqa: BLE001 - keep known provider work recoverable after persistence failure
+        return {"ok": False, "reason": "tracking-failed", "task_id": task_id}
+    # A recognized ID proves work exists even when the CLI exits nonzero.
+    # Track and bind it, but do not claim the submission completed successfully.
+    return {
+        "ok": result.code == 0,
+        "reason": "ok" if result.code == 0 else "uncertain",
+        "task_id": task_id,
+        "entry": entry,
+    }
+
+
+def acquire_registered_task_lease(
+    target: Path, *, task_id: str, label: str, prompt_hash: str | None, repo: str | None
+) -> None:
+    """Acquire and bind one lease for a Codex task registered after submission."""
+    from . import cloud_tracker
+
+    if not require_hub_lease_storage():
+        return
+    entries = cloud_tracker.load_registry(target)["entries"]
+    current = next(
+        (row for row in entries if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id), None
+    )
+    if isinstance(current, dict) and isinstance(current.get("lease_holder"), str):
+        return
+    snapshot = fleet_client.fetch_cloud()
+    leases = snapshot.get("leases")
+    existing = (
+        next(
+            (row for row in leases if isinstance(row, dict) and row.get("provider_task_id") == task_id),
+            None,
+        )
+        if isinstance(leases, list)
+        else None
+    )
+    if isinstance(existing, dict):
+        existing_id = existing.get("lease_id")
+        recovered = _recover_lease_holder(target, existing_id) if isinstance(existing_id, str) else None
+        if recovered is None:
+            # Snapshots deliberately omit holders. Never invent ownership or a duplicate lease.
+            raise RuntimeError("cloud lease holder unavailable")
+        _attach_registered_lease_holder(target, task_id, recovered)
+        return
+    digest = prompt_hash or cloud_tracker.prompt_hash(label)
+    admission = fleet_client.admit_cloud(
+        "codex",
+        repo=repo,
+        label=cloud_tracker.lease_label("codex", repo, digest),
+        prompt_hash=prompt_hash,
+        ttl_seconds=300,
+    )
+    lease_id = admission.lease.get("lease_id") if isinstance(admission.lease, dict) else None
+    if not admission.granted or not isinstance(lease_id, str):
+        raise RuntimeError("cloud admission denied")
+    try:
+        _persist_lease_holder(target, lease_id, admission.holder)
+    except Exception:  # noqa: BLE001 - this provider task already exists; retain its lease
+        raise RuntimeError("cloud lease recovery unavailable") from None
+    bound = fleet_client.bind_cloud(
+        lease_id, provider_task_id=task_id, holder=admission.holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
+    )
+    if not bound.granted:
+        raise RuntimeError("cloud lease bind failed")
+    if admission.holder:
+        _attach_registered_lease_holder(target, task_id, admission.holder)
 
 
 def parse_task_id(text: str) -> str | None:
@@ -546,6 +914,13 @@ def run_cloud_task(
         return fail_result(
             "fleet admission configuration unavailable", status="uncertain", failure_kind="fleet-admission-unavailable"
         )
+    if hub_configured:
+        try:
+            _require_private_lease_storage()
+        except OSError:
+            return fail_result(
+                "secure-owner-store-unavailable", status="denied", failure_kind="secure-owner-store-unavailable"
+            )
     lease_id: str | None = None
     lease_id_str = ""
     holder: str | None = None
