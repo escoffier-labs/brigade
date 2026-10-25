@@ -374,7 +374,7 @@ def _js_regex_end(text: str, start: int) -> int | None:
     return None
 
 
-def _js_template_code_position(prefix: str) -> bool:
+def _js_template_code_position(prefix: str, *, template_text: bool = False) -> bool:
     """Recognize bounded expression positions with one iterative lexical walk.
 
     The same token transitions handle code before a template and code inside
@@ -714,6 +714,8 @@ def _js_template_code_position(prefix: str) -> bool:
         frame.tag = False
         frame.member = False
         index += 1
+    if template_text:
+        return frames[-1] == "`"
     if any(isinstance(frame, str) or frame.kind == "interpolation" for frame in frames):
         return False
     frame = frames[-1]
@@ -742,8 +744,9 @@ def _whole_js_template_field(before: str, after: str) -> bool:
         return False
     if not _js_template_code_position(stem[: match.start()]):
         return False
-    template = stem[match.start() :]
-    return _quote_at(template, len(template), None) == "`"
+    # Reuse the same lexical walk through this field: interpolation comments
+    # and literals cannot lend their `${...}` text a template-text role.
+    return _js_template_code_position(stem, template_text=True)
 
 
 def _hostname_option_context(before: str, after: str) -> bool:
@@ -955,7 +958,7 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return not (_whole_fstring_field(before, after) or _whole_js_template_field(before, after))
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
-    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
+    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", _normalized_shell_assignments(before), re.IGNORECASE):
         return False
     if before.rstrip().endswith(("[", "{")):
         return False
@@ -963,7 +966,8 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return True
     # Prose punctuation is valid around a host, including commas and
     # parenthesized examples. An identifier immediately before '(' is a call.
-    if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", before):
+    # Complete earlier shell assignment words are opaque to code keywords.
+    if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
     if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
         return True
