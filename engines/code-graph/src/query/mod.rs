@@ -22,7 +22,7 @@ pub use context::{
     render_markdown, render_markdown_budgeted,
 };
 pub use diff::diff_graphs;
-pub use doctor::{DoctorReport, doctor, missing_db_report};
+pub use doctor::{DoctorReport, Freshness, LanguageCoverage, doctor, freshness, missing_db_report};
 pub use export::{ExportFormat, ExportScope, export_graph};
 pub use graph::{
     DEFAULT_IMPACT_DEPTH, file_neighbors, graph_edges, graph_edges_with_depth, graph_query,

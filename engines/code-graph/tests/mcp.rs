@@ -494,6 +494,60 @@ fn tools_call_affected_returns_json_content() {
 }
 
 #[test]
+fn graph_query_tools_attach_compact_freshness() {
+    let (dir, db) = ro_db();
+    let calls = [
+        ("callers", json!({"symbol":"helper"})),
+        ("callees", json!({"symbol":"run"})),
+        ("impact", json!({"symbol":"helper"})),
+        ("affected", json!({"files":["app.py"]})),
+    ];
+    for (name, args) in &calls {
+        let report = tool_json(&db, name, args.clone());
+        let freshness = report["freshness"]
+            .as_object()
+            .unwrap_or_else(|| panic!("{name} response lacks freshness: {report}"));
+        let mut keys: Vec<_> = freshness.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "age_seconds",
+                "branch_moved",
+                "head_moved",
+                "pending_files",
+                "synced_at",
+                "verdict"
+            ],
+            "{name}"
+        );
+        assert_eq!(freshness["verdict"], "FRESH", "{name}");
+        assert_eq!(freshness["pending_files"], 0, "{name}");
+    }
+    // The payload body keeps its original shape next to freshness.
+    let callers = tool_json(&db, "callers", json!({"symbol":"helper"}));
+    assert!(callers["edges"].is_array());
+
+    fs::write(dir.path().join("extra.py"), "def extra():\n    return 2\n").unwrap();
+    for (name, args) in &calls {
+        let report = tool_json(&db, name, args.clone());
+        assert_eq!(report["freshness"]["verdict"], "STALE", "{name}");
+        assert_eq!(report["freshness"]["pending_files"], 1, "{name}");
+    }
+}
+
+fn tool_json(db: &std::path::Path, name: &str, arguments: serde_json::Value) -> serde_json::Value {
+    let resp = handle_request(
+        db,
+        &json!({"jsonrpc":"2.0","id":90,"method":"tools/call",
+                "params":{"name":name,"arguments":arguments}}),
+    )
+    .unwrap();
+    assert_eq!(resp["result"]["isError"], false, "{name}: {resp}");
+    serde_json::from_str(resp["result"]["content"][0]["text"].as_str().unwrap()).unwrap()
+}
+
+#[test]
 fn tools_call_repos_reports_default_db_and_scanned_roots() {
     let (_dir, default_db) = ro_db();
     let root = tempfile::tempdir().unwrap();

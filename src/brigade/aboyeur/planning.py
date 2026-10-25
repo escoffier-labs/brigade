@@ -927,15 +927,18 @@ def _run_codex_appserver_worker(
     sandbox: str | None,
     registry: run_control.LiveTurnRegistry | None,
     on_event=None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> agents.AgentResult:
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
-    active_turn_id: str | None = None
+    active_registration: run_control.ActiveTurn | None = None
     try:
         try:
+            run_control._validate_assignment_ids(task_id, attempt_id)
             prompt = fleet_session_bootstrap.ensure_prompt(
                 prompt, cli_ref=agent.cli or "codex", model=agent.model, cwd=cwd
             )
-        except fleet_session_bootstrap.PreflightDenial as exc:
+        except (fleet_session_bootstrap.PreflightDenial, run_control.ControlError) as exc:
             return agents.AgentResult(
                 text="",
                 ok=False,
@@ -950,10 +953,14 @@ def _run_codex_appserver_worker(
         thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
 
         def on_turn_start(turn_id: str) -> None:
-            nonlocal active_turn_id
-            active_turn_id = turn_id
+            nonlocal active_registration
             if registry is not None:
-                registry.register(worker, thread, turn_id)
+                if task_id is None and attempt_id is None:
+                    active_registration = registry.register(worker, thread, turn_id)
+                else:
+                    active_registration = registry.register(
+                        worker, thread, turn_id, task_id=task_id, attempt_id=attempt_id
+                    )
 
         try:
             turn_kwargs = {"timeout": timeout, "on_event": on_event, "on_turn_start": on_turn_start}
@@ -978,8 +985,19 @@ def _run_codex_appserver_worker(
             reasoning=agent.reasoning,
         )
     finally:
-        if registry is not None and active_turn_id is not None:
-            registry.unregister(worker, active_turn_id)
+        if registry is not None and active_registration is not None:
+            if active_registration.task_id is None and active_registration.attempt_id is None:
+                registry.unregister(
+                    active_registration.worker, active_registration.turn_id, registration=active_registration
+                )
+            else:
+                registry.unregister(
+                    active_registration.worker,
+                    active_registration.turn_id,
+                    task_id=active_registration.task_id,
+                    attempt_id=active_registration.attempt_id,
+                    registration=active_registration,
+                )
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return agents.AgentResult(

@@ -7,7 +7,7 @@ import pytest
 
 from brigade import fleet_hub
 from brigade.fleet_action_auth import ActionError
-from tests.test_fleet_actions import setup_action, seed_t3_roster
+from tests.test_fleet_actions import backdate_action, setup_action, seed_t3_roster
 
 
 requires_posix = pytest.mark.skipif(
@@ -354,6 +354,7 @@ def test_work_evidence_excludes_hidden_text_and_fresh_completed_clears_exact_wor
     assert set(snapshot["evidence"]) == {"version", "state", "evidence_at"}
     action = actions.submit(conn, grant, {**request, "source": source, "observed_revision": snapshot["revision"]})
     assert "SECRET" not in json.dumps(action) and "IGNORE OPERATOR" not in json.dumps(action)
+    backdate_action(conn, action["action_id"])
     with conn:
         conn.execute(
             "UPDATE work_items SET status='completed', version=2, updated_at=?",

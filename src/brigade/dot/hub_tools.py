@@ -26,7 +26,13 @@ DIGEST_PR_LIMIT = 30
 
 class HubTools:
     def __init__(
-        self, runtime: Runtime, state: BridgeState, *, commands: CommandRunner, fleet: FleetTools, inbox: InboxTools
+        self,
+        runtime: Runtime,
+        state: BridgeState,
+        *,
+        commands: CommandRunner,
+        fleet: FleetTools | None,
+        inbox: InboxTools,
     ) -> None:
         self.runtime, self.state = runtime, state
         self.commands, self.fleet, self.inbox = commands, fleet, inbox

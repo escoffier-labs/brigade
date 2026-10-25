@@ -12,6 +12,32 @@ from . import __version__, component_bins, harness_profiles, localio
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+# https://cursor.com/docs/hooks#hook-events (retrieved 2026-10-22)
+_SUPPORTED_HOOK_EVENTS = frozenset(
+    {
+        "sessionStart",
+        "sessionEnd",
+        "preToolUse",
+        "postToolUse",
+        "postToolUseFailure",
+        "subagentStart",
+        "subagentStop",
+        "beforeShellExecution",
+        "afterShellExecution",
+        "beforeMCPExecution",
+        "afterMCPExecution",
+        "beforeReadFile",
+        "afterFileEdit",
+        "beforeSubmitPrompt",
+        "preCompact",
+        "stop",
+        "afterAgentResponse",
+        "afterAgentThought",
+        "beforeTabFileRead",
+        "afterTabFileEdit",
+        "workspaceOpen",
+    }
+)
 _MAX_HOOKS_JSON_BYTES = 1_048_576
 _HOOKS_DOCUMENT_VERSION = 1
 _OVERSIZE_ERROR = "hooks configuration exceeds 1 MiB size limit"
@@ -234,6 +260,8 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     if not isinstance(hooks, dict):
         return "existing hooks field must be an object"
     for event, entries in hooks.items():
+        if version == _HOOKS_DOCUMENT_VERSION and event not in _SUPPORTED_HOOK_EVENTS:
+            return f"existing hooks configuration has unknown event: {event}"
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
         if not all(_is_hook_definition(entry) for entry in entries):
@@ -283,6 +311,15 @@ def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, s
     return {"command": _PROJECT_HOOK_COMMAND if scope == "project" else _MANAGED_HOOK_COMMAND}
 
 
+def _same_command_hook(entry: Any, expected: dict[str, str]) -> bool:
+    """Compare command hooks while accounting for Cursor's default command type."""
+    return (
+        isinstance(entry, dict)
+        and entry.get("type", "command") == "command"
+        and {key: value for key, value in entry.items() if key != "type"} == expected
+    )
+
+
 def project_presence_hook_installed(workspace: Path, event: str) -> bool:
     """Return whether a valid project hooks config owns this Cursor event.
 
@@ -295,7 +332,9 @@ def project_presence_hook_installed(workspace: Path, event: str) -> bool:
     if doc is None or error or not doc:
         return False
     entries = (doc.get("hooks") or {}).get(event)
-    return isinstance(entries, list) and _hook_entry(scope="project") in entries
+    return isinstance(entries, list) and any(
+        _same_command_hook(entry, _hook_entry(scope="project")) for entry in entries
+    )
 
 
 def install_project_presence_hooks(workspace: Path) -> str | None:
@@ -314,7 +353,7 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
         normalized: list[Any] = []
         managed_added = False
         for entry in entries:
-            if entry == managed or entry == legacy:
+            if _same_command_hook(entry, managed) or _same_command_hook(entry, legacy):
                 if not managed_added:
                     normalized.append(managed)
                     managed_added = True

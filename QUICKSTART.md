@@ -208,15 +208,15 @@ After install, check the operator profile:
 brigade operator doctor --target <path> --profile local-operator
 ```
 
-For the file-by-file view, `brigade doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter:
+For the file-by-file view, `brigade doctor --target <path>` reports the apparent harness shape and checks every configured inbox and adapter. This schematic output uses an example workspace and `<HOME>` for the account home:
 
 ```
-brigade doctor: target /home/you/agent-kitchen
+brigade doctor: target /workspace/agent-kitchen
   harnesses: claude, codex, openclaw (owner=openclaw, depth=workspace)
-  [ok]   bootstrap: AGENTS.md   /home/you/agent-kitchen/AGENTS.md
-  [ok]   handoff: claude inbox  /home/you/agent-kitchen/.claude/memory-handoffs
-  [ok]   handoff: codex inbox   /home/you/agent-kitchen/.codex/memory-handoffs
-  [ok]   openclaw: config        /home/you/.openclaw/openclaw.json
+  [ok]   bootstrap: AGENTS.md   /workspace/agent-kitchen/AGENTS.md
+  [ok]   handoff: claude inbox  /workspace/agent-kitchen/.claude/memory-handoffs
+  [ok]   handoff: codex inbox   /workspace/agent-kitchen/.codex/memory-handoffs
+  [ok]   openclaw: config        <HOME>/.openclaw/openclaw.json
   ...
 ```
 

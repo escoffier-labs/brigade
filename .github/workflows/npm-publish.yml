@@ -48,7 +48,7 @@ jobs:
           test "$RELEASE_TAG" = v0.30.0
           test "$(git rev-parse "$RELEASE_TAG^{commit}")" = 02270bc7ffd92640cd8debf39711eca7c8678fc0
           test -z "$(git status --porcelain --untracked-files=all)"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24.22.0'
       - name: Pin npm archive and provenance toolchain
@@ -125,7 +125,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24.22.0'
       - name: Pin npm archive and provenance toolchain
@@ -192,7 +192,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24.22.0'
       - name: Pin npm archive and provenance toolchain
@@ -256,7 +256,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24.22.0'
       - name: Pin npm archive and provenance toolchain

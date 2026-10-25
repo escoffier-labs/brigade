@@ -16,6 +16,8 @@ Use it in three places:
 
 `brigade operator status` and `brigade operator doctor` report whether Content Guard is installed, the expected policy, the active pre-push hook path, the hook mode, suggested repair commands, and the latest local scan summary when available.
 
+Hostname detection uses a lexical heuristic. Host-related keys such as `host`, `hostname`, `server`, and compound keys ending in `_HOST` remain configuration when preceded by an optionally indented YAML sequence marker (`- `). The marker requires following whitespace. Shell declaration prefixes can follow the sequence marker and keep their existing behavior. Arbitrary assignments, unquoted code expressions, call arguments, and private-looking labels within public hostnames remain skipped. This heuristic does not parse YAML or source languages.
+
 Policy guidance:
 
 - `personal`: local/internal working notes and memory handoffs.

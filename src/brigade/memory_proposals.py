@@ -10,7 +10,7 @@ import re
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator
 from urllib.parse import unquote, urlsplit
 
 from . import config as brigade_config, evidence_redaction, localio, memory_cmd, provenance, trust_gate
@@ -133,10 +133,18 @@ def _configuration(target: Path) -> tuple[memory_cmd.MemoryCareConfig, dict[str,
             "depth": cfg.selection.depth if cfg else "repo",
             "harnesses": cfg.selection.harnesses if cfg else [],
         },
-        "care_config": dict(vars(care)),
+        "care_config": {k: v for k, v in vars(care).items() if k != "read_only_paths" or v},
     }
     # JSON roundtrip gives stable arrays rather than in-memory tuple comparisons.
     return care, json.loads(io.json_bytes(binding))
+
+
+def _refuse_read_only(care: memory_cmd.MemoryCareConfig, paths: Iterable[str]) -> None:
+    """Refuse any card path covered by ``read_only_paths``, naming the pattern."""
+    for path in paths:
+        pattern = memory_cmd.read_only_pattern(path, care.read_only_paths)
+        if pattern is not None:
+            raise ProposalError(f"{path} is read-only: it matches read_only_paths pattern {pattern}")
 
 
 def _finding(target: Path, care: memory_cmd.MemoryCareConfig, issue_id: str) -> dict[str, Any]:
@@ -767,8 +775,11 @@ def create_payload(
     care, binding = _configuration(target)
     _outside_roots(_root(target), target, care)
     issue = _finding(target, care, issue_id)
+    _refuse_read_only(care, [survivor, *issue["evidence_references"]])
     proposal_id = "proposal-" + uuid.uuid4().hex
     proposal = _compose(target, care, issue, binding, survivor, relation, reason, proposal_id)
+    # apply refuses every mutation path, index files included, so refuse them here too.
+    _refuse_read_only(care, [m["path"] for m in proposal["mutations"]])
     config_names = (
         brigade_config.CONFIG_REL_PATH,
         *[f"{d}/config.json" for d in brigade_config.LEGACY_WORKSPACE_DIRNAMES],
@@ -1140,6 +1151,9 @@ def apply_payload(*, target: Path, proposal_id: str, digest: str) -> dict[str, A
         already = _already_applied(target, proposal)
         if already:
             return already
+        # After the replay check so a committed proposal stays idempotent, and before
+        # _validate_live so the operator sees the pattern, not a generic config drift error.
+        _refuse_read_only(memory_cmd._config_or_default(target), [m["path"] for m in proposal["mutations"]])
         _validate_live(target, proposal)
         operation_id = "memory-proposal-" + uuid.uuid4().hex
         domain = {

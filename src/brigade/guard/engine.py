@@ -49,9 +49,11 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     allow_values = set(active_policy.allow_values)
 
     findings: list[Finding] = []
-    occupied: list[tuple[int, int]] = []
+    occupied: list[tuple[int, int, str]] = []
+    root_spans: list[tuple[int, int]] = []
 
     for rule in active_policy.all_rules():
+        is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
         regex = re.compile(rule.pattern, rule.flags)
         for match in regex.finditer(text):
             start, end = match.span()
@@ -69,7 +71,31 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
-            if _overlaps(start, end, occupied):
+            # Earlier detectors can occupy part of an expanded root path.
+            # Retain its independent decision when it fully encloses them;
+            # ordinary and partial-overlap precedence stays unchanged.
+            if any(
+                start < prev_end
+                and end > prev_start
+                and not (is_root_path and start <= prev_start and prev_end <= end)
+                and not (
+                    rule.category in {"secret", "pii"}
+                    and rule.category != prev_category
+                    and any(
+                        root_start <= min(start, prev_start) and max(end, prev_end) <= root_end
+                        for root_start, root_end in root_spans
+                    )
+                )
+                for prev_start, prev_end, prev_category in occupied
+            ):
+                continue
+            # Keep nested secret and PII decisions independent of root policy.
+            if any(
+                start < root_end
+                and end > root_start
+                and not (rule.category in {"secret", "pii"} and root_start <= start and end <= root_end)
+                for root_start, root_end in root_spans
+            ):
                 continue
 
             line = _line_for_offset(line_starts, start)
@@ -107,7 +133,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     allowed_by=allowed_by,
                 )
             )
-            occupied.append((start, end))
+            if is_root_path:
+                root_spans.append((start, end))
+            else:
+                occupied.append((start, end, rule.category))
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -126,7 +155,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             )
         )
 
-    redacted = _apply_edits(text, _edits_for(findings))
+    redacted = _apply_edits(text, _edits_for(findings, root_spans))
 
     include_opf = active_options.include_opf or active_policy.opf_backend.enabled
     opf_device = active_options.opf_device or active_policy.opf_backend.device
@@ -257,6 +286,7 @@ _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$"
 # The rest of a field after its expression: '=', a conversion, a format spec
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
+_HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:
@@ -280,6 +310,423 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
 
 
+_JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
+_JS_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+# Exhaustive reserved tokens, including strict/future reserved words. Only the
+# explicit roles below may consume them; unsupported grammar retains detection.
+_JS_RESERVED_WORDS = frozenset(
+    "await break case catch class const continue debugger default delete do else enum export extends false "
+    "finally for function if implements import in instanceof interface let new null package private protected "
+    "public return static super switch this throw true try typeof var void while with yield".split()
+)
+_JS_VALUE_WORDS = frozenset({"false", "null", "super", "this", "true"})
+
+
+class _JSCode:
+    """Locally proven lexical roles; uncertainty never consumes a literal."""
+
+    def __init__(self, kind: str = "root", anchor: bool = False):
+        self.kind = kind
+        self.operand = True
+        self.anchor = anchor
+        self.previous = ""
+        self.member = False
+        self.async_head = False
+        self.tag = False
+        self.binding = False
+        self.parameters = False
+        self.body = ""
+        self.questions = 0
+        self.control = False
+        self.key = kind == "object"
+        self.bindings: set[str] = set()
+        self.keywords: frozenset[str] = frozenset()
+
+    def value(self, token: str) -> None:
+        self.operand = False
+        self.previous = token
+        self.async_head = False
+        self.member = False
+        self.binding = False
+        self.parameters = False
+        self.body = ""
+        self.control = False
+
+
+def _js_regex_end(text: str, start: int) -> int | None:
+    index = start + 1
+    in_class = False
+    while index < len(text):
+        char = text[index]
+        if char == "\\":
+            index += 2
+            continue
+        if char == "[":
+            in_class = True
+        elif char == "]":
+            in_class = False
+        elif char == "/" and not in_class:
+            index += 1
+            while index < len(text) and text[index] in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                index += 1
+            return index
+        index += 1
+    return None
+
+
+def _js_template_code_position(prefix: str) -> bool:
+    """Recognize bounded expression positions with one iterative lexical walk.
+
+    The same token transitions handle code before a template and code inside
+    completed template literals. Unknown syntax retains hostname detection.
+    """
+    if prefix.lstrip().startswith(("<!--", "//", "--", "#", ";", "*")):
+        return False
+    frames: list[_JSCode | str] = [_JSCode()]
+    contextual: dict[str, list[bool]] = {"await": [], "yield": [], "let": []}
+
+    def leave_scope(code: _JSCode) -> None:
+        for contextual_name in code.bindings - code.keywords:
+            contextual[contextual_name].pop()
+        for contextual_name in code.keywords:
+            contextual[contextual_name].pop()
+
+    def binding_follows(index: int) -> bool:
+        # Sloppy-script 'let' can be an identifier. Prove a declaration's next
+        # binding token rather than guessing from the word alone.
+        while index < len(prefix):
+            if prefix[index].isspace():
+                index += 1
+            elif prefix.startswith("/*", index):
+                end = prefix.find("*/", index + 2)
+                if end == -1:
+                    return False
+                index = end + 2
+            else:
+                following = _JS_WORD.match(prefix, index)
+                return following is not None and (
+                    following.group() not in _JS_RESERVED_WORDS or following.group() in {"await", "yield", "let"}
+                )
+        return False
+
+    index = 0
+    first_word = True
+    while index < len(prefix):
+        frame = frames[-1]
+        char = prefix[index]
+        if isinstance(frame, str):
+            if char == "\\":
+                index += 2
+            elif char == frame:
+                frames.pop()
+                parent = frames[-1]
+                assert isinstance(parent, _JSCode)
+                parent.value("literal")
+                index += 1
+            elif frame == "`" and prefix.startswith("${", index):
+                frames.append(_JSCode("interpolation", True))
+                index += 2
+            else:
+                index += 1
+            continue
+        # An expression-bodied async arrow ends at its enclosing expression's
+        # delimiter. Its keyword role must not leak into the following code.
+        if frame.kind == "async-arrow" and char in ";,)]}":
+            if frame.operand or frame.questions:
+                return False
+            frames.pop()
+            leave_scope(frame)
+            parent = frames[-1]
+            assert isinstance(parent, _JSCode)
+            parent.value("value")
+            continue
+        if char.isspace():
+            index += 1
+            continue
+        # Preserve general-text comment exclusions, including the established
+        # conservative interpretation of whitespace-followed '--'.
+        if (
+            char == "#"
+            or prefix.startswith("//", index)
+            or (prefix.startswith("--", index) and (index + 2 == len(prefix) or prefix[index + 2].isspace()))
+        ):
+            return False
+        if prefix.startswith("/*", index):
+            end = prefix.find("*/", index + 2)
+            if end == -1:
+                return False
+            index = end + 2
+            continue
+        # A pending binding or control delimiter cannot start a regex/string.
+        # Do not consume quotes after malformed or unproven keyword contexts.
+        if frame.control and char != "(":
+            return False
+        if frame.binding and _JS_WORD.match(prefix, index) is None:
+            if not ((frame.parameters and char in "(*") or (frame.body and char == "{")):
+                return False
+        if char in "\"'`":
+            frames.append(char)
+            index += 1
+            first_word = False
+            continue
+        if char == "/":
+            if frame.operand:
+                regex_end = _js_regex_end(prefix, index)
+                if regex_end is None:
+                    return False
+                frame.value("literal")
+                index = regex_end
+            else:
+                frame.operand = True
+                frame.previous = "/"
+                frame.async_head = False
+                frame.tag = False
+                index += 2 if prefix.startswith("/=", index) else 1
+            continue
+        if word := _JS_WORD.match(prefix, index):
+            token = word.group()
+            if frame.member or (frame.kind == "object" and frame.key and frame.operand):
+                frame.value(token)
+            elif token in {"const", "let", "var"} and frame.previous in {"", ";", "("}:
+                if token == "let" and not binding_follows(word.end()):
+                    if not contextual["let"] or not contextual["let"][-1] or not frame.operand:
+                        return False
+                    frame.value(token)
+                else:
+                    frame.binding = True
+                    frame.operand = True
+                    frame.previous = token
+            elif frame.binding:
+                if token in _JS_RESERVED_WORDS and token not in {"await", "yield", "let"}:
+                    return False
+                if token in contextual and token not in frame.bindings:
+                    frame.bindings.add(token)
+                    if token not in frame.keywords:
+                        contextual[token].append(True)
+                body, parameters = frame.body, frame.parameters
+                frame.value(token)
+                frame.body, frame.parameters = body, parameters
+            elif token in {"function", "class"}:
+                if not frame.operand:
+                    return False
+                frame.body = "expression" if frame.anchor and frame.operand else "declaration"
+                frame.parameters = token == "function"
+                frame.binding = True
+                frame.previous = token
+                frame.operand = True
+            elif token in {"if", "while", "for", "with", "switch", "catch"}:
+                if not frame.operand:
+                    return False
+                frame.previous = token
+                frame.operand = True
+                frame.control = True
+                frame.tag = False
+            elif token in {"return", "throw"}:
+                if frame.previous not in {"", ";"}:
+                    return False
+                frame.operand = frame.anchor = True
+                frame.previous = token
+                frame.tag = False
+            elif token in {"delete", "void", "typeof", "new"}:
+                if not frame.operand:
+                    return False
+                frame.previous = token
+                frame.tag = False
+            elif token in {"in", "instanceof"} or (token == "of" and frame.kind == "for" and not frame.operand):
+                if frame.operand:
+                    return False
+                frame.operand = True
+                frame.previous = token
+                frame.tag = False
+            elif token in {"await", "yield", "let"}:
+                # A contextual word is an identifier only with a proven binding
+                # in the active lexical scopes. A generator's yield role wins
+                # over any binding outside that function. Unknown roles retain
+                # detection before a slash can consume literal delimiters.
+                if not contextual[token] or not contextual[token][-1]:
+                    return False
+                if not frame.operand:
+                    return False
+                frame.value(token)
+            elif token in {"else", "do"} and frame.operand:
+                frame.previous = token
+                frame.tag = False
+            elif token in _JS_VALUE_WORDS:
+                if not frame.operand:
+                    return False
+                tag = frame.anchor
+                frame.value(token)
+                frame.tag = tag
+            elif token in _JS_RESERVED_WORDS:
+                return False
+            else:
+                # Other contextual spellings (as/from/get/set/using) are
+                # identifiers here. Their unrecognized grammar cannot supply
+                # an operand or statement role through a reserved-word guess.
+                if not frame.operand:
+                    return False
+                tag = frame.anchor or (first_word and len(frames) == 1)
+                frame.value(token)
+                frame.async_head = token == "async"
+                frame.tag = tag
+            first_word = False
+            index = word.end()
+            continue
+        if char.isdigit():
+            number = _JS_NUMBER.match(prefix, index)
+            assert number is not None
+            frame.value("number")
+            frame.tag = False
+            index = number.end()
+            continue
+        pair = prefix[index : index + 2]
+        if pair in {"++", "--"}:
+            frame.previous = pair
+            frame.tag = False
+            index += 2
+            continue
+        if char == "." or pair == "?.":
+            if frame.operand:
+                return False
+            frame.member = True
+            frame.previous = "."
+            index += 2 if pair == "?." else 1
+            continue
+        if pair == "=>":
+            if frame.previous == "async-parameters":
+                child = _JSCode("async-arrow", True)
+                child.body = "expression"
+                child.keywords = frozenset({"await"})
+                contextual["await"].append(False)
+                frames.append(child)
+                index += 2
+                continue
+            frame.operand = frame.anchor = True
+            frame.body = "expression"
+            frame.previous = "=>"
+            frame.tag = False
+            index += 2
+            continue
+        if char == "(":
+            if frame.parameters:
+                kind = "parameters"
+                frame.parameters = False
+            elif frame.async_head:
+                kind = "async-parameters"
+            elif frame.control:
+                kind = "for" if frame.previous == "for" else "control"
+            else:
+                kind = "group" if frame.operand else "call"
+            frame.control = False
+            frames.append(_JSCode(kind, kind in {"call", "async-parameters"} or frame.anchor))
+            index += 1
+            continue
+        if char == "[":
+            frames.append(_JSCode("array", frame.operand or frame.anchor))
+            index += 1
+            continue
+        if char == "{":
+            if frame.body:
+                kind = "expression-body" if frame.body.endswith("expression") else "block"
+            elif frame.operand and (frame.anchor or frame.kind in {"group", "interpolation"}):
+                kind = "object"
+            elif frame.operand:
+                kind = "block"
+            else:
+                return False
+            child = _JSCode(kind)
+            if frame.body.startswith("generator-"):
+                child.keywords = frozenset({"yield"})
+                contextual["yield"].append(False)
+            frames.append(child)
+            index += 1
+            continue
+        if char in ")]}":
+            if len(frames) == 1:
+                return False
+            kind = frame.kind
+            allowed = {
+                ")": {"parameters", "async-parameters", "for", "control", "group", "call"},
+                "]": {"array"},
+                "}": {"object", "expression-body", "block", "interpolation"},
+            }
+            if kind not in allowed[char]:
+                return False
+            frames.pop()
+            leave_scope(frame)
+            parent = frames[-1]
+            index += 1
+            if kind == "interpolation":
+                assert parent == "`"
+                continue
+            assert isinstance(parent, _JSCode)
+            if kind == "parameters":
+                parent.previous = ")"
+            elif kind == "async-parameters":
+                parent.value("async-parameters")
+                parent.tag = False
+            elif kind in {"control", "for", "block"}:
+                parent.operand = True
+                parent.anchor = False
+                parent.previous = ";"
+                parent.tag = False
+                parent.body = ""
+            else:
+                parent.value(")" if char == ")" else "value")
+                parent.tag = False
+            continue
+        if char == "?":
+            if frame.operand or not frame.anchor:
+                return False
+            frame.questions += 1
+            frame.operand = True
+        elif char == ":":
+            if frame.questions:
+                frame.questions -= 1
+                frame.anchor = frame.operand = True
+            elif frame.kind == "object" and frame.key and not frame.operand:
+                frame.key = False
+                frame.anchor = frame.operand = True
+            else:
+                return False
+        elif char == ";":
+            frame.operand = True
+            frame.anchor = False
+            frame.binding = False
+            frame.body = ""
+        elif char == ",":
+            if frame.kind not in {"call", "array", "object", "parameters", "for"} and not frame.anchor:
+                return False
+            frame.operand = True
+            frame.anchor = frame.kind in {"call", "array"}
+            frame.key = frame.kind == "object"
+        elif char == "=":
+            frame.operand = frame.anchor = True
+            index += 1 if pair in {"==", "!="} else 0
+        elif char == "*" and frame.previous == "function" and frame.body:
+            frame.body = "generator-" + frame.body
+        elif char in "+-*%&|!~^<>":
+            frame.operand = True
+        else:
+            return False
+        frame.previous = char
+        frame.async_head = False
+        frame.tag = False
+        frame.member = False
+        index += 1
+    if any(isinstance(frame, str) or frame.kind == "interpolation" for frame in frames):
+        return False
+    frame = frames[-1]
+    assert isinstance(frame, _JSCode)
+    if frame.member:
+        return False
+    if frame.operand and frame.anchor:
+        return True
+    if frame.tag:
+        return frame.anchor or not prefix[-1:].isspace()
+    return not prefix.strip()
+
+
 def _whole_js_template_field(before: str, after: str) -> bool:
     """Whether a match is the entire expression of an unescaped `${...}` field."""
     opener = before.rstrip()
@@ -291,15 +738,204 @@ def _whole_js_template_field(before: str, after: str) -> bool:
     # A quote may open a literal inside an earlier expression. Keep detecting
     # its contents rather than treating its `${...}` text as a template field.
     match = re.search(r"""`(?:\\.|[^`\\"'])*$""", stem)
-    # Templates use the same expression positions as the f-string heuristic.
-    if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
+    if match is None:
         return False
-    prefix = stem[: match.start()]
-    if "/*" in prefix or prefix.lstrip().startswith(_LINE_START_COMMENT_PREFIXES):
+    if not _js_template_code_position(stem[: match.start()]):
         return False
-    if _quote_at(stem, match.start(), None) is not None:
+    template = stem[match.start() :]
+    return _quote_at(template, len(template), None) == "`"
+
+
+def _hostname_option_context(before: str, after: str) -> bool:
+    """Recognize this option's command context, not every later shell argument."""
+    if not re.search(r"(?:^|\s)--?" + _HOSTNAME_KEY + r"=\s*$", before, re.IGNORECASE):
         return False
-    return _quote_at(stem, len(stem), None) == "`"
+    # Retain the original simple-option recall, including argument punctuation.
+    if not re.search(r"[(){}\[\];]", before) and not re.match(r"\s*[,)}\];]", after):
+        return True
+    if re.match(r"\s*,", after):
+        return False
+    line = before + "hostname" + after
+    masked = list(line)
+    quote: str | None = None
+    escaped = False
+    word_boundary = True
+    for index, char in enumerate(line):
+        if escaped:
+            masked[index] = "x"
+            escaped = False
+            word_boundary = False
+        elif char == "\\" and quote != "'":
+            masked[index] = "x"
+            escaped = True
+            word_boundary = False
+        elif quote is not None:
+            masked[index] = "x"
+            word_boundary = False
+            if char == quote:
+                quote = None
+        elif char in "\"'`":
+            masked[index] = "x"
+            quote = char
+            word_boundary = False
+        elif char == "#" and word_boundary:
+            masked[index:] = " " * (len(line) - index)
+            break
+        else:
+            word_boundary = char.isspace()
+    tokens = list(re.finditer(r"\$\(|&&|\|\||[();{}|&]|[^\s();{}|&$]+|\$(?!\()", "".join(masked)))
+    # A complete earlier word expansion is argument data. Balance delimiters
+    # lexically without interpreting parameter or arithmetic expressions.
+    pairs: dict[int, int] = {}
+    openings: list[tuple[str, int]] = []
+    for index, token in enumerate(tokens):
+        value = token.group()
+        if value in {"(", "$(", "{"}:
+            openings.append(("}" if value == "{" else ")", index))
+        elif value in {")", "}"}:
+            if openings and openings[-1][0] == value:
+                pairs[openings.pop()[1]] = index
+            else:
+                openings.clear()
+    words: list[str] = []
+    groups: list[tuple[str, list[str], bool, bool]] = []
+    bracket_in_command = False
+    found = False
+    previous = ""
+    skip_until = -1
+    for index, token in enumerate(tokens):
+        if index <= skip_until:
+            continue
+        value = token.group()
+        expansion = value == "$(" or (value == "{" and line[max(0, token.start() - 1) : token.start()] == "$")
+        if not found and expansion:
+            closing = pairs.get(index)
+            if closing is not None and tokens[closing].end() <= len(before):
+                words.append("word")
+                previous = "word"
+                skip_until = closing
+                continue
+            if value == "{" or line[token.start() : token.start() + 3] == "$((":
+                return False  # The option itself is inside an expression.
+        if value in {"(", "$(", "{"}:
+            if not found and value != "$(" and words:
+                return False  # callback( ... ) and callback ( ... ) are calls.
+            if not found and value == "{" and (token.end() == len(line) or not line[token.end()].isspace()):
+                return False
+            groups.append((value, words, not found, bracket_in_command))
+            words = []
+            bracket_in_command = False
+        elif value in {")", "}"}:
+            if not groups:
+                return False
+            opening, outer_words, enclosing, outer_bracket = groups.pop()
+            if (value == "}") != (opening == "{"):
+                return False
+            if enclosing and value == "}" and previous not in {";", "&"}:
+                return False
+            if not words and previous not in {")", "}", ";", "&"}:
+                return False
+            words = outer_words + ["group"]
+            bracket_in_command = outer_bracket
+            if found and not groups:
+                return True  # Later commands cannot invalidate this context.
+        elif value in {";", "&&", "||", "|", "&"}:
+            if not words:
+                return False
+            words = []
+            bracket_in_command = False
+        else:
+            if not found and re.search(r"[\[\]]", value):
+                bracket_in_command = True
+            if token.start() <= len(before) < token.end():
+                if bracket_in_command:
+                    return False
+                found = True
+                if not groups:
+                    return not bool(re.match(r"\s*[,)}\]]", after))
+            words.append(value)
+        previous = value
+    return False
+
+
+def _normalized_shell_assignments(before: str) -> str:
+    """Treat complete declaration assignment values as opaque shell words."""
+    if not re.match(r"\s*(?:-[ \t]+)?(?:export|readonly|declare|local|@?set)\b", before, re.IGNORECASE):
+        return before
+
+    def closed(index: int, delimiter: str) -> int | None:
+        delimiters = [delimiter]
+        while index < len(before):
+            delimiter = delimiters[-1]
+            char = before[index]
+            if char == delimiter:
+                delimiters.pop()
+                index += 1
+                if not delimiters:
+                    return index
+                continue
+            if delimiter == "'":
+                index += 1
+                continue
+            if char == "\\":
+                index += 2
+                continue
+            nested = None
+            width = 1
+            if before.startswith("${", index):
+                nested, width = "}", 2
+            elif before.startswith("$(", index):
+                nested, width = ")", 2
+            elif char in "\"'`" and not (delimiter == '"' and char == "'"):
+                nested = char
+            elif char == "(" and delimiter == ")":
+                nested = delimiter
+            if nested is not None:
+                delimiters.append(nested)
+                index += width
+            else:
+                index += 1
+        return None
+
+    pieces: list[str] = []
+    position = 0
+    for assignment in re.finditer(r"(?<!\S)[a-z_][a-z0-9_]*=", before, re.IGNORECASE):
+        if assignment.start() < position:
+            continue
+        index = assignment.end()
+        while index < len(before) and not before[index].isspace():
+            char = before[index]
+            nested = None
+            width = 1
+            if before.startswith("${", index):
+                nested, width = "}", 2
+            elif before.startswith("$(", index):
+                nested, width = ")", 2
+            elif char in "\"'`":
+                nested = char
+            elif char == "\\":
+                if index + 1 == len(before):
+                    return before
+                index += 2
+                continue
+            # Attached braces are shell word data, including any brace left
+            # after a parameter expansion closes. Command operators are not.
+            elif char in ";|&()":
+                return before
+            if nested is not None:
+                parsed = closed(index + width, nested)
+                if parsed is None:
+                    return before
+                index = parsed
+            else:
+                index += 1
+        pieces.append(before[position : assignment.end()])
+        # Every successfully consumed word is opaque, including literal braces.
+        # Keep the final empty host assignment open for the hostname matcher.
+        pieces.append("value" if index > assignment.end() else "")
+        position = index
+    pieces.append(before[position:])
+    return "".join(pieces)
 
 
 def _hostname_context(text: str, start: int, end: int) -> bool:
@@ -335,13 +971,22 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return False
     if re.match(r"\s*(?:=|\?)", after):
         return False
-    # Host-related assignment keys behind shell declaration prefixes
-    # (export/readonly, and Windows batch set) are still configuration (#1920).
+    # Host-related keys after a YAML sequence marker or shell declaration
+    # prefixes (export/readonly, and Windows batch set) are configuration.
+    # Require whitespace after '-' so a hyphenated key is not a sequence item.
     if re.fullmatch(
-        r"\s*(?:(?:export|readonly|set)\s+)*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
-        before,
+        r"\s*(?:-[ \t]+)?(?:(?:(?:export|readonly|declare|(?P<local_declaration>local))(?:[ \t]+-[a-z]+)*"
+        r"|@?set(?:[ \t]+/a)?)[ \t]+"
+        r"(?:[a-z_][a-z0-9_]*=(?:[^\s\"'`;|&(){}]|'[^'\r\n]*'|\"[^\"\r\n]*\")*[ \t]+)*)*"
+        + _HOSTNAME_KEY
+        + r"(?(local_declaration)=|\s*[:=]\s*)",
+        _normalized_shell_assignments(before),
         re.IGNORECASE,
     ):
+        return True
+    # Separators and balanced shell groups bound the active option; punctuation
+    # inside earlier arguments must not hide it or turn a call into a command.
+    if _hostname_option_context(before, after):
         return True
     if re.search(r"[(){}\[\];=]|\b(?:return|const|let|var|assert|import)\b", before):
         return False
@@ -552,12 +1197,44 @@ def _overlaps(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
     return any(start < prev_end and end > prev_start for prev_start, prev_end in occupied)
 
 
-def _edits_for(findings: list[Finding]) -> list[TextEdit]:
-    return [
+def _edits_for(findings: list[Finding], root_spans: list[tuple[int, int]]) -> list[TextEdit]:
+    # Findings retain original offsets, but overlapping replacements cannot
+    # both use those offsets. A masking root edit covers all contained edits.
+    masked_roots = [
+        finding
+        for finding in findings
+        if finding.rule_id == "root-path"
+        and finding.category == "infrastructure"
+        and finding.redacts
+        and (finding.start, finding.end) in root_spans
+    ]
+    edits = [
         TextEdit(finding.start, finding.end, finding.replacement)
         for finding in findings
-        if finding.redacts and finding.start < finding.end
+        if finding.redacts
+        and finding.start < finding.end
+        and not any(
+            root is not finding and root.start <= finding.start and finding.end <= root.end for root in masked_roots
+        )
     ]
+    # Independent nested detectors can overlap without either decision being
+    # discarded. Mask their union once, using original source offsets. Keep
+    # adjacent edits separate and preserve ordinary non-root precedence.
+    selected: list[TextEdit] = []
+    for edit in sorted(edits, key=lambda item: (item.start, -item.end)):
+        if (
+            selected
+            and edit.start < selected[-1].end
+            and any(
+                root_start <= selected[-1].start and max(selected[-1].end, edit.end) <= root_end
+                for root_start, root_end in root_spans
+            )
+        ):
+            previous = selected[-1]
+            selected[-1] = TextEdit(previous.start, max(previous.end, edit.end), previous.replacement)
+        else:
+            selected.append(edit)
+    return selected
 
 
 def _apply_edits(text: str, edits: list[TextEdit]) -> str:

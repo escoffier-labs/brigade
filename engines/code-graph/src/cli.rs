@@ -847,10 +847,11 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
             .unwrap_or_else(|| "missing".to_string())
     );
     println!(
-        "branch: synced={} current={} drifted={}",
+        "branch: synced={} current={} drifted={} head_moved={}",
         report.branch.synced.as_deref().unwrap_or("unknown"),
         report.branch.current.as_deref().unwrap_or("unknown"),
-        report.branch.drifted
+        report.branch.drifted,
+        report.branch.head_moved
     );
     println!(
         "pending: new_files={} changed_files={} deleted_files={} fingerprint_stale={}",
@@ -882,6 +883,17 @@ fn print_doctor_report(report: &crate::query::DoctorReport, json: bool) -> Resul
         report.parse_errors.count,
         sample_suffix(&report.parse_errors.sample)
     );
+    for (language, coverage) in &report.coverage {
+        println!(
+            "coverage.{language}: files={} symbols={} call_sites={} resolved={} unresolved={} cross_file_edges={}",
+            coverage.files,
+            coverage.symbols,
+            coverage.call_sites,
+            coverage.resolved_call_sites,
+            coverage.unresolved_call_sites,
+            coverage.cross_file_edges
+        );
+    }
     for warning in &report.warnings {
         println!("warning: {warning}");
     }

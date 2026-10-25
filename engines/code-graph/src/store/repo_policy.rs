@@ -49,14 +49,20 @@ pub(super) fn has_git_marker(dir: &Path) -> bool {
     git.is_file() || git.join("HEAD").is_file()
 }
 
-/// Record which branch the graph describes, so `doctor` can flag a checkout
-/// of a different branch as drift. Removed when the root has no git context,
-/// so a repo that stops being one does not pin a stale branch forever.
+/// Record which branch and commit the graph describes, so `doctor` can flag a
+/// checkout of a different branch as drift and report a moved HEAD. Each key
+/// is removed when it cannot be read, so a repo that stops being one does not
+/// pin a stale branch or commit forever.
 pub(super) fn write_branch_meta(tx: &Connection, root: &Path) -> Result<()> {
-    match current_git_branch(root) {
-        Some(branch) => crate::store::meta::upsert(tx, "synced_branch", &branch)?,
-        None => {
-            tx.execute("DELETE FROM meta WHERE key = 'synced_branch'", [])?;
+    for (key, value) in [
+        ("synced_branch", current_git_branch(root)),
+        ("synced_head", current_git_head(root)),
+    ] {
+        match value {
+            Some(value) => crate::store::meta::upsert(tx, key, &value)?,
+            None => {
+                tx.execute("DELETE FROM meta WHERE key = ?1", [key])?;
+            }
         }
     }
     Ok(())
@@ -66,7 +72,73 @@ pub(super) fn write_branch_meta(tx: &Connection, root: &Path) -> Result<()> {
 /// `gitdir:` pointer of linked worktrees. Detached heads report the short
 /// commit as `detached@<12 hex>`.
 pub(crate) fn current_git_branch(root: &Path) -> Option<String> {
-    let git_dir = root.ancestors().find_map(|dir| {
+    let git_dir = git_dir(root)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    if let Some(reference) = head.strip_prefix("ref:") {
+        let reference = reference.trim();
+        let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference);
+        return Some(branch.to_string());
+    }
+    let short: String = head.chars().take(12).collect();
+    if short.chars().all(|character| character.is_ascii_hexdigit()) && !short.is_empty() {
+        Some(format!("detached@{short}"))
+    } else {
+        None
+    }
+}
+
+/// Full commit id HEAD points at, without spawning git. Resolves a symbolic
+/// HEAD through loose refs in the worktree and common git dirs, then
+/// `packed-refs`. `None` for an unborn branch or an unreadable repository.
+pub(crate) fn current_git_head(root: &Path) -> Option<String> {
+    let git_dir = git_dir(root)?;
+    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
+    let head = head.trim();
+    let Some(reference) = head.strip_prefix("ref:") else {
+        return is_object_id(head).then(|| head.to_string());
+    };
+    let reference = reference.trim();
+    if !reference.starts_with("refs/") || reference.split('/').any(|part| part == "..") {
+        return None;
+    }
+    let common = common_git_dir(&git_dir);
+    for dir in [&git_dir, &common] {
+        if let Ok(value) = fs::read_to_string(dir.join(reference)) {
+            let value = value.trim();
+            if is_object_id(value) {
+                return Some(value.to_string());
+            }
+        }
+    }
+    let packed = fs::read_to_string(common.join("packed-refs")).ok()?;
+    packed.lines().find_map(|line| {
+        let (id, name) = line.split_once(' ')?;
+        (name.trim() == reference && is_object_id(id)).then(|| id.to_string())
+    })
+}
+
+fn is_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64) && value.chars().all(|character| character.is_ascii_hexdigit())
+}
+
+/// A linked worktree's git dir names the shared repository in `commondir`;
+/// branch refs and `packed-refs` live there.
+fn common_git_dir(git_dir: &Path) -> PathBuf {
+    let Ok(content) = fs::read_to_string(git_dir.join("commondir")) else {
+        return git_dir.to_path_buf();
+    };
+    let pointed = Path::new(content.trim());
+    if pointed.is_absolute() {
+        pointed.to_path_buf()
+    } else {
+        git_dir.join(pointed)
+    }
+}
+
+/// The git dir for `root`, following the `gitdir:` pointer of linked worktrees.
+fn git_dir(root: &Path) -> Option<PathBuf> {
+    root.ancestors().find_map(|dir| {
         let git = dir.join(".git");
         if git.join("HEAD").is_file() {
             return Some(git);
@@ -84,20 +156,7 @@ pub(crate) fn current_git_branch(root: &Path) -> Option<String> {
             }
         }
         None
-    })?;
-    let head = fs::read_to_string(git_dir.join("HEAD")).ok()?;
-    let head = head.trim();
-    if let Some(reference) = head.strip_prefix("ref:") {
-        let reference = reference.trim();
-        let branch = reference.strip_prefix("refs/heads/").unwrap_or(reference);
-        return Some(branch.to_string());
-    }
-    let short: String = head.chars().take(12).collect();
-    if short.chars().all(|character| character.is_ascii_hexdigit()) && !short.is_empty() {
-        Some(format!("detached@{short}"))
-    } else {
-        None
-    }
+    })
 }
 
 pub(super) fn ensure_graphtrail_ignored(root: &Path) -> Result<()> {

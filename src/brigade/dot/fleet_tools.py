@@ -162,9 +162,11 @@ def load_fleet_config(path: Path) -> FleetConfig:
             os.close(descriptor)
 
 
-def authorization_prompt(prompt: str, owner: OwnerAuthorization, read_only: bool) -> str:
+def authorization_prompt(prompt: str, owner: OwnerAuthorization | None, read_only: bool) -> str:
     if read_only:
         return prompt
+    if owner is None:
+        raise DotError("invalid_config")
     return prompt + "\n\n## Owner authorization [" + owner.version + "]\n" + owner.text
 
 
@@ -181,14 +183,18 @@ class FleetTools:
         clock: Clock = utc_now,
     ):
         self.runtime, self.state, self.clock = runtime, state, clock
+        t3_fleet, fleet_config = runtime.paths.bin.t3_fleet, runtime.paths.fleet_config
+        if t3_fleet is None or fleet_config is None:
+            # Only a dispatch profile's runtime configures the T3 fleet client.
+            raise DotError("invalid_config")
         self.runner = (
             runner
             if runner is not None
             else _DotFleetRunner(
-                runtime.paths.bin.t3_fleet,
+                t3_fleet,
                 runtime.paths.bin.git,
                 runtime_mode="full-access",
-                fleet_config=runtime.paths.fleet_config,
+                fleet_config=fleet_config,
             )
         )
         self.commands = commands if commands is not None else CommandRunner()
@@ -231,7 +237,10 @@ class FleetTools:
             return result
 
     def _fleet_config(self) -> FleetConfig:
-        return load_fleet_config(self.runtime.paths.fleet_config)
+        path = self.runtime.paths.fleet_config
+        if path is None:
+            raise DotError("fleet_config_unavailable")
+        return load_fleet_config(path)
 
     @staticmethod
     def _controller_summary(config: FleetConfig) -> dict[str, Any]:
