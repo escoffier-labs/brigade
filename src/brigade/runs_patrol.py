@@ -185,13 +185,14 @@ def patrol(
         finding = runs_patrol_actions.environment_fault(rows, max_count=mass_max_count, max_fraction=mass_max_fraction)
         destructive = [action for action in actions if action in runs_patrol_actions.DESTRUCTIVE]
         applied_actions = actions
+        if finding is not None and actions and not force_mass_repair:
+            exit_code = 1
         if finding is not None and destructive:
             if force_mass_repair:
                 finding["overridden"] = True
             else:
                 finding["skipped_actions"] = destructive
                 applied_actions = [action for action in actions if action not in runs_patrol_actions.DESTRUCTIVE]
-                exit_code = 1
         patrol_id = clock.strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
         payload = {
             "schema": SCHEMA,

@@ -117,6 +117,26 @@ def test_apply_over_threshold_skips_destructive_actions_and_fails(tmp_path, monk
     assert receipt["findings"] == report["findings"] and receipt["exit_code"] == 1
 
 
+@pytest.mark.parametrize(
+    "dead,healthy,expected",
+    [(0, 4, 0), (2, 0, 0), (3, 3, 0), (3, 2, 1), (5, 15, 0), (6, 14, 1)],
+)
+def test_escalation_only_pass_reports_mass_fault_status(tmp_path, monkeypatch, capsys, dead, healthy, expected):
+    repo, reaped = _dead_lanes(tmp_path, monkeypatch, dead=dead, healthy=healthy)
+    code, report, err = _run(repo, capsys, apply="escalate")
+    assert code == expected, err
+    assert report["exit_code"] == expected and reaped == []
+    assert {item["action"] for item in report["actions"]} == ({"escalate"} if dead else set())
+    if expected:
+        (finding,) = report["findings"]
+        assert finding["kind"] == "suspected_environment_fault"
+        assert "skipped_actions" not in finding and "overridden" not in finding
+    else:
+        assert "findings" not in report
+    receipt = json.loads((repo / report["receipt"]).read_text())
+    assert receipt["exit_code"] == expected
+
+
 def test_forced_override_reaps_and_is_recorded_in_the_receipt(tmp_path, monkeypatch, capsys):
     repo, reaped = _dead_lanes(tmp_path, monkeypatch, dead=6, healthy=14)
     code, report, err = _run(repo, capsys, apply="reap", force_mass_repair=True)
