@@ -273,7 +273,11 @@ def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) ->
         return
     # Ordinary exclusions are silent. Only a receipt admitted here can lose
     # consistency at the subsequent safe read and request a capture retry.
-    if not verify_trial.project_trial(receipt, target=target).eligible:
+    try:
+        eligible = verify_trial.project_trial(receipt, target=target).eligible
+    except (ValueError, TypeError, RecursionError):
+        return
+    if not eligible:
         return
     if scorecard.effectiveness_outcome(receipt) != 1:
         return

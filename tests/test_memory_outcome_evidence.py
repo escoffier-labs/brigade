@@ -115,6 +115,7 @@ def test_verified_capture_reflects_one_proof_without_refreshing_or_writing_cards
         "reused",
         "audit",
         "failed",
+        "malformed_role",
         "fingerprint",
         "kind",
         "id",
@@ -144,6 +145,8 @@ def test_capture_rejects_non_supporting_receipts(tmp_path, verified_card, case, 
     elif case == "failed":
         receipt["status"] = "failed"
         receipt["commands"][0].update(status="failed", exit_code=1)
+    elif case == "malformed_role":
+        receipt["commands"][0]["check_role"] = []
     else:
         receipt["subject_binding"][
             {"fingerprint": "content_fingerprint", "kind": "artifact_kind", "id": "artifact_id"}[case]
@@ -152,6 +155,7 @@ def test_capture_rejects_non_supporting_receipts(tmp_path, verified_card, case, 
     before = snapshot(tmp_path)
     capsys.readouterr()
     assert capture(tmp_path, receipt, ident=ident, kind=kind) == 0
+    assert len(outcome_cmd.load_records(tmp_path)) == 1
     assert "evidence log append failed" not in capsys.readouterr().err
     assert log.read_evidence(tmp_path)[0] == []
     assert snapshot(tmp_path) == before
