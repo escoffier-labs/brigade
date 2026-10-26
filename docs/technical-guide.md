@@ -769,12 +769,13 @@ a lane. No action terminates a process, removes a worktree, merges, or pushes.
 
 JSON reports `truncated: true` when a source or result window
 is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
-Claims join runs only by exact `claim_id`. Current run writers omit that field,
+Local claims join runs only by exact `claim_id`. Current run writers omit that field,
 so normal claims remain separate lanes until dispatch-intent integration (#1849).
 An unmatched claim without independent worktree findings reports `unknown`
 with reason `no task-to-run join key`, regardless of age or other active runs.
-`claim-without-run` is reserved until a verified join exists. It is accepted by
-`--fail-on` but cannot currently match a lane. Claim age alone cannot establish it.
+`claim-without-run` requires a verified Hub missing-run observation as described
+below; `--fail-on claim-without-run` matches those lanes. Claim age alone cannot
+establish it.
 Invalid options or an unreadable target return 2.
 When a Hub URL and node credential are configured, patrol reads active claims
 through the fleet client and inspects this node's claims for their recorded
