@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor, wait
+from concurrent.futures import Future, wait
 from datetime import datetime
 from pathlib import Path
+from queue import Empty, SimpleQueue
+from threading import Thread
 from typing import Any
 
 from . import fleet_client, run_reap
@@ -23,6 +25,45 @@ def _safe_claim(row: dict[str, Any]) -> dict[str, Any]:
 
 _INSPECT_WORKERS = 8
 _TIMED_OUT = "Hub claim inspection timed out"
+
+
+def _inspect_owned(owned: list[dict[str, Any]], node: str, deadline: float) -> dict[str, Any]:
+    """Bound inspection concurrency without joining stalled transports at process exit."""
+    jobs: SimpleQueue[tuple[str, Future[Any]]] = SimpleQueue()
+    futures: dict[str, Future[Any]] = {}
+    for row in owned:
+        future: Future[Any] = Future()
+        futures[row["target"]] = future
+        jobs.put((row["target"], future))
+
+    def inspect() -> None:
+        while time.monotonic() < deadline:
+            try:
+                target, future = jobs.get_nowait()
+            except Empty:
+                return
+            if not future.set_running_or_notify_cancel():
+                continue
+            if time.monotonic() >= deadline:
+                future.set_exception(TimeoutError(_TIMED_OUT))
+                return
+            try:
+                future.set_result(fleet_client.inspect_claim(target, node_id=node))
+            except BaseException as exc:  # Match Future's exception handling for each inspection.
+                future.set_exception(exc)
+
+    try:
+        for _ in range(min(_INSPECT_WORKERS, len(owned))):
+            Thread(target=inspect, name="brigade-patrol", daemon=True).start()
+        wait(futures.values(), timeout=max(0.0, deadline - time.monotonic()))
+        return {
+            target: future.result()
+            for target, future in futures.items()
+            if future.done() and future.exception() is None
+        }
+    finally:
+        for future in futures.values():
+            future.cancel()
 
 
 def _snapshot(node: str, limit: int) -> tuple[list[tuple[dict[str, Any], str | None, str | None]], bool]:
@@ -46,19 +87,7 @@ def _snapshot(node: str, limit: int) -> tuple[list[tuple[dict[str, Any], str | N
         if len(bucket) < limit:
             bucket.append(row)
     window = owned + others[: limit - len(owned)]
-    decisions: dict[str, Any] = {}
-    if owned:
-        pool = ThreadPoolExecutor(max_workers=min(_INSPECT_WORKERS, len(owned)), thread_name_prefix="brigade-patrol")
-        try:
-            futures = {
-                row["target"]: pool.submit(fleet_client.inspect_claim, row["target"], node_id=node) for row in owned
-            }
-            wait(futures.values(), timeout=max(0.0, total - (time.monotonic() - started)))
-            for target, future in futures.items():
-                if future.done() and future.exception() is None:
-                    decisions[target] = future.result()
-        finally:
-            pool.shutdown(wait=False, cancel_futures=True)
+    decisions = _inspect_owned(owned, node, started + total) if owned else {}
     observations: list[tuple[dict[str, Any], str | None, str | None]] = []
     for row in window:
         if (

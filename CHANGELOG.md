@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Patrol refuses corrupt persisted action status, scope, or idempotency keys before applying changes, so malformed history cannot silently discard retry fences (#1955).
+- Patrol exits after its shared Hub inspection deadline even when a claim transport is still blocked, while preserving completed observations and bounding concurrent inspections (#1957).
 - Patrol prioritizes this node's Hub claims within the report limit, so foreign display rows cannot hide a missing local run; omitted rows still report truncation (#1964).
 - Windows care install plans create and binary-pin the selected patrol runbook before printing scheduler commands; dry runs leave the workspace unchanged (#1958).
 - Deck sidebar telemetry follows the Hub's stale verdict for enrolled machines while preserving the freshest age and unknown-time display (#2054).

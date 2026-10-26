@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
+import textwrap
 from datetime import timedelta
 
 import pytest
@@ -357,3 +360,96 @@ def test_one_slow_hub_inspection_keeps_the_other_observations(tmp_path, monkeypa
     errors = {claim["target"]: error for claim, _, error in observations}
     assert errors["repo-0"] == "Hub claim inspection timed out"
     assert [errors[f"repo-{i}"] for i in (1, 2, 3)] == [None, None, None]
+
+
+def test_timed_out_hub_inspection_does_not_delay_process_exit(tmp_path):
+    script = textwrap.dedent(
+        """
+        import sys
+        import threading
+        from brigade import cli, fleet_client
+
+        fleet_client.REPORT_TIMEOUT_SECONDS = 0.05
+        fleet_client.load_fleet_settings = lambda: {
+            "hub_url": "https://hub.example.invalid", "node_token": "fake"
+        }
+        fleet_client.resolve_node_id = lambda: "local-node"
+        fleet_client.fetch_claims = lambda: [
+            {"target": "example-repo", "owner_node": "local-node"}
+        ]
+        fleet_client.inspect_claim = lambda *args, **kwargs: threading.Event().wait(30)
+        raise SystemExit(cli.main(["runs", "patrol", "--target", sys.argv[1], "--json"]))
+        """
+    )
+    # A returned patrol report is insufficient: interpreter shutdown must also
+    # finish while the fake transport remains blocked beyond the shared budget.
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["lanes"][0]["state"] == "unknown"
+    assert payload["lanes"][0]["reason"] == "Hub claim inspection timed out"
+
+
+def test_hub_deadline_is_rechecked_after_dequeuing(monkeypatch):
+    from concurrent.futures import Future
+    from types import SimpleNamespace
+
+    from brigade import runs_patrol_hub
+
+    clock = [0.0]
+    calls = []
+
+    class DelayedFuture(Future):
+        def set_running_or_notify_cancel(self):
+            running = super().set_running_or_notify_cancel()
+            # Model a scheduler pause between dequeuing and starting the request.
+            clock[0] = 2.0
+            return running
+
+    monkeypatch.setattr(runs_patrol_hub, "Future", DelayedFuture)
+    monkeypatch.setattr(runs_patrol_hub, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(runs_patrol_hub, "Thread", lambda *, target, **kwargs: SimpleNamespace(start=target))
+    monkeypatch.setattr(fleet_client, "inspect_claim", lambda target, **kwargs: calls.append(target))
+
+    decisions = runs_patrol_hub._inspect_owned([{"target": "example-repo"}], "local-node", 1.0)
+
+    assert calls == []
+    assert decisions == {}
+
+
+def test_hub_deadline_does_not_start_queued_inspections(tmp_path, monkeypatch, hub):
+    import threading
+
+    from brigade import runs_patrol_hub
+
+    repo = _repo(tmp_path)
+    hub.extend([{**_hub_claim(repo), "target": f"repo-{i}"} for i in range(5)])
+    monkeypatch.setattr(runs_patrol_hub, "_INSPECT_WORKERS", 2)
+    monkeypatch.setattr(fleet_client, "REPORT_TIMEOUT_SECONDS", 0.5)
+    release = threading.Event()
+    workers = []
+    calls = []
+    real = fleet_client.inspect_claim
+
+    def inspect(target, **kwargs):
+        workers.append(threading.current_thread())
+        calls.append(target)
+        release.wait(5)
+        return real(target, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    try:
+        observations, _ = runs_patrol_hub._snapshot("local-node", 50)
+    finally:
+        release.set()
+        for worker in workers:
+            worker.join(2)
+    assert len(calls) == 2
+    assert not any(worker.is_alive() for worker in workers)
+    assert all(error == "Hub claim inspection timed out" for _, _, error in observations)
