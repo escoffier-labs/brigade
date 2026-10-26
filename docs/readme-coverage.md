@@ -1,7 +1,7 @@
 # README coverage map
 
 Migration date: 2026-08-13
-README cells refreshed: 2026-10-18
+README structure refreshed: 2026-10-26
 
 The root README is a short landing page. Every topic that left the previous README has a durable home below. Claims intentionally retired from the front page are listed at the end.
 
@@ -21,25 +21,25 @@ The root README is a short landing page. Every topic that left the previous READ
 | Homegrown setup adoption with `brigade operator adopt plan` | [agent-assisted setup](agent-assisted-setup.md#adapting-a-homegrown-setup), [technical guide](technical-guide.md) |
 | Contributor first-PR path and local checks | [CONTRIBUTING.md](../CONTRIBUTING.md#your-first-pr) |
 | Verify receipt example | [work closeout](work-closeout.md#abridged-receipt-example-schema_version-2) |
-| Evidence log / MiseLedger | [wiring guide](wiring-graphtrail-miseledger.md), [receipt schemas](receipt-schemas.md), [operator center](operator-center.md) |
+| Evidence log / receipt export | [evidence packages](evidence-package.md), [receipt schemas](receipt-schemas.md), [operator center](operator-center.md) |
 | Code graph queries and impact | [code intelligence](code-intelligence.md) |
 | MCP sync walkthrough and per-tool table | [mcp-sync](mcp-sync.md) |
 | Shared memory workflow diagram | [memory care](memory-care.md), [memory operations](memory-operations.md), assets under `docs/assets/` |
 | Outcome rank / capture / reconcile / explain | [outcome scoring](outcome-scoring.md) |
 | Optional stations table (Pantry, Token Glace, Skillet, Bootstrap Doctor, notifications) | [overview](overview.md), [station contract](station-contract.md) |
-| Short "why not something else" bullets | Expanded into [comparison](comparison.md) and the four README matrices |
-| "What Brigade is not" / name collisions | README Scope plus [execution model](execution-model.md) |
+| Short "why not something else" bullets | Detailed tables in [comparison](comparison.md), linked from the README |
+| "What Brigade is not" / name collisions | [execution model](execution-model.md) and project identity in the README footer |
 | "Why I built this" origin story | [overview](overview.md#why-this-exists), Cookbook link retained there |
 | Public vs historical names | [overview](overview.md#mise-en-place-brand-metaphor), [technical guide](technical-guide.md) |
 | Harness matrix | [technical guide](technical-guide.md) |
 | Brigadeclaw Q&A pointer | [https://brigade.tools/brigadeclaw](https://brigade.tools/brigadeclaw) (site). Not required on README |
-| Docs index and license | README Docs + License sections |
-| Project identity (GitHub, site, PyPI, command) | README License / identity footer. Also [overview](overview.md#project-identity) |
+| Docs index and license | README Reference section |
+| Project identity (GitHub, site, PyPI, command) | README identity footer. Also [overview](overview.md#project-identity) |
 
 ## Intentionally retired from the front page
 
 - Product art, terminal demo, and memory-workflow illustrations as README chrome
-- Code fences, JSON receipt dumps, and YAML/TOML samples in README
+- JSON receipt dumps and YAML/TOML configuration samples. Short install and verification commands remain in the README
 - Autonomous or "reflective memory learning" claims
 - Framing Brigade as a required daemon, hosted memory service, distributed task database, or full autonomous fleet runtime
 - Claiming every Brigade command writes a receipt
@@ -51,4 +51,4 @@ The root README is a short landing page. Every topic that left the previous READ
 | Line | Meaning |
 | --- | --- |
 | Stable v0.30.0 | Published PyPI release `brigade-cli==0.30.0` and npm `@escoffier-labs/brigade@0.30.0` |
-| Current main / 0.31 beta | Features on origin/main after v0.30.0 and `0.31.0.devYYYYMMDD` wheels. Labeled in README tables and this docs set |
+| Current main / 0.31 beta | Features on origin/main after v0.30.0 and `0.31.0.devYYYYMMDD` wheels. Labeled beside README capabilities and in this docs set |

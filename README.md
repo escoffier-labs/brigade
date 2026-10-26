@@ -3,13 +3,14 @@
 </p>
 
 <p align="center">
-  <strong>Run agents anywhere. Keep one record of the work.</strong><br>
-  Brigade tracks what's ready, who claimed it, and what ran across Claude Code, Codex, cloud agents, and your machines. Your local harnesses stay in sync on MCP servers, skills, and memory.
+  <strong>Coordinate your agents. Keep the tools you use.</strong><br>
+  Brigade works alongside Codex, Claude Code, Cursor, OpenCode, T3 Code, Grok Bot, OpenClaw, Hermes, Dot, and Duet. It adds coordination, shared context, and checkable work records to your existing setup.
 </p>
 
 <p align="center">
   <a href="https://brigade.tools/docs/getting-started/install">Install</a> ·
   <a href="https://brigade.tools/docs">Docs</a> ·
+  <a href="#works-with-your-existing-setup">Integrations</a> ·
   <a href="docs/comparison.md">Compare</a> ·
   <a href="QUICKSTART.md">Quickstart</a>
 </p>
@@ -24,166 +25,132 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Coding work now runs in several places at once. You drive Claude Code or Codex in a terminal, a background run works another repo, a cloud agent opens a pull request in another tab, and CI checks the result somewhere else. Each tool keeps its own history. When one agent hands work to the next, the handoff is usually a sentence like "tests pass."
+Keep using your preferred agent tools. Start with one tool in one repository, then connect more agents and machines as you need them.
 
-Agents did not create this split. Terminals, background jobs, and remote machines have always kept separate records. Running agents in parallel makes each gap cost more.
+**Stable:** v0.30.0 on PyPI and npm. **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). Beta features and work in progress are labeled below. See the [changelog](CHANGELOG.md).
 
-Brigade keeps one record around the work itself, across harnesses, repos, machines, and cloud seats: which tasks are ready, who claimed them, which commands ran and how they exited, and what the next session should know. It also keeps MCP servers, skills, and memory in sync, so an agent picking up the work in another harness starts with the same setup and context. The record is plain local files, with an optional hub for claims across machines. Agents read and write it through the CLI and MCP. You set policy, budgets, scopes, and gates, and can stop the work at any point.
+## Give the next agent more than a conversation
 
-For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex checks the package and the receipt's real exit code instead of taking the agent's word for it.
+You investigate a bug in Claude Code, implement a fix in Codex, and return to the work through T3 Code. Brigade gives that work continuity:
 
-The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
+1. **Start with context.** Read the work brief, relevant memory, and existing evidence.
+2. **Make ownership explicit.** Claim tasks and inspect dependencies or conflicting work.
+3. **Run within your rules.** Use configured model access, scopes, budgets, and approval gates for Brigade-managed execution.
+4. **Check the result.** Run verification and keep the command, exit code, logs, and Git state.
+5. **Hand off the work.** Leave the result, remaining blockers, and evidence where another agent can inspect them.
 
-**Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). See the [changelog](CHANGELOG.md) for what each release changed.
+Agents can continue within the authority you give them. You choose where approval is required and can inspect or stop Brigade-managed work.
 
-The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
+## What Brigade adds
 
-## What it does
+### Work that agents can pick up
 
-- **Ready work and safe claims.** `brigade work ready` lists unblocked tasks. Claims are atomic, so two agents cannot take the same item.
-- **Evidence between agents.** A check run through Brigade records the command, the real exit code, and the Git state. The next agent can inspect the receipt or verify an exported evidence package. Handoffs link that evidence to the work that remains.
-- **Shared memory with an owner.** Agents write handoffs with evidence sections. The memory owner lints and files them under the ingest policy. Safe notes can auto-file, and ambiguous notes enter a review queue. Session-start recall is capped.
-- **One tool catalog across harnesses.** MCP servers, tools, and skills are defined once. Projection plans preview each harness's config before sync writes it.
-- **Cloud agents tracked next to local ones.** Tasks you hand to Codex Cloud, Cursor cloud agents, or Jules are registered with their provider task ID and reconciled against provider and GitHub state, so they show up beside local runs instead of disappearing into another tab.
-- **Optional fleet view.** A self-hosted hub can arbitrate repo claims across machines and show runs, harness sessions, and cloud tasks on one board.
+Tasks, dependencies, ready-work views, claims, and handoffs make the next action discoverable. Fleet Hub adds shared coordination across enrolled machines, including ownership views, presence, messaging, and model policy.
 
-Learning in Brigade means scoring skills against eligible captured receipts, then promoting or rolling them back. Autonomous memory reflection is planned in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+**0.31 beta:** Dispatch ready tasks into separate worktrees, supervise children, and retain results for review. Watch mode fills available capacity within configured limits. A successful worker run leaves work for review and landing.
 
-<details>
-<summary><b>Examples</b></summary>
+### Evidence you can inspect
 
-**Two agents, one backlog.** Each agent asks for the next ready task. The second claim on the same item fails with exit 13 and names the holder.
-
-```bash
-brigade work ready --parallel-safe          # ready tasks, grouped into waves that do not touch the same files
-brigade work claim --next --actor codex     # take the highest-priority ready task
-```
-
-**"Tests pass" with a receipt.** The agent runs the check through Brigade instead of reporting it from memory.
+Run a check through Brigade:
 
 ```bash
 brigade work verify run --target . --command "pytest -q"
 ```
 
-The receipt keeps the command, exit code, Git commit, and dirty state, so a reviewer can check the claim without rerunning it.
+The verification record captures the command and its actual exit code, logs, and Git state. Run journals and lineage connect execution to its context. Evidence packages let another agent inspect a selected verification record and check its integrity.
 
-**Switching harnesses mid-task.** Claude Code ends a session with a handoff. The next Codex session starts from the brief instead of a blank context.
+A passing command establishes the result of that check. Completion still depends on the work's acceptance criteria.
 
-```bash
-brigade handoff lint                        # check the handoff before it is filed
-brigade work brief --target .               # what the next agent sees at session start
-```
+### Context that travels between tools
 
-**One MCP config for every tool.**
+Keep a designated memory owner, with handoffs from the tools doing the work. Brigade provides handoff linting, ingestion coverage, recall, and memory-care checks. Shared skill and tool catalogs can project reviewed configuration into supported tools.
 
-```bash
-brigade mcp plan                            # read-only preview
-brigade mcp sync --write                    # merge into each harness's native config
-```
+**0.31 beta:** Memory reflection derives evidence-backed candidates and can create consolidation proposals for review. It does not automatically rewrite claims.
 
-</details>
+### Visibility while agents work
 
-## Install
+Inspect runs, work ownership, machines, and cloud tasks through Brigade's CLI and operator views. Fleet messaging lets enrolled agents exchange information under explicit grants.
 
-If Node.js 22 or newer and npm are installed on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
+**0.31 beta:** Run patrol identifies local lane states and offers explicit repair actions. The Command Deck and CI-board integrations continue to expand.
+
+## Works with your existing setup
+
+Choose the integrations you need. Each connects a different part of the workflow.
+
+| Your system | Brigade connection |
+| --- | --- |
+| **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and supported tool and skill configuration. Execution adapters and hooks vary by tool. |
+| **T3 Code** | Remote execution integration and session visibility. The complete app-owned child-task governance flow is in progress. |
+| **Grok Bot** | Role-scoped connector packs for bounded jobs and configured workflows. |
+| **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, workspace setup, and memory care. |
+| **Dot** | A connector for memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
+| **Duet** | A connector for memory, skills, Hub messaging, and read-only fleet views. Duet executes on its own cloud machine. |
+
+Capabilities differ by integration, configuration, and release channel. Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), and [Duet guide](docs/duet-connector.md).
+
+## Start with one repository
+
+With Node.js 22 or newer on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64:
 
 ```bash
 npm install --global @escoffier-labs/brigade@0.30.0
 brigade setup
 ```
 
-To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.30.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.30.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
+The npm package manages its own Python environment. Leave optional dependencies enabled, and install Git for repository features. Upgrade npm-managed installs with npm. See the [npm package notes](npm/feasibility/README.md).
 
-On other platforms, or to use Python 3.10 or newer directly:
+Or use Python 3.10 or newer with `pipx install brigade-cli` or `uv tool install brigade-cli`, followed by `brigade setup`.
+
+Preview the setup for a repository you control:
 
 ```bash
-pipx install brigade-cli      # or: uv tool install brigade-cli
-brigade setup
+brigade operator quickstart --target ./my-repo --harnesses codex,claude --dry-run
 ```
 
-Then follow the [install guide](https://brigade.tools/docs/getting-started/install) or [QUICKSTART.md](QUICKSTART.md). To let your coding agent do the setup, hand it [first 10 minutes](docs/first-10-minutes.md) and the [agents guide](docs/agents-guide.md).
+Apply the setup, then read the first brief:
 
-If setup fails, run `brigade bug report --summary "What happened and what you expected" --dry-run` in the affected workspace. Review the complete redacted preview before sharing. See [bug reports](docs/technical-guide.md#bug-reports).
+```bash
+brigade operator quickstart --target ./my-repo --harnesses codex,claude
+brigade work brief --target ./my-repo
+```
 
-For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
+Select the tools you use. The local setup can be used without a Fleet Hub. Add fleet coordination or hosted-agent connectors when you need them.
+
+[First 10 minutes](docs/first-10-minutes.md) · [Adopt an existing setup](docs/agent-assisted-setup.md) · [Stable and beta channels](docs/update-channels.md)
+
+## Where the beta is heading
+
+- **Independent work across a fleet.** Shared ownership, dependencies, and evidence help agents recover their next action without reconstructing a conductor's conversation. [Fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121)
+- **Governed delegation through T3 Code.** Explicit batches, independently addressable child results, and isolated workspaces under Brigade's existing controls. [Delegation epic](https://github.com/escoffier-labs/brigade/issues/2046)
+- **Cross-repository campaigns.** Track one assignment across repositories with bounded ownership and evidence-backed completion. Execution and completion wiring remain in progress. [Campaigns](https://github.com/escoffier-labs/brigade/issues/1128)
+- **More ways for agents to connect.** Encrypted messaging, teammate invitations, no-hub delivery, and Hub Lite are being built in stages. [Mesh design](docs/phase-agent-mesh.md)
 
 ## MCP servers
 
-`brigade-cli` includes two MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)).
+Brigade includes a memory MCP server with bounded recall, work briefs, and handoff drafting, plus a read-only skills MCP server:
 
-- `brigade memory serve-mcp --stdio`: memory cards from the repo and user stores, with six tools: `list_cards`, `get_card`, `search_cards`, `memory_status`, `work_brief`, and `write_handoff`. `write_handoff` is the one write tool; it drafts a Memory Handoff and never edits a canonical card ([details](docs/agent-plugin.md#tools)).
-- `brigade skills serve-mcp --stdio`: the reviewed skill registry, read-only, with search, read, lint, compatibility, and install-history tools.
+```bash
+brigade memory serve-mcp --stdio
+brigade skills serve-mcp --stdio
+```
 
-Without a global install, `uvx --from brigade-cli brigade memory serve-mcp --stdio` runs the same server.
+The memory server's `write_handoff` tool drafts a handoff and never edits a canonical card. [MCP transport details](docs/technical-guide.md#streamable-http-for-the-mcp-servers).
 
 <!-- MCP Registry ownership markers; keep each on its own line. -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
-## How it compares
+## Reference
 
-Most neighbors go deeper on one layer. Brigade connects work, memory, tool config, and evidence around the same coding-agent task. Where a neighbor is stronger, its cell says so. Sources, dated notes, and projects that left these tables: [docs/comparison.md](docs/comparison.md) (checked 2026-10-18).
+[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Report an issue](https://github.com/escoffier-labs/brigade/issues) · [MIT license](LICENSE)
 
-Key: <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported · <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Partial · <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented
+The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
 
-### Work and orchestration
+<details>
+<summary>About the downloads badge</summary>
 
-| Project | Ready work | Claim safety | Parallel and run control | Task store | Verification |
-| --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Ready set + parallel-safe waves | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Fail-closed claims, optional hub | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Waves, campaigns, declared limits | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Local JSON ledger, not a task DB | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command receipts |
-| [Beads](https://github.com/gastownhall/beads) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Built in | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Atomic claim | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Agent workflow + Dolt sync | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Dolt-backed distributed store | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Task history |
-| [Gas Town](https://github.com/gastownhall/gastown) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Beads-backed | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Multi-agent runtime | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Beads ledger | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Refinery merge-queue gates |
-| [Claude Code agent teams](https://code.claude.com/docs/en/agent-teams) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared list with dependencies | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> File-locked self-claim | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Lead + teammates, experimental | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> One Claude Code session | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> TaskCompleted hook can block |
-| [Backlog.md](https://github.com/MrLesk/Backlog.md) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Board + dependencies | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Markdown in Git | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Acceptance criteria |
+The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
-### Memory
-
-| Project | Durable memory | Capture and recall | Care and operations | Learning | Provenance |
-| --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared files + cards | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Linted handoffs + bounded recall | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Owner policy + Memory Operations | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Outcome score, promote, rollback | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Work receipts + sources |
-| [agentmemory](https://github.com/rohitg00/agentmemory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Shared coding-agent memory | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Hooks + MCP + REST | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Decay, audit, governed delete | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Lessons + reflect | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Write-time origin + citations |
-| [Hindsight](https://github.com/vectorize-io/hindsight) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Facts + experiences + models | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Retain + recall | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reflect + feedback | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Reflective memory learning | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Temporal + causal links |
-| [Mem0](https://github.com/mem0ai/mem0) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> User + agent + session | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Extraction + hybrid search | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> History + metadata | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Extraction + retrieval | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Timestamps + entities |
-| [Built-in harness memory](https://code.claude.com/docs/en/memory) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per tool | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Rules + auto memory | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Varies by harness | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Harness-specific |
-
-### Tools and configuration
-
-| Project | MCP | Rules and skills | Projection | Source of truth | Audit and rollback |
-| --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP + tools catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills + harness adapters | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Dry run first, then write | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Brigade catalog | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Preserve, gate, roll back |
-| [Rulesync](https://github.com/dyoshikawa/rulesync) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules, skills, hooks, subagents | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per-target generation | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rulesync project | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Generated outputs |
-| [Ruler](https://github.com/intellectronica/ruler) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Supported | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Rules, skills, subagents | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Per-agent files | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> `.ruler/` directory | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Gitignore automation, no rollback |
-| [add-mcp](https://github.com/neon-solutions/add-mcp) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> MCP servers | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Maps fields into native files | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Native files + sync | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Warns on dropped fields |
-| [agentsync](https://agentsync.cc/) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Many agent targets | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Skills, hooks, memory, plugins | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Canonical config | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Native/lossy/skipped report |
-
-### Evidence and operations
-
-| Project | Receipts | Code impact | Agent activity | Cloud state | Replay and learning |
-| --- | --- | --- | --- | --- | --- |
-| [Brigade](https://github.com/escoffier-labs/brigade) | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Command + exit code + Git state | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Impact queries + blast radius | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Center, fleet board, harness sessions | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Codex, Cursor, Jules task status | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Score + rollback, run diff/resume |
-| [ActiveGraph](https://github.com/yoheinakajima/activegraph) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Event trace | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Reactive behaviors | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Replay, fork, and diff |
-| [Graphiti](https://github.com/getzep/graphiti) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Episode provenance | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Temporal fact updates |
-| [Codex Cloud](https://developers.openai.com/codex/cloud) | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Changed files + test results | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented | <img src="docs/assets/status-partial.svg" width="10" height="10" alt="Partial"> Task review | <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Supported"> Hosted task workspaces | <img src="docs/assets/status-undocumented.svg" width="10" height="10" alt="Not documented"> Not documented |
-
-"Not documented" means the capability was not found in that project's official README or docs on the dated pass. It is not proof of absence.
-
-## Scope
-
-Brigade coordinates agent work through local records and optional long-running services that the operator starts and can stop. The work ledger is machine-local JSON, and the fleet hub coordinates claims and events without replacing local records. Run budgets apply only when declared. Gates mark checkpoints where the operator wants approval. Agent work can continue within its authorized scope between those checkpoints, leaving receipts and journals for inspection. Full boundaries and service lifecycles: [execution model](docs/execution-model.md).
-
-Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade), not the archived CNCF Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
-
-## Docs
-
-- [First 10 minutes](docs/first-10-minutes.md) · [Overview](docs/overview.md) · [Technical guide](docs/technical-guide.md) · [Comparison](docs/comparison.md)
-- [Execution model](docs/execution-model.md) · [Work closeout](docs/work-closeout.md) · [Outcome scoring](docs/outcome-scoring.md)
-- [Memory care](docs/memory-care.md) · [Memory operations](docs/memory-operations.md) · [Code intelligence](docs/code-intelligence.md) · [MCP sync](docs/mcp-sync.md)
-- [Agents guide](docs/agents-guide.md) · [Agent-assisted setup](docs/agent-assisted-setup.md) · [README coverage](docs/readme-coverage.md)
-- [Runbooks](docs/runbooks/README.md) · [Fleet hub on a Proxmox LXC](docs/runbooks/fleet-hub-proxmox.md)
-- [Security](docs/security.md) · [Command inventory](docs/command-inventory.md) · [Contributing](CONTRIBUTING.md) · [Roadmap](ROADMAP.md)
-
-## License
-
-MIT. See [LICENSE](LICENSE).
+</details>
 
 Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), npm [`@escoffier-labs/brigade`](https://www.npmjs.com/package/@escoffier-labs/brigade), command `brigade`.

@@ -2,7 +2,7 @@
 
 Date: 2026-10-18
 
-This page backs the four README matrices. The README shows the closest neighbors for each layer. Rows marked *(docs only)* stay here for reference. Cells use "Not documented" when the capability was not found in that project's official README or docs on the dated source pass. That is not proof of absence.
+This page holds the detailed comparisons linked from the README. Rows marked *(docs only)* were omitted from the former README matrices. Cells use "Not documented" when the capability was not found in that project's official README or docs on the dated source pass. That is not proof of absence.
 
 Brigade stable claims refer to published **v0.30.0**. Anything newer on main is labeled current main / **0.31 beta**.
 
@@ -88,7 +88,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 - An approved Grok Bot scout feed enqueues labeled GitHub issues only after `--apply`. It does not invent tasks or read issue prose.
 - Ordinary runs have no hard run-budget unless declared. Declared enforcement today covers wall-clock and worker-dispatch ceilings only.
 - Model, tool, token, and cost dimensions stay observed unless an adapter owns an enforcement boundary.
-- Cross-repo campaigns aggregate ready work and compose parallel-safe waves at query time from each member's per-repo partition. Waves are not persisted; member ledgers stay authoritative.
+- Cross-repo campaigns aggregate ready work and compose parallel-safe waves at query time from each member's per-repo partition. Waves are not persisted. Member ledgers stay authoritative.
 - Center views and the fleet board are read-only. Cloud registry commands track provider work. They do not execute that work.
 - External activity observations are best-effort.
 - Safe targeted handoffs may auto-file. Ambiguous or risky notes wait for review.
