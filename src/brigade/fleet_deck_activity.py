@@ -141,8 +141,13 @@ def render_cloud_presence(view: deck.DeckView) -> str:
             '<p class="station-meta">Dot reporting coverage unknown. '
             "No current Dot reports; publishing may not be configured.</p>"
         )
-    labels = ", ".join(context.agent_label for context in tuple(agents.values())[:8])
-    more = f" · {len(agents) - 8} more in session details" if len(agents) > 8 else ""
+    # Presence-only reports have no task card; never repeat task agents in a label list.
+    presence_only = [context for context in agents.values() if context.version != 2]
+    labels = ", ".join(context.agent_label for context in presence_only[:8])
+    more = f" · {len(presence_only) - 8} more in session details" if len(presence_only) > 8 else ""
+    presence = (
+        f'<p class="row-meta">{deck.harness_badge_html("dot")} Dot · {_esc(labels)}{more}</p>' if presence_only else ""
+    )
     task_rows = "".join(
         _task_report_row(session)
         for session in view.interactive_sessions
@@ -155,10 +160,16 @@ def render_cloud_presence(view: deck.DeckView) -> str:
     )
     return (
         f"<h3>Reported cloud agents ({len(agents)})</h3>"
-        f'<p class="row-meta">{deck.harness_badge_html("dot")} Dot · {_esc(labels)}{more}</p>'
-        f'<p class="station-meta">{notice}Coverage is limited to explicitly reported sessions.</p>'
-        + (f'<ul class="rows">{task_rows}</ul>' if task_rows else "")
+        + presence
+        + f'<p class="station-meta">{notice}Coverage is limited to explicitly reported sessions.</p>'
+        + (f'<ul class="activity-cards">{task_rows}</ul>' if task_rows else "")
     )
+
+
+def status_badge(state: str, *, reported: bool = False, stale: bool = False) -> str:
+    label = ("Reported " if reported else "") + state + (" · stale" if stale else "")
+    tone = "stale" if stale else state
+    return f'<span class="activity-state" data-state="{_esc(tone)}">{_esc(label)}</span>'
 
 
 def _task_report_row(session: deck.InteractiveSession) -> str:
@@ -168,23 +179,36 @@ def _task_report_row(session: deck.InteractiveSession) -> str:
     if context is None:
         return ""
     agent = context.agent_label.replace("_", " ").replace("-", " ")
-    freshness = "stale" if session.presence_state == "stale" else "unexpired report"
-    facts = "".join(
-        f'<p class="row-meta">{label}: {_esc(value)}</p>'
-        for label, value in (("Progress", context.progress), ("Blocker", context.blocker), ("Result", context.result))
-        if value
+    # Use the most relevant supplied fact, retaining all other facts in Details.
+    priorities = (
+        (("Blocker", context.blocker), ("Progress", context.progress), ("Result", context.result))
+        if context.reported_state == "blocked"
+        else (("Result", context.result), ("Progress", context.progress), ("Blocker", context.blocker))
+        if context.reported_state == "completed"
+        else (("Progress", context.progress), ("Blocker", context.blocker), ("Result", context.result))
     )
+    fact = next(((label, value) for label, value in priorities if value), None)
+    prominent = f"{fact[0]}: {_esc(fact[1])}" if fact else "No progress reported."
+    facts = "".join(
+        f"<p>{label}: {_esc(value)}</p>"
+        for label, value in (("Progress", context.progress), ("Blocker", context.blocker), ("Result", context.result))
+        if value and (label, value) != fact
+    )
+    state = status_badge(context.reported_state, reported=True, stale=session.presence_state == "stale")
     return (
-        '<li class="row"><div class="row-body">'
+        '<li class="activity-card" data-activity-kind="reported">'
+        f'<div class="activity-head">{state}<span class="activity-kind">Dot report</span></div>'
         f'<p class="row-title">{_esc(context.task)}</p>'
-        f'<p class="row-meta">Dot · {_esc(agent)} · Reported {_esc(context.reported_state)} · {freshness}</p>'
-        f'<p class="row-meta">Observed {format_age(session.observation_age_seconds)} ago · reported-unverified</p>'
+        f'<p class="row-meta">{deck.harness_badge_html(session.harness)} Dot · {_esc(agent)}</p>'
+        f'<p class="activity-fact">{prominent}</p>'
+        '<div class="activity-footer"><details><summary>Details</summary>'
         + facts
-        + "<details><summary>Task report details</summary>"
         + f"<p>Session: {_esc(session.session_id)}<br>Reporter: {_esc(session.node_id)}"
-        + f"<br>Repository: {_esc(session.repo_identity or deck.UNKNOWN)}</p>"
+        + f"<br>Repository: {_esc(session.repo_identity or deck.UNKNOWN)}"
+        + f"<br>Freshness: {'stale' if session.presence_state == 'stale' else 'unexpired report'}"
+        + "<br>Task state: reported-unverified</p>"
         + _cloud_details(context)
-        + "</details></div></li>"
+        + f'</details><span class="activity-age">Observed {format_age(session.observation_age_seconds)} ago</span></div></li>'
     )
 
 
@@ -198,10 +222,11 @@ def render_cloud_report_history(view: deck.DeckView) -> str:
         else ""
     )
     return (
-        f"<h3>Recent cloud reports ({len(view.recent_cloud_reports)})</h3>"
-        '<p class="station-meta">Stale presence or reported outcomes; provider execution unverified. '
+        '<details class="activity-history">'
+        f"<summary>Recent cloud reports ({len(view.recent_cloud_reports)})</summary>"
+        '<p class="station-meta">Stale presence or reported outcomes. Self-reported task state; provider execution unverified. '
         "Coverage is limited to explicitly reported sessions. Outcomes do not complete leases.</p>"
-        f'<ul class="rows">{rows}</ul>{cap}'
+        f'<ul class="activity-cards">{rows}</ul>{cap}</details>'
     )
 
 

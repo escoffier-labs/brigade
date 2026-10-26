@@ -446,7 +446,7 @@ def test_octopool_renderer_refuses_malformed_capture_provenance(change):
     assert "41 requests" not in html and "<script>bad" not in html
 
 
-def test_capacity_leads_with_machines_and_reported_activity_while_folding_diagnostics():
+def test_capacity_leads_with_resources_and_retains_lease_evidence_in_advanced_details():
     from brigade import fleet_deck_overview as overview
     from tests.test_fleet_deck_overview import _mixed_view
 
@@ -462,13 +462,15 @@ def test_capacity_leads_with_machines_and_reported_activity_while_folding_diagno
     html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
     visible = _visible_text(html.split("<main", 1)[1])
     assert html.index('id="machines-table"') < html.index("Usable for selected work: unknown")
-    assert "Usable for selected work: unknown" in visible and "Active task" in visible
-    assert "Dot reporting coverage unknown" in visible
+    assert "Usable for selected work: unknown" not in visible and "Active task" not in visible
+    assert "Dot reporting coverage unknown" not in visible
     assert "0/64" not in visible and "circuit:" not in visible
     assert "Configured slots are not verified usable workers" not in visible
     assert html.count("Configured slots are not verified usable workers") == 1
-    assert "<summary>Availability details</summary>" in html and "<summary>Provider details" in html
-    assert "0/64" in html and "circuit: closed" in html
+    assert "<summary>Advanced resource details</summary>" in html and "<summary>Provider details" in html
+    advanced = html.split("<summary>Advanced resource details</summary>", 1)[1]
+    assert "Usable for selected work: unknown" in advanced and "Active task" in advanced
+    assert "0/64" in advanced and "circuit: closed" in advanced
     # A lease is actionable activity on Overview too; idle provider diagnostics remain folded.
     overview_visible = _visible_text(overview.render_overview(view, NOW, worklore_enabled=False))
     assert "Active task" in overview_visible and "0/64" not in overview_visible
@@ -2086,15 +2088,61 @@ def test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity(m
     assert "Check <fixture>" in visible and "Check &lt;fixture&gt;" in html
     assert "Miller" in visible and "Reported running" in visible
     assert "Observed 1m ago" in visible
-    assert "Awaiting fixture" in visible and "Testing" in visible
-    assert "Recent cloud reports (2)" in visible
-    assert "Older build" in visible and "stale" in visible and "Reported completed" in visible
-    assert "Reviewed fixture" in visible
-    assert "reported-unverified" in visible and "explicitly reported sessions" in visible
+    assert "Testing" in visible and "Awaiting fixture" not in visible and "Awaiting fixture" in html
+    assert "<summary>Recent cloud reports (2)</summary>" in html
+    history = html.split('<details class="activity-history">', 1)[1]
+    assert "Older build" not in visible and "Older build" in history and "stale" in history
+    assert "Reported completed" in history and "Reviewed fixture" in history
+    assert "provider execution unverified" in visible and "explicitly reported sessions" in visible
     assert "receipt-a" not in visible and "receipt-a" in html
     assert "active-task" not in visible and "outcome-task" not in visible
     assert "Running: 0 · 0 managed jobs reported" in visible
     assert overview.summarize(view).busy == 0 and view.cloud_workers == ()
+    capacity = overview.render_capacity_page(view, NOW, nonce="n", worklore_enabled=False)
+    capacity = capacity.split("<main", 1)[1].split("</main>", 1)[0]
+    assert 'data-activity-kind="reported"' not in capacity
+    for task_fact in (
+        "Check &lt;fixture&gt;",
+        "Older build",
+        "Reviewed fixture",
+        "Recent cloud reports",
+        "active-task",
+    ):
+        assert task_fact not in capacity
+    assert "<summary>Advanced resource details</summary>" in capacity
+
+
+def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidence():
+    from dataclasses import replace
+
+    from brigade import fleet_deck_overview as overview
+    from tests.test_fleet_deck_overview import NOW as resource_now, _mixed_view
+
+    worker = deck.CloudWorker(
+        "example-provider",
+        1,
+        3,
+        "open",
+        (deck.CloudLease("lease-example", "example/repo", "Lease <fixture>", "running", "artifact-example"),),
+    )
+    view = replace(_mixed_view(), cloud_workers=(worker,), octopool_observation=_octopool_capture())
+    html = overview.render_capacity_page(view, resource_now, nonce="n", worklore_enabled=False)
+    html = html.split("<main", 1)[1].split("</main>", 1)[0]
+    visible = _visible_text(html)
+    assert "Machines (3)" in visible and "44%" in visible and "1m" in visible
+    assert "2 busy, 8 idle" in html and 'data-status="stale"' in html
+    assert "41 requests" in visible and "Pool-wide" in visible
+    assert "example-provider" not in visible and "Lease <fixture>" not in visible
+    assert "Control plane" not in visible and "No active leases." not in visible
+    assert "No active provider leases reported." not in visible
+    marker = "<details><summary>Advanced resource details</summary>"
+    assert html.count(marker) == 1
+    advanced = html.split(marker, 1)[1]
+    assert "example-provider" in advanced and "Lease &lt;fixture&gt;" in advanced
+    assert "lease-example" in advanced and "artifact-example" in advanced and "circuit: open" in advanced
+    assert "Control plane" in advanced and "stale-telemetry" in advanced
+    assert "Configured slots are not verified usable workers." in advanced
+    assert "Lease <fixture>" not in html
 
 
 @pytest.mark.parametrize(
@@ -2185,3 +2233,122 @@ def test_terminal_reports_do_not_hide_live_presence_at_sql_cap(conn, monkeypatch
     live = {row["session_id"] for row in rows if not str(row["session_id"]).startswith("completed-")}
     assert live == {"local-session", "v1-session", "running-task"}
     assert len(rows) == 3 + deck.CLOUD_REPORT_HISTORY_LIMIT
+
+
+@pytest.mark.parametrize(
+    ("state", "facts", "expected"),
+    [
+        ("blocked", {"progress": "Checking fixture", "blocker": "Need review", "result": "Draft ready"}, "Need review"),
+        (
+            "completed",
+            {"progress": "Checking fixture", "blocker": "Need review", "result": "Draft ready"},
+            "Draft ready",
+        ),
+        (
+            "running",
+            {"progress": "Checking fixture", "blocker": "Need review", "result": "Draft ready"},
+            "Checking fixture",
+        ),
+        ("failed", {"result": "Build failed"}, "Build failed"),
+        ("queued", {}, "No progress reported."),
+        ("cancelled", {}, "No progress reported."),
+        ("unknown", {}, "No progress reported."),
+    ],
+)
+def test_reported_activity_cards_prioritize_one_fact_and_fold_provenance(state, facts, expected):
+    from brigade import fleet_deck_activity as activity
+
+    context = deck.CloudSessionContext(
+        version=2,
+        provider="dot",
+        agent_label="Example agent",
+        sequence=4,
+        observed_at=NOW.isoformat(),
+        source="cloud_threads",
+        source_scope="authorized-visible-threads",
+        coverage="explicitly-reported-sessions",
+        task="Review <fixture>",
+        reported_state=state,
+        evidence_refs=("receipt-example",),
+        **facts,
+    )
+    session = deck.InteractiveSession(
+        NODE_A,
+        "dot",
+        "session-example",
+        "github.com/example/project",
+        "fleet",
+        "project",
+        "",
+        None,
+        (),
+        False,
+        cloud_context=context,
+        presence_state="stale",
+        observation_age_seconds=60,
+    )
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), interactive_sessions=(session,))
+    html = activity.render_cloud_presence(view)
+    visible = _visible_text(html)
+    assert 'data-activity-kind="reported"' in html
+    assert f"Reported {state}" in visible and "stale" in visible
+    assert "Review <fixture>" in visible and "Review &lt;fixture&gt;" in html
+    assert "<fixture>" not in html
+    assert visible.count("Example agent") == 1
+    assert expected in visible
+    for fact in facts.values():
+        assert fact in html
+        assert (fact in visible) == (fact == expected)
+    assert "session-example" not in visible and "session-example" in html
+    assert "receipt-example" not in visible and "receipt-example" in html
+    assert NOW.isoformat() not in visible and NOW.isoformat() in html
+    assert "Source: cloud_threads" in html and "Source: cloud_threads" not in visible
+    assert visible.count("Self-reported task state; provider execution unverified.") == 1
+
+
+def test_recent_cloud_outcomes_are_closed_with_count_and_keep_stale_and_cap_details():
+    from brigade import fleet_deck_activity as activity
+
+    context = deck.CloudSessionContext(
+        version=2,
+        provider="dot",
+        agent_label="Example agent",
+        sequence=1,
+        observed_at=NOW.isoformat(),
+        source="cloud_threads",
+        source_scope="authorized-visible-threads",
+        coverage="explicitly-reported-sessions",
+        task="Older fixture",
+        reported_state="completed",
+        result="Reviewed fixture",
+    )
+    session = deck.InteractiveSession(
+        NODE_A,
+        "dot",
+        "old-session",
+        "",
+        "fleet",
+        "",
+        "",
+        None,
+        (),
+        False,
+        cloud_context=context,
+        presence_state="stale",
+        observation_age_seconds=1000,
+    )
+    view = deck.DeckView(
+        stations=(),
+        rail=(),
+        repos=(),
+        outcomes=(),
+        observers=(),
+        recent_cloud_reports=(session,) * deck.CLOUD_REPORT_HISTORY_LIMIT,
+    )
+    html = activity.render_cloud_report_history(view)
+    assert html.startswith("<details") and " open" not in html.split(">", 1)[0]
+    assert f"<summary>Recent cloud reports ({deck.CLOUD_REPORT_HISTORY_LIMIT})</summary>" in html
+    assert "Older fixture" not in _visible_text(html)
+    assert "Older fixture" in html and "Reviewed fixture" in html and "stale" in html
+    assert "Recent report list may be capped." in html
+    assert "Outcomes do not complete leases." in html

@@ -505,10 +505,10 @@ def test_stale_and_unknown_working_rows_link_to_the_attention_board():
 def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     html = overview.render_work_lists(_mixed_view())
     assert "2 managed jobs reported" in html
-    assert html.count('class="row"') == 2
+    assert html.count('data-activity-kind="managed"') == 2
     assert 'href="/view/machines?node=11111111-1111-4111-8111-111111111111&amp;repo=skillet"' in html
     assert "seat-a · linux-a" in html
-    assert 'class="row-time">2m elapsed<br>evidence 5s ago<' in html
+    assert "2m elapsed" in html and "evidence 5s ago" in html
     assert 'class="badge ' in html
 
 
@@ -557,7 +557,7 @@ def test_working_row_labels_parallel_activity_and_non_running_buckets():
     html = overview.render_work_lists(_view([station]))
     assert "parallel activity" in html
     assert "! collision" not in html and 'class="flag"' not in html
-    assert 'class="chip chip-muted">queued<' in html
+    assert 'data-state="queued">queued<' in html
     assert "conductor-1 · linux-a" in html
 
 
@@ -1486,3 +1486,26 @@ def test_sidebar_state_words_replace_dots_on_the_whole_deck_and_version_has_titl
     assert f'<span class="mono sidebar-version" title="v{brigade.__version__}">v{brigade.__version__}</span>' in sidebar
     assert "tree-meta" not in sidebar
     assert "stale" in machines and "not enrolled" in machines
+
+
+def test_managed_activity_card_exposes_status_and_folds_supplied_run_metadata():
+    run = _run(
+        NODE_A,
+        "run-private",
+        "example-project",
+        provider="example-provider",
+        model="example-model",
+        repo_identity="github.com/example/project",
+    )
+    station = _station(NODE_A, "Example machine", 2, [run])
+    html = overview._working_row(station, station.tiles[0])
+    visible, details = html.split("<details", 1)
+    assert 'data-activity-kind="managed"' in visible
+    assert "Managed" in visible and "running" in visible
+    assert "example-project" in visible and "seat-a · Example machine" in visible
+    assert "2m elapsed" in visible and "evidence 5s ago" in html
+    assert "run-private" not in visible and "run-private" in details
+    assert "example-provider" not in visible and "example-provider" in details
+    assert "github.com/example/project" not in visible and "github.com/example/project" in details
+    assert _stamp(60) in details and "run.started" in details
+    assert " open" not in html.split("<summary", 1)[0]

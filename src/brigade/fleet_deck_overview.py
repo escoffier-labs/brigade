@@ -360,15 +360,19 @@ def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *,
         params["attention"] = "1"  # the board hides these buckets unless attention is on
     href = "/view/machines?" + urlencode(params)
     parallel = activity.parallel_note(parallel_detail, overlap=overlap) if tile.collision or overlap else ""
-    state = "" if run.bucket == "running" else f' <span class="chip chip-muted">{_esc(run.bucket)}</span>'
     model = run.launch_model or run.model
     model_attr = f' title="{_esc(model)}"' if model else ""
     return (
-        f'<li class="row" title="{_esc(run.run_id)}">'
-        f'<div class="row-body"><p class="row-title"><a href="{_esc(href)}">{_esc(run.repo or UNKNOWN)}</a>'
-        f'{state}</p><p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} '
-        f"{_esc(seat)} · {_esc(station.label)}</p>{parallel}</div>"
-        f'<span class="row-time">{_esc(format_age(run.elapsed_seconds))} elapsed<br>evidence {_esc(format_age(run.age_seconds))} ago</span></li>'
+        '<li class="activity-card" data-activity-kind="managed">'
+        f'<div class="activity-head">{activity.status_badge(run.bucket)}<span class="activity-kind">Managed</span></div>'
+        f'<p class="row-title"><a href="{_esc(href)}">{_esc(run.repo or UNKNOWN)}</a></p>'
+        f'<p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} {_esc(seat)} · {_esc(station.label)}</p>'
+        f'<p class="activity-fact">{_esc(format_age(run.elapsed_seconds))} elapsed</p>{parallel}'
+        '<div class="activity-footer"><details><summary>Details</summary>'
+        f"<p>Run: {_esc(run.run_id)}<br>Node: {_esc(run.node_id)}<br>State: {_esc(run.state)}"
+        f"<br>Repository: {_esc(run.repo_identity or UNKNOWN)}<br>Provider: {_esc(run.provider or UNKNOWN)}"
+        f"<br>Model: {_esc(model or UNKNOWN)}<br>Station last heard: {_esc(station.last_heard or UNKNOWN)}</p>"
+        f'</details><span class="activity-age">evidence {_esc(format_age(run.age_seconds))} ago</span></div></li>'
     )
 
 
@@ -404,7 +408,7 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
     )
     count = sum(station.busy for station in view.stations)
     running = sum(tile.run.bucket == "running" for station in view.stations for tile in station.tiles)
-    working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
+    working = f'<ul class="activity-cards">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
         '<section class="panel" aria-labelledby="working-title"><header><h2 id="working-title">Activity</h2>'
         '<a class="card-link" href="/view/machines">View runs</a></header>'
@@ -727,12 +731,9 @@ def render_capacity_page(view: DeckView, now: datetime, *, nonce: str, worklore_
         '<main class="deck-shell overview capacity-page"><header class="page-head"><div><h1>Capacity</h1>'
         '<p class="page-sub">Configured capacity and reported observations</p></div></header>'
         + render_machine_table(view, now)
-        + '<p class="station-meta">Usable for selected work: unknown.</p>'
-        + activity.render_cloud_presence_panel(view)
-        + render_cloud_workers(view)
         + activity.render_octopool_observation(view)
-        + "<details><summary>Availability details</summary><p>Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p></details>"
-        + "<details><summary>Control plane details</summary>"
+        + "<details><summary>Advanced resource details</summary><p>Usable for selected work: unknown. Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p>"
+        + render_cloud_workers(view)
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
         + "</details></main>"
     )
