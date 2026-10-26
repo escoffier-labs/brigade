@@ -141,6 +141,61 @@ def _render(view, **kwargs):
 # --- projection --------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("state", "heading", "explanation"),
+    [
+        ("active", "Settings are active", "Future session loads use these settings"),
+        ("staged", "Saved for later", "These settings are saved, but they do not control new work"),
+        ("unknown", "Activation status unknown", "cannot confirm whether they control new work"),
+    ],
+)
+def test_summary_explains_activation_and_saved_assignments_before_technical_details(conn, state, heading, explanation):
+    _seed(conn)
+    view = fleet_policy_page.load_view(
+        conn, inventory=_fresh_inventory(), activation=fleet_policy_page.Activation(state, "fixture")
+    )
+    page = _render(view, editable=False)
+    summary, advanced = page.split('<details id="policy-advanced"', 1)
+    assert "<h1>Model assignments</h1>" in summary
+    assert heading in summary and explanation in summary
+    assert '<a href="/deck/roster">View current routing</a>' in summary
+    assert "Saved fleet defaults" in summary
+    assert "overrides" in summary.lower()
+    worker = summary.split('id="role-impl"', 1)[1].split("</article>", 1)[0]
+    assert "Worker" in worker and "model-a-1" in worker and "seat-alpha" in worker
+    reviewer = summary.split('id="role-review"', 1)[1].split("</article>", 1)[0]
+    assert "Reviewer" in reviewer and "model-b-1" in reviewer and "seat-beta" in reviewer
+    researcher = summary.split('id="role-research"', 1)[1].split("</article>", 1)[0]
+    assert "Researcher" in researcher and "Not assigned" in researcher
+    for value in ("Maximum concurrent workers", "Contributor training", "Not allowed", "30d", "Not set"):
+        assert value in summary
+    for value in (view.digest, view.created_at, "data.allow_training", "Legacy run preference"):
+        assert value not in summary
+    assert "Advanced details" in advanced
+    for anchor in ("identity", "defaults", "seats", "consumers", "repos", "sessions", "history"):
+        assert f'id="{anchor}"' in advanced
+    assert view.digest in advanced and view.created_at in advanced
+    assert f'id="{fleet_policy_page.repository_anchor("acme/public-tool")}"' in advanced
+    if state == "unknown":
+        assert "Legacy run preference still owns" not in page
+    if state == "active":
+        assert "already running keep" in summary
+
+
+def test_summary_keeps_unset_saved_limits_distinct_from_resolver_defaults(conn):
+    document = _document()
+    document["defaults"] = {}
+    _seed(conn, document)
+    view = fleet_policy_page.load_view(
+        conn, inventory=_fresh_inventory(), activation=fleet_policy_page.Activation("active", "fixture")
+    )
+    page = _render(view, editable=False)
+    limits = page.split('id="policy-limits"', 1)[1].split("</section>", 1)[0]
+    assert limits.count("Not set") == 6
+    assert "Not allowed" not in limits
+    assert "Saved fleet defaults" in limits
+
+
 def test_view_reports_the_full_effective_policy_identity(conn):
     revision = _seed(conn)
     view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory())
@@ -856,8 +911,9 @@ def test_activation_is_unknown_when_the_migration_module_is_absent(conn, monkeyp
     assert activation.state == "unknown"
     view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory(), activation=activation)
     page = _render(view)
-    assert "staged policy" in page.lower()
-    assert "does not yet" in page.lower() or "not yet" in page.lower()
+    assert "Activation status unknown" in page
+    assert "cannot confirm whether they control new work" in page
+    assert "Legacy run preference still owns" not in page
 
 
 def test_activation_probe_reads_the_real_migration_module_when_present(conn):
@@ -872,7 +928,8 @@ def test_activation_probe_reads_the_real_migration_module_when_present(conn):
     assert activation.state == ("active" if module.is_activated(conn) else "staged")
     assert activation.compatibility_behavior == module.migration_status(conn)["compatibility_behavior"]
     page = _render(fleet_policy_page.load_view(conn, inventory=_fresh_inventory(), activation=activation))
-    assert ("staged policy" in page.lower()) is not activation.active
+    heading = "Settings are active" if activation.active else "Saved for later"
+    assert f'id="activation">{heading}</h2>' in page
 
 
 def test_activation_is_never_inferred_from_a_populated_policy(conn):
@@ -973,6 +1030,10 @@ def test_a_successful_preview_renders_the_diff_and_a_confirm_control(conn):
     )
     assert f'name="review" value="{previewed.review}"' in page
     assert 'name="action" value="save"' in page
+    visible, advanced = page.split('<details id="policy-advanced"', 1)
+    assert "Confirm save" in visible
+    assert "Edit saved fleet defaults" in advanced
+    assert 'name="field.role_impl"' in advanced
     confirmed = fleet_policy_page.apply(
         conn,
         replace(submission, action="save", review=previewed.review),
@@ -1140,6 +1201,35 @@ def test_read_only_render_offers_no_save_control(conn):
     assert "<button" not in page
     assert 'name="csrf"' not in page
     assert "read-only" in page.lower()
+    for control in ("<select", "<input", "<textarea", "<form"):
+        assert control not in page
+    assert "csrf-token" not in page
+
+
+@pytest.mark.parametrize(
+    ("scope", "target", "label", "anchor"),
+    [
+        ("defaults", "", "Edit saved fleet defaults", None),
+        ("seat", "seat-alpha", "Seat matrix and model settings", "seat-seat-alpha"),
+        ("consumer", "brigade-run", "Edit consumer integrations and overrides", "consumer-brigade-run"),
+        (
+            "repository",
+            "acme/public-tool",
+            "Edit repository settings and overrides",
+            fleet_policy_page.repository_anchor("acme/public-tool"),
+        ),
+        ("rollback", "", "Session acknowledgements, audit history and rollback", None),
+    ],
+)
+def test_returned_admin_draft_opens_its_editor_without_hiding_the_error(conn, scope, target, label, anchor):
+    revision = _seed(conn)
+    draft = _submission(scope, "preview", revision, target=target)
+    page = _render(fleet_policy_page.load_view(conn, inventory=_fresh_inventory()), draft=draft, error="Draft refused")
+    assert '<details id="policy-advanced" open>' in page
+    assert f"<details open><summary>{label}</summary>" in page
+    if anchor:
+        assert f'<details id="{anchor}" open>' in page
+    assert page.index("Draft refused") < page.index('<details id="policy-advanced"')
 
 
 def test_values_are_escaped(conn):
@@ -1329,7 +1419,7 @@ def test_policy_route_renders_for_read_only_cookie_and_admin_bearer(tmp_path):
         assert status == 200
         assert headers["cache-control"] == "no-store"
         assert "content-security-policy" in headers
-        assert "Command Deck &middot; Policy" in page
+        assert "<h1>Model assignments</h1>" in page
         assert hub.token not in page and cookie.split("=", 1)[1] not in page
         bearer = {"Authorization": f"Bearer {hub.token}"}
         assert hub.request("GET", "/deck/policy", headers=bearer)[0] == 200

@@ -12,9 +12,9 @@ projections the page is not allowed to guess:
   evidence that a saved model is gone. Catalog listings are not treated as
   authenticated CLI execution.
 * ``Activation`` - whether the policy authority is live. Until the migration
-  module reports activation, the document is labelled a *staged policy* and the
-  page says plainly that edits do not yet change runtime behaviour. Activation
-  is never inferred from a non-empty document.
+  module reports activation, the page distinguishes saved future settings
+  from unknown activation. Activation is never inferred from a non-empty
+  document.
 
 Every write goes through ``fleet_hub_policy.preview_policy`` /
 ``save_policy`` / ``rollback_policy`` under the same compare-and-swap the JSON
@@ -65,6 +65,21 @@ UPDATED_BY = "policy-form"
 # One word for "the hub does not carry this", shared with the deck so the two
 # pages never disagree about what an absent value looks like.
 UNKNOWN_TEXT = fleet_command_deck.UNKNOWN
+
+_POLICY_CSS = """
+.policy-page .policy-access { margin: var(--space-3) 0; color: var(--muted); font-size: 12px; }
+.policy-page .policy-status { margin: var(--space-4) 0; border-left: 3px solid var(--signal); }
+.policy-page .policy-status h2 { margin-bottom: var(--space-2); }
+.policy-page .policy-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: var(--space-3); }
+.policy-page .policy-role { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-raised); }
+.policy-page .policy-role h3 { margin: 0 0 var(--space-2); color: var(--muted); font-size: 12px; font-weight: 500; }
+.policy-page .policy-model { margin: 0 0 var(--space-2); font-size: 17px; font-weight: 600; overflow-wrap: anywhere; }
+.policy-page .policy-seat { margin: 0; color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.policy-page .policy-limits { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: var(--space-4); margin: 0; }
+.policy-page .policy-limits dt { color: var(--muted); font-size: 12px; }
+.policy-page .policy-limits dd { margin: var(--space-1) 0 0; color: var(--ink); overflow-wrap: anywhere; }
+.policy-page pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+"""
 
 
 # Canonical runtime role keys. These are the keys consumers actually read; the
@@ -1102,13 +1117,23 @@ def _identity_panel(view: PolicyView) -> str:
         ("reason", view.reason),
         ("parent revision", "none" if view.parent_revision is None else view.parent_revision),
         ("provider snapshot", snapshot),
+        ("activation state", view.activation.state),
+        ("activation detail", view.activation.detail),
+        ("activation source", view.activation.source),
+        ("compatibility behavior", view.activation.compatibility_behavior),
     ]
     body = "".join(f"<dt>{_esc(key)}</dt><dd>{_text(value)}</dd>" for key, value in rows)
     links = " ".join(f'<a href="#consumer-{_esc(row.name)}">{_esc(row.name)}</a>' for row in view.consumers)
     consumer_html = f'<p class="hint">consumers: {links}</p>' if links else ""
     return (
         '<section class="panel" aria-labelledby="identity"><header><h2 id="identity">Policy document identity</h2></header>'
-        f'<dl class="tile-facts">{body}</dl>{consumer_html}{_inventory_note(inventory)}</section>'
+        f'<dl class="tile-facts">{body}</dl><p>{_esc(application_note(view.activation))}</p>'
+        + (
+            "<p>Role assignments are owned here; the roster page no longer writes them directly.</p>"
+            if view.activation.active
+            else ""
+        )
+        + f"{consumer_html}{_inventory_note(inventory)}</section>"
     )
 
 
@@ -1168,24 +1193,76 @@ def _inventory_note(inventory: Inventory) -> str:
 def _activation_panel(view: PolicyView) -> str:
     activation = view.activation
     if activation.active:
-        return (
-            '<section class="panel" aria-labelledby="activation"><header><h2 id="activation">Authority</h2></header>'
-            f"<p>The policy authority is <strong>active</strong> ({_esc(activation.compatibility_behavior)}). "
-            "Role assignments are owned here; the roster page no longer writes them directly.</p></section>"
+        headline = "Settings are active"
+        detail = (
+            "Future session loads use these settings. Sessions already running keep the settings they loaded "
+            "until their documented refresh or restart."
         )
-    if activation.state == "staged":
-        headline = "The policy authority is <strong>not activated</strong>."
-        # The headline already says it; repeating the module's detail here
-        # would just be the same sentence twice.
-        detail = ""
+    elif activation.state == "staged":
+        headline = "Saved for later"
+        detail = "These settings are saved, but they do not control new work."
     else:
-        headline = "Activation status is <strong>unknown</strong> (no migration status available)."
-        detail = f'<p class="hint">{_esc(activation.detail)}</p>'
+        headline = "Activation status unknown"
+        detail = "These are saved settings. This page cannot confirm whether they control new work."
     return (
-        '<section class="panel banner" aria-labelledby="activation"><header><h2 id="activation">Authority</h2></header>'
-        f"<p>{headline} This document is a <strong>staged policy</strong>: saving it records a revision, "
-        "but it does not yet change live runtime routing. Legacy run preference still owns runtime roles "
-        f"until the migration reports activation.</p>{detail}</section>"
+        '<section class="panel policy-status" aria-labelledby="activation">'
+        f'<h2 id="activation">{headline}</h2><p>{detail}</p>'
+        '<a href="/deck/roster">View current routing</a></section>'
+    )
+
+
+def _assignment_summary(view: PolicyView) -> str:
+    roles = view.document["defaults"].get("roles", {})
+    seats = {row.name: row for row in view.seats}
+    cards = []
+    for role in POLICY_ROLES:
+        alias = roles.get(role)
+        seat = seats.get(alias)
+        model = seat.model if seat else "Not assigned"
+        alias_note = f'<p class="policy-seat">Seat: {_esc(alias)}</p>' if alias else ""
+        cards.append(
+            f'<article class="policy-role" aria-labelledby="role-{_esc(role)}">'
+            f'<h3 id="role-{_esc(role)}">{_esc(ROLE_LABELS.get(role, role))}</h3>'
+            f'<p class="policy-model">{_esc(model)}</p>{alias_note}</article>'
+        )
+    scope = {
+        "active": "Saved fleet defaults in the active policy.",
+        "staged": "Saved fleet defaults for future use.",
+    }.get(view.activation.state, "Saved fleet defaults; activation has not been confirmed.")
+    return (
+        '<section class="panel" aria-labelledby="policy-roles"><header>'
+        '<h2 id="policy-roles">Models by role</h2></header>'
+        f"<p>{scope} Consumer, repository and session overrides can change an assignment.</p>"
+        '<p class="hint">Assignments record configured models; they do not confirm availability or provider sign-in.</p>'
+        f'<div class="policy-role-grid">{"".join(cards)}</div></section>'
+    )
+
+
+def _limits_summary(view: PolicyView) -> str:
+    defaults = view.document["defaults"]
+    data = defaults.get("data", {})
+    execution = defaults.get("execution", {})
+
+    def permission(value: object) -> str:
+        return "Allowed" if value is True else "Not allowed" if value is False else "Not set"
+
+    rows = (
+        ("Maximum concurrent workers", execution.get("concurrency")),
+        ("Contributor training", permission(data.get("allow_training"))),
+        ("Free models", permission(data.get("allow_free"))),
+        ("Data retention", data.get("retention")),
+        ("Default machine", execution.get("machine")),
+        ("Worker timeout (seconds)", execution.get("timeout_seconds")),
+    )
+    facts = "".join(
+        f"<div><dt>{_esc(label)}</dt><dd>{_esc('Not set' if value is None or value == '' else value)}</dd></div>"
+        for label, value in rows
+    )
+    return (
+        '<section class="panel" aria-labelledby="policy-limits"><header>'
+        '<h2 id="policy-limits">Limits and permissions</h2></header>'
+        '<p class="hint">Saved fleet defaults. Overrides and additional restrictions are in Advanced details.</p>'
+        f'<dl class="policy-limits">{facts}</dl></section>'
     )
 
 
@@ -1253,6 +1330,13 @@ def _plan_panel(
 
 
 def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submission | None) -> str:
+    if not editable:
+        return (
+            '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Saved fleet defaults'
+            '</h2></header><p class="hint">Free-model eligibility and contributor training use allow_free and '
+            "allow_training. Quota pools and cost classes stay separate.</p>"
+            f"<pre>{_esc(json.dumps(view.document['defaults'], indent=2, sort_keys=True))}</pre></section>"
+        )
     values = _draft_for(draft, "defaults")
     roles = view.document["defaults"].get("roles", {})
     data = view.document["defaults"].get("data", {})
@@ -1334,11 +1418,6 @@ def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submis
         "(allow_free and allow_training). A quota pool name is a label, not a price or cost classification. "
         "Quota pools and cost classes stay separate.</p>"
     )
-    if not editable:
-        return (
-            '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Fleet defaults and roles'
-            f"</h2></header>{body}</section>"
-        )
     return (
         '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Fleet defaults and roles</h2>'
         '</header><form method="post" action="/deck/policy" class="roster-form">'
@@ -1464,8 +1543,9 @@ def _seat_form(view: PolicyView, row: SeatRow, *, csrf: str, draft: Submission |
         ]
     )
     bindings = values.get("bindings", json.dumps(row.bindings, indent=2, sort_keys=True))
+    opened = " open" if draft is not None and draft.scope == "seat" and draft.target == row.name else ""
     return (
-        f'<details id="seat-{_esc(row.name)}"><summary>{_esc(row.name)} &middot; {_esc(row.provider)}/'
+        f'<details id="seat-{_esc(row.name)}"{opened}><summary>{_esc(row.name)} &middot; {_esc(row.provider)}/'
         f"{_esc(row.model)} &middot; inventory {_esc(row.inventory_state)}</summary>"
         f'{pin_note}{warn_note}<form method="post" action="/deck/policy" class="roster-form">'
         + _hidden("seat", row.name, view.revision, csrf)
@@ -1553,7 +1633,8 @@ def _consumer_section(view: PolicyView, *, editable: bool, csrf: str, draft: Sub
             + _actions(_reason_for(draft, "consumer", row.name))
             + "</form>"
         )
-        blocks.append(f'<details id="consumer-{_esc(row.name)}">{summary}{facts}{form}</details>')
+        opened = " open" if draft is not None and draft.scope == "consumer" and draft.target == row.name else ""
+        blocks.append(f'<details id="consumer-{_esc(row.name)}"{opened}>{summary}{facts}{form}</details>')
     return (
         '<section class="panel" aria-labelledby="consumers"><header><h2 id="consumers">Consumers</h2>'
         f'<p class="panel-count">{len(view.consumers)} consumer(s)</p></header>'
@@ -1691,7 +1772,8 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
             + _actions(_reason_for(draft, "repository", row.identity))
             + "</form>"
         )
-        blocks.append(f'<details id="{_esc(anchor)}">{summary}{facts}{form}</details>')
+        opened = " open" if draft is not None and draft.scope == "repository" and draft.target == row.identity else ""
+        blocks.append(f'<details id="{_esc(anchor)}"{opened}>{summary}{facts}{form}</details>')
     return (
         '<section class="panel" aria-labelledby="repos"><header><h2 id="repos">Repositories</h2>'
         f'<p class="panel-count">{len(view.repositories)} repository/repositories</p></header>'
@@ -1861,13 +1943,9 @@ def render(
     ``review`` is the server-minted token for the previewed document; it is
     what turns the proposed-change panel into a confirm-save control.
     """
-    parts: list[str] = ['<main class="deck-shell">']
+    parts: list[str] = ['<main class="deck-shell policy-page">']
     parts.append(
-        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Policy</h1>"
-        f'<p class="station-meta">revision {view.revision}, saved {_esc(view.created_at)} by '
-        f"{_esc(view.actor or 'unknown')}</p></div>"
-        f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
+        '<header class="masthead"><div><p class="eyebrow">Settings</p><h1>Model assignments</h1></div></header>'
     )
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
@@ -1875,18 +1953,27 @@ def render(
         parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
     if not editable:
         parts.append(
-            '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'
+            '<p class="policy-access">Access: read-only. You can inspect saved settings; editing requires an authorized admin request.</p>'
         )
     parts.append(_activation_panel(view))
-    heading = {
-        "active": "Active policy",
-        "staged": "Staged policy, not active",
-    }.get(view.activation.state, "Policy activation unknown")
-    parts.append(f"<h2>{heading}</h2>")
-    parts.append("<details><summary>Document identity and inventory</summary>" + _identity_panel(view) + "</details>")
     parts.append(_plan_panel(plan, activation=view.activation, draft=draft, review=review if editable else None))
-    parts.append(_defaults_form(view, editable=editable, csrf=csrf, draft=draft))
-    parts.append("<details><summary>Seat matrix and model settings</summary>" + _seat_table(view))
+    parts.append(_assignment_summary(view))
+    parts.append(_limits_summary(view))
+    draft_scope = draft.scope if editable and draft is not None else None
+    opened = " open" if draft_scope is not None else ""
+    parts.append(f'<details id="policy-advanced"{opened}><summary>Advanced details</summary>')
+    parts.append("<details><summary>Document identity and inventory</summary>" + _identity_panel(view) + "</details>")
+    if editable:
+        opened = " open" if draft_scope == "defaults" else ""
+        parts.append(
+            f"<details{opened}><summary>Edit saved fleet defaults</summary>"
+            + _defaults_form(view, editable=True, csrf=csrf, draft=draft)
+            + "</details>"
+        )
+    else:
+        parts.append(_defaults_form(view, editable=False, csrf=csrf, draft=None))
+    opened = " open" if draft_scope == "seat" else ""
+    parts.append(f"<details{opened}><summary>Seat matrix and model settings</summary>" + _seat_table(view))
     if editable:
         seat_forms = "".join(_seat_form(view, row, csrf=csrf, draft=draft) for row in view.seats)
         parts.append(
@@ -1894,11 +1981,35 @@ def render(
             f'<p class="panel-count">{len(view.seats)} seat(s)</p></header>{seat_forms}</section>'
         )
     parts.append("</details>")
-    parts.append(_consumer_section(view, editable=editable, csrf=csrf, draft=draft))
-    parts.append(_repository_section(view, editable=editable, csrf=csrf, draft=draft))
-    parts.append("<details><summary>Session acknowledgements and audit history</summary>" + _sessions_section(view))
+    consumer_label = "Edit consumer integrations and overrides" if editable else "Consumer integrations and overrides"
+    opened = " open" if draft_scope == "consumer" else ""
+    parts.append(
+        f"<details{opened}><summary>{consumer_label}</summary>"
+        + _consumer_section(view, editable=editable, csrf=csrf, draft=draft)
+        + "</details>"
+    )
+    repo_label = "Edit repository settings and overrides" if editable else "Repository settings and overrides"
+    opened = " open" if draft_scope == "repository" else ""
+    parts.append(
+        f"<details{opened}><summary>{repo_label}</summary>"
+        + _repository_section(view, editable=editable, csrf=csrf, draft=draft)
+        + "</details>"
+    )
+    history_label = (
+        "Session acknowledgements, audit history and rollback"
+        if editable
+        else "Session acknowledgements and audit history"
+    )
+    opened = " open" if draft_scope == "rollback" else ""
+    parts.append(f"<details{opened}><summary>{history_label}</summary>" + _sessions_section(view))
     parts.append(_history_section(view, editable=editable, csrf=csrf) + "</details>")
-    parts.append("</main>")
+    parts.append("</details></main>")
     return fleet_command_deck._document(
-        "\n".join(parts), nonce=nonce, now=now, title="Policy", refresh=False, active="policy"
+        "\n".join(parts),
+        nonce=nonce,
+        now=now,
+        title="Model assignments",
+        refresh=False,
+        active="policy",
+        extra_css=_POLICY_CSS,
     )

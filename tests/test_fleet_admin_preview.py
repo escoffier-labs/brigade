@@ -122,8 +122,10 @@ def test_settings_lead_with_authority_and_read_only_values(tmp_path):
         view = policy.load_view(conn)
         page = policy.render(view, nonce="p", now=NOW, csrf="secret", editable=False)
         assert page.index('id="activation"') < page.index('id="identity"')
-        assert "Policy activation unknown" in page and "Effective policy</h2>" not in page
+        assert "Activation status unknown" in page and "Effective policy</h2>" not in page
         assert "enroll with the fleet token to edit" not in page
+        assert all(control not in page for control in ("<select", "<input", "<textarea"))
+        assert "secret" not in page
         page = roster.render(
             roster.load_view(conn, deck.DeckConfig()), nonce="p", now=NOW, csrf="secret", editable=False
         )
@@ -272,9 +274,9 @@ def test_policy_heading_distinguishes_active_staged_and_unknown(tmp_path):
     try:
         view = policy.load_view(conn)
         for state, heading in (
-            ("active", "Active policy"),
-            ("staged", "Staged policy, not active"),
-            ("unknown", "Policy activation unknown"),
+            ("active", "Settings are active"),
+            ("staged", "Saved for later"),
+            ("unknown", "Activation status unknown"),
         ):
             page = policy.render(
                 replace(view, activation=policy.Activation(state, "fixture")),
@@ -283,7 +285,7 @@ def test_policy_heading_distinguishes_active_staged_and_unknown(tmp_path):
                 csrf="fixture",
                 editable=False,
             )
-            assert f"<h2>{heading}</h2>" in page
+            assert f'<h2 id="activation">{heading}</h2>' in page
     finally:
         conn.close()
 
