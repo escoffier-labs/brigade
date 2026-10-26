@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from brigade import localio, runs_patrol, runs_patrol_actions, runs_patrol_receipts
+from brigade import cli, localio, runs_patrol, runs_patrol_actions, runs_patrol_receipts
 from tests.test_run_reap import NOW
 
 
@@ -220,6 +220,33 @@ def test_action_history_over_the_limit_is_refused_not_published(tmp_path, monkey
     with pytest.raises(ValueError, match="action history"):
         runs_patrol_receipts.write_receipt(path, payload)
     assert not path.exists()
+
+
+def test_oversized_action_history_returns_patrol_error(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(runs_patrol_receipts, "RECEIPT_BYTE_LIMIT", 2000)
+    for i in range(8):
+        path = tmp_path / ".brigade/runs" / f"20260820-120000-patrol{i:02d}" / "run.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{")
+    write = runs_patrol_receipts.write_receipt
+    published = []
+
+    def tracked(path, payload):
+        write(path, payload)
+        published.append(path.read_bytes())
+
+    monkeypatch.setattr(runs_patrol_receipts, "write_receipt", tracked)
+    assert cli.main(["runs", "patrol", "--target", str(tmp_path), "--apply", "escalate", "--json"]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == "error: patrol: patrol action history exceeds receipt byte limit\n"
+    receipts = list((tmp_path / ".brigade/patrol").glob("*/patrol.json"))
+    assert len(receipts) == 1
+    assert receipts[0].read_bytes() == published[-1]
+    assert receipts[0].stat().st_size <= 2000
+    receipt = runs_patrol_receipts.read_receipt(receipts[0].parent)
+    assert receipt["actions"]
+    assert all(action["status"] == "recorded" for action in receipt["actions"])
 
 
 def test_care_status_reads_a_receipt_between_one_and_four_mib(tmp_path):

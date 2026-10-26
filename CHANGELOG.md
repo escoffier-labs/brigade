@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Message identity can report mutual peer authorization and independent enrollment and grant epochs for up to 16 external agents (#2070).
+- Patrol returns its documented error status when action history exceeds the receipt size limit, preserving the last durable receipt (#1956).
 - Store sealed Hub messages with retry lookup, post-ack content purge, storage quotas, and optional required sealing (#2045).
 - Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
 

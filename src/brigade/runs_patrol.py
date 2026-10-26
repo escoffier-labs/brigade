@@ -239,7 +239,7 @@ def patrol(
             payload.update(exit_code=2, error=type(exc).__name__)
             try:
                 runs_patrol_receipts.write_receipt(written_receipt, payload)
-            except OSError:
+            except (OSError, ValueError):
                 pass  # The original failure still determines the exit disposition.
         print(f"error: patrol: {exc}", file=sys.stderr)
         return 2
