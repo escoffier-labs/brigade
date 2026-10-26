@@ -1257,21 +1257,60 @@ def test_sidebar_resources_link_out_safely(view):
     assert html.count("<nav") == 1
 
 
-def test_sidebar_meta_shows_version_and_flags_stale_telemetry():
+@pytest.mark.parametrize("reason", ["stale-telemetry", "unknown-telemetry"])
+def test_sidebar_meta_shows_version_and_uses_hub_stale_verdict(reason):
     import brigade
 
-    machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(120))
-    view = _view(plane=_plane([machine]), stale_after_seconds=60)
+    machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(720), unused_reason=reason)
+    view = _view([_station(NODE_A, "linux-a", 8)], plane=_plane([machine]))
     html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert "sidebar-meta--stale" in html and "telemetry stale 2m" in html
+    assert 'data-status="stale"' in html
+    assert "sidebar-meta--stale" in html and "telemetry stale 12m" in html
     assert f"v{brigade.__version__}" in html
-    fresh = overview.render_sidebar(replace(view, stale_after_seconds=1800), "overview", NOW, worklore_enabled=True)
-    assert "sidebar-meta--stale" not in fresh and "telemetry 2m" in fresh
+    fresh_view = replace(
+        view, stale_after_seconds=60, control_plane=_plane([replace(machine, unused_reason="idle-capacity")])
+    )
+    fresh = overview.render_sidebar(fresh_view, "overview", NOW, worklore_enabled=True)
+    assert 'data-status="idle"' in fresh
+    assert "sidebar-meta--stale" not in fresh and "telemetry 12m" in fresh
 
 
-@pytest.mark.parametrize("plane", [None, _plane([_machine("linux-a", NODE_A, last_observed_at="unreadable")])])
+@pytest.mark.parametrize("enrolled", [True, False])
+def test_sidebar_meta_uses_only_enrolled_verdicts_and_keeps_the_freshest_age(enrolled):
+    view = _view(
+        [_station(NODE_A, "linux-a", 8), _station(NODE_B, "linux-b", 8, enrolled=enrolled)],
+        plane=_plane(
+            [
+                _machine("linux-a", NODE_A, last_observed_at=_stamp(720), unused_reason="stale-telemetry"),
+                _machine("linux-b", NODE_B),
+            ]
+        ),
+    )
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert ("sidebar-meta--stale" in html) is not enrolled
+    assert ("telemetry 1m" if enrolled else "telemetry stale 1m") in html
+
+
+@pytest.mark.parametrize(
+    "stations", [(), (_station(NODE_A, "linux-a", 8, enrolled=False),), (_station(NODE_B, "linux-b", 8),)]
+)
+def test_sidebar_meta_needs_an_enrolled_hub_verdict_to_be_stale(stations):
+    machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(7200), unused_reason="stale-telemetry")
+    html = overview.render_sidebar(_view(stations, plane=_plane([machine])), "overview", NOW, worklore_enabled=True)
+    assert "sidebar-meta--stale" not in html and "telemetry 2h 0m" in html
+
+
+@pytest.mark.parametrize(
+    "plane",
+    [
+        None,
+        _plane(),
+        _plane([_machine("linux-a", NODE_A, last_observed_at="unreadable", unused_reason="unknown-telemetry")]),
+    ],
+)
 def test_sidebar_meta_is_unknown_without_a_control_plane(plane):
-    html = overview.render_sidebar(_view(plane=plane), "overview", NOW, worklore_enabled=True)
+    view = _view([_station(NODE_A, "linux-a", 8)], plane=plane)
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
     assert "telemetry unknown" in html and "sidebar-meta--stale" not in html
 
 

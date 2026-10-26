@@ -10,6 +10,7 @@ from .fleet_deck_overview import (
     POLICY_LIMITS,
     _esc,
     format_age,
+    is_stale,
     machine_for,
     seconds_since,
     station_status,
@@ -114,7 +115,12 @@ def _sidebar_meta(view: DeckView | None, now: datetime) -> str:
         ages = [] if plane is None else [seconds_since(machine.last_observed_at, now) for machine in plane.machines]
         known = [age for age in ages if age is not None]
         age = min(known) if known else None
-        stale = age is not None and age > view.stale_after_seconds
+        enrolled = [station for station in view.stations if station.enrolled]
+        stale = (
+            age is not None
+            and bool(enrolled)
+            and all(is_stale(station, machine_for(view, station)) for station in enrolled)
+        )
         modifier = " sidebar-meta--stale" if stale else ""
         text = "telemetry unknown" if age is None else f"telemetry {'stale ' if stale else ''}{format_age(age)}"
         telemetry = f'<span class="mono sidebar-telemetry">{_esc(text)}</span>'
