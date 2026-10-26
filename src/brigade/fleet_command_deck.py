@@ -50,6 +50,7 @@ FAILURE_STATE_SUFFIXES = (
 )
 ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT, SESSION_LIMIT = 200, 8, 10, 500
 CLOUD_PROVIDER_LIMIT, CLOUD_LEASE_LIMIT = 8, 16
+CLOUD_REPORT_HISTORY_LIMIT = 50
 CLOUD_TEXT_LIMIT = 256
 SESSION_REPO_IDENTITY_LIMIT, SESSION_CHECKOUT_PATH_LIMIT = 512, 1024
 BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "unknown": 2, "stale": 2, "running": 3, "queued": 4}
@@ -212,6 +213,12 @@ class CloudSessionContext:
     coverage: str
     parent_session_id: str = ""
     work_id: str = ""
+    task: str = ""
+    reported_state: str = "unknown"
+    progress: str = ""
+    blocker: str = ""
+    result: str = ""
+    evidence_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -229,6 +236,8 @@ class InteractiveSession:
     dirty_paths: tuple[str, ...]
     dirty_truncated: bool
     cloud_context: CloudSessionContext | None = None
+    presence_state: str = "active"
+    observation_age_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -474,6 +483,7 @@ class DeckView:
     observers: tuple[tuple[str, str], ...]
     cloud_workers: tuple[CloudWorker, ...] = ()
     interactive_sessions: tuple[InteractiveSession, ...] = ()
+    recent_cloud_reports: tuple[InteractiveSession, ...] = ()
     control_plane: ControlPlane | None = None
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
     stale_after_seconds: int = 1800
@@ -1047,10 +1057,19 @@ def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[
 
 
 def fetch_interactive_sessions(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, object]]:
-    """Active unexpired sessions via the Hub session authority. Capped separately."""
+    """Active presence plus separately bounded v2 stale/terminal task reports."""
     from . import fleet_hub_sessions
+    from .fleet_dot import TERMINAL_STATES
 
-    return fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())[:SESSION_LIMIT]
+    active = fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())[:SESSION_LIMIT]
+    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=now.timestamp())[:CLOUD_REPORT_HISTORY_LIMIT]
+    return [
+        row
+        for row in active
+        if not (
+            isinstance(context := row.get("cloud_context"), dict) and context.get("reported_state") in TERMINAL_STATES
+        )
+    ] + history
 
 
 def fetch_observers(conn: sqlite3.Connection, configured: frozenset[str]) -> list[tuple[str, str]]:
@@ -1107,36 +1126,6 @@ def _display_claim(claim: Claim | None, enrolled_labels: Mapping[str, str]) -> C
         owner_node=_node_label(claim.owner_node, enrolled_labels),
         owner_conductor=claim.owner_conductor,
         ttl_remaining=claim.ttl_remaining,
-    )
-
-
-def _cloud_session_context(raw: object) -> CloudSessionContext | None:
-    from .fleet_dot import DotReportError, validate_cloud_context
-
-    if raw is None:
-        return None
-    try:
-        return CloudSessionContext(**validate_cloud_context(raw))
-    except DotReportError:
-        return None
-
-
-def _interactive_session(raw: Mapping[str, object]) -> InteractiveSession:
-    dirty = raw.get("dirty_paths")
-    paths = tuple(item for item in dirty if isinstance(item, str)) if isinstance(dirty, (list, tuple)) else ()
-    branch = raw.get("branch")
-    return InteractiveSession(
-        node_id=_safe_display_text(raw.get("node_id")),
-        harness=_safe_display_text(raw.get("harness")),
-        session_id=_safe_display_text(raw.get("session_id")),
-        repo_identity=_safe_display_text(raw.get("repo_identity"), limit=SESSION_REPO_IDENTITY_LIMIT),
-        identity_scope=_safe_display_text(raw.get("identity_scope")) or "fleet",
-        repo_label=_safe_display_text(raw.get("repo_label")),
-        checkout_path=_safe_display_text(raw.get("checkout_path"), limit=SESSION_CHECKOUT_PATH_LIMIT),
-        branch=_safe_display_text(branch) if isinstance(branch, str) else None,
-        dirty_paths=paths,
-        dirty_truncated=bool(raw.get("dirty_truncated")),
-        cloud_context=_cloud_session_context(raw.get("cloud_context")),
     )
 
 
@@ -1265,7 +1254,9 @@ def build_view(
     interactive_sessions: Sequence[Mapping[str, object]] = (),
     control_plane: ControlPlane | None = None,
 ) -> DeckView:
-    del now
+    from .fleet_dot import TERMINAL_STATES
+    from .fleet_deck_activity import interactive_session
+
     active_runs = tuple(
         run for run in live_runs if not is_terminal_state(run.state) and run.bucket not in {"stale", "unknown"}
     )
@@ -1274,7 +1265,20 @@ def build_view(
     parallel_targets = {
         target for target in {run.repo for run in active_runs} if collides(target, active_runs, claims_by_target)
     }
-    session_rows = tuple(_interactive_session(item) for item in interactive_sessions)
+    session_rows_list = []
+    history_rows = []
+    for item in interactive_sessions:
+        session = interactive_session(item, now=now)
+        cloud = session.cloud_context
+        if (
+            cloud is not None
+            and cloud.version == 2
+            and (session.presence_state == "stale" or cloud.reported_state in TERMINAL_STATES)
+        ):
+            history_rows.append(session)
+        elif item.get("presence_state") != "stale":
+            session_rows_list.append(session)
+    session_rows = tuple(session_rows_list[:SESSION_LIMIT])
     overlap_targets = _exact_path_overlap_targets(interactive_sessions)
     stations: list[StationView] = []
     for station in config.stations:
@@ -1374,6 +1378,7 @@ def build_view(
         observers=tuple(observers),
         cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
         interactive_sessions=session_rows,
+        recent_cloud_reports=tuple(history_rows[:CLOUD_REPORT_HISTORY_LIMIT]),
         control_plane=control_plane,
         observed_work_groups=config.observed_work_groups,
         stale_after_seconds=config.stale_after_seconds,

@@ -411,12 +411,14 @@ def test_work_response_must_confirm_bound_report_authority(report_transport, mon
 
 def v2_report(**updates):
     return report(
-        version=2,
-        task="Check build",
-        reported_state="running",
-        source="explicit-metadata",
-        source_scope="explicit-session",
-        **updates,
+        **{
+            "version": 2,
+            "task": "Check build",
+            "reported_state": "running",
+            "source": "explicit-metadata",
+            "source_scope": "explicit-session",
+            **updates,
+        }
     )
 
 
@@ -430,6 +432,7 @@ def test_v2_stores_full_report_replaces_dynamic_fields_and_fences_replay(monkeyp
     body = fleet_dot.report_session(raw)["presence_payload"]
     _, first = fleet_hub_sessions.handle_session(conn, body, caller_node=NODE)
     context = first["session"]["cloud_context"]
+    assert first["session"]["evidence_verification"] == "reported-unverified"
     assert context["task"] == "Check build"
     assert context["reported_state"] == "running"
     assert context["evidence_refs"] == ["receipt-a"]

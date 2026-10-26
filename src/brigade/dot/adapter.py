@@ -255,8 +255,7 @@ class DotTools:
                 "and no runtime setting adds them. Do the work on your own compute."
             ),
             fleet_hub=dict(
-                read_only=False,
-                report_session="fleet_report_session: gated explicit v2 task reports, dry-run by default, reported-unverified; no lifecycle authority",
+                read_only=True,
                 start_of_task="fleet_digest, then fleet_overview and fleet_work_next for full detail",
                 note="Fleet Hub views never reserve, claim or change hub state. fleet_work_next is a dry run.",
             ),

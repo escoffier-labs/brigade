@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Mapping, Sequence
 
 from . import fleet_command_deck as deck
@@ -92,6 +93,42 @@ def _membership(session: deck.InteractiveSession) -> str:
     )
 
 
+def cloud_session_context(raw: object) -> deck.CloudSessionContext | None:
+    from .fleet_dot import DotReportError, validate_cloud_context
+
+    if raw is None:
+        return None
+    try:
+        context = validate_cloud_context(raw)
+        if "evidence_refs" in context:
+            context["evidence_refs"] = tuple(context["evidence_refs"])
+        return deck.CloudSessionContext(**context)
+    except DotReportError:
+        return None
+
+
+def interactive_session(raw: Mapping[str, object], *, now: datetime) -> deck.InteractiveSession:
+    dirty = raw.get("dirty_paths")
+    paths = tuple(item for item in dirty if isinstance(item, str)) if isinstance(dirty, (list, tuple)) else ()
+    branch = raw.get("branch")
+    context = cloud_session_context(raw.get("cloud_context"))
+    return deck.InteractiveSession(
+        node_id=deck._safe_display_text(raw.get("node_id")),
+        harness=deck._safe_display_text(raw.get("harness")),
+        session_id=deck._safe_display_text(raw.get("session_id")),
+        repo_identity=deck._safe_display_text(raw.get("repo_identity"), limit=deck.SESSION_REPO_IDENTITY_LIMIT),
+        identity_scope=deck._safe_display_text(raw.get("identity_scope")) or "fleet",
+        repo_label=deck._safe_display_text(raw.get("repo_label")),
+        checkout_path=deck._safe_display_text(raw.get("checkout_path"), limit=deck.SESSION_CHECKOUT_PATH_LIMIT),
+        branch=deck._safe_display_text(branch) if isinstance(branch, str) else None,
+        dirty_paths=paths,
+        dirty_truncated=bool(raw.get("dirty_truncated")),
+        cloud_context=context,
+        presence_state="stale" if raw.get("presence_state") == "stale" else "active",
+        observation_age_seconds=deck._age_seconds(context.observed_at, now) if context else None,
+    )
+
+
 def render_cloud_presence(view: deck.DeckView) -> str:
     """Bounded human labels from reported presence, independent of lease inventory."""
     agents = {
@@ -106,11 +143,65 @@ def render_cloud_presence(view: deck.DeckView) -> str:
         )
     labels = ", ".join(context.agent_label for context in tuple(agents.values())[:8])
     more = f" · {len(agents) - 8} more in session details" if len(agents) > 8 else ""
+    task_rows = "".join(
+        _task_report_row(session)
+        for session in view.interactive_sessions
+        if session.cloud_context is not None and session.cloud_context.version == 2
+    )
+    notice = (
+        "Self-reported task state; provider execution unverified. "
+        if task_rows
+        else "Presence only; running work unobserved. "
+    )
     return (
         f"<h3>Reported cloud agents ({len(agents)})</h3>"
         f'<p class="row-meta">{deck.harness_badge_html("dot")} Dot · {_esc(labels)}{more}</p>'
-        '<p class="station-meta">Presence only; running work unobserved. '
-        "Coverage is limited to explicitly reported sessions.</p>"
+        f'<p class="station-meta">{notice}Coverage is limited to explicitly reported sessions.</p>'
+        + (f'<ul class="rows">{task_rows}</ul>' if task_rows else "")
+    )
+
+
+def _task_report_row(session: deck.InteractiveSession) -> str:
+    from .fleet_deck_overview import format_age
+
+    context = session.cloud_context
+    if context is None:
+        return ""
+    agent = context.agent_label.replace("_", " ").replace("-", " ")
+    freshness = "stale" if session.presence_state == "stale" else "unexpired report"
+    facts = "".join(
+        f'<p class="row-meta">{label}: {_esc(value)}</p>'
+        for label, value in (("Progress", context.progress), ("Blocker", context.blocker), ("Result", context.result))
+        if value
+    )
+    return (
+        '<li class="row"><div class="row-body">'
+        f'<p class="row-title">{_esc(context.task)}</p>'
+        f'<p class="row-meta">Dot · {_esc(agent)} · Reported {_esc(context.reported_state)} · {freshness}</p>'
+        f'<p class="row-meta">Observed {format_age(session.observation_age_seconds)} ago · reported-unverified</p>'
+        + facts
+        + "<details><summary>Task report details</summary>"
+        + f"<p>Session: {_esc(session.session_id)}<br>Reporter: {_esc(session.node_id)}"
+        + f"<br>Repository: {_esc(session.repo_identity or deck.UNKNOWN)}</p>"
+        + _cloud_details(context)
+        + "</details></div></li>"
+    )
+
+
+def render_cloud_report_history(view: deck.DeckView) -> str:
+    if not view.recent_cloud_reports:
+        return ""
+    rows = "".join(_task_report_row(session) for session in view.recent_cloud_reports)
+    cap = (
+        '<p class="station-meta">Recent report list may be capped.</p>'
+        if len(view.recent_cloud_reports) >= deck.CLOUD_REPORT_HISTORY_LIMIT
+        else ""
+    )
+    return (
+        f"<h3>Recent cloud reports ({len(view.recent_cloud_reports)})</h3>"
+        '<p class="station-meta">Stale presence or reported outcomes; provider execution unverified. '
+        "Coverage is limited to explicitly reported sessions. Outcomes do not complete leases.</p>"
+        f'<ul class="rows">{rows}</ul>{cap}'
     )
 
 
@@ -121,7 +212,13 @@ def _cloud_details(context: deck.CloudSessionContext) -> str:
         f"<br>Work: {_esc(context.work_id or deck.UNKNOWN)}"
         f"<br>Source: {_esc(context.source)}<br>Scope: {_esc(context.source_scope)}"
         f"<br>Coverage: {_esc(context.coverage)}<br>Observed: {_esc(context.observed_at)}"
-        f"<br>Context version: {context.version} · Sequence: {context.sequence}</p>"
+        f"<br>Context version: {context.version} · Sequence: {context.sequence}"
+        + (
+            f"<br>Reported-unverified evidence: {_esc(', '.join(context.evidence_refs))}"
+            if context.evidence_refs
+            else ""
+        )
+        + "</p>"
     )
 
 
@@ -130,6 +227,8 @@ def render_octopool_observation(view: deck.DeckView) -> str:
     header = '<section class="panel" id="octopool-observation"><h2>GitHub reads / Octopool</h2>'
     if observation is None:
         return header + '<p class="station-meta">Octopool reporting not connected</p></section>'
+    captured = datetime.fromisoformat(observation.captured_at)
+    captured_label = f"{captured:%b} {captured.day} {captured:%H:%M} UTC"
     seconds = observation.window_seconds
     window = f"{seconds // 3600}h" if seconds % 3600 == 0 else f"{seconds}s"
     labels = {
@@ -148,10 +247,11 @@ def render_octopool_observation(view: deck.DeckView) -> str:
     rate = observation.eligible_cache_hit_rate
     details = f"<p>Eligible cache hit rate: {rate:.2%}</p>" if rate is not None else ""
     return (
-        header + f'<p class="station-meta">Captured {_esc(observation.captured_at)} · {window} · '
+        header + f'<p class="station-meta">Captured {_esc(captured_label)} · {window} · '
         "Pool-wide, includes clients outside this fleet.</p>"
         f'<p class="row-meta">{metrics or "No valid counters provided."}</p>'
         "<details><summary>Metric details</summary><p>Source: Octopool stats capture</p>"
+        f"<p>Capture timestamp: {_esc(observation.captured_at)}</p>"
         "<p>Cache-served responses include cache hits and stale responses, including revalidations. "
         "Uncached outcomes count responses served outside the cache. Neither counter measures upstream request savings. "
         "Fallbacks count expected local fallbacks and do not necessarily indicate failure.</p>"
@@ -180,7 +280,9 @@ def render_cloud_presence_panel(view: deck.DeckView) -> str:
         + render_cloud_presence(view)
         + "<details><summary>Reported session presence</summary>"
         + render_sessions(view)
-        + "</details></section>"
+        + "</details>"
+        + render_cloud_report_history(view)
+        + "</section>"
     )
 
 

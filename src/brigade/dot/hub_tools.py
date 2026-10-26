@@ -104,10 +104,6 @@ class HubTools:
                 "acquired_at",
                 "renewed_at",
                 "expires_at",
-                "cloud_context",
-                "presence_state",
-                "provider_lifecycle",
-                "inventory_coverage",
                 "expired",
             )
             items = [claim for claim in claims["claims"] if isinstance(claim, dict)]
@@ -229,6 +225,7 @@ class HubTools:
             "presence_state",
             "provider_lifecycle",
             "inventory_coverage",
+            "evidence_verification",
         )
         shown = []
         for item in sessions[:limit]:
@@ -346,10 +343,6 @@ class HubTools:
             "renewed_at",
             "released_at",
             "expires_at",
-            "cloud_context",
-            "presence_state",
-            "provider_lifecycle",
-            "inventory_coverage",
             "expired",
             "owner_node",
             "owner_conductor",

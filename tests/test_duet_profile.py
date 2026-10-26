@@ -272,6 +272,8 @@ class DuetAdapter(DuetFixture):
     @requires_local_state
     def test_capabilities_describe_no_dispatch_and_no_auto_reply(self):
         result = self.call("duet_capabilities")
+        self.assertTrue(result["fleet_hub"]["read_only"])
+        self.assertNotIn("report_session", result["fleet_hub"])
         self.assertEqual(set(result["tools"]), ISSUE_TOOLS)
         self.assertEqual(set(result["absent_tools"]), DISPATCH_AND_T3)
         self.assertTrue(result["messaging_enabled"])

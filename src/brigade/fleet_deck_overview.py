@@ -412,7 +412,7 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
         f"{working}{activity.render_cloud_presence(view)}<details><summary>Reported session presence</summary>"
         "<p>Agent sessions report presence. They may be idle or overlap managed jobs. "
         "Current presence means the Hub has an unexpired report.</p>"
-        f"{render_sessions(view)}</details></section>"
+        f"{render_sessions(view)}</details>{activity.render_cloud_report_history(view)}</section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
         f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section>"
     )

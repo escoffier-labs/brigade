@@ -145,7 +145,7 @@ def list_sessions(
         # Filter before LIMIT so local sessions and fresh nonterminal reports
         # cannot hide older task outcomes. JSON is validated on every write.
         node_filter += (
-            "AND cloud_context_json IS NOT NULL AND (state != 'active' OR expires_at <= ? "
+            "AND json_extract(cloud_context_json, '$.version') = 2 AND (state != 'active' OR expires_at <= ? "
             "OR json_extract(cloud_context_json, '$.reported_state') IN ('completed', 'failed', 'cancelled')) "
         )
         params.append(now)
@@ -572,7 +572,10 @@ def _session_payload(row: tuple[Any, ...], *, now: float | None = None) -> dict[
     }
 
     if row[16] is not None:
-        payload["cloud_context"] = json.loads(row[16])
+        context = json.loads(row[16])
+        payload["cloud_context"] = context
+        if context.get("version") == 2:
+            payload["evidence_verification"] = "reported-unverified"
         payload["checkout_path"] = None
         payload["repo_identity"] = row[3] or None
         payload["provider_lifecycle"] = "unobserved"

@@ -46,6 +46,8 @@ class OverviewChecks(Fixture):
         self.assertEqual(result["status"]["routing"], {"impl": "sol61"})
         self.assertEqual(result["claims"]["count"], 1)
         self.assertNotIn("holder", result["claims"]["claims"][0])
+        self.assertNotIn("cloud_context", result["claims"]["claims"][0])
+        self.assertNotIn("presence_state", result["claims"]["claims"][0])
         self.runner.calls.clear()
         self.call("fleet_overview", include_terminal=True)
         self.assertEqual(self.runner.argvs()[0], [BRIGADE, "fleet", "status", "--json", "--all"])
@@ -173,6 +175,13 @@ class V4Behavior(Fixture):
             }
             for i in range(60)
         ]
+        sessions[-1].update(
+            cloud_context={"version": 2, "task": "Check fixture", "reported_state": "running"},
+            presence_state="active",
+            provider_lifecycle="unobserved",
+            inventory_coverage="explicitly-reported-sessions",
+            evidence_verification="reported-unverified",
+        )
         self.runner.handler = reply(sessions)
         result = self.call("fleet_sessions")
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "sessions", "--json"]])
@@ -180,6 +189,9 @@ class V4Behavior(Fixture):
         self.assertEqual(len(result["sessions"]), 50)
         self.assertEqual(result["sessions"][0]["session_id"], "s59")
         self.assertEqual(result["sessions"][0]["dirty_count"], 59)
+        self.assertEqual(result["sessions"][0]["cloud_context"], sessions[-1]["cloud_context"])
+        self.assertEqual(result["sessions"][0]["presence_state"], "active")
+        self.assertEqual(result["sessions"][0]["evidence_verification"], "reported-unverified")
         self.assertNotIn("dirty_paths", result["sessions"][0])
         self.assertEqual(result["by_node"], {"alpha": 30, "beta": 30})
         self.runner.calls.clear()
@@ -270,6 +282,8 @@ class V4Behavior(Fixture):
         result = self.call("fleet_cloud", include_released=True, limit=2)
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "cloud", "--all", "--json"]])
         self.assertEqual([lease["lease_id"] for lease in result["leases"]], ["l4", "l3"])
+        self.assertNotIn("cloud_context", result["leases"][0])
+        self.assertNotIn("presence_state", result["leases"][0])
         self.assertEqual(result["lease_count"], 5)
 
     @requires_local_state

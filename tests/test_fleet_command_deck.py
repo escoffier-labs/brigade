@@ -380,7 +380,8 @@ def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_head
     html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
     panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
     visible = _visible_text(panel)
-    assert "Captured" in visible and "2026-08-25T12:00:00+00:00" in visible
+    assert "Captured Aug 25 12:00 UTC" in visible
+    assert "2026-08-25T12:00:00+00:00" in panel and "2026-08-25T12:00:00+00:00" not in visible
     assert "24h" in visible and "Pool-wide" in visible and "includes clients outside this fleet" in visible
     assert "41 requests" in visible and "7 cache-served responses" in visible
     assert "2 fallbacks" in visible and "1 service errors" in visible
@@ -2036,3 +2037,124 @@ def test_octopool_prefers_canonical_cache_and_uncached_counters():
     assert "11 cache-served responses" in html and "30 uncached outcomes" in html
     assert "7 cache-served responses" not in html and "99 uncached" not in html
     assert "reads saved" not in html and "requests avoided" not in html
+
+
+def test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity(monkeypatch):
+    from brigade import fleet_dot, fleet_deck_overview as overview
+    from tests.test_fleet_dot import v2_report
+
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp())
+    for raw in (
+        v2_report(
+            session_id="active-task",
+            agent_label="Miller",
+            observed_at=_ts(60),
+            task="Check <fixture>",
+            blocker="Awaiting fixture",
+            progress="Testing",
+        ),
+        v2_report(session_id="stale-task", observed_at=_ts(1000), reported_state="running", task="Older build"),
+        v2_report(
+            session_id="outcome-task",
+            observed_at=_ts(120),
+            reported_state="completed",
+            task="Review change",
+            result="Reviewed fixture",
+            evidence_refs=["receipt-a"],
+        ),
+    ):
+        fleet_hub_sessions.handle_session(conn, fleet_dot.report_session(raw)["presence_payload"], caller_node=NODE_A)
+    rows = deck.fetch_interactive_sessions(conn, now=NOW)
+    view = deck.build_view(
+        deck.DeckConfig(stations=()),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=rows,
+    )
+    assert len(view.interactive_sessions) == 1
+    assert len(view.recent_cloud_reports) == 2
+    html = overview.render_work_lists(view)
+    visible = _visible_text(html)
+    assert "Check <fixture>" in visible and "Check &lt;fixture&gt;" in html
+    assert "Miller" in visible and "Reported running" in visible
+    assert "Observed 1m ago" in visible
+    assert "Awaiting fixture" in visible and "Testing" in visible
+    assert "Recent cloud reports (2)" in visible
+    assert "Older build" in visible and "stale" in visible and "Reported completed" in visible
+    assert "Reviewed fixture" in visible
+    assert "reported-unverified" in visible and "explicitly reported sessions" in visible
+    assert "receipt-a" not in visible and "receipt-a" in html
+    assert "active-task" not in visible and "outcome-task" not in visible
+    assert "Running: 0 · 0 managed jobs reported" in visible
+    assert overview.summarize(view).busy == 0 and view.cloud_workers == ()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"task": "x" * 401},
+        {"reported_state": "verified"},
+        {"sequence": True},
+        {"evidence_refs": ["https://localhost/private"]},
+    ],
+)
+def test_dashboard_refuses_malformed_v2_context_even_in_history(change):
+    from brigade import fleet_dot, fleet_deck_overview as overview
+    from tests.test_fleet_dot import v2_report
+
+    context = dict(fleet_dot.parse_report(v2_report()).snapshot.cloud_context)
+    context.update(change)
+    view = deck.build_view(
+        deck.DeckConfig(stations=()),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=[
+            {"node_id": NODE_A, "session_id": "bad", "presence_state": "stale", "cloud_context": context}
+        ],
+    )
+    assert view.recent_cloud_reports == ()
+    html = overview.render_work_lists(view)
+    assert "Check build" not in html and "https://localhost" not in html
+
+
+def test_recent_report_cap_is_applied_before_merging_active_presence(monkeypatch):
+    from brigade import fleet_dot
+    from tests.test_fleet_dot import v2_report
+
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    monkeypatch.setattr(deck, "CLOUD_REPORT_HISTORY_LIMIT", 1)
+    for received, raw in (
+        (NOW.timestamp() - 1, v2_report(session_id="older-outcome", observed_at=_ts(60), reported_state="completed")),
+        (NOW.timestamp(), v2_report(session_id="newer-stale-report", observed_at=_ts(1000))),
+    ):
+        monkeypatch.setattr(fleet_hub, "_now_epoch", lambda received=received: received)
+        fleet_hub_sessions.handle_session(conn, fleet_dot.report_session(raw)["presence_payload"], caller_node=NODE_A)
+    rows = deck.fetch_interactive_sessions(conn, now=NOW)
+    view = deck.build_view(
+        deck.DeckConfig(stations=()),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=rows,
+    )
+    assert [row.session_id for row in view.recent_cloud_reports] == ["newer-stale-report"]
