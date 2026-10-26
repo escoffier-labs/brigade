@@ -47,12 +47,25 @@ def test_primary_sections_keep_work_discoverable_without_worklore():
             assert f'href="{route}"' in page
 
 
-def test_overview_attention_precedes_counts_and_runs_before_capacity():
+def test_overview_places_machines_directly_after_attention_and_keeps_secondary_counts():
     view = replace(_mixed_view(), rail=_alert_view().rail)
     source = overview.page_alerts(view, NOW)[0].source_ref
     page = overview.render_overview(view, NOW, worklore_enabled=True, action_sources=frozenset({source}))
-    assert page.index("skillet on linux-a") < page.index('aria-label="Fleet summary"')
-    assert page.index('aria-labelledby="working-title"') < page.index('id="machines-table"')
+    attention = page.split('aria-labelledby="attention-title"', 1)[1].split("</section>", 1)[0]
+    assert attention.count('class="alert-row"') <= 3
+    assert 'class="alert-line"' not in attention and ">Review</a>" not in attention
+    assert attention.count(">View all alerts</a>") == 1
+    assert re.search(r'</section>\s*<section class="panel" id="machines-table"', page)
+    assert page.index("skillet on linux-a") < page.index('id="machines-table"')
+    assert page.index('id="machines-table"') < page.index('aria-labelledby="working-title"')
+    machines = page.split('id="machines-table"', 1)[1].split("</section>", 1)[0]
+    assert "Usable for selected work: unknown" in machines
+    assert "Reported counts and capacity context" in machines
+    assert 'class="cards"' not in page
+    assert 'class="split"' not in page
+    assert "About activity" not in page
+    assert "Running: 2" in page and "3 ready to run" in page
+    assert "Not ready: unknown" in page
     assert "first observed 2h 0m ago" in page and "external.failed" in page
     assert ">Prepare repair</a>" in page
     assert "Usable for selected work: unknown" in page

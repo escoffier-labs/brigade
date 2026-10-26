@@ -326,8 +326,8 @@ def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(i
     if actionable:
         assert alerts[-1].detail == reason
     html = deck.render_deck(view, nonce="nonce", now=NOW)
-    noun = "alert" if count == 1 else "alerts"
-    assert (f"<strong>{count} {noun}</strong>" in html) == bool(count)
+    assert html.count('class="alert-row"') == count
+    assert 'class="alert-line"' not in html
     summary = "3 excluded from ready queue" if actionable else "3 not ready"
     assert f"<details><summary>{summary}</summary>" in html and 'href="/deck/work"' in html
     readable = {"not-ready": "not ready", "blocker": "blocked", "attempt-limit": "reached the attempt limit"}[reason]
@@ -504,7 +504,7 @@ def test_stale_and_unknown_working_rows_link_to_the_attention_board():
 
 def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     html = overview.render_work_lists(_mixed_view())
-    assert "Managed jobs (2)" in html
+    assert "2 managed jobs reported" in html
     assert html.count('class="row"') == 2
     assert 'href="/view/machines?node=11111111-1111-4111-8111-111111111111&amp;repo=skillet"' in html
     assert "seat-a · linux-a" in html
@@ -615,7 +615,7 @@ def test_repositoryless_jobs_remain_visible_without_shared_label_claim():
     assert not any(entry.kind == "parallel" for entry in view.rail)
     assert sum(station.busy for station in view.stations) == 2
     html = overview.render_work_lists(view)
-    assert "Managed jobs (2)" in html and html.count(">unknown</a>") == 2
+    assert "2 managed jobs reported" in html and html.count(">unknown</a>") == 2
     assert "parallel activity" not in html
     assert "<td>unknown</td>" in deck.repo_coordination_table(view)
 
@@ -955,11 +955,11 @@ def test_overview_body_orders_sections_and_folds_control_plane_details():
     html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
     order = [
         'class="page-head"',
-        'class="alert-line"',
+        'aria-labelledby="attention-title"',
+        'id="machines-table"',
         'aria-label="Fleet summary"',
         'aria-labelledby="working-title"',
         'id="interactive-sessions"',
-        'id="machines-table"',
         'id="cloud-workers"',
         'id="timeline"',
         "<summary>Control plane details</summary>",
@@ -1170,13 +1170,13 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
     html = overview.render_overview(view, NOW, worklore_enabled=True)
     activity = html.split('aria-labelledby="working-title"', 1)[1].split('aria-labelledby="queued-title"', 1)[0]
     assert ">Activity<" in activity
-    assert "Managed jobs (2)" in activity
+    assert "2 managed jobs reported" in activity
     assert "Reported agent sessions (4)" in activity
     assert "may be idle" in activity
     assert f"{name} · " in activity and "current presence" in activity
     assert "unexpired report" in activity
     assert html.count('id="interactive-sessions"') == 1
-    assert html.index('aria-labelledby="working-title"') < html.index('id="machines-table"')
+    assert html.index('id="machines-table"') < html.index('aria-labelledby="working-title"')
     assert "one, two" in activity
     assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
     assert HOSTILE not in activity
@@ -1413,26 +1413,26 @@ def test_machine_legend_uses_its_own_swatches_not_seat_segments():
     assert "seg" not in legend.replace("seat-legend", "")
 
 
-def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero():
+def test_overview_attention_uses_one_destination_and_preserves_counted_subjects():
     from collections import Counter
 
     view = _alert_view()
     rail = view.rail + (view.rail[0],)
     view = replace(view, rail=rail)
-    line = overview.render_alert_line(view, NOW)
-    assert "<strong>8 alerts</strong>" in line
-    assert "2 failed" not in line  # Subject rows now carry each state, rather than a second aggregate inventory.
-    assert '<a href="/deck/alerts">Review</a>' in line
+    attention = overview.render_attention(view, NOW, action_sources=frozenset())
+    assert 'class="alert-line"' not in attention
+    assert attention.count('href="/deck/alerts"') == 1
+    assert "5 more alerts" in attention
     assert Counter(alert.kind for alert in overview.page_alerts(view, NOW))["failed"] == 2
     clear = replace(
         _plane(present=deck.CONTROL_PLANE_SECTIONS),
         authority_present=True,
         authority=deck.AuthorityState("true", "active"),
     )
-    assert overview.render_alert_line(_view(plane=clear), NOW) == ""
+    assert "No active alerts" in overview.render_attention(_view(plane=clear), NOW, action_sources=frozenset())
     single = replace(_view(plane=clear), rail=view.rail[:1])
     assert len(overview.page_alerts(single, NOW)) == 1
-    assert "<strong>1 alert</strong>" in overview.render_alert_line(single, NOW)
+    assert overview.render_attention(single, NOW, action_sources=frozenset()).count('class="alert-row"') == 1
     page = overview.render_overview(view, NOW, worklore_enabled=True)
     assert page.count('class="alert-row"') == 3 and "external.failed" in page
     assert "5 more alerts" in page
@@ -1440,10 +1440,10 @@ def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero(
     assert full.count('class="alert-row"') == 8 and "external.failed" in full
     markers = [
         'class="page-head"',
-        'class="alert-line"',
+        'aria-labelledby="attention-title"',
+        'id="machines-table"',
         'aria-label="Fleet summary"',
         'aria-labelledby="working-title"',
-        'id="machines-table"',
     ]
     assert [page.index(marker) for marker in markers] == sorted(page.index(marker) for marker in markers)
 
@@ -1458,14 +1458,12 @@ def test_machine_notes_column_is_only_present_when_a_row_has_a_note(claims, colu
     assert ("machine-table--no-notes" in html) == (columns == 4)
 
 
-def test_activity_explanation_is_a_tooltip_and_verdict_display_is_sentence_case():
+def test_activity_explanation_is_visible_without_nested_help_and_verdict_is_sentence_case():
     html = overview.render_work_lists(_mixed_view())
     assert '<h2 id="working-title">Activity</h2>' in html
-    assert re.search(
-        r'<details class="panel-help"><summary>About activity</summary><p>Managed jobs occupy station slots\.', html
-    )
+    assert "About activity" not in html
+    assert re.search(r'<p class="station-meta">Running: 2 · 2 managed jobs reported\. Managed jobs occupy', html)
     assert 'title="Managed jobs occupy' not in html
-    assert '<p class="station-meta">Managed jobs occupy' not in html
     assert 'verdict-status--unknown">Coverage unknown (1)' in overview.render_header(_view(), NOW)
     clear = replace(
         _plane(present=deck.CONTROL_PLANE_SECTIONS),

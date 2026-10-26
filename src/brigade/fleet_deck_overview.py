@@ -126,7 +126,7 @@ def free_seats(station: StationView, machine: MachineState | None) -> int:
     return base
 
 
-# --- summary cards ------------------------------------------------------------
+# --- reported counts ------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -165,6 +165,7 @@ def _card(name: str, title: str, value: str, sub: str, bar: str = "") -> str:
 
 
 def render_summary(view: DeckView) -> str:
+    """Secondary reported counts, kept inside the machine panel's context."""
     summary = summarize(view)
     running = sum(tile.run.bucket == "running" for station in view.stations for tile in station.tiles)
     working_bar = (
@@ -175,13 +176,8 @@ def render_summary(view: DeckView) -> str:
     queue = (
         view.control_plane.queue if view.control_plane is not None and "queue" in view.control_plane.present else None
     )
-    not_ready = (
-        str(sum(int(deck._cp_text(item["count"])) for item in queue.exclusions) + len(queue.blocked_items))
-        if queue is not None and queue.complete and queue.blocked_known
-        else UNKNOWN
-    )
     return (
-        '<section class="cards" aria-label="Fleet summary">'
+        '<section class="reported-counts" aria-label="Fleet summary">'
         + _card(
             "working",
             "Running",
@@ -190,13 +186,17 @@ def render_summary(view: DeckView) -> str:
             working_bar,
         )
         + _card("queued", "Ready to run", summary.queued, "queue eligibility")
-        + _card("not-ready", "Not ready", not_ready, "excluded or blocked; review reasons")
-        + "</section>"
-        + "<details><summary>Configured capacity counts</summary>"
+        + _card("not-ready", "Not ready", _not_ready(queue), "excluded or blocked; review reasons")
         + _card("idle", "Spare configured slots", summary.idle, "fresh telemetry; usability not verified")
         + _card("offline", "Offline", summary.offline, "stale or offline")
-        + "</details>"
+        + "</section>"
     )
+
+
+def _not_ready(queue: deck.QueueState | None) -> str:
+    if queue is None or not queue.complete or not queue.blocked_known:
+        return UNKNOWN
+    return str(sum(int(deck._cp_text(item["count"])) for item in queue.exclusions) + len(queue.blocked_items))
 
 
 # --- alerts ---------------------------------------------------------------------
@@ -286,15 +286,6 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
     return tuple(attention + collisions + stale + coverage)
 
 
-def render_alert_line(view: DeckView, now: datetime) -> str:
-    alerts = page_alerts(view, now)
-    if not alerts:
-        return ""
-    return (
-        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> <a href="/deck/alerts">Review</a></p>'
-    )
-
-
 def render_attention(
     view: DeckView, now: datetime, *, action_sources: frozenset[str], worklore_enabled: bool = True
 ) -> str:
@@ -305,9 +296,8 @@ def render_attention(
     return (
         '<section class="panel" aria-labelledby="attention-title"><header><h2 id="attention-title">Needs attention</h2>'
         '<a href="/deck/alerts">View all alerts</a></header>'
-        + render_alert_line(view, now)
         + render_alert_rows(alerts[:3], action_sources=action_sources, compact=True, worklore_enabled=worklore_enabled)
-        + (f'<p><a href="/deck/alerts">{remaining} more alerts · View all alerts</a></p>' if remaining > 0 else "")
+        + (f'<p class="station-meta">{remaining} more alerts</p>' if remaining > 0 else "")
         + "</section>"
     )
 
@@ -387,6 +377,9 @@ def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> s
         return '<p class="empty">Queue unknown: the control-plane snapshot has no queue section.</p>'
     queue = plane.queue
     counts = activity.queue_counts(queue)
+    counts += (
+        f'<p class="station-meta">Not ready: {_esc(_not_ready(queue))} · excluded or blocked in this snapshot.</p>'
+    )
     counts += deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
     rows = "".join(
         '<li class="row"><div class="row-body">'
@@ -410,16 +403,18 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
         for tile in station.tiles
     )
     count = sum(station.busy for station in view.stations)
+    running = sum(tile.run.bucket == "running" for station in view.stations for tile in station.tiles)
     working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
-        '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
-        '<div><h2 id="working-title">Activity</h2><details class="panel-help"><summary>About activity</summary>'
-        "<p>Managed jobs occupy station slots. Agent sessions report presence; they may be idle or overlap "
-        "managed jobs. Current presence means the Hub has an unexpired report.</p></details></div>"
+        '<section class="panel" aria-labelledby="working-title"><header><h2 id="working-title">Activity</h2>'
         '<a class="card-link" href="/view/machines">View runs</a></header>'
-        f"<h3>Managed jobs ({count})</h3>{working}<details><summary>Reported session presence</summary>{render_sessions(view)}</details></section>"
+        f'<p class="station-meta">Running: {running} · {count} managed jobs reported. Managed jobs occupy station slots.</p>'
+        f"{working}<details><summary>Reported session presence</summary>"
+        "<p>Agent sessions report presence. They may be idle or overlap managed jobs. "
+        "Current presence means the Hub has an unexpired report.</p>"
+        f"{render_sessions(view)}</details></section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
-        f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section></div>"
+        f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section>"
     )
 
 
@@ -541,7 +536,7 @@ def _machine_row(view: DeckView, station: StationView, now: datetime, *, show_no
     )
 
 
-def render_machine_table(view: DeckView, now: datetime) -> str:
+def render_machine_table(view: DeckView, now: datetime, *, include_context: bool = False) -> str:
     header = (
         '<section class="panel" id="machines-table" aria-labelledby="machines-title"><header><div>'
         f'<h2 id="machines-title">Machines ({len(view.stations)})</h2>'
@@ -550,10 +545,21 @@ def render_machine_table(view: DeckView, now: datetime) -> str:
         '<span class="legend-swatch legend-swatch--off"></span>unavailable</p></div>'
         '<a class="card-link" href="/view/machines">Machines board</a></header>'
     )
+    context = (
+        '<p class="station-meta">Usable for selected work: unknown. Configured slots describe reported capacity. '
+        '<a href="/deck/capacity">Capacity details</a></p>'
+        "<details><summary>Reported counts and capacity context</summary>"
+        "<p>Authentication, provider readiness, policy eligibility and shared quotas are not verified here. "
+        "Local and cloud pools may overlap and are not added together.</p>" + render_summary(view) + "</details>"
+        if include_context
+        else ""
+    )
     if not view.stations:
         return (
             header
-            + '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'
+            + '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p>'
+            + context
+            + "</section>"
         )
     show_notes = any(
         machine_notes(station, machine_for(view, station), station_status(station, machine_for(view, station)))
@@ -565,7 +571,7 @@ def render_machine_table(view: DeckView, now: datetime) -> str:
     return (
         header + f'<div class="table-wrap"><table class="{table_class}"><thead><tr><th>Machine</th><th>Seats</th>'
         f"<th>Load</th>{notes_header}<th>Seen</th></tr></thead>"
-        f"<tbody>{rows}</tbody></table></div></section>"
+        f"<tbody>{rows}</tbody></table></div>{context}</section>"
     )
 
 
@@ -688,10 +694,8 @@ def render_overview(
         '<main class="deck-shell overview">',
         render_header(view, now),
         render_attention(view, now, action_sources=action_sources, worklore_enabled=worklore_enabled),
-        render_summary(view),
+        render_machine_table(view, now, include_context=True),
         render_work_lists(view, worklore_enabled=worklore_enabled),
-        '<p class="station-meta">Configured seats and telemetry describe reported capacity. Usable for selected work: unknown. Authentication, provider readiness, policy eligibility and shared quotas are not verified here. <a href="/deck/capacity">Capacity details</a></p>',
-        render_machine_table(view, now),
         "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
         "<details><summary>Recent outcomes</summary>" + render_outcomes(view) + "</details>",
         "<details><summary>Control plane details</summary>"

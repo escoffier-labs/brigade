@@ -371,17 +371,17 @@ def test_badge_icons_have_trusted_accessible_labels_without_inline_styles():
     assert [attrs["title"] for attrs in badges[-1:]] == [hostile]
 
 
-def test_populated_deck_orders_summary_alerts_work_and_machines():
+def test_populated_deck_orders_alerts_machines_context_and_work():
     station = deck.StationView(
         deck.StationConfig("fixture-node", "Example", 2), "Example", True, 0, NOW.isoformat(), ()
     )
     view = deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
     markers = [
-        'class="alert-line"',
+        'aria-labelledby="attention-title"',
+        'id="machines-table"',
         'aria-label="Fleet summary"',
         'aria-labelledby="working-title"',
-        'id="machines-table"',
     ]
     positions = [rendered.index(marker) for marker in markers]
     assert positions == sorted(positions)

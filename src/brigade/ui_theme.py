@@ -264,6 +264,9 @@ OVERVIEW_CSS = """
 .card-title { margin: 0; color: var(--muted); font-size: 12px; font-weight: 500; }
 .card-value { color: var(--ink); margin: var(--space-1) 0 0; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .card-sub { margin: 0 0 var(--space-2); color: var(--muted); font-size: 12px; }
+.reported-counts { display: flex; flex-wrap: wrap; gap: var(--space-4); }
+.reported-counts .card { flex: 1 1 160px; padding: 0; border: 0; }
+.reported-counts .card-title, .reported-counts .card-value { font-size: 13px; }
 progress { appearance: none; -webkit-appearance: none; display: block; width: 100%; height: 6px; border: 0; border-radius: 999px; overflow: hidden; background: var(--bar-track); color: var(--working); }
 progress::-webkit-progress-bar { background: var(--bar-track); }
 progress::-webkit-progress-value { background: var(--working); }
