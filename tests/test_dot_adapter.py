@@ -20,6 +20,7 @@ from brigade.dot.state import BridgeState
 from tests.test_dot_runtime import _document
 from tests.test_dot_state import NOW
 from tests.test_dot_inbox_tools import FakeMessages
+from tests.test_fleet_dot import v2_report
 
 EMAIL = "dot@example.test"
 OTHER = "other@example.test"
@@ -137,6 +138,7 @@ class Fixture(unittest.TestCase):
 
 
 VALID_CALLS = {
+    "fleet_report_session": {"report": v2_report()},
     "dot_t3_capabilities": {},
     "fleet_capacity": {"host": "beta"},
     "fleet_doctor": {"host": "alpha", "repository": "brigade"},
@@ -252,7 +254,15 @@ class DispatchGateChecks(Fixture):
         gated = sorted(name for name, schema in TOOL_SCHEMAS.items() if schema.gated)
         self.assertEqual(
             gated,
-            ["fleet_answer", "fleet_approve", "fleet_followup", "fleet_interrupt", "fleet_submit", "message_send"],
+            [
+                "fleet_answer",
+                "fleet_approve",
+                "fleet_followup",
+                "fleet_interrupt",
+                "fleet_report_session",
+                "fleet_submit",
+                "message_send",
+            ],
         )
         for name in gated:
             arguments = VALID_CALLS.get(name, {"job_id": "c7d2d37c-6269-46be-8ba9-49cbf9eb399a", "task": "review"})

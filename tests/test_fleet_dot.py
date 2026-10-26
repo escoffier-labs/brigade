@@ -501,3 +501,144 @@ def test_cloud_history_filters_before_limit(monkeypatch):
     history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 901, node_ids={NODE})
     assert [row["session_id"] for row in history] == ["session-a"]
     assert fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 901, text_filter="Check build") == history
+
+
+@pytest.mark.parametrize(
+    "reply", [{}, {"session": None}, {"session": {"node_id": NODE}}, "invalid", "timeout", "old-hub"]
+)
+def test_v2_publication_never_confirms_missing_or_malformed_readback(monkeypatch, reply):
+    from io import BytesIO
+    from brigade import fleet_dot, fleet_client_messages
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
+    monkeypatch.setattr(fleet_client_messages, "identity", lambda **kw: {"principal": NODE})
+    calls = []
+
+    def opened(request, **kwargs):
+        calls.append(request)
+        if reply == "timeout":
+            raise TimeoutError
+        if reply == "old-hub":
+            import urllib.error
+
+            raise urllib.error.HTTPError(request.full_url, 400, "old hub", {}, None)
+        response = BytesIO(reply.encode() if isinstance(reply, str) else json.dumps(reply).encode())
+        response.status = 200
+        return response
+
+    monkeypatch.setattr(fleet_client, "_hub_open", opened)
+    result = fleet_dot.report_session(v2_report(), publish=True, expected_node=NODE)
+    assert result["status"] == ("refused" if reply == "old-hub" else "unknown")
+    assert result["summaries_persisted"] is False
+    assert len(calls) == 1  # Never downgrade or retry a v2 report as v1.
+
+
+@pytest.mark.parametrize("race", ["runtime", "principal", "settings", "node", "admin", "missing"])
+def test_v2_refuses_identity_and_configuration_races_before_write(monkeypatch, race):
+    from brigade import fleet_dot, fleet_client_messages
+
+    settings = {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""}
+    if race == "admin":
+        settings["admin_token"] = settings["node_token"]
+    if race == "missing":
+        settings["node_token"] = ""
+    current_node = [NODE]
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: current_node[0])
+
+    def identity(**kwargs):
+        if race == "settings":
+            settings["hub_url"] = "https://other.example.test"
+            settings["node_token"] = "b" * 40
+        if race == "node":
+            current_node[0] = OTHER
+        return {"principal": OTHER if race == "principal" else NODE}
+
+    monkeypatch.setattr(fleet_client_messages, "identity", identity)
+    monkeypatch.setattr(fleet_client, "_hub_open", lambda *a, **k: pytest.fail("unauthorized session write"))
+    result = fleet_dot.report_session(v2_report(), publish=True, expected_node=OTHER if race == "runtime" else NODE)
+    assert result["status"] == "refused"
+    assert result["summaries_persisted"] is False
+    assert "n" * 40 not in json.dumps(result) and "b" * 40 not in json.dumps(result)
+
+
+def test_v2_local_http_publication_readback_replay_and_revocation(tmp_path, monkeypatch):
+    import threading
+    from datetime import datetime, timezone
+    from brigade import fleet_dot
+
+    db = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(db)
+    _, token = fleet_hub.add_node(conn, NODE)
+    conn.close()
+    server = fleet_hub.make_server("127.0.0.1", 0, db, "fixture-admin")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    settings = {"hub_url": f"http://127.0.0.1:{server.server_address[1]}", "node_token": token, "admin_token": ""}
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
+    # Message-only runtime credentials must never be read for node publication.
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", str(tmp_path / "nonexistent"))
+    raw = v2_report(observed_at=datetime.now(timezone.utc).isoformat(), result="Checked fixture")
+    try:
+        result = fleet_dot.report_session(raw, publish=True, expected_node=NODE)
+        assert result["status"] == "confirmed" and result["summaries_persisted"] is True
+        conn = fleet_hub.open_db(db)
+        before = fleet_hub_sessions.list_sessions(conn)[0]
+        assert before["cloud_context"]["result"] == "Checked fixture"
+        assert fleet_dot.report_session(raw, publish=True, expected_node=NODE)["status"] == "confirmed"
+        assert fleet_hub_sessions.list_sessions(conn)[0]["expires_at"] == before["expires_at"]
+        fleet_hub.revoke_node(conn, NODE)
+        conn.close()
+        assert fleet_dot.report_session(raw, publish=True, expected_node=NODE)["status"] == "refused"
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("change", ["node", "session", "sequence", "task", "omitted", "extra", "boolean"])
+def test_v2_public_session_client_requires_complete_exact_context(monkeypatch, change):
+    from io import BytesIO
+    from brigade import fleet_dot, fleet_client_messages
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
+    monkeypatch.setattr(fleet_client_messages, "identity", lambda **kw: {"principal": NODE})
+    snapshot = fleet_dot.parse_report(v2_report()).snapshot
+    session = {
+        "node_id": NODE,
+        "harness": "dot",
+        "session_id": snapshot.session_id,
+        "repo_identity": None,
+        "cloud_context": dict(snapshot.cloud_context),
+        "ttl_seconds": snapshot.ttl_seconds,
+    }
+    if change == "node":
+        session["node_id"] = OTHER
+    elif change == "session":
+        session["session_id"] = "another"
+    elif change == "omitted":
+        session["cloud_context"].pop("task")
+    elif change == "extra":
+        session["cloud_context"]["unexpected"] = "value"
+    else:
+        session["cloud_context"]["sequence" if change in {"sequence", "boolean"} else "task"] = (
+            True if change == "boolean" else 3
+        )
+
+    def opened(*a, **k):
+        response = BytesIO(json.dumps({"session": session}).encode())
+        response.status = 200
+        return response
+
+    monkeypatch.setattr(fleet_client, "_hub_open", opened)
+    assert fleet_client.publish_session(snapshot).ok is False

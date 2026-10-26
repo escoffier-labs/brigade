@@ -309,11 +309,19 @@ def read_report(data: bytes) -> object:
         raise DotReportError("report requires valid bounded JSON") from None
 
 
-def report_session(raw: object, *, publish: bool = False, holder_nonce: str | None = None) -> dict[str, Any]:
+def report_session(
+    raw: object, *, publish: bool = False, holder_nonce: str | None = None, expected_node: str | None = None
+) -> dict[str, Any]:
     """Validate/project, or explicitly publish through supported fleet clients."""
     from . import fleet_client
 
     report = parse_report(raw)
+    if (report.snapshot.cloud_context or {}).get("version") == 2:
+        if holder_nonce is not None:
+            raise DotReportError("v2 does not accept holder authority")
+        return _report_task_session(report, publish=publish, expected_node=expected_node)
+    if expected_node is not None:
+        raise DotReportError("expected-node requires version 2")
     if holder_nonce is not None:
         from .worklore_ownership import nonce_hash, _reject_nonce_echo
 
@@ -369,6 +377,38 @@ def report_session(raw: object, *, publish: bool = False, holder_nonce: str | No
         return result
     if isinstance(work_id, str):
         _publish_work(report, work_id, node_id, holder_nonce, result)
+    return result
+
+
+def _report_task_session(report: DotReport, *, publish: bool, expected_node: str | None) -> dict[str, Any]:
+    from . import fleet_client
+
+    result: dict[str, Any] = {
+        "mode": "publish" if publish else "dry-run",
+        "status": "dry-run",
+        "inventory_coverage": "explicitly-reported-sessions",
+        "provider_lifecycle": "unobserved",
+        "evidence_verification": "reported-unverified",
+        "presence_payload": fleet_client._session_request_body(report.snapshot, action="upsert"),
+        "summaries_persisted": False,
+        "components": {"presence": "projected", "work": "not-requested"},
+    }
+    if not publish:
+        return result
+    # CLI callers without an MCP runtime are still fenced to the configured
+    # host identity. Remote MCP arguments never select this identity.
+    node = expected_node if expected_node is not None else fleet_client.resolve_node_id()
+    published = fleet_client.publish_task_session(report.snapshot, expected_node=node)
+    if published.ok:
+        result.update(status="confirmed", summaries_persisted=True, confirmed_node=node)
+        result["components"]["presence"] = "published"
+    else:
+        reason = published.reason or "unconfirmed"
+        refused = reason in {"node_auth_required", "node_identity_mismatch", "hub_unconfigured"} or (
+            reason.startswith("http_status:4")
+        )
+        result["status"] = "refused" if refused else "unknown"
+        result["components"]["presence"] = f"{'failed' if refused else 'unknown'}:{reason}"
     return result
 
 

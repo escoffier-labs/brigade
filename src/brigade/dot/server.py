@@ -172,6 +172,14 @@ def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT
         return await invoke("fleet_overview", {"include_terminal": include_terminal})
 
     @tool(
+        name="fleet_report_session",
+        annotations=annotations("fleet_report_session"),
+        description="Validate a bounded explicit v2 task report offline by default; publish=true stores unverified task facts with the host node credential. Requires dispatch_enabled. No run, lease, ownership or provider discovery authority. Unknown replies never confirm persistence.",
+    )
+    async def fleet_report_session(report: dict, publish: bool = False) -> dict:
+        return await invoke("fleet_report_session", {"report": report, "publish": publish})
+
+    @tool(
         name="fleet_sessions",
         annotations=annotations("fleet_sessions"),
         description="Read-only: Fleet Hub interactive sessions (brigade fleet sessions), newest heartbeat first, with counts by state, node and harness. include_ended adds ended/expired sessions.",

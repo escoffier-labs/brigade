@@ -107,6 +107,17 @@ def answers_value(value: Any) -> dict[str, Any]:
     return value
 
 
+def task_report(value: Any) -> dict[str, Any]:
+    from ..fleet_dot import DotReportError, parse_report
+
+    require(isinstance(value, dict) and type(value.get("version")) is int and value["version"] == 2)
+    try:
+        parse_report(value)
+    except DotReportError:
+        raise DotError("invalid_request") from None
+    return value
+
+
 def message_ids(value: Any) -> list[int]:
     require(isinstance(value, list) and 1 <= len(value) <= 100)
     require(all(type(item) is int and 0 < item < 2**62 for item in value))
@@ -258,6 +269,9 @@ TOOL_SCHEMAS = {
     "inbox_reply": ToolSchema(
         {"msg_id": _required(_integer(1, 2**63 - 1)), "body": _required(MESSAGE_BODY)}, read_only=False
     ),
+    "fleet_report_session": ToolSchema(
+        {"report": _required(task_report), "publish": _optional(_boolean, False)}, gated=True, read_only=False
+    ),
     "fleet_sessions": ToolSchema(
         {"include_ended": _optional(_boolean, False), "limit": _optional(_integer(1, 100), 50)}
     ),
@@ -281,7 +295,9 @@ TOOL_SCHEMAS = {
 
 TOOLS = frozenset(TOOL_SCHEMAS)
 # Tools that start or steer work on operator machines, gated by dispatch_enabled.
-DISPATCH_GATED_TOOLS = frozenset({"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt"})
+DISPATCH_GATED_TOOLS = frozenset(
+    {"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt", "fleet_report_session"}
+)
 # Hub messaging has its own gate, so a profile can send messages without dispatch.
 MESSAGING_GATED_TOOLS = frozenset({"message_send"})
 GATED_TOOLS = DISPATCH_GATED_TOOLS | MESSAGING_GATED_TOOLS

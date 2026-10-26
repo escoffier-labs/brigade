@@ -103,6 +103,7 @@ from .fleet_event_report import report_event_detailed as report_event_detailed
 
 if TYPE_CHECKING:
     from .fleet_session_presence import SessionSnapshot
+    from .fleet_client_cloud import admit_cloud as admit_cloud, bind_cloud as bind_cloud, release_cloud as release_cloud
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
@@ -1378,7 +1379,68 @@ def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None
 
 def publish_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> SessionWriteResult:
     """Refresh one interactive session and return a bounded non-secret status."""
+    if snapshot.cloud_context is not None and snapshot.cloud_context.get("version") == 2:
+        # V2 task persistence always requires strict identity and stored readback.
+        # Endpoint overrides are deliberately unavailable for task reports.
+        if hub_url is not None:
+            return SessionWriteResult(False, "endpoint_override_refused")
+        return publish_task_session(snapshot, expected_node=resolve_node_id())
     return _post_session(snapshot, action="upsert", hub_url=hub_url)
+
+
+def publish_task_session(snapshot: SessionSnapshot, *, expected_node: str) -> SessionWriteResult:
+    """Confirm a v2 readback under one captured host node authority. No retries."""
+    from .fleet_client_message_credentials import MessageAuthority, MessageAuthorityError, FleetMessageHubError
+    from . import fleet_client_messages
+
+    attempted = False
+    try:
+        authority = MessageAuthority.capture(node_credential=True)
+        if not _node_id_is_claimable(expected_node) or authority.node_id != expected_node:
+            return SessionWriteResult(False, "node_identity_mismatch")
+        _require_encrypted_or_loopback_hub(authority.hub)
+        principal = fleet_client_messages.identity(authority=authority, timeout=REPORT_TIMEOUT_SECONDS)
+        if principal != {"principal": expected_node}:
+            return SessionWriteResult(False, "node_identity_mismatch")
+        # Re-read only to refuse changed configuration, never to switch endpoint
+        # or credential between authentication and publication.
+        authority.validate()
+        body = _session_request_body(snapshot, action="upsert")
+        request = urllib.request.Request(
+            authority.hub.rstrip("/") + "/sessions",
+            data=json.dumps(body).encode("utf-8"),
+            headers={"Content-Type": "application/json", "Authorization": f"Bearer {authority.token}"},
+            method="POST",
+        )
+        attempted = True
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            if response.status != 200:
+                return SessionWriteResult(False, f"http_status:{response.status}")
+            payload = json.loads(_read_bounded_response(response, limit=64 * 1024))
+        authority.validate()
+        session = payload.get("session") if isinstance(payload, dict) else None
+        if not isinstance(session, dict):
+            return SessionWriteResult(False, "invalid_session_response")
+        expected = {
+            "node_id": expected_node,
+            "harness": "dot",
+            "session_id": snapshot.session_id,
+            "repo_identity": snapshot.repo_identity or None,
+            "cloud_context": dict(snapshot.cloud_context or {}),
+            "ttl_seconds": snapshot.ttl_seconds,
+        }
+        # JSON equality is type-strict (True is not sequence 1), includes the
+        # complete replacement context, and refuses old Hubs dropping v2 facts.
+        actual = {key: session.get(key) for key in expected}
+        if json.dumps(actual, sort_keys=True) != json.dumps(expected, sort_keys=True):
+            return SessionWriteResult(False, "invalid_session_response")
+        return SessionWriteResult(True)
+    except MessageAuthorityError:
+        return SessionWriteResult(False, "credential_changed" if attempted else "node_auth_required")
+    except FleetMessageHubError as exc:
+        return SessionWriteResult(False, f"http_status:{exc.status}" if exc.status else "identity_unconfirmed")
+    except Exception as exc:
+        return SessionWriteResult(False, _classify_session_write_error(exc))
 
 
 def upsert_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> bool:

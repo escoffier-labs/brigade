@@ -355,6 +355,32 @@
       },
       "name": "fleet_recent"
     },
+    "fleet_report_session": {
+      "name": "fleet_report_session",
+      "description": "Validate a bounded explicit v2 task report offline by default; publish=true stores unverified task facts with the host node credential. Requires dispatch_enabled. No run, lease, ownership or provider discovery authority. Unknown replies never confirm persistence.",
+      "inputSchema": {
+        "properties": {
+          "report": {
+            "additionalProperties": true,
+            "title": "Report",
+            "type": "object"
+          },
+          "publish": {
+            "default": false,
+            "title": "Publish",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "report"
+        ],
+        "title": "fleet_report_sessionArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false
+      }
+    },
     "fleet_sessions": {
       "annotations": {
         "readOnlyHint": true

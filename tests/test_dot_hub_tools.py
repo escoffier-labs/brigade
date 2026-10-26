@@ -323,7 +323,8 @@ class V4Behavior(Fixture):
         self.assertIn("fleet_overview", capabilities["operating_instructions"])
         self.assertTrue(set(V4_TOOLS) <= set(capabilities["tools"]))
         self.assertTrue(set(V4_TOOLS) <= set(capabilities["fleet_hub"]["tools"]))
-        self.assertTrue(capabilities["fleet_hub"]["read_only"])
+        self.assertFalse(capabilities["fleet_hub"]["read_only"])
+        self.assertIn("fleet_report_session", capabilities["fleet_hub"]["report_session"])
 
 
 STATUS = {
@@ -660,3 +661,52 @@ class DigestRoutes(Fixture):
         with self.assertRaisesRegex(DotError, "invalid_request"):
             self.call("fleet_digest", repo="other")
         self.assertEqual(self.runner.calls, [])
+
+
+class ReportChecks(Fixture):
+    @requires_local_state
+    def test_report_gated_strict_and_fixed_stdin(self):
+        from tests.test_fleet_dot import v2_report
+        from brigade.dot.adapter import validate_arguments
+        from brigade.dot.profile import DUET
+        import pytest
+
+        raw = v2_report()
+        self.runner.handler = lambda argv, stdin: CommandResult(0, b'{"status":"dry-run","summaries_persisted":false}')
+        result = self.call("fleet_report_session", report=raw)
+        assert result["status"] == "dry-run"
+        call = self.runner.calls[-1]
+        assert call["argv"] == [BRIGADE, "fleet", "dot", "report", "--expected-node", self.runtime.hub.node_id]
+        assert json.loads(call["stdin"]) == raw
+        assert call["timeout"] <= 60 and call["max_output"] <= 65536
+        self.call("fleet_report_session", report=raw, publish=True)
+        assert self.runner.calls[-1]["argv"] == [*call["argv"], "--publish"]
+        with pytest.raises(DotError, match="dispatch_disabled"):
+            self.make_adapter(False).call(EMAIL, "fleet_report_session", {"report": raw})
+        assert len(self.runner.calls) == 2
+        for extra in ({"node_id": "other"}, {"hub_url": "https://example.test"}, {"holder_file": "x"}):
+            with pytest.raises(DotError):
+                self.call("fleet_report_session", report=raw, **extra)
+        for bad in ({**raw, "token": "short"}, {**raw, "version": 1}, {**raw, "result": "x" * 401}):
+            with pytest.raises(DotError):
+                self.call("fleet_report_session", report=bad)
+        with pytest.raises(DotError):
+            validate_arguments("fleet_report_session", {"report": raw}, tools=DUET.tools)
+        assert TOOL_SCHEMAS["fleet_report_session"].read_only is False
+        with self.state.transaction() as c:
+            rows = c.execute("SELECT arg_summary FROM call_log WHERE tool = 'fleet_report_session'").fetchall()
+        assert all("Check build" not in str(row) for row in rows)
+
+    @requires_local_state
+    def test_report_unknown_child_results_never_claim_persistence(self):
+        from tests.test_fleet_dot import v2_report
+
+        for reply in (
+            CommandResult(None, b"", timed_out=True),
+            CommandResult(0, b"invalid"),
+            CommandResult(0, b"{}"),
+            CommandResult(0, b'{"status":"confirmed","summaries_persisted":true}'),
+        ):
+            self.runner.handler = lambda argv, stdin, reply=reply: reply
+            result = self.call("fleet_report_session", report=v2_report(), publish=True)
+            assert result["status"] == "unknown" and result["summaries_persisted"] is False

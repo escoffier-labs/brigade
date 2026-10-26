@@ -60,6 +60,7 @@ ISSUE_TOOLS = {
     "fleet_digest",
 }
 DISPATCH_AND_T3 = {
+    "fleet_report_session",
     "fleet_submit",
     "fleet_followup",
     "fleet_answer",
