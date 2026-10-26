@@ -46,6 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Incomplete runs without infrastructure-only attribution score -1 during outcome capture, matching the scoring policy.
 - Skill validation accepts folded and literal YAML block scalars, including chomping and explicit indentation indicators, while continuing to reject unsupported nesting.
 - Fleet Machines and Repos boards use the shared Deck sidebar, navigation, and Resources while preserving board filters and pivot query state in dark and light themes. Wide tables scroll within their wrappers, and board refresh timing stays synchronized with its label.
+- Live run controls no longer advertise an unusable Unix socket while starting a loopback TCP transport for long paths or platforms without Unix sockets. Loopback control metadata is published after the endpoint binds (#1767, slice 4).
 
 - Duet binds its authenticated Hub credential and endpoint until restart, keeps maintenance out of the shared node queue, and holds queued sends and replies while messaging is disabled. Doctor and watch verify the active principal. Watch reports polling outages without webhooks. Skill reads enforce both registry IDs and directory names.
 

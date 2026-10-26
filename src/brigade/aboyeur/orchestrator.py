@@ -1216,7 +1216,9 @@ def run(
     if effective_transport == "app-server" and not has_codex_workers:
         effective_transport = "exec"
     elif effective_transport == "app-server" and output_dir is not None:
-        control_socket = output_dir / "control.sock"
+        preferred_socket = output_dir / "control.sock"
+        if run_control.plan_control_transport(preferred_socket) == "unix":
+            control_socket = preferred_socket
     transport_for_payload = effective_transport
     if output_dir is not None:
         run_io._write_json(

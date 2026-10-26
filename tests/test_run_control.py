@@ -195,6 +195,51 @@ def test_runs_interrupt_refuses_missing_socket(tmp_path, capsys):
     assert "control socket is not active" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("fallback", ["long-path", "no-af-unix"])
+def test_run_does_not_publish_unix_endpoint_before_loopback_start(tmp_path, monkeypatch, fallback):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "claude", "plan and synthesize"),
+            "cook": Agent("cook", "codex", "write code"),
+        },
+        timeout_seconds=10.0,
+        codex_transport="app-server",
+    )
+    run_dir = tmp_path / ("long-" + "x" * 110 if fallback == "long-path" else "run")
+    if fallback == "no-af-unix":
+        monkeypatch.delattr(run_control.socket, "AF_UNIX", raising=False)
+    assert run_control.plan_control_transport(run_dir / "control.sock") == "loopback-tcp"
+    real_app_server = codex_appserver.AppServer
+    monkeypatch.setattr(
+        aboyeur.codex_appserver,
+        "AppServer",
+        lambda cwd=None: real_app_server(argv=FAKE, cwd=cwd),
+    )
+    real_start = run_control.ControlServer.start
+    started = []
+
+    def inspect_before_start(server):
+        initial = json.loads((run_dir / "run.json").read_text())
+        assert initial["status"] == "dispatching"
+        assert "control_socket" not in initial
+        assert "control_transport" not in initial
+        transport = real_start(server)
+        assert transport.kind == "loopback-tcp"
+        started.append(transport)
+        return transport
+
+    monkeypatch.setattr(run_control.ControlServer, "start", inspect_before_start)
+    assert (
+        run_aboyeur_guarded("say hi", roster, worker="cook", cwd=tmp_path, output_dir=run_dir, route_enabled=False) == 0
+    )
+    assert len(started) == 1
+    final = json.loads((run_dir / "run.json").read_text())
+    assert final["control_transport"] == started[0].to_metadata()
+    assert "control_socket" not in final
+    assert not _control_transport_active(started[0])
+
+
 def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeypatch, capsys):
     roster = Roster(
         orchestrator="chef",
@@ -240,8 +285,11 @@ def test_run_records_control_socket_and_cli_steers_live_worker(tmp_path, monkeyp
     assert result == {"rc": 0}
     assert "steer: cook" in capsys.readouterr().out
     run_meta = json.loads((run_dir / "run.json").read_text())
-    assert run_meta["control_transport"]["kind"] == "unix"
-    assert run_meta["control_socket"] == control_transport.path
+    assert run_meta["control_transport"] == control_transport.to_metadata()
+    if control_transport.kind == "unix":
+        assert run_meta["control_socket"] == control_transport.path
+    else:
+        assert "control_socket" not in run_meta
     if control_transport.kind == "unix" and control_transport.path:
         assert not Path(control_transport.path).exists()
     worker_results = json.loads((run_dir / "worker-results.json").read_text())["results"]
