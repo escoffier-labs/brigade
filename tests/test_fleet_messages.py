@@ -4642,3 +4642,97 @@ def test_identity_snapshot_coherence(message_hub, monkeypatch, mutation):
         assert after[1]["peers"][0]["grant_epoch"] != before[1]["peers"][0]["grant_epoch"]
     else:
         assert after[1]["peers"] == [_denied_identity_peer()]
+
+
+@pytest.mark.parametrize("wire_code", ["message_identity_peers_unsupported", "fixture_unrecognized_code"])
+def test_identity_node_client_preserves_bounded_error_without_fallback(message_hub, monkeypatch, wire_code):
+    base, token_a, _, _ = message_hub
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    handle = fleet_hub_messages.handle
+
+    def denied(conn, raw, **kwargs):
+        try:
+            return handle(conn, raw, **kwargs)
+        except fleet_hub_messages.MessageForbidden as exc:
+            if wire_code == "fixture_unrecognized_code":
+                raise fleet_hub_messages.MessageForbidden(str(exc), code=wire_code) from exc
+            raise
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", denied)
+    request_body = {"action": "identity", "peers": ["agent:peer"]}
+    assert _request(base, token_a, request_body) == (
+        403,
+        {"error": "identity peers requires an agent principal", "code": wire_code},
+    )
+    hub_open = fleet_client._hub_open
+    requests = []
+
+    def observed(request, **kwargs):
+        requests.append((request.full_url, json.loads(request.data)))
+        return hub_open(request, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "_hub_open", observed)
+    with pytest.raises(credentials.FleetMessageHubError) as exc:
+        fleet_client_messages.identity(peers=["agent:peer"], timeout=2)
+    assert requests == [(base + "/messages", request_body)]
+    assert exc.value.status == 403
+    assert exc.value.code == (wire_code if wire_code == "message_identity_peers_unsupported" else None)
+
+
+def test_principal_client_preserves_epoch_failure_code_and_transaction(message_hub, monkeypatch):
+    from brigade import fleet_hub_message_grants as grants
+
+    base, token_a, _, db = message_hub
+    _identity_pair(db)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN}
+    )
+    conn = fleet_hub.open_db(db)
+    try:
+        before_principals = conn.execute("SELECT * FROM fleet_message_principals ORDER BY principal_id").fetchall()
+        before_grants = conn.execute("SELECT * FROM fleet_message_send_grants ORDER BY principal_id,pattern").fetchall()
+        current_epoch = conn.execute("SELECT grant_epoch FROM fleet_message_principals WHERE name='caller'").fetchone()[
+            0
+        ]
+        calls = []
+
+        def collide(size):
+            calls.append(size)
+            return current_epoch
+
+        monkeypatch.setattr(grants.secrets, "token_urlsafe", collide)
+        request_body = {"action": "grants", "name": "caller", "may_send_to": []}
+        assert _post_path(base, ADMIN, "/message-principals", request_body) == (
+            403,
+            {"error": "message authorization unavailable", "code": "message_authorization_unavailable"},
+        )
+        assert calls == [24] * 4
+        calls.clear()
+        hub_open = fleet_client._hub_open
+        requests = []
+
+        def observed(request, **kwargs):
+            requests.append((request.full_url, json.loads(request.data)))
+            return hub_open(request, **kwargs)
+
+        monkeypatch.setattr(fleet_client, "_hub_open", observed)
+        with pytest.raises(credentials.FleetMessageHubError) as exc:
+            fleet_client_messages.manage_principal("grants", name="caller", may_send_to=[])
+        assert requests == [(base + "/message-principals", request_body)]
+        assert calls == [24] * 4
+        assert (
+            conn.execute("SELECT * FROM fleet_message_principals ORDER BY principal_id").fetchall() == before_principals
+        )
+        assert (
+            conn.execute("SELECT * FROM fleet_message_send_grants ORDER BY principal_id,pattern").fetchall()
+            == before_grants
+        )
+        conn.execute("BEGIN IMMEDIATE")
+        conn.rollback()
+        assert exc.value.status == 403
+        assert exc.value.code == "message_authorization_unavailable"
+    finally:
+        conn.close()

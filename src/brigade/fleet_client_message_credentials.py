@@ -35,6 +35,8 @@ MESSAGE_CODES = (
             "message_recipient_inactive",
             "message_recipient_unknown",
             "message_sender_inactive",
+            "message_identity_peers_unsupported",
+            "message_authorization_unavailable",
             "message_not_found",
             "message_timestamp_future",
             "token_file_invalid",
