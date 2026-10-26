@@ -17,7 +17,7 @@ from . import memory_proposal_v2_ops as delta
 from .card_identity import IdentityIndex, card_identity
 from .card_fingerprint import strip_frontmatter
 from .handoff_cmd.drafts import _render_handoff_draft
-from .memory_reflect_candidates import _evidence_roots, _resolved
+from .memory_reflect_candidates import Card, _evidence_id, _evidence_roots, _invalid_outcome_ids, _resolved
 from .selection import WRITER_INBOXES
 
 SCHEMA = "brigade.memory-proposal.v2"
@@ -83,6 +83,18 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
             refs.update(ref for ref in values if isinstance(ref, str) and len(ref) <= 1024)
     if len(refs) > io.MAX_LIST:
         raise legacy.ProposalError("op evidence count exceeded")
+    from .memory_evidence_log import EvidenceLog
+
+    ledger = EvidenceLog(target)
+    normalized_refs = {_evidence_id(ref) for ref in refs}
+    for source in sources:
+        if source["path"] not in addressed:
+            continue
+        identity = card_identity(source["metadata"], source["path"])
+        rows = [row for key in (identity.card_id, *identity.aliases) for row in ledger.by_identity.get(key, [])]
+        card = Card(source["path"], source["text"], source["metadata"], identity, rows)
+        if normalized_refs & _invalid_outcome_ids(target, card, normalized_refs):
+            raise legacy.ProposalError("outcome evidence drift; refresh the candidate")
     resolved = _resolved(target, sorted(refs), _evidence_roots(target))
     digests = {}
     for ref in resolved:

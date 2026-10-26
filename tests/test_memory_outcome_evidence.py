@@ -28,6 +28,11 @@ def verified_card(tmp_path, monkeypatch, request):
     monkeypatch.setattr(verify_mod.helpers, "_now", lambda: datetime(2026, 10, 20, 12, tzinfo=timezone.utc))
     _init_verify_git_repo(tmp_path)
     path = card(tmp_path, "cache")
+    role = getattr(request, "param", "effectiveness")
+    if role == "linked":
+        card(tmp_path, "linked")
+        path.write_text(path.read_text() + "[[linked]]\n")
+        role = "effectiveness"
     verify_manifest.write_workspace_manifest(
         tmp_path,
         {
@@ -49,7 +54,7 @@ def verified_card(tmp_path, monkeypatch, request):
             "checks": [
                 {
                     "check_id": "fixture.echo-ok",
-                    "check_role": getattr(request, "param", "effectiveness"),
+                    "check_role": role,
                     "command": f"{sys.executable} -c \"print('ok')\"",
                 }
             ],
@@ -115,7 +120,7 @@ def test_verified_capture_reflects_one_proof_without_refreshing_or_writing_cards
         "id",
     ],
 )
-def test_capture_rejects_non_supporting_receipts(tmp_path, verified_card, case):
+def test_capture_rejects_non_supporting_receipts(tmp_path, verified_card, case, capsys):
     path, receipt = verified_card
     ident, kind = "cache", "card"
     if case == "caller":
@@ -145,7 +150,9 @@ def test_capture_rejects_non_supporting_receipts(tmp_path, verified_card, case):
         ] = "other"
     rewrite(receipt)
     before = snapshot(tmp_path)
+    capsys.readouterr()
     assert capture(tmp_path, receipt, ident=ident, kind=kind) == 0
+    assert "evidence log append failed" not in capsys.readouterr().err
     assert log.read_evidence(tmp_path)[0] == []
     assert snapshot(tmp_path) == before
 
@@ -215,3 +222,135 @@ def test_non_verify_card_signals_do_not_supply_support(tmp_path, verified_card, 
         )
     assert log.read_evidence(tmp_path)[0] == []
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+@pytest.mark.parametrize("drift", ["card", "linked", "receipt"])
+def test_capture_admission_interleaving_preserves_outcome_without_support(
+    tmp_path, verified_card, monkeypatch, capsys, drift
+):
+    path, receipt = verified_card
+    original = verify_trial.project_trial
+
+    def interleave(value, **kwargs):
+        projection = original(value, **kwargs)
+        assert projection.eligible
+        if drift == "receipt":
+            (Path(receipt["path"]) / "receipt.json").write_text("{}")
+        else:
+            changed = path if drift == "card" else tmp_path / "memory/cards/linked.md"
+            changed.write_text(changed.read_text().replace("Keep", "Never keep"))
+        return projection
+
+    capsys.readouterr()
+    monkeypatch.setattr(verify_trial, "project_trial", interleave)
+    assert capture(tmp_path, receipt) == 0
+    output = capsys.readouterr()
+    assert len(outcome_cmd.load_records(tmp_path)) == 1
+    assert log.read_evidence(tmp_path)[0] == []
+    assert "warning: evidence log append failed" in output.err
+    assert len(output.err) < 400
+
+
+def drift_support(target, path, receipt, drift):
+    retained = Path(receipt["path"]) / "receipt.json"
+    if drift == "card":
+        path.write_text(path.read_text().replace("Keep", "Never keep"))
+    elif drift == "linked":
+        linked = target / "memory/cards/linked.md"
+        linked.write_text(linked.read_text().replace("Keep", "Never keep"))
+    elif drift == "missing":
+        retained.unlink()
+    elif drift == "identity":
+        changed = json.loads(retained.read_text())
+        changed["run_id"] = "other-receipt"
+        rewrite(changed)
+    elif drift == "digest":
+        changed = json.loads(retained.read_text())
+        changed["completed_at"] = "2026-10-21T12:00:00Z"
+        retained.write_text(json.dumps(changed))
+    else:
+        retained.write_text("{}")
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+@pytest.mark.parametrize("drift", ["card", "linked", "receipt", "missing", "identity", "digest"])
+def test_reflection_excludes_drifted_outcome_support(tmp_path, verified_card, capsys, drift):
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    rows = log.read_evidence(tmp_path)[0]
+    assert rows
+    drift_support(tmp_path, path, receipt, drift)
+    before = snapshot(tmp_path)
+    capsys.readouterr()
+    code, result = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert result["candidates"] == []
+    assert log.read_evidence(tmp_path)[0] == rows
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+@pytest.mark.parametrize("drift", ["linked", "receipt"])
+@pytest.mark.parametrize("stage", ["candidate", "proposal"])
+def test_retained_outcome_preview_refuses_evidence_drift(tmp_path, verified_card, drift, stage):
+    from brigade import memory_proposals as api, memory_reflect
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    if stage == "proposal":
+        proposal = propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Inspect support.")
+        values = dict(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+        api.review_payload(**values, reason="Inspect the exact preview.")
+    drift_support(tmp_path, path, receipt, drift)
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError):
+        if stage == "candidate":
+            propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Inspect support.")
+        else:
+            api.apply_payload(**values)
+    assert snapshot(tmp_path) == before
+
+
+def test_changed_card_cannot_re_admit_logged_outcome_via_metadata_citation(tmp_path, verified_card, capsys):
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["receipt:{ref}#proof"]'))
+    before = snapshot(tmp_path)
+    capsys.readouterr()
+    code, result = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert result["candidates"] == []
+    assert log.read_evidence(tmp_path)[0]
+    assert snapshot(tmp_path) == before
+
+
+def test_repeated_outcome_validation_is_distinct_and_newest_window_bounded(tmp_path, verified_card, monkeypatch):
+    from brigade import memory_reflect
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    write_log(tmp_path, path, *[(f"receipt:{ref}#proof", "outcome", receipt["completed_at"])] * 1000)
+    original = log.validate_outcome_support
+    checked = []
+
+    def observe(*args, **kwargs):
+        checked.append(kwargs["ref"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(log, "validate_outcome_support", observe)
+    result = memory_reflect.run_payload(target=tmp_path, dry_run=True)
+    assert checked == [ref]
+    assert all(c["proof_count"] == 1 for c in result["candidates"])
+    checked.clear()
+    newest = [f".brigade/work/verify-runs/new-{i:03}/receipt.json" for i in range(70)]
+    write_log(tmp_path, path, *[(evidence(tmp_path, item), "outcome", "2026-10-21T12:00:00Z") for item in newest])
+    result = memory_reflect.run_payload(target=tmp_path, dry_run=True)
+    assert len(checked) == 64
+    assert set(checked) == set(newest[-64:])
+    assert result["candidates"] == []

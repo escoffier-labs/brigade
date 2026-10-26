@@ -62,14 +62,24 @@ def _valid(row: object) -> bool:
 
 
 def append_evidence(
-    target: Path, *, card_path: Path, evidence_id: str, kind: str, similarity: float, ts: str | None = None
+    target: Path,
+    *,
+    card_path: Path,
+    evidence_id: str,
+    kind: str,
+    similarity: float,
+    ts: str | None = None,
+    expected_card_text: str | None = None,
 ) -> None:
     """Append one bounded row, failing closed on unsafe paths or capabilities."""
     from .card_identity import card_identity
     from .memory_cmd import _parse_frontmatter
 
     rel = card_path.relative_to(target).as_posix()
-    meta, _ = _parse_frontmatter(io.text(card_path, limit=io.MAX_CARD_BYTES) or "")
+    text = io.text(card_path, limit=io.MAX_CARD_BYTES) or ""
+    if expected_card_text is not None and text != expected_card_text:
+        raise ValueError("card changed before evidence append")
+    meta, _ = _parse_frontmatter(text)
     row = {
         "ts": ts if ts is not None else datetime.now(timezone.utc).isoformat(),
         "card_id": card_identity(meta, rel).card_id,
@@ -100,12 +110,102 @@ def append_evidence(
             os.close(fd)
 
 
-def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) -> None:
-    """Admit a durable card outcome using the existing verification contract.
+def verify_outcome_ref(ref: str) -> bool:
+    """Recognize the current outcome writer's canonical verify receipt pointer."""
+    parts = Path(ref).parts
+    return (
+        len(parts) == 5
+        and parts[:3] == (".brigade", "work", "verify-runs")
+        and parts[-1] == "receipt.json"
+        and io.relative(ref) == ref
+    )
 
-    Replays may append identical IDs and timestamps. Reflection counts distinct
-    IDs, so a retry neither adds proof nor advances the observation time.
+
+def _snapshot_fingerprint(target: Path, card_path: str, text: str, artifact_id: str) -> str | None:
+    """Use the existing linked-card closure with bounded no-follow byte reads."""
+    from . import outcome_cmd
+
+    path = outcome_cmd._artifact_content_path(target, artifact_id, "card")
+    if path is None or path != target / io.relative(card_path):
+        return None
+    raw = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
+    if raw != text.encode():
+        return None
+    closure = outcome_cmd._linked_card_closure(path.parent, path.stem)
+    if len(closure) > io.MAX_FILES:
+        return None
+    digest = hashlib.sha256()
+    digest.update(hashlib.sha256(raw).hexdigest().encode("ascii"))
+    digest.update(b"\0")
+    total = len(raw)
+    for stem in closure:
+        linked = io.read_bytes(path.parent / f"{stem}.md", limit=io.MAX_CARD_BYTES)
+        assert linked is not None
+        total += len(linked)
+        if total > io.MAX_CORPUS_BYTES:
+            return None
+        digest.update(stem.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(hashlib.sha256(linked).hexdigest().encode("ascii"))
+        digest.update(b"\0")
+    fingerprint = digest.hexdigest() if closure else hashlib.sha256(raw).hexdigest()
+    # Bind the safe snapshot and closure to the current fingerprint as well.
+    if io.read_bytes(path, limit=io.MAX_CARD_BYTES) != raw:
+        return None
+    return fingerprint if outcome_cmd.artifact_fingerprint(target, artifact_id, "card") == fingerprint else None
+
+
+def validate_outcome_support(
+    target: Path,
+    *,
+    card_path: str,
+    card_text: str,
+    ref: str,
+    timestamp: str | None = None,
+    observed: dict[str, Any] | None = None,
+) -> bool:
+    """Revalidate logged verify support against a specific card and retained receipt.
+
+    Generic evidence is deliberately outside this contract. Callers select only
+    canonical verify pointers attributed by outcome log rows.
     """
+    from . import scorecard, verify_trial
+
+    try:
+        if not verify_outcome_ref(ref):
+            return False
+        path = target / ref
+        raw = io.read_bytes(path)
+        receipt = json.loads(raw or b"")
+        if not isinstance(receipt, dict) or (observed is not None and receipt != observed):
+            return False
+        if receipt.get("run_id") != path.parent.name or receipt.get("path") != str(path.parent):
+            return False
+        if receipt.get("status") != "completed" or receipt.get("reused_from"):
+            return False
+        binding = receipt.get("subject_binding")
+        if not isinstance(binding, dict) or binding.get("artifact_kind") != "card":
+            return False
+        artifact_id = binding.get("artifact_id")
+        if not isinstance(artifact_id, str):
+            return False
+        stamp = receipt.get("completed_at") or receipt.get("started_at")
+        if _timestamp(stamp) is None or (timestamp is not None and timestamp != stamp):
+            return False
+        if not verify_trial.project_trial(receipt, target=target).eligible:
+            return False
+        if scorecard.effectiveness_outcome(receipt) != 1:
+            return False
+        # Admission may read other state. Recheck both retained bytes and the
+        # full linked-card fingerprint after it, rather than trusting old data.
+        fingerprint = _snapshot_fingerprint(target, card_path, card_text, artifact_id)
+        return bool(fingerprint and fingerprint == binding.get("content_fingerprint") and io.read_bytes(path) == raw)
+    except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
+        return False
+
+
+def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) -> None:
+    """Admit a durable card outcome, preserving original time and distinct proof."""
     from . import outcome_cmd, scorecard, verify_trial
 
     if record.source != "verify" or record.artifact_kind != "card":
@@ -113,30 +213,44 @@ def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) ->
     if receipt.get("status") != "completed" or receipt.get("reused_from"):
         return
     binding = receipt.get("subject_binding")
-    if not isinstance(binding, dict):
-        return
-    if binding.get("artifact_kind") != "card" or binding.get("artifact_id") != record.artifact_id:
+    if (
+        not isinstance(binding, dict)
+        or binding.get("artifact_kind") != "card"
+        or binding.get("artifact_id") != record.artifact_id
+    ):
         return
     path = outcome_cmd._artifact_content_path(target, record.artifact_id, "card")
     if path is None:
         return
+    text = io.text(path, limit=io.MAX_CARD_BYTES)
+    if text is None:
+        return
     fingerprint = outcome_cmd.artifact_fingerprint(target, record.artifact_id, "card")
     if not fingerprint or fingerprint != binding.get("content_fingerprint"):
         return
+    # Ordinary exclusions are silent. Only a receipt admitted here can lose
+    # consistency at the subsequent safe read and request a capture retry.
     if not verify_trial.project_trial(receipt, target=target).eligible:
         return
     if scorecard.effectiveness_outcome(receipt) != 1:
         return
     timestamp = receipt.get("completed_at") or receipt.get("started_at")
-    if not isinstance(timestamp, str) or _timestamp(timestamp) is None:
+    if _timestamp(timestamp) is None:
         return
     ref = Path(record.evidence_ref).relative_to(target).as_posix()
-    io.relative(ref)
-    if not ref.startswith(".brigade/work/verify-runs/") or not ref.endswith("/receipt.json"):
-        return
-    # Check the receipt pointer through the same no-follow IO as reflection.
-    io.read_bytes(target / ref)
-    append_evidence(target, card_path=path, evidence_id=ref, kind="outcome", similarity=1.0, ts=timestamp)
+    if not validate_outcome_support(
+        target, card_path=path.relative_to(target).as_posix(), card_text=text, ref=ref, observed=receipt
+    ):
+        raise ValueError("outcome support is not consistent with retained evidence")
+    append_evidence(
+        target,
+        card_path=path,
+        evidence_id=ref,
+        kind="outcome",
+        similarity=1.0,
+        ts=timestamp,
+        expected_card_text=text,
+    )
 
 
 def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None:

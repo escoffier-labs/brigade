@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Successful manifest-backed card outcome captures feed reflection with receipt evidence while preserving card bytes and original verification timestamps.
+- Successful manifest-backed card outcomes feed memory reflection with receipt evidence and original verification timestamps. Capture, reflection, and reviewed proposals reject support whose card bindings or retained receipts have changed, without editing canonical cards.
 
 - Message replies can bound spool-lock acquisition while preserving the default blocking behavior.
 - The ownership map keeps charter metadata within its response budget and reports omitted owners; claim loading fetches a bounded active page instead of materializing stale claim history (#1799).

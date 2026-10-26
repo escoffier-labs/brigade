@@ -62,7 +62,22 @@ failed verification, and checks without successful effectiveness add no support.
 Retrying capture can append the same receipt id and timestamp. Reflection counts
 that id once, and retry does not refresh the observation. If the optional log
 append fails, capture warns after preserving the durable outcome. Retry capture
-to supply the missing evidence.
+to supply the missing evidence. Ordinary non-supporting receipts are excluded
+silently. Capture checks the safely read receipt against the admitted source,
+then rechecks the card snapshot and its linked-card fingerprint after admission.
+
+Reflection revalidates logged `outcome` pointers of the form
+`.brigade/work/verify-runs/<id>/receipt.json` against the retained receipt and
+the candidate's card snapshot, including linked cards. Changed card bindings,
+missing or invalid receipts, and receipt identity or timestamp drift contribute
+no proof or consolidation preview. Their historical log rows remain untouched.
+An invalid logged pointer cannot regain proof through the card's evidence
+metadata. Saved candidates and proposals undergo the same check when proposed
+or applied. Validation deduplicates repeated ids and timestamps and stays within
+the newest 64 distinct log ids plus up to 64 current citations per card.
+Generic evidence under other roots, and manually cited files without a matching
+verify-outcome log row, retain their existing resolution and reviewed-proposal
+semantics. A file's presence alone does not validate logged verify-outcome support.
 Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
 Near-match and opposite-polarity flags use the same cutoff, including the care
