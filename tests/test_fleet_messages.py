@@ -3607,6 +3607,156 @@ def test_flush_rejects_invalid_lock_timeout_before_settings(monkeypatch, lock_ti
             fleet_client_messages.flush("node-a", lock_timeout=lock_timeout)
 
 
+@pytest.fixture
+def reply_lock_spool(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(
+        credentials, "message_settings", lambda *_args: ("https://hub.example.test", "synthetic-token", NODE_A)
+    )
+    authority = credentials.MessageAuthority.capture()
+    path = fleet_client_messages._spool_path(authority.node_id, authority.token, hub_url=authority.hub)
+    older = {
+        "action": "send",
+        "to": NODE_B,
+        "subject": "Older",
+        "body": "Queued first",
+        "client_id": "older-message",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    with fleet_client._spool_lock(path) as dir_fd:
+        assert fleet_client._spool_append_locked(path, older, dir_fd=dir_fd)
+    attempts = []
+
+    def request(_hub, _token, message, **_kwargs):
+        attempts.append(dict(message))
+        return 201, {"message": {"client_id": message["client_id"]}}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    return authority, path, attempts
+
+
+@pytest.fixture(params=["process", "file"])
+def reply_spool_contention(reply_lock_spool, tmp_path, request):
+    import subprocess
+
+    _authority, path, _attempts = reply_lock_spool
+    release = threading.Event()
+    if request.param == "process":
+        ready = threading.Event()
+
+        def hold():
+            with fleet_client._spool_lock(path, timeout=2):
+                ready.set()
+                release.wait(timeout=5)
+
+        holder = threading.Thread(target=hold)
+        holder.start()
+        try:
+            assert ready.wait(timeout=3), "spool lock holder did not start"
+            yield release.set
+        finally:
+            release.set()
+            holder.join(timeout=6)
+            assert not holder.is_alive(), "spool lock holder did not finish"
+    else:
+        if fleet_client.fcntl is None and fleet_client.msvcrt is None:
+            pytest.skip("OS spool file locking is unavailable")
+        ready_path, release_path = tmp_path / "holder-ready", tmp_path / "holder-release"
+        code = """
+import sys
+import time
+from pathlib import Path
+from brigade import fleet_client
+path, ready, release = map(Path, sys.argv[1:])
+with fleet_client._spool_lock(path, timeout=2):
+    ready.touch()
+    deadline = time.monotonic() + 5
+    while not release.exists() and time.monotonic() < deadline:
+        time.sleep(0.01)
+"""
+        holder_process = subprocess.Popen([sys.executable, "-c", code, str(path), str(ready_path), str(release_path)])
+        try:
+            deadline = time.monotonic() + 3
+            while not ready_path.exists() and holder_process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert ready_path.exists(), "spool file lock holder did not start"
+            yield release_path.touch
+        finally:
+            release_path.touch()
+            try:
+                assert holder_process.wait(timeout=6) == 0
+            finally:
+                if holder_process.poll() is None:
+                    holder_process.kill()
+                    holder_process.wait(timeout=3)
+
+
+def test_reply_zero_lock_timeout_has_no_effect_and_same_id_recovers(reply_lock_spool, reply_spool_contention):
+    authority, path, attempts = reply_lock_spool
+    before = path.read_bytes()
+    kwargs = dict(body="Reply second", subject="Re: task", reference=None, priority="normal", client_id="reply-retry")
+    started = time.monotonic()
+    with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+        fleet_client_messages.reply(17, authority=authority, lock_timeout=0, **kwargs)
+    assert time.monotonic() - started < 1
+    assert attempts == []
+    assert path.read_bytes() == before
+
+    reply_spool_contention()
+    result = fleet_client_messages.reply(17, authority=authority, lock_timeout=1, **kwargs)
+    assert result == {"message": {"client_id": "reply-retry"}}
+    assert [(message["action"], message["client_id"]) for message in attempts] == [
+        ("send", "older-message"),
+        ("reply", "reply-retry"),
+    ]
+    assert fleet_client._read_spool(path) == []
+
+
+@pytest.mark.parametrize("explicit_none", [False, True], ids=["omitted", "none"])
+def test_reply_default_lock_timeout_waits_for_bounded_release(reply_lock_spool, reply_spool_contention, explicit_none):
+    authority, path, attempts = reply_lock_spool
+    timer = threading.Timer(0.2, reply_spool_contention)
+    timer.start()
+    started = time.monotonic()
+    try:
+        result = fleet_client_messages.reply(
+            17,
+            body="Reply second",
+            subject=None,
+            reference=None,
+            priority="normal",
+            client_id="reply-wait",
+            authority=authority,
+            **({"lock_timeout": None} if explicit_none else {}),
+        )
+    finally:
+        timer.cancel()
+        timer.join(timeout=2)
+        assert not timer.is_alive()
+    assert time.monotonic() - started >= 0.1
+    assert result == {"message": {"client_id": "reply-wait"}}
+    assert [message["client_id"] for message in attempts] == ["older-message", "reply-wait"]
+    assert fleet_client._read_spool(path) == []
+
+
+@pytest.mark.parametrize("lock_timeout", [-1, float("nan"), float("inf"), True])
+def test_reply_rejects_existing_invalid_lock_timeouts(reply_lock_spool, lock_timeout):
+    authority, path, attempts = reply_lock_spool
+    before = path.read_bytes()
+    with pytest.raises(fleet_client.FleetClientError, match="^invalid fleet spool lock timeout$"):
+        fleet_client_messages.reply(
+            17,
+            body="Reply",
+            subject=None,
+            reference=None,
+            priority="normal",
+            authority=authority,
+            lock_timeout=lock_timeout,
+        )
+    assert attempts == []
+    assert path.read_bytes() == before
+
+
 def _wait_for_active_waiters(recipient: str, expected: int, *, timeout: float = 2.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

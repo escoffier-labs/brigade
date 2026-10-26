@@ -728,6 +728,7 @@ def reply(
     token_file: str | None = None,
     authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
+    lock_timeout: float | None = None,
 ) -> dict[str, Any]:
     authority = _authority(authority, token_file, expected_scope)
     _validate_sqlite_integer(message_id, "message id")
@@ -751,7 +752,7 @@ def reply(
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
     message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
-    result = _send_ordered(message, authority)
+    result = _send_ordered(message, authority, lock_timeout=lock_timeout)
     authority.validate()
     return result
 
