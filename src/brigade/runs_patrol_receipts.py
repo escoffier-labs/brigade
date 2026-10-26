@@ -107,6 +107,17 @@ def _read_payload(path: Path) -> dict[str, Any] | None:
     records = payload.get("actions")
     if not isinstance(records, list) or any(not isinstance(item, dict) for item in records):
         raise ValueError("invalid patrol action history")
+    for record in records:
+        status = record.get("status")
+        if not isinstance(status, str) or status not in FENCE_STATUSES | {"refused", "skipped"}:
+            raise ValueError("invalid patrol action history")
+        # Refused/skipped outcomes do not fence later attempts. Legacy receipts
+        # may contain only their status; fence-bearing records need both keys.
+        if status in FENCE_STATUSES and any(
+            not isinstance(record.get(field), str) or not record[field].strip()
+            for field in ("scope", "idempotency_key")
+        ):
+            raise ValueError("invalid patrol action history")
     return payload
 
 

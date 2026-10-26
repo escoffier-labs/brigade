@@ -5,8 +5,63 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
+import pytest
+
 from brigade import cli, localio, runs_patrol, runs_patrol_actions, runs_patrol_receipts
 from tests.test_run_reap import NOW
+
+
+@pytest.mark.parametrize("field", ["status", "scope", "idempotency_key"])
+@pytest.mark.parametrize("value", [None, "", " ", 1, [], {}, "missing"])
+def test_receipt_rejects_invalid_fence_fields(tmp_path, field, value):
+    action = {"status": "pending", "scope": "local", "idempotency_key": "fence"}
+    if value == "missing":
+        action.pop(field)
+    else:
+        action[field] = value
+    path = tmp_path / "receipt/patrol.json"
+    localio.write_json(path, {"schema": "brigade.runs_patrol.v1", "actions": [action]})
+    with pytest.raises(ValueError, match="invalid patrol action history"):
+        runs_patrol_receipts.read_receipt(path.parent)
+
+
+@pytest.mark.parametrize("status", sorted(runs_patrol_receipts.FENCE_STATUSES))
+def test_receipt_accepts_all_fence_statuses_without_optional_legacy_fields(tmp_path, status):
+    action = {"status": status, "scope": "local", "idempotency_key": "fence"}
+    path = tmp_path / "receipt/patrol.json"
+    localio.write_json(path, {"schema": "brigade.runs_patrol.v1", "actions": [action]})
+    assert runs_patrol_receipts.read_receipt(path.parent)["actions"] == [action]
+
+
+@pytest.mark.parametrize("location", ["receipt", "legacy", "shard"])
+def test_apply_refuses_corrupt_history_before_releasing_claim(tmp_path, capsys, location):
+    from tests.test_run_reap import _repo, _write_run
+    from tests.test_runs_patrol import _ledger
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+    before = ledger.read_bytes()
+    root = repo / ".brigade/patrol"
+    paths = {
+        "receipt": root / "20260820T120000-old/patrol.json",
+        "legacy": root / runs_patrol_receipts.FENCE_FILE,
+        "shard": runs_patrol_receipts._fence_path(root / runs_patrol_receipts.FENCE_DIRECTORY, run.name),
+    }
+    path = paths[location]
+    localio.write_json(
+        path,
+        {
+            "schema": "brigade.runs_patrol.v1",
+            "observed_at": (NOW - timedelta(days=8)).isoformat(),
+            "actions": [{"status": "unrecognized", "scope": "ledger", "idempotency_key": "fence"}],
+        },
+    )
+    original = path.read_bytes()
+    assert runs_patrol.patrol(target=repo, apply="release-claim", now=NOW) == 2
+    assert "invalid patrol action history" in capsys.readouterr().err
+    assert ledger.read_bytes() == before
+    assert path.read_bytes() == original
 
 
 def test_report_retention_bounds_count_and_age_but_keeps_action_fences(tmp_path, capsys):
