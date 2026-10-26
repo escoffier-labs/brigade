@@ -574,8 +574,19 @@ def test_failed_transport_leaves_pending_receipt_for_cooldown(report_env, monkey
     assert "cooldown" in capsys.readouterr().err
 
 
-def test_pending_submission_with_matching_issue_is_not_filed_again(report_env, monkeypatch, capsys):
+@pytest.mark.parametrize("hour", [12, 23], ids=["same-day", "utc-midnight"])
+def test_pending_submission_with_matching_issue_is_not_filed_again(report_env, monkeypatch, capsys, hour):
+    from datetime import datetime, timedelta, timezone
+
     mod, target = report_env
+    now = datetime(2026, 1, 1, hour, 59, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
     issue = {"number": 321, "title": "same failure", "state": "open"}
     issue_creates = []
 
@@ -590,14 +601,12 @@ def test_pending_submission_with_matching_issue_is_not_filed_again(report_env, m
     capsys.readouterr()
     logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
     log = next(logs.glob("*.jsonl"))
-    record = json.loads(log.read_text())
-    from datetime import datetime, timedelta, timezone
-
-    record["attempted_at"] = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
-    log.write_text(json.dumps(record) + "\n")
+    before = log.read_bytes()
+    now += timedelta(minutes=6)
     assert submit_prepared(target, capsys, "--via", "gh", "--json") == 2
     assert "matching issue found" in capsys.readouterr().err
     assert len(issue_creates) == 1
+    assert log.read_bytes() == before
 
 
 def test_closed_projection_drops_unlisted_doctor_and_last_error_fields(report_env, monkeypatch, capsys):
