@@ -125,6 +125,7 @@ def list_sessions(
     node_ids: set[str] | None = None,
     text_filter: str | None = None,
     active_nodes_only: bool = False,
+    recent_cloud_reports: bool = False,
 ) -> list[dict[str, object]]:
     """Active unexpired sessions, or history when ``include_all`` is set.
 
@@ -140,6 +141,14 @@ def list_sessions(
             return []
         node_filter = "AND node_id IN (" + ",".join("?" for _ in node_ids) + ") "
         params.extend(sorted(node_ids))
+    if recent_cloud_reports:
+        # Filter before LIMIT so local sessions and fresh nonterminal reports
+        # cannot hide older task outcomes. JSON is validated on every write.
+        node_filter += (
+            "AND cloud_context_json IS NOT NULL AND (state != 'active' OR expires_at <= ? "
+            "OR json_extract(cloud_context_json, '$.reported_state') IN ('completed', 'failed', 'cancelled')) "
+        )
+        params.append(now)
     if active_nodes_only:
         # A subquery rather than a bound list, so the roster size never meets
         # SQLite's bound-parameter limit.
@@ -152,7 +161,7 @@ def list_sessions(
         conn.create_function("brigade_casefold", 1, _casefold, deterministic=True)
         text_clause = (
             "AND instr(brigade_casefold("
-            + " || char(31) || ".join(f"coalesce({column}, '')" for column in _FILTER_COLUMNS)
+            + " || char(31) || ".join(f"coalesce({column}, '')" for column in (*_FILTER_COLUMNS, "cloud_context_json"))
             + "), ?) > 0 "
         )
         params.append(text_filter.casefold())
@@ -167,6 +176,24 @@ def list_sessions(
         params,
     ).fetchall()
     return [_session_payload(row, now=now) for row in rows]
+
+
+def list_cloud_reports(
+    conn: sqlite3.Connection,
+    *,
+    now_epoch: float | None = None,
+    node_ids: set[str] | None = None,
+    text_filter: str | None = None,
+) -> list[dict[str, object]]:
+    """Bounded stale/terminal reported tasks, separate from active presence."""
+    return list_sessions(
+        conn,
+        include_all=True,
+        now_epoch=now_epoch,
+        node_ids=node_ids,
+        text_filter=text_filter,
+        recent_cloud_reports=True,
+    )
 
 
 def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[str, Any]:
@@ -238,6 +265,8 @@ def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[s
         from .fleet_dot import DotReportError, parse_report
 
         metadata = {k: v for k, v in cloud.items() if k != "provider"}
+        if cloud["version"] == 2:
+            metadata.pop("coverage", None)
         metadata["session_id"] = request["session_id"]
         if request["repo_identity"]:
             metadata["repo_identity"] = request["repo_identity"]

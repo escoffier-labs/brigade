@@ -407,3 +407,97 @@ def test_work_response_must_confirm_bound_report_authority(report_transport, mon
     )
     assert result["components"] == {"presence": "published", "work": "unknown:invalid-report-response"}
     assert result["summaries_persisted"] is False
+
+
+def v2_report(**updates):
+    return report(
+        version=2,
+        task="Check build",
+        reported_state="running",
+        source="explicit-metadata",
+        source_scope="explicit-session",
+        **updates,
+    )
+
+
+def test_v2_stores_full_report_replaces_dynamic_fields_and_fences_replay(monkeypatch):
+    from brigade import fleet_dot
+
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW)
+    raw = v2_report(progress="Testing", blocker="Waiting", evidence_refs=["receipt-a"])
+    body = fleet_dot.report_session(raw)["presence_payload"]
+    _, first = fleet_hub_sessions.handle_session(conn, body, caller_node=NODE)
+    context = first["session"]["cloud_context"]
+    assert context["task"] == "Check build"
+    assert context["reported_state"] == "running"
+    assert context["evidence_refs"] == ["receipt-a"]
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW + 100)
+    _, replay = fleet_hub_sessions.handle_session(conn, body, caller_node=NODE)
+    assert replay == first
+    changed = {**body, "cloud_context": {**context, "progress": "Changed"}}
+    with pytest.raises(fleet_hub.FleetHubError, match="sequence conflicts"):
+        fleet_hub_sessions.handle_session(conn, changed, caller_node=NODE)
+    raw = {**raw, "sequence": 2, "reported_state": "completed", "result": "Build checked"}
+    for key in ("progress", "blocker", "evidence_refs"):
+        raw.pop(key)
+    _, second = fleet_hub_sessions.handle_session(
+        conn, fleet_dot.report_session(raw)["presence_payload"], caller_node=NODE
+    )
+    context = second["session"]["cloud_context"]
+    assert context["result"] == "Build checked"
+    assert "progress" not in context and "blocker" not in context
+    assert context["evidence_refs"] == []
+    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 1000)
+    assert history[0]["cloud_context"]["reported_state"] == "completed"
+    assert history[0]["presence_state"] == "stale"
+    assert len(fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 100)) == 1
+    with pytest.raises(fleet_hub.FleetHubError, match="linkage"):
+        fleet_hub_sessions.handle_session(conn, cloud_body(sequence=3), caller_node=NODE)
+
+
+@pytest.mark.parametrize(
+    "updates,remove",
+    [
+        ({"reported_state": "verified"}, None),
+        ({"reported_state": True}, None),
+        ({"work_id": "w-a", "ownership_revision": 0, "generation": 1}, None),
+        ({"task": "secret=short"}, None),
+        ({"result": "x" * 401}, None),
+        ({"evidence_refs": ["r"] * 9}, None),
+        ({"provider": "other"}, None),
+        ({}, "task"),
+        ({}, "reported_state"),
+        ({}, "source"),
+        ({}, "source_scope"),
+    ],
+)
+def test_v2_strict_fields(updates, remove):
+    from brigade import fleet_dot
+
+    raw = {**v2_report(), **updates}
+    if remove:
+        raw.pop(remove)
+    with pytest.raises(fleet_dot.DotReportError):
+        fleet_dot.parse_report(raw)
+
+
+def test_cloud_history_filters_before_limit(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW)
+    from brigade import fleet_dot
+
+    body = fleet_dot.report_session(v2_report())["presence_payload"]
+    fleet_hub_sessions.handle_session(conn, body, caller_node=NODE)
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_HISTORY_LIMIT", 1)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW + 901)
+    # A newer active cloud row must not hide the older stale report.
+    newer = fleet_dot.report_session(v2_report(session_id="newer", observed_at="2026-01-01T00:15:01Z"))[
+        "presence_payload"
+    ]
+    fleet_hub_sessions.handle_session(conn, newer, caller_node=OTHER)
+    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 901, node_ids={NODE})
+    assert [row["session_id"] for row in history] == ["session-a"]
+    assert fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 901, text_filter="Check build") == history
