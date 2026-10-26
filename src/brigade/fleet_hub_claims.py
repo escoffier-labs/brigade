@@ -696,3 +696,27 @@ def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[
         claim["expired"] = expired
         result.append(claim)
     return result
+
+
+def list_active_claims(conn: sqlite3.Connection, *, now_epoch: float, limit: int) -> list[dict[str, Any]]:
+    """Read a bounded active page, validating each returned claim's generation fence."""
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
+        raise ValueError("active claim limit must be a positive integer")
+    columns = ", ".join("c." + name.strip() for name in CLAIM_COLUMNS.split(","))
+    try:
+        rows = conn.execute(
+            f"SELECT {columns}, c.holder_token, c.lock_token, c.lock_acquired_at, c.lock_run_dir, f.generation "
+            "FROM claims c LEFT JOIN claim_fences f ON f.target = c.target "
+            "WHERE c.expires_at > ? ORDER BY c.target LIMIT ?",
+            (now_epoch, limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        _refuse_missing_schema(exc)
+        raise
+    result = []
+    for row in rows:
+        _checked_generation(row[15])
+        claim = hub._claim_payload(row)
+        claim["expired"] = False
+        result.append(claim)
+    return result

@@ -136,7 +136,7 @@ def _node_labels(conn: sqlite3.Connection) -> dict[str, str]:
     return {str(node_id): str(label) for node_id, label in rows}
 
 
-def _claims(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding]:
+def _claims(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: float) -> list[Holding]:
     return [
         Holding(
             kind="claim",
@@ -149,8 +149,7 @@ def _claims(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding
             harness=claim.get("harness") or "",
             conductor=claim.get("owner_conductor") or "",
         )
-        for claim in fleet_hub_claims.list_claims(conn)
-        if not claim["expired"]
+        for claim in fleet_hub_claims.list_active_claims(conn, now_epoch=now_epoch, limit=SOURCE_LIMIT + 1)
     ]
 
 
@@ -250,7 +249,7 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bo
     truncated: list[str] = []
     items: list[Holding] = []
     loaders: tuple[tuple[str, Callable[[], list[Holding]]], ...] = (
-        ("claims", lambda: _claims(conn, labels)),
+        ("claims", lambda: _claims(conn, labels, now_epoch)),
         *((("grokbot-jobs", lambda: _grokbot_jobs(conn, labels)),) if include_grokbot else ()),
         ("sessions", lambda: _sessions(conn, labels, now_epoch)),
         ("delegations", lambda: _delegations(conn, labels, now_epoch)),
@@ -293,9 +292,9 @@ def _size(value: Any) -> int:
 def view_payload(view: OwnersView) -> dict[str, Any]:
     """The ``brigade.fleet_owners.v1`` JSON body served by ``GET /owners``.
 
-    Each list is capped at ``JSON_HOLDINGS_LIMIT`` and the whole body at
-    ``JSON_RESPONSE_BUDGET_BYTES``: unassigned items fill first, then overlaps,
-    then owner holdings in name order, each only while the budget lasts.
+    Owner metadata fills first in name order, with omitted names reported.
+    Holdings lists are capped at ``JSON_HOLDINGS_LIMIT``: unassigned items fill
+    first, then overlaps, then owner holdings, all within the shared byte budget.
     """
     owners: list[dict[str, Any]] = []
     for name in sorted(view.charters):
@@ -310,7 +309,7 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
                 "never": list(charter.get("never") or []),
                 "intake": list(charter.get("intake") or []),
                 "contact": charter.get("contact"),
-                "match": dict(match),
+                "match": {key: value for key, value in match.items() if key != "principals"},
                 "charter_only": charter_only(match),
                 "principals": [
                     {"name": principal, "enrolled": principal in view.enrolled_principals}
@@ -324,7 +323,11 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
         "schema": SCHEMA,
         "policy_version": view.policy_version,
         "policy_error": view.policy_error,
-        "owners": owners,
+        "owners": [],
+        "owners_total": len(owners),
+        # Reserve room for every omitted name before filling metadata. Removing
+        # included names later only makes this conservative byte budget smaller.
+        "truncated_owners": [owner["name"] for owner in owners],
         "unassigned": [],
         "unassigned_total": len(view.unassigned),
         "overlaps": [],
@@ -334,20 +337,22 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
     }
     remaining = JSON_RESPONSE_BUDGET_BYTES - _size(payload)
 
-    def fill(target: list[dict[str, Any]], rows: Sequence[dict[str, Any]]) -> None:
+    def fill(target: list[dict[str, Any]], rows: Sequence[dict[str, Any]], *, limit: int = JSON_HOLDINGS_LIMIT) -> None:
         nonlocal remaining
-        for row in rows[:JSON_HOLDINGS_LIMIT]:
+        for row in rows[:limit]:
             cost = _size(row)
             if cost > remaining:
                 return
             target.append(row)
             remaining -= cost
 
+    fill(payload["owners"], owners, limit=len(owners))
+    payload["truncated_owners"] = payload["truncated_owners"][len(payload["owners"]) :]
     fill(payload["unassigned"], [item.public() for item in view.unassigned[:JSON_HOLDINGS_LIMIT]])
     fill(
         payload["overlaps"],
         [{**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps[:JSON_HOLDINGS_LIMIT]],
     )
-    for owner in owners:
+    for owner in payload["owners"]:
         fill(owner["holdings"], [item.public() for item in view.by_owner.get(owner["name"], ())[:JSON_HOLDINGS_LIMIT]])
     return payload

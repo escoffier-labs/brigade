@@ -203,10 +203,10 @@ def test_policy_read_failure_keeps_live_items_and_names_the_failure(conn, monkey
 def test_a_failing_source_is_marked_unknown_and_the_others_still_load(conn, monkeypatch):
     _job(conn, "grokbot-1", "queued")
 
-    def broken(_conn):
+    def broken(_conn, **_kwargs):
         raise sqlite3.OperationalError("no such table: claims")
 
-    monkeypatch.setattr(fleet_hub_claims, "list_claims", broken)
+    monkeypatch.setattr(fleet_hub_claims, "list_active_claims", broken)
     view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
     assert view.unknown_sources == ("claims",)
     assert _refs(view.unassigned) == [("grokbot-job", "grokbot-1")]
@@ -396,3 +396,111 @@ def test_payload_stays_under_the_response_budget_when_many_owners_share_holdings
     assert len(payload["unassigned"]) == fleet_owners.JSON_HOLDINGS_LIMIT
     assert all(owner["holdings_total"] == len(items) for owner in payload["owners"])
     assert payload["owners"][-1]["holdings"] == []
+
+
+@pytest.mark.parametrize("label", ["Owner", "雪" * 16 + ' "quoted"'])
+def test_valid_principal_heavy_policy_stays_within_response_cap(conn, label):
+    principals = ["p" * 123 + f"{index:04}" for index in range(64)]
+    _save_owners(
+        conn,
+        {f"owner-{index:02}": {"label": label, "match": {"principals": principals}} for index in range(30)},
+    )
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert view.policy_error is None and len(view.charters) == 30
+
+    payload = fleet_owners.view_payload(view)
+
+    assert len(json.dumps(payload).encode()) <= fleet_owners.JSON_RESPONSE_BUDGET_BYTES
+    assert payload["owners_total"] == 30
+    assert payload["truncated_owners"] == []
+    assert len(payload["owners"]) == 30
+    for owner in payload["owners"]:
+        assert "principals" not in owner["match"]
+        assert [principal["name"] for principal in owner["principals"]] == principals
+
+
+def test_owner_metadata_uses_shared_budget_and_reports_omitted_charters(conn, monkeypatch):
+    names = ["alpha", "beta", "gamma"]
+    _save_owners(conn, {name: {"label": name, "summary": '雪"' * 64} for name in names})
+    monkeypatch.setattr(fleet_owners, "JSON_RESPONSE_BUDGET_BYTES", 1300)
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+
+    payload = fleet_owners.view_payload(view)
+
+    assert len(json.dumps(payload).encode()) <= 1300
+    included = [owner["name"] for owner in payload["owners"]]
+    assert 0 < len(included) < len(names)
+    assert included == names[: len(included)]
+    assert payload["owners_total"] == len(names)
+    assert payload["truncated_owners"] == names[len(included) :]
+    assert payload["unknown_sources"] == []
+    assert list(view.charters) == names
+
+
+def test_owners_fetches_only_a_bounded_active_claim_page(conn, monkeypatch):
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp())
+    monkeypatch.setattr(fleet_owners, "SOURCE_LIMIT", 2)
+    for prefix in ("a-expired", "z-active"):
+        for index in range(4):
+            _claim(conn, target=f"{prefix}/{index}")
+    conn.execute("UPDATE claims SET expires_at = ? WHERE target LIKE 'a-expired/%'", (NOW.timestamp(),))
+    conn.commit()
+    before = list(conn.iterdump())
+    fetched = []
+
+    def count_claim_rows(cursor, row):
+        if len(row) == 16 and cursor.description[0][0] == "target":
+            fetched.append(row[0])
+        return row
+
+    conn.row_factory = count_claim_rows
+    conn.execute("PRAGMA query_only=ON")
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+
+    assert fetched == ["z-active/0", "z-active/1", "z-active/2"]
+    assert _refs(view.unassigned) == [("claim", "z-active/0"), ("claim", "z-active/1")]
+    assert view.truncated_sources == ("claims",)
+    assert view.unknown_sources == ()
+    assert list(conn.iterdump()) == before
+
+
+@pytest.mark.parametrize("limit", [-1, 0, True, 1.5, "2"])
+def test_bounded_active_claim_read_rejects_invalid_limits(conn, limit):
+    with pytest.raises(ValueError, match="positive integer"):
+        fleet_hub_claims.list_active_claims(conn, now_epoch=NOW.timestamp(), limit=limit)
+
+
+@pytest.mark.parametrize("damage", ["missing", "negative", "table"])
+def test_bounded_active_claim_read_preserves_fence_refusal(conn, monkeypatch, damage):
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp())
+    _claim(conn)
+    if damage == "missing":
+        conn.execute("DELETE FROM claim_fences")
+    elif damage == "negative":
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("UPDATE claim_fences SET generation = -1")
+    else:
+        conn.execute("DROP TABLE claim_fences")
+    conn.commit()
+    before = list(conn.iterdump())
+    conn.execute("PRAGMA query_only=ON")
+
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+
+    assert view.unknown_sources == ("claims",)
+    assert view.unassigned == []
+    with pytest.raises(fleet_hub.FleetHubError, match="fence"):
+        fleet_hub_claims.list_claims(conn)
+    assert list(conn.iterdump()) == before
+
+
+def test_general_claim_listing_still_validates_expired_fences(conn, monkeypatch):
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp())
+    _claim(conn)
+    conn.execute("UPDATE claims SET expires_at = ?", (NOW.timestamp(),))
+    conn.execute("DELETE FROM claim_fences")
+    conn.commit()
+
+    assert fleet_hub_claims.list_active_claims(conn, now_epoch=NOW.timestamp(), limit=2) == []
+    with pytest.raises(fleet_hub.FleetHubError, match="fence"):
+        fleet_hub_claims.list_claims(conn)
