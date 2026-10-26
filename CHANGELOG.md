@@ -41,6 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Content guard detects and fully redacts Windows home paths with forward or mixed separators, while preserving quoted spaces and surrounding prose (#1913).
+
 - Managed Cursor command hooks with an explicit command type are recognized without duplicate callbacks.
 - Incomplete runs without infrastructure-only attribution score -1 during outcome capture, matching the scoring policy.
 - Skill validation accepts folded and literal YAML block scalars, including chomping and explicit indentation indicators, while continuing to reject unsupported nesting.

@@ -100,6 +100,30 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         flags=re.IGNORECASE | re.MULTILINE,
     ),
     Rule(
+        id="windows-home-path",
+        category="pii",
+        # Match before home-path so /Users inside a drive-qualified path
+        # cannot claim a partial span and suppress the complete Windows path.
+        # Quotes bound paths with spaced directory leaves. Without quotes,
+        # spaces need a following separator or filename extension so prose
+        # after the path is not consumed. Forward slashes and raw or escaped
+        # backslashes can be mixed independently at each component boundary.
+        pattern=(
+            r"(?<![\w.-])(?:(?<=(?P<windows_quote>[\"'`]))|(?<![\"'`]))"
+            r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
+            r"(?(windows_quote)"
+            r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
+            r"|"
+            r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\{1,2}|/))*"
+            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
+            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
+            r")"
+        ),
+        replacement="<PRIVATE_HOME_PATH>",
+        description="Windows filesystem path under a user home directory.",
+        flags=re.IGNORECASE,
+    ),
+    Rule(
         id="home-path",
         category="pii",
         # Matches absolute paths under conventional home roots including the
@@ -108,27 +132,6 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         pattern=r"(?<![\w.-])/(?:home|Users)/[A-Za-z0-9._-]+(?:/[A-Za-z0-9._@+-]+)*",
         replacement="<PRIVATE_HOME_PATH>",
         description="Filesystem path under a user home directory.",
-    ),
-    Rule(
-        id="windows-home-path",
-        category="pii",
-        # Quotes bound paths with spaced directory leaves. Without quotes,
-        # spaces need a following separator or filename extension so prose
-        # after the path is not consumed. Both raw and escaped slashes work.
-        pattern=(
-            r"(?<![\w.-])(?:(?<=(?P<windows_quote>[\"'`]))|(?<![\"'`]))"
-            r"[A-Z]:\\{1,2}Users\\{1,2}"
-            r"(?(windows_quote)"
-            r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
-            r"|"
-            r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*\\{1,2})*"
-            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
-            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
-            r")"
-        ),
-        replacement="<PRIVATE_HOME_PATH>",
-        description="Windows filesystem path under a user home directory.",
-        flags=re.IGNORECASE,
     ),
     Rule(
         id="root-path",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import unittest
+from itertools import product
 from pathlib import Path
 
 from brigade.guard.engine import scan_text
@@ -249,18 +250,25 @@ class JwtTokenRuleTests(unittest.TestCase):
 
 class MissingLeakShapeTests(unittest.TestCase):
     def test_windows_spaced_paths_are_completely_redacted(self) -> None:
-        for separator in ("\\", "\\\\"):
-            for components in (
-                ("Example User", "Private Folder", "secret.txt"),
-                ("example-user", "Private Folder", "secret file.txt"),
-                ("Example User",),
-                ("Example User", "Private Folder"),
-            ):
-                path = "C:" + separator + separator.join(("Users", *components))
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        for components in (
+            ("Example User", "Private Folder", "secret.txt"),
+            ("example-user", "Private Folder", "secret file.txt"),
+            ("Example User",),
+            ("Example User", "Private Folder"),
+        ):
+            for separators in product(("\\", "\\\\", "/"), repeat=len(components) + 1):
+                path = "C:" + "".join(
+                    separator + part for separator, part in zip(separators, ("Users", *components), strict=True)
+                )
                 for quote in ('"', "'", "`"):
                     text = f"Config at {quote}{path}{quote}, then continue."
-                    with self.subTest(separator=separator, components=components, quote=quote):
+                    with self.subTest(separators=separators, components=components, quote=quote):
+                        blocked = scan_text(text, policy=public_policy)
+                        self.assertTrue(blocked.blocked)
+                        self.assertEqual([finding.match for finding in blocked.findings], [path])
                         result = scan_text(text, policy=Policy(rules={"windows-home-path": "redact"}))
+                        self.assertEqual([finding.rule_id for finding in result.findings], ["windows-home-path"])
                         self.assertEqual([finding.match for finding in result.findings], [path])
                         self.assertEqual(
                             result.redacted_text,
@@ -268,8 +276,10 @@ class MissingLeakShapeTests(unittest.TestCase):
                         )
 
     def test_unquoted_windows_spaced_paths_preserve_surrounding_text(self) -> None:
-        for separator in ("\\", "\\\\"):
-            path = "C:" + separator + separator.join(("Users", "Example User", "Private Folder", "secret file.txt"))
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        for separators in product(("\\", "\\\\", "/"), repeat=4):
+            components = ("Users", "Example User", "Private Folder", "secret file.txt")
+            path = "C:" + "".join(separator + part for separator, part in zip(separators, components, strict=True))
             for before, after in (
                 ("Config at ", " for logs."),
                 ("Config at ", ", then continue."),
@@ -278,8 +288,12 @@ class MissingLeakShapeTests(unittest.TestCase):
                 ("Config at ", " then consult docs.md."),
                 ("Config at ", "\nNext line."),
             ):
-                with self.subTest(separator=separator, before=before, after=after):
+                with self.subTest(separators=separators, before=before, after=after):
+                    blocked = scan_text(before + path + after, policy=public_policy)
+                    self.assertTrue(blocked.blocked)
+                    self.assertEqual([finding.match for finding in blocked.findings], [path])
                     result = scan_text(before + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
+                    self.assertEqual([finding.rule_id for finding in result.findings], ["windows-home-path"])
                     self.assertEqual([finding.match for finding in result.findings], [path])
                     self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
 
@@ -462,10 +476,17 @@ class MissingLeakShapeTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
 
-        for separator in ("\\", "\\\\", "\\\\\\\\"):
+        for separator in ("\\", "\\\\", "\\\\\\\\", "/"):
             text = '"C:' + separator + "Users" + separator + '"'
             with self.subTest(separator=separator):
                 self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
+
+    def test_windows_separator_variants_preserve_safe_negatives(self) -> None:
+        for first, second in product(("\\", "\\\\", "/"), repeat=2):
+            for prefix, root in (("C:", "Projects"), ("XC:", "Users"), ("C", "Users")):
+                text = prefix + first + root + second + "example-user"
+                with self.subTest(text=text):
+                    self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
 
     def test_root_path_negatives(self) -> None:
         for text in ("/rooted/project", "/srv/root/project", "relative/root/project"):
