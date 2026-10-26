@@ -50,9 +50,19 @@ produce reinforcement previews. A preview triggered by new outcome evidence
 also includes resolved reinforcement ids so its evidence list supports its proof count.
 Reflection considers the newest 64 distinct log evidence ids per card by timestamp,
 with evidence ids breaking ties. Older ids remain in the log.
-The `outcome` row kind is reserved for future outcome capture. No production
-command writes it yet, so ingest alone cannot produce `reinforce` candidates
-in this slice.
+`brigade outcome capture <card-stem> --kind card --run-id <id>` appends an
+`outcome` support row after durable outcome capture when a tracked verifier
+manifest admits the receipt, its subject matches the current contained card's
+kind, id, and content fingerprint, and verification and effectiveness both
+succeeded. The row contains a target-relative receipt pointer and the original
+receipt completion timestamp (or start timestamp when completion is absent).
+Capture and reflection leave canonical card bytes unchanged.
+Reused receipts, audit-only checks, manual and worker-run signals, skill captures,
+failed verification, and checks without successful effectiveness add no support.
+Retrying capture can append the same receipt id and timestamp. Reflection counts
+that id once, and retry does not refresh the observation. If the optional log
+append fails, capture warns after preserving the durable outcome. Retry capture
+to supply the missing evidence.
 Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
 Near-match and opposite-polarity flags use the same cutoff, including the care
