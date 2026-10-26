@@ -258,6 +258,7 @@ OVERVIEW_CSS = """
 .overview-grid > .panel { min-width: 0; margin: 0; }
 .overview-grid > .panel > header { padding-bottom: var(--space-3); border-bottom: 1px solid var(--line-quiet); }
 .overview-grid > .panel:first-child, .overview-grid > .panel:nth-child(2) { grid-column: 1 / -1; }
+.overview-grid > #machines-table { grid-column: 1 / -1; }
 .overview-grid .activity-cards { grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: var(--space-2); }
 .overview-grid .activity-card { min-height: 0; padding: var(--space-2) var(--space-3); }
 .overview-grid .activity-card .row-title { font-size: 14px; }
