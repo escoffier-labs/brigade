@@ -3,6 +3,7 @@
 import json
 import re
 import sqlite3
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from html.parser import HTMLParser
 
@@ -343,6 +344,130 @@ def test_cloud_presence_summary_bounds_labels_and_keeps_all_sessions_in_details(
     assert "4 more in session details" in visible
     assert "Agent-11" not in visible and "Agent-11" in html
     assert "Reported agent sessions (12)" in html
+
+
+def _octopool_capture():
+    return {
+        "captured_at": NOW.isoformat(),
+        "scope": "pool-wide",
+        "window": {"seconds": 86400, "label": "untrusted window label"},
+        "pool_usage": {
+            "requests": 41,
+            "saved_github_requests": 7,
+            "fallbacks": 2,
+            "service_errors": 1,
+            "eligible_cache_hit_rate": 0.25,
+        },
+        "operator": "ignored-private-client",
+    }
+
+
+def test_capacity_without_an_octopool_observation_has_a_concise_connection_state():
+    from brigade import fleet_deck_overview as overview
+
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=())
+    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    assert "Octopool reporting not connected" in html
+    assert "No quota, reset time, cache accounting" not in html
+    assert "GitHub reads / Octopool" not in overview.render_overview(view, NOW, worklore_enabled=False)
+
+
+def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_headroom_claims():
+    from brigade import fleet_deck_overview as overview
+
+    observation = deck.octopool_observation_from_snapshot(_octopool_capture())
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), octopool_observation=observation)
+    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
+    visible = _visible_text(panel)
+    assert "Captured" in visible and "2026-08-25T12:00:00+00:00" in visible
+    assert "24h" in visible and "Pool-wide" in visible and "includes clients outside this fleet" in visible
+    assert "41 requests" in visible and "7 GitHub reads saved" in visible
+    assert "2 fallbacks" in visible and "1 service errors" in visible
+    assert "Source: Octopool stats capture" in panel
+    assert "Eligible cache hit rate: 25.00%" in panel and "25.00%" not in visible
+    assert "ignored-private-client" not in html and "untrusted window label" not in html
+    assert "quota" not in panel.lower() and "available" not in panel.lower() and "live" not in panel.lower()
+    assert "GitHub reads / Octopool" not in overview.render_overview(view, NOW, worklore_enabled=False)
+
+
+@pytest.mark.parametrize("bad", [True, -1, 2**53, "123", 2.5, float("nan"), float("inf")])
+def test_octopool_renderer_revalidates_provided_counters_and_omits_invalid_values(bad):
+    from brigade import fleet_deck_overview as overview
+
+    raw = _octopool_capture()
+    raw["pool_usage"] = {
+        "requests": 8,
+        "saved_github_requests": bad,
+        "fallbacks": bad,
+        "service_errors": bad,
+        "eligible_cache_hit_rate": bad,
+        "url": "https://example.test/untrusted",
+        "secret": "private-metadata",
+    }
+    # Raw mappings may arrive from preview callers; the renderer owns this last boundary too.
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), octopool_observation=raw)
+    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
+    assert "8 requests" in panel
+    assert "GitHub reads saved" not in panel and "fallbacks" not in panel and "service errors" not in panel
+    assert "Eligible cache hit rate" not in panel
+    assert "private-metadata" not in panel and "https://example.test/untrusted" not in panel
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"captured_at": "<script>bad</script>"},
+        {"captured_at": "2026-01-01T00:00:00"},
+        {"scope": "fleet-only"},
+        {"window": {"seconds": True}},
+        {"window": {"seconds": -1}},
+        {"pool_usage": [1, 2]},
+    ],
+)
+def test_octopool_renderer_refuses_malformed_capture_provenance(change):
+    from brigade import fleet_deck_overview as overview
+
+    view = deck.DeckView(
+        stations=(),
+        rail=(),
+        repos=(),
+        outcomes=(),
+        observers=(),
+        octopool_observation={**_octopool_capture(), **change},
+    )
+    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    assert "Octopool reporting not connected" in html
+    assert "41 requests" not in html and "<script>bad" not in html
+
+
+def test_capacity_leads_with_machines_and_reported_activity_while_folding_diagnostics():
+    from brigade import fleet_deck_overview as overview
+    from tests.test_fleet_deck_overview import _mixed_view
+
+    view = replace(
+        _mixed_view(),
+        cloud_workers=(
+            deck.CloudWorker("codex", 0, 64, "closed", ()),
+            deck.CloudWorker(
+                "cursor", 1, 3, "open", (deck.CloudLease("task-id", "example/tool", "Active task", "running", ""),)
+            ),
+        ),
+    )
+    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    visible = _visible_text(html.split("<main", 1)[1])
+    assert html.index('id="machines-table"') < html.index("Usable for selected work: unknown")
+    assert "Usable for selected work: unknown" in visible and "Active task" in visible
+    assert "Dot reporting coverage unknown" in visible
+    assert "0/64" not in visible and "circuit:" not in visible
+    assert "Configured slots are not verified usable workers" not in visible
+    assert html.count("Configured slots are not verified usable workers") == 1
+    assert "<summary>Availability details</summary>" in html and "<summary>Provider details" in html
+    assert "0/64" in html and "circuit: closed" in html
+    # A lease is actionable activity on Overview too; idle provider diagnostics remain folded.
+    overview_visible = _visible_text(overview.render_overview(view, NOW, worklore_enabled=False))
+    assert "Active task" in overview_visible and "0/64" not in overview_visible
 
 
 def test_repo_page_marks_only_exact_live_dirty_overlap(conn, now):

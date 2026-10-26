@@ -79,7 +79,7 @@ def test_capacity_shares_deck_authorization_and_browser_read_only_scope(hub):  #
     credential = cookie(hub)
     status, headers, page = request(hub, "GET", "/deck/capacity", headers={"Cookie": credential})
     assert status == 200
-    assert "<h1>Capacity</h1>" in page and "Octopool" in page and "not observed" in page
+    assert "<h1>Capacity</h1>" in page and "Octopool reporting not connected" in page
     assert "Usable for selected work: unknown" in page
     assert "No stations configured" in page
     assert "<form" not in page

@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlencode
 
-from . import fleet_action_sources, fleet_command_deck as deck
+from . import fleet_action_sources, fleet_command_deck as deck, ui_theme
 from .fleet_action_auth import canonical
 from . import fleet_deck_activity as activity
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
@@ -605,15 +605,16 @@ def _cloud_worker_html(worker: deck.CloudWorker) -> str:
 def render_cloud_workers(view: DeckView) -> str:
     cards = "".join(_cloud_worker_html(worker) for worker in view.cloud_workers)
     return (
-        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Provider leases</h2>'
-        f'<p class="panel-count">{len(view.cloud_workers)} provider(s)</p></header>'
+        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Provider leases</h2></header>'
+        + activity.render_provider_leases(view)
+        + f"<details><summary>Provider details ({len(view.cloud_workers)})</summary>"
         '<p class="station-meta">Lease inventory does not cover reported agent presence.</p>'
         + (
             f'<div class="cloud-workers">{cards}</div>'
             if cards
             else '<p class="empty">No cloud providers configured.</p>'
         )
-        + "</section>"
+        + "</details></section>"
     )
 
 
@@ -697,7 +698,9 @@ def render_overview(
         render_attention(view, now, action_sources=action_sources, worklore_enabled=worklore_enabled),
         render_machine_table(view, now, include_context=True),
         render_work_lists(view, worklore_enabled=worklore_enabled),
-        "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
+        render_cloud_workers(view)
+        if any(worker.leases for worker in view.cloud_workers)
+        else "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
         "<details><summary>Recent outcomes</summary>" + render_outcomes(view) + "</details>",
         "<details><summary>Control plane details</summary>"
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
@@ -723,17 +726,16 @@ def render_capacity_page(view: DeckView, now: datetime, *, nonce: str, worklore_
     body = (
         '<main class="deck-shell overview capacity-page"><header class="page-head"><div><h1>Capacity</h1>'
         '<p class="page-sub">Configured capacity and reported observations</p></div></header>'
-        '<section class="panel"><h2>Usable for selected work: unknown</h2>'
-        "<p>Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p></section>"
         + render_machine_table(view, now)
+        + '<p class="station-meta">Usable for selected work: unknown.</p>'
+        + activity.render_cloud_presence_panel(view)
         + render_cloud_workers(view)
-        + '<section class="panel"><h2>GitHub reads / Octopool</h2><p>Availability not observed. No quota, reset time, cache accounting or pool scope is published in this Deck projection.</p></section>'
+        + activity.render_octopool_observation(view)
+        + "<details><summary>Availability details</summary><p>Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p></details>"
         + "<details><summary>Control plane details</summary>"
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
         + "</details></main>"
     )
-    from . import ui_theme
-
     return deck._document(
         body,
         nonce=nonce,

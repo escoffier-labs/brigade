@@ -450,6 +450,20 @@ class ControlPlane:
 
 
 @dataclass(frozen=True)
+class OctopoolObservation:
+    """A supplied capture of shared-pool usage, with no availability verdict."""
+
+    captured_at: str
+    window_seconds: int
+    scope: str = "pool-wide"
+    requests: int | None = None
+    saved_github_requests: int | None = None
+    fallbacks: int | None = None
+    service_errors: int | None = None
+    eligible_cache_hit_rate: float | None = None
+
+
+@dataclass(frozen=True)
 class DeckView:
     stations: tuple[StationView, ...]
     rail: tuple[RailEntry, ...]
@@ -461,6 +475,7 @@ class DeckView:
     control_plane: ControlPlane | None = None
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
     stale_after_seconds: int = 1800
+    octopool_observation: OctopoolObservation | Mapping[str, object] | None = None
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -952,6 +967,51 @@ def cloud_workers_from_snapshot(snapshot: Mapping[str, object]) -> tuple[CloudWo
 
 def _safe_display_text(value: object, *, limit: int = CLOUD_TEXT_LIMIT) -> str:
     return _strip_controls(value)[:limit] if isinstance(value, str) else ""
+
+
+def octopool_observation_from_snapshot(raw: object) -> OctopoolObservation | None:
+    """Project only bounded capture provenance and allowlisted usage counters."""
+    names = ("requests", "saved_github_requests", "fallbacks", "service_errors")
+    if isinstance(raw, OctopoolObservation):
+        raw = {
+            "captured_at": raw.captured_at,
+            "scope": raw.scope,
+            "window": {"seconds": raw.window_seconds},
+            "pool_usage": {name: getattr(raw, name) for name in (*names, "eligible_cache_hit_rate")},
+        }
+    if not isinstance(raw, Mapping) or raw.get("scope") != "pool-wide":
+        return None
+    stamp, window, usage = raw.get("captured_at"), raw.get("window"), raw.get("pool_usage")
+    if not isinstance(stamp, str) or len(stamp) > 64 or _strip_controls(stamp) != stamp:
+        return None
+    if not isinstance(window, Mapping) or not isinstance(usage, Mapping):
+        return None
+    seconds = window.get("seconds")
+    if type(seconds) is not int or not 0 < seconds <= 2**53 - 1:
+        return None
+    try:
+        captured = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if captured.tzinfo is None:
+            return None
+        stamp = captured.astimezone(_UTC).isoformat()
+    except (ValueError, OverflowError):
+        return None
+    counters = {
+        name: value if type(value) is int and 0 <= value <= 2**53 - 1 else None
+        for name in names
+        for value in (usage.get(name),)
+    }
+    rate = usage.get("eligible_cache_hit_rate")
+    rate = float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) and 0 <= rate <= 1 else None
+    return OctopoolObservation(
+        captured_at=stamp,
+        window_seconds=seconds,
+        requests=counters["requests"],
+        saved_github_requests=counters["saved_github_requests"],
+        fallbacks=counters["fallbacks"],
+        service_errors=counters["service_errors"],
+        eligible_cache_hit_rate=rate,
+    )
 
 
 def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, str]:

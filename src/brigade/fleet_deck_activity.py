@@ -1,4 +1,4 @@
-"""Activity and queue presentation over the Deck's reported metadata."""
+"""Activity, queue and read-pool presentation over the Deck's reported metadata."""
 
 from __future__ import annotations
 
@@ -122,6 +122,61 @@ def _cloud_details(context: deck.CloudSessionContext) -> str:
         f"<br>Source: {_esc(context.source)}<br>Scope: {_esc(context.source_scope)}"
         f"<br>Coverage: {_esc(context.coverage)}<br>Observed: {_esc(context.observed_at)}"
         f"<br>Context version: {context.version} · Sequence: {context.sequence}</p>"
+    )
+
+
+def render_octopool_observation(view: deck.DeckView) -> str:
+    observation = deck.octopool_observation_from_snapshot(view.octopool_observation)
+    header = '<section class="panel" id="octopool-observation"><h2>GitHub reads / Octopool</h2>'
+    if observation is None:
+        return header + '<p class="station-meta">Octopool reporting not connected</p></section>'
+    seconds = observation.window_seconds
+    window = f"{seconds // 3600}h" if seconds % 3600 == 0 else f"{seconds}s"
+    labels = {
+        "requests": ("request", "requests"),
+        "saved_github_requests": ("GitHub read saved", "GitHub reads saved"),
+        "fallbacks": ("fallback", "fallbacks"),
+        "service_errors": ("service errors", "service errors"),
+    }
+    metrics = " · ".join(
+        f"{value} {words[value != 1]}"
+        for name, words in labels.items()
+        for value in (getattr(observation, name),)
+        if value is not None
+    )
+    rate = observation.eligible_cache_hit_rate
+    details = f"<p>Eligible cache hit rate: {rate:.2%}</p>" if rate is not None else ""
+    return (
+        header + f'<p class="station-meta">Captured {_esc(observation.captured_at)} · {window} · '
+        "Pool-wide, includes clients outside this fleet.</p>"
+        f'<p class="row-meta">{metrics or "No valid counters provided."}</p>'
+        "<details><summary>Metric details</summary><p>Source: Octopool stats capture</p>"
+        + details
+        + "</details></section>"
+    )
+
+
+def render_provider_leases(view: deck.DeckView) -> str:
+    rows = "".join(
+        f"<li><strong>{_esc(worker.provider)} · {_esc(lease.label or 'Reported lease')}</strong>"
+        f"<br>{_esc(lease.repo)} · {_esc(lease.state)}</li>"
+        for worker in view.cloud_workers
+        for lease in worker.leases
+    )
+    return (
+        f'<ul class="cloud-lease-list">{rows}</ul>'
+        if rows
+        else '<p class="empty">No active provider leases reported.</p>'
+    )
+
+
+def render_cloud_presence_panel(view: deck.DeckView) -> str:
+    return (
+        '<section class="panel">'
+        + render_cloud_presence(view)
+        + "<details><summary>Reported session presence</summary>"
+        + render_sessions(view)
+        + "</details></section>"
     )
 
 
