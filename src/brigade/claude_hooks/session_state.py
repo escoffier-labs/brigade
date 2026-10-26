@@ -320,7 +320,16 @@ def _write_session_state_preserving_latch(
                 # The requested value, rather than a changed-state flag, also
                 # preserves deliberate same-value captures and generic fallback
                 # semantics when a Read completed after the snapshot was loaded.
-                _rt()._record_exercised_artifact(updated, capture_artifact_id)
+                capture_kind = None
+                if isinstance(capture_artifact_id, str) and capture_artifact_id.strip() == updated.get(
+                    "exercised_artifact_id"
+                ):
+                    capture_kind = updated.get("exercised_artifact_kind")
+                _rt()._record_exercised_artifact(
+                    updated,
+                    capture_artifact_id,
+                    kind=capture_kind if isinstance(capture_kind, str) and capture_kind.strip() else "skill",
+                )
             dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation

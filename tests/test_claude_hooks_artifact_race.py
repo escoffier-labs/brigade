@@ -141,15 +141,30 @@ def test_explicit_capture_intent_survives_concurrent_read(target, monkeypatch, c
 
 
 @pytest.mark.parametrize("kind", ["skill", "runbook"])
-def test_full_save_preserves_kind_pair_and_updates_caller(target, kind):
+@pytest.mark.parametrize("capture", [None, "taste", " taste "])
+def test_full_save_preserves_kind_pair_and_updates_caller(target, kind, capture):
     stale = seed_artifact(target, "prior-skill")
     current = dict(stale, exercised_artifact_id="taste", exercised_artifact_kind=kind)
     runtime.write_session_state(target, SESSION, current)
-    assert runtime._write_session_state_preserving_latch(target, SESSION, stale)
+    assert runtime._write_session_state_preserving_latch(target, SESSION, stale, capture_artifact_id=capture)
     persisted = runtime.read_session_state(target, SESSION)
     assert persisted is not None
     for state in (persisted, stale):
         assert (state["exercised_artifact_id"], state["exercised_artifact_kind"]) == ("taste", kind)
+
+
+@pytest.mark.parametrize("capture,expected", [("taste", ("taste", "runbook")), ("new-skill", ("new-skill", "skill"))])
+def test_routed_capture_preserves_kind_only_for_same_artifact(target, capture, expected):
+    seed_artifact(target, "taste", kind="runbook")
+    event(
+        target,
+        "PostToolUse",
+        tool_name="Bash",
+        tool_input={"command": f"brigade work verify run --command true --capture {capture}"},
+    )
+    state = runtime.read_session_state(target, SESSION)
+    assert state is not None
+    assert (state["exercised_artifact_id"], state["exercised_artifact_kind"]) == expected
 
 
 def test_task_reset_does_not_inherit_artifact_or_accept_old_snapshot(target):
