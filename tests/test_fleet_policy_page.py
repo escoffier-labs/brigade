@@ -1625,10 +1625,8 @@ def test_policy_route_rejects_an_oversized_or_wrong_media_type_body(tmp_path):
 def test_deck_nav_links_to_the_policy_page(tmp_path):
     with _RouteHub(tmp_path) as hub:
         bearer = {"Authorization": f"Bearer {hub.token}"}
-        assert '<a href="/deck/policy">Staged / active policy</a>' in hub.request("GET", "/", headers=bearer)[2]
-        assert (
-            '<a href="/deck/policy">Staged / active policy</a>' in hub.request("GET", "/deck/roster", headers=bearer)[2]
-        )
+        assert '<a href="/deck/roster">' in hub.request("GET", "/", headers=bearer)[2]
+        assert '<a href="/deck/policy">Model assignments</a>' in hub.request("GET", "/deck/roster", headers=bearer)[2]
 
 
 # --- activation-aware application text ----------------------------------------

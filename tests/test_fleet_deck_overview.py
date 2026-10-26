@@ -956,9 +956,11 @@ def test_overview_body_orders_sections_and_folds_control_plane_details():
     order = [
         'class="page-head"',
         'aria-labelledby="attention-title"',
+        'aria-labelledby="working-title"',
         'id="machines-table"',
         'aria-label="Fleet summary"',
-        'aria-labelledby="working-title"',
+        'aria-labelledby="queued-title"',
+        "<summary>Fleet details</summary>",
         'id="interactive-sessions"',
         'id="cloud-workers"',
         'id="timeline"',
@@ -990,9 +992,9 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     assert f'<a href="/deck">{NAV_ICONS["overview"]}Overview</a>' in html
     assert html.count("aria-current") == 1
     assert "/deck/work" not in html
-    for href in ("/deck/roster", "/deck/policy", "/view/machines"):
+    for href in ("/deck/roster", "/view/machines"):
         assert f'href="{href}"' in html
-    assert 'href="/deck/work"' in overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert 'href="/deck/work"' not in overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
 
 
 def test_sidebar_omits_inventories_and_capacity_retains_machine_and_cloud_evidence():
@@ -1168,7 +1170,7 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
     )
     view = replace(_mixed_view(), interactive_sessions=sessions)
     html = overview.render_overview(view, NOW, worklore_enabled=True)
-    activity = html.split('aria-labelledby="working-title"', 1)[1].split('aria-labelledby="queued-title"', 1)[0]
+    activity = html.split('aria-labelledby="working-title"', 1)[1]
     assert ">Activity<" in activity
     assert "2 managed jobs reported" in activity
     assert "Reported agent sessions (4)" in activity
@@ -1176,7 +1178,7 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
     assert f"{name} · " in activity and "current presence" in activity
     assert "unexpired report" in activity
     assert html.count('id="interactive-sessions"') == 1
-    assert html.index('id="machines-table"') < html.index('aria-labelledby="working-title"')
+    assert html.index('aria-labelledby="working-title"') < html.index('id="machines-table"')
     assert "one, two" in activity
     assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
     assert HOSTILE not in activity
@@ -1192,7 +1194,7 @@ def test_activity_bounds_visible_sessions_and_discloses_possible_membership_cap(
     )
     sessions = tuple(replace(session, session_id=f"session-{index}") for index in range(memberships - 1))
     sessions += (replace(session, repo_identity="example/two", repo_label="two", checkout_path="/tmp/two"),)
-    html = overview.render_work_lists(replace(_mixed_view(), interactive_sessions=sessions))
+    html = overview.render_overview(replace(_mixed_view(), interactive_sessions=sessions), NOW, worklore_enabled=True)
     # One session has two memberships: count identities, and retain both checkouts.
     assert f"Reported agent sessions ({memberships - 1})" in html
     assert "one, two" in html and "/tmp/two" in html
@@ -1224,7 +1226,11 @@ def test_queue_readable_counts_and_folded_routine_exclusions(eligible, queued, l
     assert "observed scan" not in html and "not-ready" not in html
     assert "reported above" not in html
     if eligible == queued:
-        assert html.count("7") == 1
+        from tests.test_fleet_command_deck import _visible_text
+
+        assert _visible_text(html).count("7") == 1
+        details = html.split("<summary>Queue counts and reasons</summary>", 1)[1]
+        assert details.count("7") == 1
     disabled = overview.render_work_lists(_view(plane=_plane(queue=queue)), worklore_enabled=False)
     assert 'href="/deck/work"' not in disabled
 
@@ -1385,8 +1391,9 @@ def test_main_column_has_no_status_dots():
 def test_card_links_point_only_at_existing_routes():
     for enabled in (True, False):
         html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=enabled)
-        assert html.count('class="card-link"') == 2
+        assert html.count('class="card-link"') == 3
         assert html.count('class="card-link" href="/view/machines"') == 2
+        assert 'class="card-link" href="/deck/capacity"' in html
         assert 'class="card-link" href="/deck/work"' not in html
     rule = re.search(r"\.card-link::after \{[^}]*\}", ui_theme.BASE_CSS).group(0)
     assert 'content: "\\2192"' in rule
@@ -1441,9 +1448,10 @@ def test_overview_attention_uses_one_destination_and_preserves_counted_subjects(
     markers = [
         'class="page-head"',
         'aria-labelledby="attention-title"',
+        'aria-labelledby="working-title"',
         'id="machines-table"',
         'aria-label="Fleet summary"',
-        'aria-labelledby="working-title"',
+        'aria-labelledby="queued-title"',
     ]
     assert [page.index(marker) for marker in markers] == sorted(page.index(marker) for marker in markers)
 
@@ -1458,11 +1466,11 @@ def test_machine_notes_column_is_only_present_when_a_row_has_a_note(claims, colu
     assert ("machine-table--no-notes" in html) == (columns == 4)
 
 
-def test_activity_explanation_is_visible_without_nested_help_and_verdict_is_sentence_case():
+def test_activity_counts_are_concise_and_verdict_is_sentence_case():
     html = overview.render_work_lists(_mixed_view())
     assert '<h2 id="working-title">Activity</h2>' in html
     assert "About activity" not in html
-    assert re.search(r'<p class="station-meta">Running: 2 · 2 managed jobs reported\. Managed jobs occupy', html)
+    assert '<p class="station-meta">Running: 2 · 2 managed jobs reported.</p>' in html
     assert 'title="Managed jobs occupy' not in html
     assert 'verdict-status--unknown">Coverage unknown (1)' in overview.render_header(_view(), NOW)
     clear = replace(
@@ -1509,3 +1517,71 @@ def test_managed_activity_card_exposes_status_and_folds_supplied_run_metadata():
     assert "github.com/example/project" not in visible and "github.com/example/project" in details
     assert _stamp(60) in details and "run.started" in details
     assert " open" not in html.split("<summary", 1)[0]
+
+
+def test_overview_bounds_activity_and_keeps_every_task_and_diagnostic_in_native_details():
+    from html import escape
+    from tests.test_ui_theme_integration import Markup
+
+    title = "x" * 220 + HOSTILE
+    runs = [_run(NODE_A, f"managed-{i}", f"repo-{i}-{title}") for i in range(5)]
+    sessions = tuple(
+        deck.InteractiveSession(
+            NODE_A,
+            "dot",
+            f"report-{i}",
+            "example/tool",
+            "fleet",
+            "tool",
+            "",
+            None,
+            (),
+            False,
+            cloud_context=deck.CloudSessionContext(
+                2,
+                "reported-provider",
+                f"agent-{i}",
+                i,
+                _stamp(60),
+                "fixture",
+                "fixture",
+                "explicit",
+                task=f"task-{i}-{title}",
+                reported_state="blocked",
+                blocker=f"blocker-{i}",
+                evidence_refs=(f"evidence-{i}",),
+            ),
+            observation_age_seconds=60,
+        )
+        for i in range(5)
+    )
+    history = replace(sessions[0], session_id="old-report", presence_state="stale")
+    view = _view(
+        [_station(NODE_A, "Example", 8, runs)],
+        plane=_plane(),
+        interactive_sessions=sessions,
+        recent_cloud_reports=(history,),
+        outcomes=(_run(NODE_A, "finished", "old-repo", state="run.completed"),),
+    )
+    page = overview.render_overview(view, NOW, worklore_enabled=True)
+    markup = Markup(page)
+    visible_cards = [
+        attrs.get("data-activity-kind")
+        for i, (_, attrs) in enumerate(markup.tags)
+        if attrs.get("data-activity-kind")
+        and not any(markup.tags[parent][0] == "details" for parent in markup.ancestors[i])
+    ]
+    assert visible_cards.count("managed") == visible_cards.count("reported") == 3
+    assert "<summary>More managed jobs (2)</summary>" in page
+    assert "<summary>More reported tasks (2)</summary>" in page
+    assert "<summary>Fleet details</summary>" in page and "<summary>About reports</summary>" in page
+    for marker in ("interactive-sessions", "timeline", "cloud-workers", "control-plane"):
+        index = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("id") == marker)
+        parents = markup.ancestors[index]
+        assert any(markup.tags[i][0] == "details" and markup.text[i].startswith("Fleet details") for i in parents)
+    assert HOSTILE not in page
+    for i in range(5):
+        assert escape(f"repo-{i}-{title}") in page and escape(f"task-{i}-{title}") in page
+        assert f"evidence-{i}" in page and f"blocker-{i}" in page
+    assert "Reported blocked · stale" in page and "reported-provider · lifecycle unobserved" in page
+    assert "Self-reported task state; provider execution unverified." in page

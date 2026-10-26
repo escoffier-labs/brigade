@@ -344,12 +344,15 @@ def test_cloudflare_snapshot_rejects_unapproved_fields():
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-def test_stats_page_preserves_worklore_navigation(monkeypatch, enabled):
+def test_stats_page_uses_settings_context_with_worklore_on_or_off(monkeypatch, enabled):
     from brigade import fleet_admin_stats_page as page, worklore_http
 
     monkeypatch.setattr(worklore_http, "enabled", lambda: enabled)
     html = page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
-    assert ('href="/deck/work"' in html) is enabled
+    assert 'href="/view/machines"' in html
+    assert 'href="/deck/work"' not in html
+    assert '<a href="/deck/policy">Model assignments</a>' in html
+    assert '<a href="/deck/stats" aria-current="page">Reporting</a>' in html
 
 
 @pytest.mark.parametrize(

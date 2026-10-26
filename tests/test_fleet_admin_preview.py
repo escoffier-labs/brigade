@@ -8,6 +8,7 @@ import pytest
 
 from brigade import fleet_command_deck as deck, fleet_deck_overview as overview, fleet_work_page
 from tests.test_fleet_deck_overview import NOW, HOSTILE, _alert_view, _mixed_view
+from tests.test_ui_theme_integration import Markup
 from tests.test_fleet_enrollment import cookie, hub, request, ADMIN  # noqa: F401
 
 
@@ -40,14 +41,14 @@ def test_primary_sections_keep_work_discoverable_without_worklore():
             "/deck/repos",
             "/deck/roster",
         ]
-        assert ('href="/deck/work"' in page) == enabled
+        assert 'aria-label="Section tabs"' in page
+        assert "More destinations" not in page and "Section destinations" not in page
         assert 'aria-labelledby="tree-machines"' not in page
         assert 'aria-labelledby="tree-cloud"' not in page
-        for route in ("/deck/alerts", "/deck/policy", "/deck/stats", "/deck/owners", "/deck/ci", "/view/repos"):
-            assert f'href="{route}"' in page
+        assert 'href="/deck/alerts"' in page
 
 
-def test_overview_places_machines_directly_after_attention_and_keeps_secondary_counts():
+def test_overview_compact_cards_keep_evidence_below_the_default_scan():
     view = replace(_mixed_view(), rail=_alert_view().rail)
     source = overview.page_alerts(view, NOW)[0].source_ref
     page = overview.render_overview(view, NOW, worklore_enabled=True, action_sources=frozenset({source}))
@@ -55,9 +56,9 @@ def test_overview_places_machines_directly_after_attention_and_keeps_secondary_c
     assert attention.count('class="alert-row"') <= 3
     assert 'class="alert-line"' not in attention and ">Review</a>" not in attention
     assert attention.count(">View all alerts</a>") == 1
-    assert re.search(r'</section>\s*<section class="panel" id="machines-table"', page)
-    assert page.index("skillet on linux-a") < page.index('id="machines-table"')
-    assert page.index('id="machines-table"') < page.index('aria-labelledby="working-title"')
+    assert page.index('aria-labelledby="attention-title"') < page.index('aria-labelledby="working-title"')
+    assert page.index('aria-labelledby="working-title"') < page.index('id="machines-table"')
+    assert page.index('id="machines-table"') < page.index('aria-labelledby="queued-title"')
     machines = page.split('id="machines-table"', 1)[1].split("</section>", 1)[0]
     assert "Usable for selected work: unknown" in machines
     assert "Reported counts and capacity context" in machines
@@ -219,21 +220,65 @@ def test_observed_reporting_leads_with_observation_scope_before_details():
     assert page.index("Weekly observations: 1") < page.index("<summary>Snapshot and methodology")
 
 
-def test_current_section_destinations_remain_in_context_with_worklore_on_or_off():
-    from brigade import fleet_deck_sidebar as sidebar
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize(
+    "active, labels, current",
+    [
+        ("overview", ["Overview", "Alerts"], "Overview"),
+        ("alerts", ["Overview", "Alerts"], "Alerts"),
+        ("boards", ["Runs", "Stored tasks", "Ready queue"], "Runs"),
+        ("work", ["Runs", "Stored tasks", "Ready queue"], "Stored tasks"),
+        ("capacity", ["Machines", "GitHub reads", "Cloud details"], "Machines"),
+        ("repos", ["Repositories", "Run history", "Checks", "Ownership"], "Repositories"),
+        ("repo-board", ["Repositories", "Run history", "Checks", "Ownership"], "Run history"),
+        ("ci", ["Repositories", "Run history", "Checks", "Ownership"], "Checks"),
+        ("owners", ["Repositories", "Run history", "Checks", "Ownership"], "Ownership"),
+        ("roster", ["Live routing", "Model assignments", "Reporting"], "Live routing"),
+        ("policy", ["Live routing", "Model assignments", "Reporting"], "Model assignments"),
+        ("stats", ["Live routing", "Model assignments", "Reporting"], "Reporting"),
+    ],
+)
+def test_section_tabs_have_exact_current_destination_and_feature_gated_discovery(enabled, active, labels, current):
+    page = deck._document("<main>Content</main>", nonce="p", now=NOW, active=active, worklore_enabled=enabled)
+    markup = Markup(page)
+    tab = next(
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "nav" and attrs.get("aria-label") == "Section tabs"
+    )
+    links = markup.descendants(tab, "a")
+    expected = [label for label in labels if label != "Stored tasks" or enabled]
+    assert [markup.text[i] for i in links] == expected
+    assert [markup.text[i] for i in links if markup.tags[i][1].get("aria-current")] == (
+        [] if active == "work" and not enabled else [current]
+    )
+    assert len(Navigation(page).links) == 5
+    sidebar = page.split("<aside", 1)[1].split("</aside>", 1)[0]
+    assert "More destinations" not in sidebar and "Section destinations" not in sidebar
 
-    for enabled in (False, True):
-        for active, routes in (
-            ("work", ("/view/machines", "/deck#queued-title")),
-            ("roster", ("/deck/roster", "/deck/policy", "/deck/stats")),
-        ):
-            page = sidebar.render_sidebar(_mixed_view(), active, NOW, worklore_enabled=enabled)
-            context = page.split('aria-label="Section destinations">', 1)[1].split("</div>", 1)[0]
-            for route in routes:
-                assert f'href="{route}"' in context
-            if active == "work":
-                assert ('href="/deck/work"' in context) == enabled
-            assert len(Navigation(page).links) == 5
+
+def test_section_anchor_destinations_have_real_targets_and_http_tabs(hub):  # noqa: F811
+    credential = cookie(hub)
+    for route, current in (
+        ("/deck", "Overview"),
+        ("/view/machines", "Runs"),
+        ("/view/repos", "Run history"),
+        ("/deck/capacity", "Machines"),
+    ):
+        status, _, page = request(hub, "GET", route, headers={"Cookie": credential})
+        assert status == 200
+        markup = Markup(page)
+        tab = next(
+            i
+            for i, (tag, attrs) in enumerate(markup.tags)
+            if tag == "nav" and attrs.get("aria-label") == "Section tabs"
+        )
+        assert [markup.text[i] for i in markup.descendants(tab, "a") if markup.tags[i][1].get("aria-current")] == [
+            current
+        ]
+    page = overview.render_capacity_page(_mixed_view(), NOW, nonce="p", worklore_enabled=True)
+    for anchor in ("machines-table", "octopool-observation", "cloud-details"):
+        assert f'id="{anchor}"' in page
+        assert f'href="/deck/capacity#{anchor}"' in page
+    assert 'id="queued-title"' in overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
 
 
 @pytest.mark.parametrize(
@@ -265,6 +310,8 @@ def test_not_ready_total_requires_complete_queue_projection(queue, expected, rea
     page = overview.render_summary(_view(plane=plane))
     assert _card_value(page, "not-ready") == expected, queue
     assert _card_value(page, "queued") == ready, queue
+    compact = overview.render_ready_queue(_view(plane=plane), worklore_enabled=True)
+    assert f"Not ready: {expected}</p>" in compact, queue
 
 
 def test_policy_heading_distinguishes_active_staged_and_unknown(tmp_path):

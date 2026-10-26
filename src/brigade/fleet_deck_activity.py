@@ -129,8 +129,13 @@ def interactive_session(raw: Mapping[str, object], *, now: datetime) -> deck.Int
     )
 
 
-def render_cloud_presence(view: deck.DeckView) -> str:
+def render_cloud_presence(view: deck.DeckView, *, preview_limit: int | None = None) -> str:
     """Bounded human labels from reported presence, independent of lease inventory."""
+    about = (
+        "<details><summary>About reports</summary><p>Managed jobs occupy station slots. "
+        "Coverage is limited to explicitly reported sessions. Presence reports may be idle or overlap managed jobs. "
+        "Current presence means the Hub has an unexpired report.</p></details>"
+    )
     agents = {
         (session.node_id, session.harness, session.session_id): session.cloud_context
         for session in view.interactive_sessions
@@ -139,7 +144,7 @@ def render_cloud_presence(view: deck.DeckView) -> str:
     if not agents:
         return (
             '<p class="station-meta">Dot reporting coverage unknown. '
-            "No current Dot reports; publishing may not be configured.</p>"
+            "No current Dot reports; publishing may not be configured.</p>" + about
         )
     # Presence-only reports have no task card; never repeat task agents in a label list.
     presence_only = [context for context in agents.values() if context.version != 2]
@@ -148,10 +153,20 @@ def render_cloud_presence(view: deck.DeckView) -> str:
     presence = (
         f'<p class="row-meta">{deck.harness_badge_html("dot")} Dot · {_esc(labels)}{more}</p>' if presence_only else ""
     )
-    task_rows = "".join(
-        _task_report_row(session)
+    tasks = [
+        session
         for session in view.interactive_sessions
         if session.cloud_context is not None and session.cloud_context.version == 2
+    ]
+    shown = tasks if preview_limit is None else tasks[:preview_limit]
+    task_rows = "".join(_task_report_row(session) for session in shown)
+    remaining = tasks[len(shown) :]
+    more_tasks = (
+        f'<details><summary>More reported tasks ({len(remaining)})</summary><ul class="activity-cards">'
+        + "".join(_task_report_row(session) for session in remaining)
+        + "</ul></details>"
+        if remaining
+        else ""
     )
     notice = (
         "Self-reported task state; provider execution unverified. "
@@ -161,8 +176,10 @@ def render_cloud_presence(view: deck.DeckView) -> str:
     return (
         f"<h3>Reported cloud agents ({len(agents)})</h3>"
         + presence
-        + f'<p class="station-meta">{notice}Coverage is limited to explicitly reported sessions.</p>'
+        + f'<p class="station-meta">{notice}</p>'
+        + about
         + (f'<ul class="activity-cards">{task_rows}</ul>' if task_rows else "")
+        + more_tasks
     )
 
 

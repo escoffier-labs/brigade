@@ -337,7 +337,7 @@ def test_cloud_presence_summary_bounds_labels_and_keeps_all_sessions_in_details(
         now=NOW,
         interactive_sessions=sessions + [dict(sessions[0], repo_label="another-membership")],
     )
-    html = overview.render_work_lists(view)
+    html = overview.render_overview(view, NOW, worklore_enabled=True)
     visible = _visible_text(html)
     assert "Reported cloud agents (12)" in visible
     assert len(re.findall(r"Agent-\d+", visible)) == 8
@@ -471,9 +471,11 @@ def test_capacity_leads_with_resources_and_retains_lease_evidence_in_advanced_de
     advanced = html.split("<summary>Advanced resource details</summary>", 1)[1]
     assert "Usable for selected work: unknown" in advanced and "Active task" in advanced
     assert "0/64" in advanced and "circuit: closed" in advanced
-    # A lease is actionable activity on Overview too; idle provider diagnostics remain folded.
-    overview_visible = _visible_text(overview.render_overview(view, NOW, worklore_enabled=False))
-    assert "Active task" in overview_visible and "0/64" not in overview_visible
+    # Provider leases remain reachable under the grouped Fleet details disclosure.
+    overview_html = overview.render_overview(view, NOW, worklore_enabled=False)
+    overview_visible = _visible_text(overview_html)
+    assert "Active task" not in overview_visible and "0/64" not in overview_visible
+    assert "Active task" in overview_html.split("<summary>Fleet details</summary>", 1)[1]
 
 
 def test_repo_page_marks_only_exact_live_dirty_overlap(conn, now):
@@ -596,7 +598,10 @@ def test_unrelated_brigade_basename_does_not_attach_session_overlap(conn, now):
     html = repos_page.render(view, nonce="nonce", now=now)
     assert ">brigade<" in html
     assert session_row.target in html
-    assert html.count("! overlap") == 1
+    table = re.search(r"<table>.*?</table>", html, re.S).group(0)
+    assert table.count("! overlap") == 1
+    cards = html.split('<section aria-label="Repository summaries">', 1)[1].split("</section>", 1)[0]
+    assert cards.count("! overlap") == 1
 
 
 def test_identity_bearing_session_label_stays_unique_when_truncated():
@@ -1835,7 +1840,8 @@ def test_build_view_carries_the_control_plane(conn, now):
         control_plane=plane,
     )
     assert view.control_plane is plane
-    assert 'href="/deck/policy"' in deck.render_deck(view, nonce="nonce", now=now)
+    html = deck.render_deck(view, nonce="nonce", now=now)
+    assert 'id="control-plane"' in html and 'href="/deck/roster"' in html
 
 
 def _policy_machines():
@@ -2083,7 +2089,7 @@ def test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity(m
     )
     assert len(view.interactive_sessions) == 1
     assert len(view.recent_cloud_reports) == 2
-    html = overview.render_work_lists(view)
+    html = overview.render_overview(view, NOW, worklore_enabled=True)
     visible = _visible_text(html)
     assert "Check <fixture>" in visible and "Check &lt;fixture&gt;" in html
     assert "Miller" in visible and "Reported running" in visible
@@ -2093,7 +2099,9 @@ def test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity(m
     history = html.split('<details class="activity-history">', 1)[1]
     assert "Older build" not in visible and "Older build" in history and "stale" in history
     assert "Reported completed" in history and "Reviewed fixture" in history
-    assert "provider execution unverified" in visible and "explicitly reported sessions" in visible
+    assert "provider execution unverified" in visible
+    about = html.split("<summary>About reports</summary>", 1)[1].split("</details>", 1)[0]
+    assert "explicitly reported sessions" in about and "explicitly reported sessions" not in visible
     assert "receipt-a" not in visible and "receipt-a" in html
     assert "active-task" not in visible and "outcome-task" not in visible
     assert "Running: 0 · 0 managed jobs reported" in visible
@@ -2135,7 +2143,7 @@ def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidenc
     assert "example-provider" not in visible and "Lease <fixture>" not in visible
     assert "Control plane" not in visible and "No active leases." not in visible
     assert "No active provider leases reported." not in visible
-    marker = "<details><summary>Advanced resource details</summary>"
+    marker = '<details id="cloud-details"><summary>Advanced resource details</summary>'
     assert html.count(marker) == 1
     advanced = html.split(marker, 1)[1]
     assert "example-provider" in advanced and "Lease &lt;fixture&gt;" in advanced

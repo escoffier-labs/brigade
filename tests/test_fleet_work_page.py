@@ -666,7 +666,7 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
         conn.close()
     _group_config(tmp_path, [_group_raw(work_ids=ids)])
     route = "/deck/observed/sample-source"
-    normal_home_routes = ("/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/view/machines", "/view/repos")
+    normal_home_routes = ("/deck", "/deck/repos", "/deck/roster", "/view/machines", "/view/repos")
     with _hub(tmp_path, deck_config_path=tmp_path / "deck.json", trust_tailscale_identity=True) as (hub, db):
         assert _request(hub, route)[0] == 401
         conn = fleet_hub.open_db(db)
@@ -703,6 +703,8 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
             assert 'href="/deck/work"' in home
             for normal_route in normal_home_routes:
                 assert f'href="{normal_route}"' in home
+            settings = _request(hub, "/deck/roster", headers=auth)[2]
+            assert '<a href="/deck/policy">Model assignments</a>' in settings
             assert _request(hub, route + "?cursor=bad", headers=auth)[0] == 400
             assert _request(hub, "/deck/observed/unknown", headers=auth)[0] == 404
         assert _request(hub, "/work/items", headers=cookie)[0] == 401

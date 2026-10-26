@@ -895,13 +895,14 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
     assert _request(hub, "POST", "/events", headers=_bearer(), body=[event])[0] == 200
     status, headers, page = _request(hub, "GET", f"/view/{view}?{urlencode(query)}", headers=_bearer())
     assert status == 200
-    assert f'<div class="shell" data-active="{"repos" if view == "repos" else "boards"}">' in page
-    assert '<div class="shell-main"><main class="deck-shell fleet-board">' in page
+    assert f'<div class="shell" data-active="{"repo-board" if view == "repos" else "boards"}">' in page
+    assert '<div class="shell-main"><nav class="section-tabs" aria-label="Section tabs">' in page
+    assert '<main class="deck-shell fleet-board">' in page
     sidebar = re.search(r'<aside class="shell-sidebar"[^>]*>(.*?)</aside>', page, re.S)
     assert sidebar is not None
     assert page.count('<nav class="deck-nav" aria-label="Command Deck">') == 1
     assert f'href="{"/deck/repos" if view == "repos" else "/view/machines"}" aria-current="page"' in sidebar[1]
-    for route in ["/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/deck/owners"]:
+    for route in ["/deck", "/deck/repos", "/deck/roster"]:
         assert f'href="{route}"' in sidebar[1]
     for label in ["Resources", "Docs", "Report a bug", "Star on GitHub", 'class="sidebar-meta"', "sidebar-version"]:
         assert label in sidebar[1]

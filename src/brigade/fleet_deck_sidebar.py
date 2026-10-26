@@ -24,19 +24,27 @@ NAV_ITEMS = (
 )
 
 SECTION_ROUTES = {
-    "overview": (("/deck/alerts", "Alerts"),),
-    "work": (("/view/machines", "Runs"), ("/deck#queued-title", "Ready queue")),
-    "capacity": (("/deck/capacity#machines-table", "Machines"), ("/deck/capacity#cloud-workers", "Cloud")),
+    "overview": (("overview", "/deck", "Overview"), ("alerts", "/deck/alerts", "Alerts")),
+    "work": (
+        ("boards", "/view/machines", "Runs"),
+        ("work", "/deck/work", "Stored tasks"),
+        ("queue", "/deck#queued-title", "Ready queue"),
+    ),
+    "capacity": (
+        ("capacity", "/deck/capacity#machines-table", "Machines"),
+        ("github-reads", "/deck/capacity#octopool-observation", "GitHub reads"),
+        ("cloud-details", "/deck/capacity#cloud-details", "Cloud details"),
+    ),
     "repos": (
-        ("/deck/repos", "Work and claims"),
-        ("/view/repos", "Repository board"),
-        ("/deck/ci", "CI"),
-        ("/deck/owners", "Ownership"),
+        ("repos", "/deck/repos", "Repositories"),
+        ("repo-board", "/view/repos", "Run history"),
+        ("ci", "/deck/ci", "Checks"),
+        ("owners", "/deck/owners", "Ownership"),
     ),
     "roster": (
-        ("/deck/roster", "Live routing"),
-        ("/deck/policy", "Staged / active policy"),
-        ("/deck/stats", "Reporting"),
+        ("roster", "/deck/roster", "Live routing"),
+        ("policy", "/deck/policy", "Model assignments"),
+        ("stats", "/deck/stats", "Reporting"),
     ),
 }
 
@@ -45,18 +53,27 @@ def section_for(active: str) -> str:
     return {
         "alerts": "overview",
         "boards": "work",
+        "queue": "work",
+        "repo-board": "repos",
         "policy": "roster",
         "stats": "roster",
         "owners": "repos",
         "ci": "repos",
+        "github-reads": "capacity",
+        "cloud-details": "capacity",
     }.get(active, active)
 
 
-def secondary_links(section: str, *, worklore_enabled: bool) -> str:
-    routes = list(SECTION_ROUTES[section])
-    if section == "work" and worklore_enabled:
-        routes.append(("/deck/work", "Stored tasks"))
-    return "".join(f'<a href="{_esc(href)}">{_esc(label)}</a>' for href, label in routes)
+def render_section_tabs(active: str, *, worklore_enabled: bool) -> str:
+    """Ordinary links with an exact current destination; usable without scripts."""
+    routes = SECTION_ROUTES.get(section_for(active), SECTION_ROUTES["overview"])
+    links = []
+    for key, href, label in routes:
+        if key == "work" and not worklore_enabled:
+            continue
+        current = ' aria-current="page"' if key == active else ""
+        links.append(f'<a href="{_esc(href)}"{current}>{_esc(label)}</a>')
+    return '<nav class="section-tabs" aria-label="Section tabs">' + "".join(links) + "</nav>"
 
 
 RESOURCE_LINKS: tuple[tuple[str, str, str], ...] = (
@@ -99,7 +116,7 @@ def _sidebar_meta(view: DeckView | None, now: datetime) -> str:
 
 
 def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklore_enabled: bool) -> str:
-    """Five primary destinations, contextual links, Resources, and telemetry age."""
+    """Five primary destinations, attention, Resources, and telemetry age."""
     section = section_for(active)
     links = []
     for key, href, label in NAV_ITEMS:
@@ -108,22 +125,12 @@ def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklor
         links.append(f'<a href="{href}"{current}>{icon}{label}</a>')
     alerts = len(page_alerts(view, now)) if view is not None else None
     alert_count = f' <span class="nav-count">{alerts}</span>' if alerts else ""
-    contextual = secondary_links(
-        section if section in SECTION_ROUTES else "overview", worklore_enabled=worklore_enabled
-    )
-    discovery = "".join(
-        f'<div class="section-links"><h2>{_esc(label)}</h2>{secondary_links(key, worklore_enabled=worklore_enabled)}</div>'
-        for key, _, label in NAV_ITEMS
-        if key != section
-    )
     return "".join(
         [
             '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'
             '<p class="brand-name">Brigade Fleet Hub</p><p class="brand-sub">self-hosted</p></div>',
             f'<nav class="deck-nav" aria-label="Command Deck">{"".join(links)}</nav>',
             f'<a class="attention-shortcut" href="/deck/alerts">Alerts{alert_count}</a>',
-            f'<div class="section-links" aria-label="Section destinations">{contextual}</div>',
-            f'<details class="nav-more"><summary>More destinations</summary>{discovery}</details>',
             _resources(),
             _sidebar_meta(view, now),
             "</aside>",

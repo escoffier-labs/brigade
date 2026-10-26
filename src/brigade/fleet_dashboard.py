@@ -889,7 +889,7 @@ def render_page(
         "</main>"
     )
     return _document(
-        f"{title} - Brigade Fleet", nonce, body, now=current, active="repos" if query.view == "repos" else "boards"
+        f"{title} - Brigade Fleet", nonce, body, now=current, active="repo-board" if query.view == "repos" else "boards"
     )
 
 

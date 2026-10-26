@@ -126,9 +126,6 @@ def free_seats(station: StationView, machine: MachineState | None) -> int:
     return base
 
 
-# --- reported counts ------------------------------------------------------------
-
-
 @dataclass(frozen=True)
 class Summary:
     busy: int
@@ -197,9 +194,6 @@ def _not_ready(queue: deck.QueueState | None) -> str:
     if queue is None or not queue.complete or not queue.blocked_known:
         return UNKNOWN
     return str(sum(int(deck._cp_text(item["count"])) for item in queue.exclusions) + len(queue.blocked_items))
-
-
-# --- alerts ---------------------------------------------------------------------
 
 
 @dataclass(frozen=True)
@@ -302,9 +296,6 @@ def render_attention(
     )
 
 
-# --- header and verdict ---------------------------------------------------------
-
-
 def _plural(count: int, word: str) -> str:
     return f"{count} {word}{'' if count == 1 else 's'}"
 
@@ -349,9 +340,6 @@ def render_header(view: DeckView, now: datetime) -> str:
     )
 
 
-# --- working now and queued -------------------------------------------------------
-
-
 def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *, overlap: bool = False) -> str:
     run = tile.run
     seat = run.seat or (tile.claim.owner_conductor if tile.claim is not None else "") or UNKNOWN
@@ -380,49 +368,60 @@ def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> s
     if plane is None or "queue" not in plane.present:
         return '<p class="empty">Queue unknown: the control-plane snapshot has no queue section.</p>'
     queue = plane.queue
-    counts = activity.queue_counts(queue)
-    counts += (
-        f'<p class="station-meta">Not ready: {_esc(_not_ready(queue))} · excluded or blocked in this snapshot.</p>'
-    )
-    counts += deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
     rows = "".join(
         '<li class="row"><div class="row-body">'
         f'<p class="row-title">{_esc(deck._cp_text(item.get("id")))}</p>'
         f'<p class="row-meta">blocked · {_esc(activity.REASONS.get(deck._cp_text(item.get("reason")), deck._cp_text(item.get("reason"))))}</p></div></li>'
         for item in queue.blocked_items
     )
-    if rows:
-        return counts + f'<ul class="rows">{rows}</ul>'
+    reasons = f'<ul class="rows">{rows}</ul>' if rows else ""
     if not queue.blocked_known:
-        counts += '<p class="empty">Blocked reasons unknown.</p>'
-    return counts
+        reasons += '<p class="empty">Blocked reasons unknown.</p>'
+    return (
+        f'<p class="station-meta">{_esc(queue.eligible_count)} ready to run · Not ready: {_esc(_not_ready(queue))}</p>'
+        "<details><summary>Queue counts and reasons</summary>"
+        + activity.queue_counts(queue)
+        + deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
+        + reasons
+        + "</details>"
+    )
 
 
-def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
+def render_ready_queue(view: DeckView, *, worklore_enabled: bool) -> str:
+    return (
+        '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2>'
+        '<a class="card-link" href="/view/machines">View runs</a></header>'
+        + _queue_body(view.control_plane, worklore_enabled=worklore_enabled)
+        + "</section>"
+    )
+
+
+def render_work_lists(view: DeckView, *, worklore_enabled: bool = True, include_queue: bool = True) -> str:
     parallel = {entry.repo: entry.detail for entry in view.rail if entry.kind == "parallel"}
     overlaps = {row.target for row in view.repos if row.interactive_overlap}
-    rows = "".join(
-        _working_row(station, tile, parallel.get(tile.run.repo, ""), overlap=tile.run.repo in overlaps)
-        for station in view.stations
-        for tile in station.tiles
-    )
-    count = sum(station.busy for station in view.stations)
-    running = sum(tile.run.bucket == "running" for station in view.stations for tile in station.tiles)
-    working = f'<ul class="activity-cards">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
+    jobs = [(station, tile) for station in view.stations for tile in station.tiles]
+
+    def rows(items: list[tuple[StationView, Tile]]) -> str:
+        return (
+            '<ul class="activity-cards">'
+            + "".join(
+                _working_row(station, tile, parallel.get(tile.run.repo, ""), overlap=tile.run.repo in overlaps)
+                for station, tile in items
+            )
+            + "</ul>"
+        )
+
+    working = rows(jobs[:3]) if jobs else '<p class="empty">No managed jobs reported.</p>'
+    if len(jobs) > 3:
+        working += f"<details><summary>More managed jobs ({len(jobs) - 3})</summary>{rows(jobs[3:])}</details>"
+    running = sum(tile.run.bucket == "running" for _, tile in jobs)
     return (
         '<section class="panel" aria-labelledby="working-title"><header><h2 id="working-title">Activity</h2>'
         '<a class="card-link" href="/view/machines">View runs</a></header>'
-        f'<p class="station-meta">Running: {running} · {count} managed jobs reported. Managed jobs occupy station slots.</p>'
-        f"{working}{activity.render_cloud_presence(view)}<details><summary>Reported session presence</summary>"
-        "<p>Agent sessions report presence. They may be idle or overlap managed jobs. "
-        "Current presence means the Hub has an unexpired report.</p>"
-        f"{render_sessions(view)}</details>{activity.render_cloud_report_history(view)}</section>"
-        '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
-        f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section>"
+        f'<p class="station-meta">Running: {running} · {len(jobs)} managed jobs reported.</p>'
+        f"{working}{activity.render_cloud_presence(view, preview_limit=3)}</section>"
+        + (render_ready_queue(view, worklore_enabled=worklore_enabled) if include_queue else "")
     )
-
-
-# --- machines table ---------------------------------------------------------------
 
 
 SEGMENT_LIMIT = 16
@@ -547,12 +546,12 @@ def render_machine_table(view: DeckView, now: datetime, *, include_context: bool
         '<p class="seat-legend" aria-hidden="true"><span class="legend-swatch legend-swatch--busy"></span>busy '
         '<span class="legend-swatch legend-swatch--free"></span>idle '
         '<span class="legend-swatch legend-swatch--off"></span>unavailable</p></div>'
-        '<a class="card-link" href="/view/machines">Machines board</a></header>'
+        '<a class="card-link" href="/deck/capacity">View capacity</a></header>'
     )
     context = (
+        "<details><summary>Reported counts and capacity context</summary>"
         '<p class="station-meta">Usable for selected work: unknown. Configured slots describe reported capacity. '
         '<a href="/deck/capacity">Capacity details</a></p>'
-        "<details><summary>Reported counts and capacity context</summary>"
         "<p>Authentication, provider readiness, policy eligibility and shared quotas are not verified here. "
         "Local and cloud pools may overlap and are not added together.</p>" + render_summary(view) + "</details>"
         if include_context
@@ -577,9 +576,6 @@ def render_machine_table(view: DeckView, now: datetime, *, include_context: bool
         f"<th>Load</th>{notes_header}<th>Seen</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>{context}</section>"
     )
-
-
-# --- below the fold ---------------------------------------------------------------
 
 
 def _cloud_worker_html(worker: deck.CloudWorker) -> str:
@@ -655,23 +651,12 @@ def render_observed_groups(view: DeckView, now: datetime) -> str:
             group.snapshot_observed_at, now=now, stale_after_seconds=view.stale_after_seconds
         )
         cards += (
-            '<article class="panel"><h3><a href="/deck/observed/'
-            + _esc(group.key)
-            + '">'
-            + _esc(group.label)
-            + "</a></h3><p>"
-            + str(len(group.work_ids))
-            + " configured observation records</p><p>Coverage: "
-            + _esc(group.coverage)
-            + "</p><p>Configured source: "
-            + _esc(group.source_ref)
-            + "<br>Configured proxy: "
-            + _esc(group.proxy_ref)
-            + "<br>Configured parent: "
-            + _esc(group.parent_ref)
-            + "</p><p>Snapshot observation time (operator-configured metadata): "
-            + _esc(stamp)
-            + f"<br>Snapshot freshness: {freshness}. Stale after {view.stale_after_seconds} seconds.</p></article>"
+            f'<article class="panel"><h3><a href="/deck/observed/{_esc(group.key)}">{_esc(group.label)}</a></h3>'
+            f"<p>{len(group.work_ids)} configured observation records</p><p>Coverage: {_esc(group.coverage)}</p>"
+            f"<p>Configured source: {_esc(group.source_ref)}<br>Configured proxy: {_esc(group.proxy_ref)}"
+            f"<br>Configured parent: {_esc(group.parent_ref)}</p>"
+            f"<p>Snapshot observation time (operator-configured metadata): {_esc(stamp)}"
+            f"<br>Snapshot freshness: {freshness}. Stale after {view.stale_after_seconds} seconds.</p></article>"
         )
     return (
         f"<details><summary>Observed work groups ({len(view.observed_work_groups)})</summary>"
@@ -699,12 +684,18 @@ def render_overview(
     parts = [
         '<main class="deck-shell overview">',
         render_header(view, now),
+        '<div class="overview-grid">',
         render_attention(view, now, action_sources=action_sources, worklore_enabled=worklore_enabled),
+        render_work_lists(view, worklore_enabled=worklore_enabled, include_queue=False),
         render_machine_table(view, now, include_context=True),
-        render_work_lists(view, worklore_enabled=worklore_enabled),
-        render_cloud_workers(view)
-        if any(worker.leases for worker in view.cloud_workers)
-        else "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
+        render_ready_queue(view, worklore_enabled=worklore_enabled),
+        "</div>",
+        "<details><summary>Fleet details</summary>",
+        "<details><summary>Reported session presence</summary><p>Sessions report presence and may be idle or overlap managed jobs.</p>"
+        + render_sessions(view)
+        + "</details>",
+        activity.render_cloud_report_history(view),
+        "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
         "<details><summary>Recent outcomes</summary>" + render_outcomes(view) + "</details>",
         "<details><summary>Control plane details</summary>"
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
@@ -712,9 +703,14 @@ def render_overview(
     ]
     if worklore_enabled and view.observed_work_groups:
         parts.append(render_observed_groups(view, now))
-    parts.append(render_observers(view, now))
-    parts.append('<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer>')
-    parts.append("</main>")
+    parts.extend(
+        [
+            render_observers(view, now),
+            "</details>",
+            '<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer>',
+            "</main>",
+        ]
+    )
     return "\n".join(parts)
 
 
@@ -732,7 +728,7 @@ def render_capacity_page(view: DeckView, now: datetime, *, nonce: str, worklore_
         '<p class="page-sub">Configured capacity and reported observations</p></div></header>'
         + render_machine_table(view, now)
         + activity.render_octopool_observation(view)
-        + "<details><summary>Advanced resource details</summary><p>Usable for selected work: unknown. Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p>"
+        + '<details id="cloud-details"><summary>Advanced resource details</summary><p>Usable for selected work: unknown. Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p>'
         + render_cloud_workers(view)
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
         + "</details></main>"

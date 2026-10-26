@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlencode
 
 from . import fleet_command_deck, fleet_policy_page
 
@@ -349,6 +350,20 @@ def _row_html(row: RepoPolicyRow) -> str:
     )
 
 
+def _summary_card(row: RepoPolicyRow) -> str:
+    target = row.live[0].repo if row.live else row.label
+    href = "/view/repos?" + urlencode({"repo": target})
+    claim = f"Claim held · {row.claim_owner} · {row.claim_ttl}" if row.claim_owner else "No active claim"
+    flags = f'<p class="collision">{_esc(row.flags)}</p>' if row.flags else ""
+    linkage = '<p class="station-meta">Policy linkage unknown</p>' if not row.linked else ""
+    return (
+        '<article class="repository-card"><header>'
+        f'<h2>{_esc(row.label)}</h2><a class="card-link" href="{_esc(href)}">View runs</a></header>'
+        f"<p>{len(row.live)} reported run{'s' if len(row.live) != 1 else ''}</p>"
+        f'<p class="station-meta">{_esc(claim)}</p>{flags}{linkage}</article>'
+    )
+
+
 def render(
     view: fleet_command_deck.DeckView,
     *,
@@ -358,7 +373,7 @@ def render(
     nonce: str,
     now: datetime,
 ) -> str:
-    """The repos page: policy per repository, then the claim/run coordination table."""
+    """Repository summaries, with complete coordination and policy disclosures."""
     linked = sum(1 for row in rows if row.linked)
     if policy_available:
         state = (
@@ -372,14 +387,18 @@ def render(
             + ". Claim and run coordination below is unaffected.</p>"
         )
     blocks = "".join(_row_html(row) for row in rows) or '<p class="empty">No repositories to show.</p>'
+    cards = "".join(_summary_card(row) for row in (rows or build_rows(view, None)))
+    if not cards:
+        cards = '<p class="empty">No repository observations available. <a href="/view/repos">View run history</a></p>'
     body = (
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Repos</h1></div>"
+        "<h1>Repositories</h1></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
-        '<section class="repo-panel" aria-label="Repository coordination">'
-        "<h2>Claims and live runs</h2>"
+        '<section aria-label="Repository summaries"><div class="repository-grid">'
+        + cards
+        + "</div></section><details><summary>Claims and live runs</summary>"
         + fleet_command_deck.repo_coordination_table(view)
-        + "</section><details><summary>Repository policy and metadata</summary>"
+        + "</details><details><summary>Repository policy and metadata</summary>"
         '<section class="panel" aria-labelledby="repo-policy"><header><h2 id="repo-policy">Repository policy</h2>'
         f'<p class="panel-count">{len(rows)} target(s)</p></header>{state}{blocks}</section></details>'
         '<footer><a href="/view/machines">Runs</a> <a href="/view/repos">Repository board</a> '

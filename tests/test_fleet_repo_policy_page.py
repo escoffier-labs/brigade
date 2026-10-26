@@ -298,7 +298,8 @@ def test_repos_route_keeps_the_deck_navigation(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         status, page = _get(hub, "/deck/repos")
         assert status == 200
-        assert '<a href="/deck/policy">Staged / active policy</a>' in page
+        assert '<nav class="section-tabs" aria-label="Section tabs">' in page
+        assert '<a href="/deck/owners">Ownership</a>' in page
         assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}Settings</a>' in page
 
 
@@ -467,3 +468,43 @@ def test_repository_free_permission_override_and_rendering(conn):
     assert "free models allowed" in html
     assert "&middot; free denied" in html
     assert "free models denied" in html
+
+
+def test_repository_cards_lead_with_observed_work_and_keep_full_coordination(conn):
+    from dataclasses import replace
+    from tests.test_ui_theme_integration import Markup
+
+    hostile = "repository-" + "x" * 200 + "<script>alert(1)</script>"
+    row = replace(
+        _claim_row(hostile, OVERRIDDEN), live=(_live_run(OVERRIDDEN),), collision=True, interactive_overlap=True
+    )
+    view = _deck_view(row)
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    markup = Markup(page)
+    cards = [
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "article" and attrs.get("class") == "repository-card"
+    ]
+    assert cards
+    card = next(i for i in cards if OVERRIDDEN in markup.text[i])
+    assert "1 reported run" in markup.text[card] and "Claim held" in markup.text[card]
+    assert "parallel activity" in markup.text[card] and "overlap" in markup.text[card]
+    assert not any(markup.tags[i][0] == "details" for i in markup.ancestors[card])
+    table = next(i for i, (tag, _) in enumerate(markup.tags) if tag == "table")
+    assert any(
+        markup.tags[i][0] == "details" and markup.text[i].startswith("Claims and live runs")
+        for i in markup.ancestors[table]
+    )
+    assert "<summary>Repository policy and metadata</summary>" in page
+    assert hostile not in page and "&lt;script&gt;" in page
+    assert "600s left" in page and "drift" in page and "No active claim" in page
+    assert "epic" not in markup.text[card].lower() and "progress" not in markup.text[card].lower()
+
+
+def test_repository_cards_use_coordination_when_policy_is_unavailable_and_honest_empty_state():
+    view = _deck_view(_claim_row("unlinked-checkout"))
+    page = _render(view, (), unavailable_reason="not available")
+    assert 'class="repository-card"' in page and "unlinked-checkout" in page
+    assert "Policy linkage unknown" in page and "Claim held" in page
+    empty = _render(_deck_view(), ())
+    assert "No repository observations available" in empty
+    assert 'href="/view/repos"' in empty

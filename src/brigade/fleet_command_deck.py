@@ -1917,7 +1917,7 @@ def _document(
         title,
         active,
         sidebar,
-        body,
+        fleet_deck_sidebar.render_section_tabs(active, worklore_enabled=worklore_enabled) + body,
         nonce,
         as_of=_stamp(now),
         refresh_seconds=refresh_seconds if refresh else None,
