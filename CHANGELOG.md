@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Patrol prioritizes this node's Hub claims within the report limit, so foreign display rows cannot hide a missing local run; omitted rows still report truncation (#1964).
 - Windows care install plans create and binary-pin the selected patrol runbook before printing scheduler commands; dry runs leave the workspace unchanged (#1958).
 - Deck sidebar telemetry follows the Hub's stale verdict for enrolled machines while preserving the freshest age and unknown-time display (#2054).
 - Message identity can report mutual peer authorization and independent enrollment and grant epochs for up to 16 external agents (#2070).

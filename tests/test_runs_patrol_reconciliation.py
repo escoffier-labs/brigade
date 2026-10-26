@@ -165,6 +165,84 @@ def test_hub_row_limit_is_explicit(tmp_path, hub):
     assert lanes.truncated
 
 
+def test_hub_local_claim_precedes_foreign_rows_at_limit(tmp_path, monkeypatch, capsys, hub):
+    repo = _repo(tmp_path)
+    hub.extend([_hub_claim(repo, owner="other-node"), _hub_claim(repo)])
+    inspected = []
+    real_inspect = fleet_client.inspect_claim
+
+    def inspect(target, **kwargs):
+        inspected.append(target)
+        return real_inspect(target, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    before = _snapshot(repo)
+    assert patrol(target=repo, now=NOW, limit=1, json_output=True, fail_on="claim-without-run") == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload["lanes"]) == 1
+    assert payload["lanes"][0]["state"] == "claim-without-run"
+    assert payload["lanes"][0]["hub_claim"]["owner_node"] == "local-node"
+    assert inspected == [hub[1]["target"]]
+    assert payload["truncated"] is True
+    assert "private-fence-value" not in json.dumps(payload)
+    assert _snapshot(repo) == before
+
+
+@pytest.mark.parametrize("limit", [1, 2, 3, 4, 6])
+def test_hub_window_prioritizes_local_claims_and_bounds_inspections(tmp_path, monkeypatch, hub, limit):
+    from brigade import runs_patrol_hub
+
+    repo = _repo(tmp_path)
+    hub.extend(
+        [
+            {**_hub_claim(repo, owner="other-node"), "target": "foreign-first"},
+            {**_hub_claim(repo), "target": "local-first"},
+            {**_hub_claim(repo, owner="other-node"), "target": "foreign-second"},
+            {**_hub_claim(repo), "target": "local-second"},
+        ]
+    )
+    before = json.dumps(hub, sort_keys=True)
+    inspected = []
+    real_inspect = fleet_client.inspect_claim
+
+    def inspect(target, **kwargs):
+        assert kwargs == {"node_id": "local-node"}
+        inspected.append(target)
+        return real_inspect(target, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    observations, truncated = runs_patrol_hub._snapshot("local-node", limit)
+    expected = ["local-first", "local-second", "foreign-first", "foreign-second"][:limit]
+    assert [claim["target"] for claim, _, _ in observations] == expected
+    assert sorted(inspected) == [target for target in expected if target.startswith("local-")]
+    assert len(observations) == min(limit, len(hub))
+    assert truncated is (len(hub) > limit)
+    assert all(error is None for _, _, error in observations)
+    assert all(path is None for claim, path, _ in observations if claim["owner_node"] != "local-node")
+    assert "private-fence-value" not in json.dumps(observations)
+    assert json.dumps(hub, sort_keys=True) == before
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [None, "invalid", {}, {"target": 12, "owner_node": "local-node"}, {"target": "bad", "owner_node": None}],
+)
+def test_hub_window_preserves_malformed_rows_in_remaining_capacity(tmp_path, monkeypatch, hub, malformed):
+    from brigade import runs_patrol_hub
+
+    repo = _repo(tmp_path)
+    foreign = _hub_claim(repo, owner="other-node")
+    local = _hub_claim(repo)
+    hub.extend([foreign, local])
+    monkeypatch.setattr(fleet_client, "fetch_claims", lambda: [malformed, foreign, local])
+    observations, truncated = runs_patrol_hub._snapshot("local-node", 3)
+    assert observations[0][0]["owner_node"] == "local-node"
+    assert observations[1] == ({}, None, "malformed Hub claim")
+    assert observations[2][0]["owner_node"] == "other-node"
+    assert observations[2][1:] == (None, None)
+    assert truncated is False
+
+
 def test_brief_has_bounded_local_patrol_summary(tmp_path, monkeypatch, capsys):
     repo = _repo(tmp_path)
     for index in range(12):

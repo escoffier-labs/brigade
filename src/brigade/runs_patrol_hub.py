@@ -34,12 +34,18 @@ def _snapshot(node: str, limit: int) -> tuple[list[tuple[dict[str, Any], str | N
     started = time.monotonic()
     total = fleet_client.REPORT_TIMEOUT_SECONDS
     rows = fleet_client._run_with_deadline(fleet_client.fetch_claims, timeout=total)
-    window = list(rows[:limit])
-    owned = [
-        row
-        for row in window
-        if isinstance(row, dict) and isinstance(row.get("target"), str) and row.get("owner_node") == node
-    ]
+    # Reserve the bounded window for inspectable local claims before display/error rows.
+    owned: list[dict[str, Any]] = []
+    others: list[Any] = []
+    for row in rows:
+        bucket = (
+            owned
+            if isinstance(row, dict) and isinstance(row.get("target"), str) and row.get("owner_node") == node
+            else others
+        )
+        if len(bucket) < limit:
+            bucket.append(row)
+    window = owned + others[: limit - len(owned)]
     decisions: dict[str, Any] = {}
     if owned:
         pool = ThreadPoolExecutor(max_workers=min(_INSPECT_WORKERS, len(owned)), thread_name_prefix="brigade-patrol")
