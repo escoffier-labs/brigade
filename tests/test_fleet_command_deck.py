@@ -2158,3 +2158,30 @@ def test_recent_report_cap_is_applied_before_merging_active_presence(monkeypatch
         interactive_sessions=rows,
     )
     assert [row.session_id for row in view.recent_cloud_reports] == ["newer-stale-report"]
+
+
+def test_terminal_reports_do_not_hide_live_presence_at_sql_cap(conn, monkeypatch):
+    from brigade import fleet_dot
+    from tests.test_fleet_dot import report, v2_report
+
+    # All three older rows remain unexpired while newer outcomes fill the
+    # real 500-row SQL cap. Do not shorten the cap or replace the SQL reader.
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp() - 60)
+    _seed_session(conn, session_id="local-session")
+    conn.execute("UPDATE interactive_sessions SET heartbeat_at = ?, started_at = ?", (_ts(60), _ts(60)))
+    for raw in (
+        report(session_id="v1-session", observed_at=_ts(60)),
+        v2_report(session_id="running-task", observed_at=_ts(60)),
+    ):
+        fleet_hub_sessions.handle_session(conn, fleet_dot.report_session(raw)["presence_payload"], caller_node=NODE_A)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW.timestamp())
+    for index in range(500):
+        raw = v2_report(session_id=f"completed-{index:03}", observed_at=_ts(0), reported_state="completed")
+        fleet_hub_sessions.handle_session(conn, fleet_dot.report_session(raw)["presence_payload"], caller_node=NODE_A)
+    assert conn.execute("SELECT count(*) FROM interactive_sessions").fetchone()[0] == 503
+    # Ordinary session readers retain their existing presence semantics.
+    assert len(fleet_hub_sessions.list_sessions(conn, now_epoch=NOW.timestamp())) == 500
+    rows = deck.fetch_interactive_sessions(conn, now=NOW)
+    live = {row["session_id"] for row in rows if not str(row["session_id"]).startswith("completed-")}
+    assert live == {"local-session", "v1-session", "running-task"}
+    assert len(rows) == 3 + deck.CLOUD_REPORT_HISTORY_LIMIT

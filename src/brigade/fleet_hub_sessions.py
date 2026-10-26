@@ -126,6 +126,7 @@ def list_sessions(
     text_filter: str | None = None,
     active_nodes_only: bool = False,
     recent_cloud_reports: bool = False,
+    exclude_terminal_cloud_reports: bool = False,
 ) -> list[dict[str, object]]:
     """Active unexpired sessions, or history when ``include_all`` is set.
 
@@ -149,6 +150,14 @@ def list_sessions(
             "OR json_extract(cloud_context_json, '$.reported_state') IN ('completed', 'failed', 'cancelled')) "
         )
         params.append(now)
+    if exclude_terminal_cloud_reports:
+        # Deck history owns terminal v2 reports. Exclude before LIMIT so they
+        # cannot crowd out live tasks or ordinary local/v1 presence.
+        node_filter += (
+            "AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
+            "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
+            "IN ('completed', 'failed', 'cancelled')) "
+        )
     if active_nodes_only:
         # A subquery rather than a bound list, so the roster size never meets
         # SQLite's bound-parameter limit.

@@ -1059,17 +1059,12 @@ def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[
 def fetch_interactive_sessions(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, object]]:
     """Active presence plus separately bounded v2 stale/terminal task reports."""
     from . import fleet_hub_sessions
-    from .fleet_dot import TERMINAL_STATES
 
-    active = fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())[:SESSION_LIMIT]
+    active = fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp(), exclude_terminal_cloud_reports=True)[
+        :SESSION_LIMIT
+    ]
     history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=now.timestamp())[:CLOUD_REPORT_HISTORY_LIMIT]
-    return [
-        row
-        for row in active
-        if not (
-            isinstance(context := row.get("cloud_context"), dict) and context.get("reported_state") in TERMINAL_STATES
-        )
-    ] + history
+    return active + history
 
 
 def fetch_observers(conn: sqlite3.Connection, configured: frozenset[str]) -> list[tuple[str, str]]:
