@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Message replies can bound spool-lock acquisition while preserving the default blocking behavior.
 - The ownership map keeps charter metadata within its response budget and reports omitted owners; claim loading fetches a bounded active page instead of materializing stale claim history (#1799).
 - Patrol refuses corrupt persisted action status, scope, or idempotency keys before applying changes, so malformed history cannot silently discard retry fences (#1955).
 - Patrol exits after its shared Hub inspection deadline even when a claim transport is still blocked, while preserving completed observations and bounding concurrent inspections (#1957).
