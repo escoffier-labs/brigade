@@ -295,15 +295,13 @@ def test_hook_run_returns_when_followup_filesystem_stalls(tmp_path: Path, monkey
 
 def test_hook_run_latches_after_repeated_timeouts(tmp_path: Path, monkeypatch, capsys):
     target = _wired_claude(tmp_path)
-    monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.01)
 
-    def hang(_event: str, _payload: dict, *, pin=None) -> dict | None:
-        import time
+    def timeout(_event: str, _payload: dict, *, pin=None) -> dict | None:
+        # Exercise the real worker and parent follow-up after target discovery,
+        # without racing the worker prologue against a shortened deadline.
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
 
-        time.sleep(1)
-        return None
-
-    monkeypatch.setattr(runtime, "handle_payload", hang)
+    monkeypatch.setattr(runtime, "handle_payload", timeout)
     payload = json.dumps(_payload(target, "PreToolUse"))
     capsys.readouterr()
 
