@@ -354,3 +354,119 @@ def test_repeated_outcome_validation_is_distinct_and_newest_window_bounded(tmp_p
     assert len(checked) == 64
     assert set(checked) == set(newest[-64:])
     assert result["candidates"] == []
+
+
+@pytest.mark.parametrize("run_id", ["..", r"bad\run", "x" * 1050])
+def test_malformed_verify_pointer_preserves_generic_cli_candidates(tmp_path, capsys, run_id):
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path = card(tmp_path, "cache")
+    ref = evidence(tmp_path, ".brigade/receipts/generic.json")
+    write_log(tmp_path, path, (ref, "outcome", "2026-10-20T12:00:00Z"))
+    code, baseline = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0 and len(baseline["candidates"]) == 2
+    write_log(
+        tmp_path,
+        path,
+        (f".brigade/work/verify-runs/{run_id}/receipt.json", "outcome", "2026-10-21T12:00:00Z"),
+    )
+    assert log.read_evidence(tmp_path)[1:] == (0, False)
+    code, result = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert result["candidates"] == baseline["candidates"]
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+@pytest.mark.parametrize("stage", ["reflection", "proposal"])
+def test_oversized_linked_support_never_uses_unrestricted_reads(tmp_path, verified_card, monkeypatch, stage):
+    from brigade import memory_proposals as api, memory_reflect
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    _, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    linked = tmp_path / "memory/cards/linked.md"
+    linked.write_bytes(b"x" * (log.io.MAX_CARD_BYTES + 1))
+    unsafe_reads = []
+    for name in ("read_text", "read_bytes"):
+        original = getattr(Path, name)
+
+        def observe(path, *args, _original=original, **kwargs):
+            if path == linked:
+                unsafe_reads.append(path)
+            return _original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, name, observe)
+    if stage == "reflection":
+        result = memory_reflect.run_payload(target=tmp_path, dry_run=True)
+        assert result["status"] == "completed" and result["candidates"] == []
+    else:
+        with pytest.raises(api.ProposalError):
+            propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Inspect support.")
+    assert unsafe_reads == []
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+@pytest.mark.parametrize("bound", ["discovery", "bytes"])
+def test_support_bounds_precede_closure_reads(tmp_path, verified_card, monkeypatch, bound):
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    text = path.read_text()
+    if bound == "discovery":
+        for index in range(log.io.MAX_FILES):
+            (path.parent / f"unused-{index}.md").touch()
+    else:
+        monkeypatch.setattr(log.io, "MAX_CORPUS_BYTES", len(text.encode()))
+    linked = path.parent / "linked.md"
+    reads = []
+    original = log.io.read_bytes
+
+    def observe(value, **kwargs):
+        reads.append((value, kwargs.get("limit")))
+        return original(value, **kwargs)
+
+    monkeypatch.setattr(log.io, "read_bytes", observe)
+    assert not log.validate_outcome_support(
+        tmp_path,
+        card_path="memory/cards/cache.md",
+        card_text=text,
+        ref=f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json",
+    )
+    if bound == "discovery":
+        assert not any(value.parent == path.parent for value, _ in reads)
+    else:
+        assert all(limit == 0 for value, limit in reads if value == linked)
+
+
+@pytest.mark.parametrize("verified_card", ["linked"], indirect=True)
+def test_bounded_support_preserves_legacy_link_fingerprint(tmp_path, verified_card, monkeypatch):
+    path, receipt = verified_card
+    linked = path.parent / "linked.md"
+    linked.rename(path.parent / "Linked.md")
+    path.write_text(path.read_text().replace("[[linked]]", "[[cards/LINKED.md#section|alias]] [[absent]]"))
+    linked = path.parent / "Linked.md"
+    linked.write_text(linked.read_text() + "[[CACHE]]\n")
+    # Obtain a fresh binding from the real verifier after editing the closure.
+    receipt = _run_manifest_verify(tmp_path, "card-fixture", monkeypatch=monkeypatch, start_session=False)
+    assert receipt["subject_binding"]["content_fingerprint"] == outcome_cmd.artifact_fingerprint(
+        tmp_path, "cache", "card"
+    )
+    assert verify_trial.project_trial(receipt, target=tmp_path).eligible
+    text = path.read_text()
+    unsafe_reads = []
+    for name in ("read_text", "read_bytes"):
+        original = getattr(Path, name)
+
+        def observe(value, *args, _original=original, **kwargs):
+            if value.parent == path.parent:
+                unsafe_reads.append(value)
+            return _original(value, *args, **kwargs)
+
+        monkeypatch.setattr(Path, name, observe)
+    assert log.validate_outcome_support(
+        tmp_path,
+        card_path="memory/cards/cache.md",
+        card_text=text,
+        ref=f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json",
+    )
+    assert unsafe_reads == []

@@ -112,47 +112,90 @@ def append_evidence(
 
 def verify_outcome_ref(ref: str) -> bool:
     """Recognize the current outcome writer's canonical verify receipt pointer."""
+    try:
+        io.relative(ref)
+    except ValueError:
+        return False
     parts = Path(ref).parts
-    return (
-        len(parts) == 5
-        and parts[:3] == (".brigade", "work", "verify-runs")
-        and parts[-1] == "receipt.json"
-        and io.relative(ref) == ref
-    )
+    return len(parts) == 5 and parts[:3] == (".brigade", "work", "verify-runs") and parts[-1] == "receipt.json"
+
+
+def _card_stems(cards_dir: Path) -> dict[str, str]:
+    """Bound discovery before reading any card, without resolving directory links."""
+    stems: dict[str, str] = {}
+    with io.directory(cards_dir) as parent, os.scandir(parent) as entries:
+        for count, entry in enumerate(entries, start=1):
+            if count > io.MAX_FILES:
+                raise ValueError("card directory entry limit exceeded")
+            if not entry.name.endswith(".md"):
+                continue
+            io.relative(entry.name)
+            stem = entry.name[:-3]
+            lower = stem.lower()
+            if lower in stems:
+                # The legacy discovery order is ambiguous for colliding names.
+                raise ValueError("ambiguous card stem")
+            stems[lower] = stem
+    return stems
+
+
+def _linked_snapshot(path: Path) -> dict[str, bytes]:
+    """Read a bounded closure, charging its byte budget before each read/decode."""
+    from .memory_doctor.parsing import extract_wiki_links
+    from .outcome_cmd import _link_target_slug
+
+    stems = _card_stems(path.parent)
+    pending = [path.stem]
+    queued = {path.stem.lower()}
+    snapshot: dict[str, bytes] = {}
+    total = 0
+    while pending:
+        if len(snapshot) >= io.MAX_FILES:
+            raise ValueError("linked card count limit exceeded")
+        stem = pending.pop()
+        raw = io.read_bytes(path.parent / f"{stem}.md", limit=min(io.MAX_CARD_BYTES, io.MAX_CORPUS_BYTES - total))
+        assert raw is not None
+        total += len(raw)
+        snapshot[stem] = raw
+        for link in extract_wiki_links(raw.decode("utf-8", errors="replace")):
+            slug = _link_target_slug(link).lower()
+            actual = stems.get(slug)
+            if actual is None or slug in queued:
+                continue
+            # Refuse unsafe links conservatively; reads always use O_NOFOLLOW.
+            io.relative(f"{actual}.md")
+            if len(queued) >= io.MAX_FILES:
+                raise ValueError("linked card count limit exceeded")
+            queued.add(slug)
+            pending.append(actual)
+    return snapshot
 
 
 def _snapshot_fingerprint(target: Path, card_path: str, text: str, artifact_id: str) -> str | None:
-    """Use the existing linked-card closure with bounded no-follow byte reads."""
-    from . import outcome_cmd
+    """Recheck bounded no-follow snapshots using the exact legacy digest format."""
+    from .outcome_cmd import _safe_card_id_component
 
-    path = outcome_cmd._artifact_content_path(target, artifact_id, "card")
-    if path is None or path != target / io.relative(card_path):
+    if _safe_card_id_component(artifact_id) is None:
         return None
-    raw = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
+    path = target / "memory" / "cards" / f"{artifact_id}.md"
+    if path != target / io.relative(card_path):
+        return None
+    snapshot = _linked_snapshot(path)
+    raw = snapshot.pop(path.stem)
     if raw != text.encode():
-        return None
-    closure = outcome_cmd._linked_card_closure(path.parent, path.stem)
-    if len(closure) > io.MAX_FILES:
         return None
     digest = hashlib.sha256()
     digest.update(hashlib.sha256(raw).hexdigest().encode("ascii"))
     digest.update(b"\0")
-    total = len(raw)
-    for stem in closure:
-        linked = io.read_bytes(path.parent / f"{stem}.md", limit=io.MAX_CARD_BYTES)
-        assert linked is not None
-        total += len(linked)
-        if total > io.MAX_CORPUS_BYTES:
-            return None
+    for stem, linked in sorted(snapshot.items()):
         digest.update(stem.encode("utf-8"))
         digest.update(b"\0")
         digest.update(hashlib.sha256(linked).hexdigest().encode("ascii"))
         digest.update(b"\0")
-    fingerprint = digest.hexdigest() if closure else hashlib.sha256(raw).hexdigest()
-    # Bind the safe snapshot and closure to the current fingerprint as well.
-    if io.read_bytes(path, limit=io.MAX_CARD_BYTES) != raw:
-        return None
-    return fingerprint if outcome_cmd.artifact_fingerprint(target, artifact_id, "card") == fingerprint else None
+    fingerprint = digest.hexdigest() if snapshot else hashlib.sha256(raw).hexdigest()
+    snapshot[path.stem] = raw
+    # Rediscover as well as reread: a formerly absent link may now exist.
+    return fingerprint if _linked_snapshot(path) == snapshot else None
 
 
 def validate_outcome_support(
@@ -225,7 +268,7 @@ def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) ->
     text = io.text(path, limit=io.MAX_CARD_BYTES)
     if text is None:
         return
-    fingerprint = outcome_cmd.artifact_fingerprint(target, record.artifact_id, "card")
+    fingerprint = _snapshot_fingerprint(target, path.relative_to(target).as_posix(), text, record.artifact_id)
     if not fingerprint or fingerprint != binding.get("content_fingerprint"):
         return
     # Ordinary exclusions are silent. Only a receipt admitted here can lose
