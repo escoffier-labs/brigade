@@ -4,6 +4,7 @@ import json
 import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from html.parser import HTMLParser
 
 import http.client
 import threading
@@ -162,6 +163,186 @@ def test_deck_sessions_are_separate_escaped_and_do_not_consume_capacity(conn, no
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
     assert view.stations[0].busy == 0
+
+
+def _visible_text(html):
+    class VisibleText(HTMLParser):
+        depth = 0
+
+        def __init__(self):
+            super().__init__()
+            self.text = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "details":
+                self.depth += 1
+
+        def handle_endtag(self, tag):
+            if tag == "details":
+                self.depth -= 1
+
+        def handle_data(self, data):
+            if not self.depth:
+                self.text.append(data)
+
+    parser = VisibleText()
+    parser.feed(html)
+    return " ".join(parser.text)
+
+
+def test_reported_cloud_agent_survives_hub_projection_without_becoming_a_job(conn, now, monkeypatch):
+    from brigade import fleet_dot, fleet_deck_overview as overview
+
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now.timestamp())
+    body = fleet_dot.report_session(
+        {
+            "version": 1,
+            "session_id": "cloud-session",
+            "agent_label": "Miller",
+            "repo_identity": "github.com/example/cloud-project",
+            "parent_session_id": "cloud-parent",
+            "work_id": "work-123",
+            "ownership_revision": 0,
+            "generation": 1,
+            "source": "cloud_threads",
+            "source_scope": "authorized-visible-threads",
+            "observed_at": now.isoformat(),
+            "sequence": 1,
+        }
+    )["presence_payload"]
+    fleet_hub_sessions.handle_session(conn, body, caller_node=NODE_A)
+    _seed_session(conn, session_id="local-session")
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=now,
+        interactive_sessions=deck.fetch_interactive_sessions(conn, now=now),
+        cloud_workers=(deck.CloudWorker("codex", 0, 2, "closed", ()),),
+    )
+    html = deck.render_deck(view, nonce="nonce", now=now)
+    activity = html.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
+    visible = _visible_text(activity)
+    assert "Reported cloud agents (1)" in visible and "Miller" in visible and "Dot" in visible
+    assert "Presence only; running work unobserved" in visible
+    assert "cloud-session" not in visible and "cloud-parent" not in visible and "work-123" not in visible
+    assert "authorized-visible-threads" not in visible and "cloud_threads" not in visible
+    assert "Parent: cloud-parent" in html and "Work: work-123" in html
+    assert "Source: cloud_threads" in html and "Scope: authorized-visible-threads" in html
+    assert "Repository: github.com/example/cloud-project" in html
+    assert "github.com/example/cloud-project" not in visible
+    assert "Coverage: explicitly-reported-sessions" in html
+    assert "Observed: 2026-08-25T12:00:00+00:00" in html
+    assert "Session: local-session" in html and "Checkout: /tmp/project" in html
+    assert "Reported agent sessions (2)" in html
+    assert "Running: 0 · 0 managed jobs reported" in html and overview.summarize(view).busy == 0
+    assert view.cloud_workers[0].used == 0 and view.cloud_workers[0].leases == ()
+    assert "Provider leases" in html and "No active leases." in html
+    assert "Lease inventory does not cover reported agent presence." in html
+    # Hub expiry remains the authority; a display label never refreshes presence.
+    assert deck.fetch_interactive_sessions(conn, now=now + timedelta(seconds=901)) == []
+
+
+@pytest.mark.parametrize("providers", [(), (deck.CloudWorker("codex", 0, 2, "closed", ()),)])
+def test_missing_dot_reports_leave_cloud_coverage_unknown(providers):
+    from brigade import fleet_deck_overview as overview
+
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), cloud_workers=providers)
+    html = overview.render_work_lists(view)
+    visible = _visible_text(html)
+    assert "Dot reporting coverage unknown" in visible
+    assert "No current Dot reports; publishing may not be configured." in visible
+    assert "no cloud work" not in html.lower()
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"agent_label": '<img src=x onerror="alert(1)">'},
+        {"parent_session_id": "<script>bad</script>"},
+        {"work_id": "w" * 129},
+        {"source_scope": "account-wide"},
+        {"observed_at": "not-a-time"},
+        {"sequence": True},
+        {"url": "https://example.test/untrusted"},
+    ],
+)
+def test_deck_rejects_invalid_cloud_metadata_without_creating_links(change):
+    from brigade import fleet_deck_overview as overview
+
+    raw = {
+        "node_id": NODE_A,
+        "harness": "dot",
+        "session_id": "cloud-session",
+        "cloud_context": {
+            "version": 1,
+            "provider": "dot",
+            "agent_label": "Untrusted-agent",
+            "sequence": 1,
+            "observed_at": NOW.isoformat(),
+            **change,
+        },
+    }
+    view = deck.build_view(
+        deck.DeckConfig(stations=()),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=[raw],
+    )
+    html = overview.render_work_lists(view)
+    assert "Dot reporting coverage unknown" in html
+    assert "Untrusted-agent" not in html and "<img" not in html and "<script>bad" not in html
+    assert 'href="https://example.test/untrusted"' not in html
+
+
+def test_cloud_presence_summary_bounds_labels_and_keeps_all_sessions_in_details():
+    from brigade import fleet_deck_overview as overview
+
+    sessions = [
+        {
+            "node_id": NODE_A,
+            "harness": "dot",
+            "session_id": f"cloud-{index}",
+            "cloud_context": {
+                "version": 1,
+                "provider": "dot",
+                "agent_label": f"Agent-{index:02}",
+                "sequence": 1,
+                "observed_at": NOW.isoformat(),
+            },
+        }
+        for index in range(12)
+    ]
+    view = deck.build_view(
+        deck.DeckConfig(stations=()),
+        live_runs=[],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=sessions + [dict(sessions[0], repo_label="another-membership")],
+    )
+    html = overview.render_work_lists(view)
+    visible = _visible_text(html)
+    assert "Reported cloud agents (12)" in visible
+    assert len(re.findall(r"Agent-\d+", visible)) == 8
+    assert "4 more in session details" in visible
+    assert "Agent-11" not in visible and "Agent-11" in html
+    assert "Reported agent sessions (12)" in html
 
 
 def test_repo_page_marks_only_exact_live_dirty_overlap(conn, now):
@@ -1013,7 +1194,7 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         _seed_run(hub, NODE_A, "physical", "run.created", repo="physical-repo")
         status, headers, body = _request(hub, "GET", "/", headers=_bearer())
         assert status == 200 and "frame-ancestors 'none'" in headers["content-security-policy"]
-        assert "Cloud workers" in body
+        assert ">Provider leases</h2>" in body
         assert " cursor</h3>" in body and ">1/3<" in body
         assert "closed" in body
         assert " codex</h3>" in body and ">0/2<" in body and "No active leases." in body

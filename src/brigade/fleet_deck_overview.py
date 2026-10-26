@@ -409,7 +409,7 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
         '<section class="panel" aria-labelledby="working-title"><header><h2 id="working-title">Activity</h2>'
         '<a class="card-link" href="/view/machines">View runs</a></header>'
         f'<p class="station-meta">Running: {running} · {count} managed jobs reported. Managed jobs occupy station slots.</p>'
-        f"{working}<details><summary>Reported session presence</summary>"
+        f"{working}{activity.render_cloud_presence(view)}<details><summary>Reported session presence</summary>"
         "<p>Agent sessions report presence. They may be idle or overlap managed jobs. "
         "Current presence means the Hub has an unexpired report.</p>"
         f"{render_sessions(view)}</details></section>"
@@ -605,8 +605,9 @@ def _cloud_worker_html(worker: deck.CloudWorker) -> str:
 def render_cloud_workers(view: DeckView) -> str:
     cards = "".join(_cloud_worker_html(worker) for worker in view.cloud_workers)
     return (
-        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2>'
+        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Provider leases</h2>'
         f'<p class="panel-count">{len(view.cloud_workers)} provider(s)</p></header>'
+        '<p class="station-meta">Lease inventory does not cover reported agent presence.</p>'
         + (
             f'<div class="cloud-workers">{cards}</div>'
             if cards

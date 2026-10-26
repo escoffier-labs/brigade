@@ -82,11 +82,46 @@ def queue_exclusions(queue: deck.QueueState, *, worklore_enabled: bool) -> str:
 
 
 def _membership(session: deck.InteractiveSession) -> str:
+    if session.cloud_context is not None:
+        return f"<li><p>Repository: {_esc(session.repo_identity or deck.UNKNOWN)}</p></li>"
     dirty = str(len(session.dirty_paths)) + ("+" if session.dirty_truncated else "")
     return (
         f"<li><strong>{_esc(session.repo_label or session.repo_identity)}</strong>"
         f"<p>Repository: {_esc(session.repo_identity)}<br>Checkout: {_esc(session.checkout_path)}"
         f"<br>Branch: {_esc(session.branch or deck.UNKNOWN)} · Dirty paths: {_esc(dirty)}</p></li>"
+    )
+
+
+def render_cloud_presence(view: deck.DeckView) -> str:
+    """Bounded human labels from reported presence, independent of lease inventory."""
+    agents = {
+        (session.node_id, session.harness, session.session_id): session.cloud_context
+        for session in view.interactive_sessions
+        if session.cloud_context is not None
+    }
+    if not agents:
+        return (
+            '<p class="station-meta">Dot reporting coverage unknown. '
+            "No current Dot reports; publishing may not be configured.</p>"
+        )
+    labels = ", ".join(context.agent_label for context in tuple(agents.values())[:8])
+    more = f" · {len(agents) - 8} more in session details" if len(agents) > 8 else ""
+    return (
+        f"<h3>Reported cloud agents ({len(agents)})</h3>"
+        f'<p class="row-meta">{deck.harness_badge_html("dot")} Dot · {_esc(labels)}{more}</p>'
+        '<p class="station-meta">Presence only; running work unobserved. '
+        "Coverage is limited to explicitly reported sessions.</p>"
+    )
+
+
+def _cloud_details(context: deck.CloudSessionContext) -> str:
+    return (
+        f"<p>Provider: {_esc(context.provider)} · lifecycle unobserved"
+        f"<br>Parent: {_esc(context.parent_session_id or deck.UNKNOWN)}"
+        f"<br>Work: {_esc(context.work_id or deck.UNKNOWN)}"
+        f"<br>Source: {_esc(context.source)}<br>Scope: {_esc(context.source_scope)}"
+        f"<br>Coverage: {_esc(context.coverage)}<br>Observed: {_esc(context.observed_at)}"
+        f"<br>Context version: {context.version} · Sequence: {context.sequence}</p>"
     )
 
 
@@ -100,13 +135,19 @@ def render_sessions(view: deck.DeckView) -> str:
     for (node, harness, session_id), memberships in groups.items():
         repos = ", ".join(dict.fromkeys(item.repo_label or item.repo_identity for item in memberships))
         name = HARNESS_NAMES.get(harness, harness or deck.UNKNOWN)
+        cloud = memberships[0].cloud_context
+        title = cloud.agent_label if cloud else repos or "Repository unknown"
+        location = "reported cloud presence" if cloud else labels.get(node, "Unlisted machine")
+        summary = "Cloud report details" if cloud else "Session and checkout details"
         rows.append(
             '<li class="row"><div class="row-body">'
-            f'<p class="row-title">{_esc(repos or "Repository unknown")}</p>'
+            f'<p class="row-title">{_esc(title)}</p>'
             f'<p class="row-meta">{deck.harness_badge_html(harness)} {_esc(name)} · '
-            f"{_esc(labels.get(node, 'Unlisted machine'))} · current presence</p>"
-            "<details><summary>Session and checkout details</summary>"
-            f"<p>Session: {_esc(session_id)}<br>Node: {_esc(node)}</p><ul>"
+            f"{_esc(location)} · current presence</p>"
+            f"<details><summary>{summary}</summary>"
+            f"<p>Session: {_esc(session_id)}<br>Node: {_esc(node)}</p>"
+            + (_cloud_details(cloud) if cloud else "")
+            + "<ul>"
             + "".join(_membership(item) for item in memberships)
             + "</ul></details></div></li>"
         )

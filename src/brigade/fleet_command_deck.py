@@ -199,6 +199,22 @@ class RepoRow:
 
 
 @dataclass(frozen=True)
+class CloudSessionContext:
+    """Validated reported presence, never a provider job or lease."""
+
+    version: int
+    provider: str
+    agent_label: str
+    sequence: int
+    observed_at: str
+    source: str
+    source_scope: str
+    coverage: str
+    parent_session_id: str = ""
+    work_id: str = ""
+
+
+@dataclass(frozen=True)
 class InteractiveSession:
     """One live interactive session. Separate from runs and station capacity."""
 
@@ -212,6 +228,7 @@ class InteractiveSession:
     branch: str | None
     dirty_paths: tuple[str, ...]
     dirty_truncated: bool
+    cloud_context: CloudSessionContext | None = None
 
 
 @dataclass(frozen=True)
@@ -1013,6 +1030,17 @@ def _display_claim(claim: Claim | None, enrolled_labels: Mapping[str, str]) -> C
     )
 
 
+def _cloud_session_context(raw: object) -> CloudSessionContext | None:
+    from .fleet_dot import DotReportError, validate_cloud_context
+
+    if raw is None:
+        return None
+    try:
+        return CloudSessionContext(**validate_cloud_context(raw))
+    except DotReportError:
+        return None
+
+
 def _interactive_session(raw: Mapping[str, object]) -> InteractiveSession:
     dirty = raw.get("dirty_paths")
     paths = tuple(item for item in dirty if isinstance(item, str)) if isinstance(dirty, (list, tuple)) else ()
@@ -1028,6 +1056,7 @@ def _interactive_session(raw: Mapping[str, object]) -> InteractiveSession:
         branch=_safe_display_text(branch) if isinstance(branch, str) else None,
         dirty_paths=paths,
         dirty_truncated=bool(raw.get("dirty_truncated")),
+        cloud_context=_cloud_session_context(raw.get("cloud_context")),
     )
 
 
