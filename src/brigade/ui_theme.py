@@ -211,8 +211,11 @@ tbody tr:hover td { background: var(--surface-raised); }
 .alert-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2) var(--space-3); padding: var(--space-3) 0; border-top: 1px solid var(--line-quiet); }
 .alert-row h3 { margin: var(--space-1) 0; }
 .alert-age, .alert-detail { margin: 0; color: var(--muted); font-size: 12px; }
+.alert-summary { margin: var(--space-1) 0; font-size: 13px; }
+.alert-guidance { margin: var(--space-2) 0; max-width: 75ch; font-size: 13px; }
 .alert-action { align-self: center; max-width: 9rem; }
 .alert-action a { display: inline-flex; align-items: center; min-height: 40px; }
+.alert-action-note { display: block; color: var(--muted); font-size: 11px; }
 .alert-evidence { grid-column: 1 / -1; margin: 0; padding: var(--space-2); }
 .pager { display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-4) 0; }
 .pager a { display: inline-flex; align-items: center; min-height: 32px; padding: 0 var(--space-3); border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface); color: var(--ink); text-decoration: none; }
