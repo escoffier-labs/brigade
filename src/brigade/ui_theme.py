@@ -243,6 +243,11 @@ tbody tr:hover td { background: var(--surface-raised); }
 # Main-column rules for the Alerts page (/deck/alerts) only.
 ALERTS_CSS = """
 .alerts-page .panel { margin-top: var(--space-4); }
+@media (max-width: 600px) {
+  .alerts-page .alert-row { grid-template-columns: minmax(0, 1fr); }
+  .alerts-page .alert-action { max-width: none; display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); }
+  .alerts-page .alert-action-note { flex-basis: 100%; }
+}
 """
 
 OVERVIEW_CSS = """
