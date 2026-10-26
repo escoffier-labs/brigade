@@ -1218,12 +1218,21 @@ def _assignment_summary(view: PolicyView) -> str:
     for role in POLICY_ROLES:
         alias = roles.get(role)
         seat = seats.get(alias)
-        model = seat.model if seat else "Not assigned"
+        status_note = ""
+        if not alias:
+            model = "Not assigned"
+        elif seat is None:
+            model = "Model configuration missing"
+            status_note = '<p class="hint">The saved role points to configuration not available on this page.</p>'
+        else:
+            model = seat.model
+            if not seat.enabled:
+                status_note = '<p class="hint">Disabled in saved settings.</p>'
         alias_note = f'<p class="policy-seat">Seat: {_esc(alias)}</p>' if alias else ""
         cards.append(
             f'<article class="policy-role" aria-labelledby="role-{_esc(role)}">'
             f'<h3 id="role-{_esc(role)}">{_esc(ROLE_LABELS.get(role, role))}</h3>'
-            f'<p class="policy-model">{_esc(model)}</p>{alias_note}</article>'
+            f'<p class="policy-model">{_esc(model)}</p>{alias_note}{status_note}</article>'
         )
     scope = {
         "active": "Saved fleet defaults in the active policy.",

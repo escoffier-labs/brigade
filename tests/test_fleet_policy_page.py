@@ -182,6 +182,43 @@ def test_summary_explains_activation_and_saved_assignments_before_technical_deta
         assert "already running keep" in summary
 
 
+@pytest.mark.parametrize(
+    ("assignment", "display"),
+    [
+        ("unassigned", "Not assigned"),
+        ("missing", "Model configuration missing"),
+        ("enabled", "model-a-1"),
+        ("disabled", "model-a-1"),
+    ],
+)
+def test_summary_distinguishes_saved_assignment_configuration_states(conn, assignment, display):
+    document = _document()
+    if assignment == "unassigned":
+        document["defaults"]["roles"].pop("impl")
+    elif assignment == "missing":
+        document["defaults"]["roles"]["impl"] = "missing-seat"
+    document["seats"]["seat-alpha"]["enabled"] = assignment != "disabled"
+    _seed(conn, document)
+    view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory())
+    page = _render(view, editable=False)
+    summary = page.split('<details id="policy-advanced"', 1)[0]
+    worker = summary.split('id="role-impl"', 1)[1].split("</article>", 1)[0]
+    assert display in worker
+    assert ("Not assigned" in worker) == (assignment == "unassigned")
+    assert ("Model configuration missing" in worker) == (assignment == "missing")
+    assert ("Disabled" in worker) == (assignment == "disabled")
+    if assignment == "unassigned":
+        assert "Seat:" not in worker
+    else:
+        alias = document["defaults"]["roles"]["impl"]
+        assert f"Seat: {html.escape(alias)}" in worker
+    if assignment == "missing":
+        assert "The saved role points to configuration not available on this page." in worker
+    if assignment == "disabled":
+        assert "Disabled in saved settings." in worker
+    assert "do not confirm availability or provider sign-in" in summary
+
+
 def test_summary_keeps_unset_saved_limits_distinct_from_resolver_defaults(conn):
     document = _document()
     document["defaults"] = {}
