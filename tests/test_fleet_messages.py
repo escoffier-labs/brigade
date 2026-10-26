@@ -4139,3 +4139,506 @@ def test_message_identity_is_authenticated_even_with_empty_inbox(message_hub, tm
         )
     with pytest.raises(fleet_client.FleetClientError):
         fleet_client_messages.identity(token_file=str(token))
+
+
+def _identity_pair(db):
+    conn = fleet_hub.open_db(db)
+    try:
+        caller = fleet_hub_messages.add_principal(conn, {"name": "caller", "may_send_to": ["agent:peer"]})
+        peer = fleet_hub_messages.add_principal(conn, {"name": "peer", "may_send_to": ["agent:caller"]})
+        return caller, peer
+    finally:
+        conn.close()
+
+
+def _denied_identity_peer(principal="agent:peer"):
+    return {"principal": principal, "authorized": False, "enrollment_epoch": None, "grant_epoch": None}
+
+
+def test_identity_peers_exact_schema_and_bounds(message_hub):
+    import re
+
+    base, node_token, _, db = message_hub
+    caller, peer = _identity_pair(db)
+    status, result = _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer", "agent:unknown"]})
+    assert status == 200
+    assert set(result) == {"schema", "principal", "enrollment_epoch", "grant_epoch", "peers"}
+    assert result["schema"] == "brigade.message_authorization.v1"
+    assert result["principal"] == "agent:caller"
+    assert len(result["peers"]) == 2
+    authorized = result["peers"][0]
+    assert set(authorized) == {"principal", "authorized", "enrollment_epoch", "grant_epoch"}
+    assert authorized["principal"] == "agent:peer" and authorized["authorized"] is True
+    assert result["peers"][1] == _denied_identity_peer("agent:unknown")
+    epochs = [value[key] for value in (result, authorized) for key in ("enrollment_epoch", "grant_epoch")]
+    assert all(re.fullmatch(r"[A-Za-z0-9_-]{16,128}", value) for value in epochs)
+    assert len(set(epochs)) == 4
+    assert not set(epochs).intersection(
+        {caller["token"], peer["token"], caller["enrollment_id"], peer["enrollment_id"]}
+    )
+    peers = [f"agent:peer{i}" for i in range(16)]
+    assert _request(base, caller["token"], {"action": "identity", "peers": peers}) == (
+        200,
+        {**result, "peers": [_denied_identity_peer(name) for name in peers]},
+    )
+    assert _request(base, node_token, {"action": "identity", "peers": ["agent:peer"]}) == (
+        403,
+        {"error": "identity peers requires an agent principal", "code": "message_identity_peers_unsupported"},
+    )
+    for token in ("", "unknown-bearer"):
+        assert _request(base, token, {"action": "identity", "peers": ["agent:peer"]})[0] == 401
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"peers": None},
+        {"peers": []},
+        {"peers": [f"agent:p{i}" for i in range(17)]},
+        {"peers": ["agent:peer", "agent:peer"]},
+        {"peers": ["agent:caller"]},
+        {"peers": [NODE_A]},
+        {"peers": ["*"]},
+        {"peers": ["agent:*"]},
+        {"peers": ["agent:Bad"]},
+        {"peers": ["agent:peer\n"]},
+        {"peers": [1]},
+        {"peers": "agent:peer"},
+        {"peers": ["agent:" + "p" * 64]},
+        {"extra": True},
+    ],
+)
+def test_identity_peers_invalid_arguments(message_hub, change):
+    base, _, _, db = message_hub
+    caller, _ = _identity_pair(db)
+    assert _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"], **change}) == (
+        400,
+        {"error": "invalid identity arguments", "code": "invalid_argument"},
+    )
+
+
+@pytest.mark.parametrize(
+    "denial", ["caller_grants", "peer_grants", "both_grants", "unknown", "revoked", "null", "malformed"]
+)
+def test_identity_mutual_grants_uniform_denial(message_hub, denial):
+    from brigade import fleet_hub_message_grants as grants
+
+    base, _, _, db = message_hub
+    caller, peer = _identity_pair(db)
+    conn = fleet_hub.open_db(db)
+    try:
+        if denial in {"caller_grants", "both_grants"}:
+            grants.set_grants(conn, {"action": "grants", "name": "caller", "may_send_to": []})
+        if denial in {"peer_grants", "both_grants"}:
+            grants.set_grants(conn, {"action": "grants", "name": "peer", "may_send_to": []})
+        if denial == "unknown":
+            conn.execute("DELETE FROM fleet_message_principals WHERE name='peer'")
+        if denial == "revoked":
+            fleet_hub_messages.revoke_principal(
+                conn, {"action": "revoke", "name": "peer", "expected_enrollment_id": peer["enrollment_id"]}
+            )
+        if denial in {"null", "malformed"}:
+            conn.execute(
+                "UPDATE fleet_message_principals SET grant_epoch=? WHERE name='peer'",
+                (None if denial == "null" else "bad",),
+            )
+        conn.commit()
+        before = conn.total_changes
+        status, result = _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})
+        assert status == 200
+        assert result["peers"] == [_denied_identity_peer()]
+        assert conn.total_changes == before
+        if denial in {"null", "malformed"}:
+            assert conn.execute("SELECT grant_epoch FROM fleet_message_principals WHERE name='peer'").fetchone()[0] == (
+                None if denial == "null" else "bad"
+            )
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("patterns", [["*"], ["agent:*"], ["agent:caller"]])
+def test_identity_mutual_wildcard_semantics(message_hub, patterns):
+    from brigade import fleet_hub_message_grants as grants
+
+    base, _, _, db = message_hub
+    caller, _ = _identity_pair(db)
+    conn = fleet_hub.open_db(db)
+    try:
+        grants.set_grants(conn, {"action": "grants", "name": "peer", "may_send_to": patterns})
+        grants.set_grants(conn, {"action": "grants", "name": "caller", "may_send_to": ["agent:*"]})
+    finally:
+        conn.close()
+    assert (
+        _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})[1]["peers"][0]["authorized"]
+        is True
+    )
+
+
+@pytest.mark.parametrize("generation", [None, "0" * 64])
+def test_identity_requires_authenticated_generation(message_hub, generation):
+    _, _, _, db = message_hub
+    _identity_pair(db)
+    conn = fleet_hub.open_db(db)
+    try:
+        with pytest.raises(fleet_hub_messages.MessageAuthError):
+            fleet_hub_messages.handle(
+                conn,
+                {"action": "identity", "peers": ["agent:peer"]},
+                caller="agent:caller",
+                authenticated_generation=generation,
+            )
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("column,value", [("authorization_enrollment_epoch", None), ("grant_epoch", "bad")])
+def test_identity_caller_metadata_fails_closed_without_repair(message_hub, column, value):
+    base, _, _, db = message_hub
+    caller, _ = _identity_pair(db)
+    conn = fleet_hub.open_db(db)
+    try:
+        conn.execute(f"UPDATE fleet_message_principals SET {column}=? WHERE name='caller'", (value,))
+        conn.commit()
+        assert _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]}) == (
+            403,
+            {"error": "sender is not an active hub principal", "code": "message_sender_inactive"},
+        )
+        assert conn.execute(f"SELECT {column} FROM fleet_message_principals WHERE name='caller'").fetchone()[0] == value
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("mutation", ["revoke", "rotate"])
+def test_identity_stale_captured_http_authentication(message_hub, monkeypatch, mutation):
+    from concurrent.futures import ThreadPoolExecutor
+
+    base, _, _, db = message_hub
+    caller, _ = _identity_pair(db)
+    captured, resume = threading.Event(), threading.Event()
+    handle = fleet_hub_messages.handle
+
+    def delayed(conn, raw, **kwargs):
+        if raw.get("action") == "identity":
+            assert kwargs["authenticated_generation"] == fleet_hub.hash_node_token(caller["token"])
+            captured.set()
+            assert resume.wait(5)
+        return handle(conn, raw, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", delayed)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_request, base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})
+        try:
+            assert captured.wait(5)
+            conn = fleet_hub.open_db(db)
+            try:
+                fleet_hub_messages.revoke_principal(
+                    conn, {"action": "revoke", "name": "caller", "expected_enrollment_id": caller["enrollment_id"]}
+                )
+                if mutation == "rotate":
+                    fleet_hub_messages.add_principal(
+                        conn,
+                        {
+                            "name": "caller",
+                            "expected_enrollment_id": caller["enrollment_id"],
+                            "may_send_to": ["agent:peer"],
+                        },
+                    )
+            finally:
+                conn.close()
+        finally:
+            resume.set()
+        assert future.result(timeout=5) == (
+            403,
+            {"error": "sender is not an active hub principal", "code": "message_sender_inactive"},
+        )
+    assert _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})[0] == 401
+
+
+@pytest.fixture
+def identity_authority(tmp_path, monkeypatch):
+    token = tmp_path / "identity.token"
+    token.write_text("t" * 40)
+    token.chmod(0o600)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.invalid", "node_token": ""}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    return credentials.MessageAuthority.capture(str(token))
+
+
+def _identity_response():
+    return {
+        "schema": "brigade.message_authorization.v1",
+        "principal": "agent:caller",
+        "enrollment_epoch": "a" * 32,
+        "grant_epoch": "b" * 32,
+        "peers": [
+            {"principal": "agent:peer", "authorized": True, "enrollment_epoch": "c" * 32, "grant_epoch": "d" * 32},
+            _denied_identity_peer("agent:unknown"),
+        ],
+    }
+
+
+def _identity_http_response(monkeypatch, payload, *, status=200):
+    calls = []
+
+    def hub_open(request, **kwargs):
+        calls.append((request, kwargs))
+        response = BytesIO(json.dumps(payload).encode())
+        response.status = status
+        return response
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    return calls
+
+
+def test_identity_client_strict_validation_and_scope(identity_authority, monkeypatch):
+    payload = _identity_response()
+    calls = _identity_http_response(monkeypatch, payload)
+    assert (
+        fleet_client_messages.identity(
+            peers=["agent:peer", "agent:unknown"],
+            authority=identity_authority,
+            expected_scope=identity_authority.scope,
+            timeout=1.5,
+        )
+        == payload
+    )
+    assert len(calls) == 1
+    request, kwargs = calls[0]
+    assert json.loads(request.data) == {"action": "identity", "peers": ["agent:peer", "agent:unknown"]}
+    assert request.get_header("Authorization") == "Bearer " + "t" * 40
+    assert kwargs["timeout"] == 1.5
+    with pytest.raises(credentials.MessageAuthorityError):
+        fleet_client_messages.identity(peers=["agent:peer"], authority=identity_authority, expected_scope="other-scope")
+    assert len(calls) == 1
+    # The opaque bearer cannot establish the caller independently. The relay
+    # compares this syntactically valid returned caller to its own configuration.
+    payload["principal"] = "agent:another"
+    assert (
+        fleet_client_messages.identity(peers=["agent:peer", "agent:unknown"], authority=identity_authority)["principal"]
+        == "agent:another"
+    )
+    identity_authority_path = Path(identity_authority.token_file)
+    identity_authority_path.write_text("u" * 40)
+    with pytest.raises(credentials.MessageAuthorityError):
+        fleet_client_messages.identity(peers=["agent:peer"], authority=identity_authority)
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize(
+    "peers",
+    [
+        [],
+        ["agent:p"] * 2,
+        [f"agent:p{i}" for i in range(17)],
+        [NODE_A],
+        ["agent:Bad"],
+        ["agent:p\n"],
+        ["agent:*"],
+        [None],
+        "agent:peer",
+    ],
+)
+def test_identity_client_invalid_peers_before_authority(peers, monkeypatch):
+    def capture(*args, **kwargs):
+        pytest.fail("invalid peers reached credential capture")
+
+    monkeypatch.setattr(credentials.MessageAuthority, "capture", capture)
+    with pytest.raises(fleet_client.FleetClientError, match="identity"):
+        fleet_client_messages.identity(peers=peers)
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "basic",
+        "schema",
+        "principal_type",
+        "principal_node",
+        "self",
+        "top_extra",
+        "top_missing",
+        "caller_null",
+        "caller_short",
+        "caller_long",
+        "caller_newline",
+        "records_type",
+        "zero",
+        "seventeen",
+        "reorder",
+        "duplicate",
+        "omit",
+        "substitute",
+        "extra",
+        "record_extra",
+        "record_missing",
+        "integer_bool",
+        "null_bool",
+        "true_null",
+        "false_epoch",
+        "peer_short",
+        "peer_long",
+        "peer_newline",
+    ],
+)
+def test_identity_client_rejects_malformed_success(identity_authority, monkeypatch, mutation):
+    payload = _identity_response()
+    peer = payload["peers"][0]
+    if mutation == "basic":
+        payload = {"principal": "agent:caller"}
+    elif mutation == "schema":
+        payload["schema"] = "brigade.message_authorization.v0"
+    elif mutation == "principal_type":
+        payload["principal"] = 1
+    elif mutation == "principal_node":
+        payload["principal"] = NODE_A
+    elif mutation == "self":
+        payload["principal"] = "agent:peer"
+    elif mutation == "top_extra":
+        payload["extra"] = True
+    elif mutation == "top_missing":
+        del payload["grant_epoch"]
+    elif mutation == "caller_null":
+        payload["enrollment_epoch"] = None
+    elif mutation == "caller_short":
+        payload["grant_epoch"] = "a" * 15
+    elif mutation == "caller_long":
+        payload["grant_epoch"] = "a" * 129
+    elif mutation == "caller_newline":
+        payload["enrollment_epoch"] += "\n"
+    elif mutation == "records_type":
+        payload["peers"] = {}
+    elif mutation == "zero":
+        payload["peers"] = []
+    elif mutation == "seventeen":
+        payload["peers"] *= 9
+    elif mutation == "reorder":
+        payload["peers"].reverse()
+    elif mutation == "duplicate":
+        payload["peers"][1] = peer.copy()
+    elif mutation == "omit":
+        payload["peers"].pop()
+    elif mutation == "substitute":
+        peer["principal"] = "agent:other"
+    elif mutation == "extra":
+        payload["peers"].append(_denied_identity_peer("agent:other"))
+    elif mutation == "record_extra":
+        peer["patterns"] = ["*"]
+    elif mutation == "record_missing":
+        del peer["grant_epoch"]
+    elif mutation == "integer_bool":
+        peer["authorized"] = 1
+    elif mutation == "null_bool":
+        peer["authorized"] = None
+    elif mutation == "true_null":
+        peer["grant_epoch"] = None
+    elif mutation == "false_epoch":
+        payload["peers"][1]["enrollment_epoch"] = "e" * 32
+    elif mutation == "peer_short":
+        peer["enrollment_epoch"] = "e" * 15
+    elif mutation == "peer_long":
+        peer["enrollment_epoch"] = "e" * 129
+    elif mutation == "peer_newline":
+        peer["grant_epoch"] += "\n"
+    calls = _identity_http_response(monkeypatch, payload)
+    with pytest.raises(fleet_client.FleetClientError, match="identity"):
+        fleet_client_messages.identity(peers=["agent:peer", "agent:unknown"], authority=identity_authority)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
+def test_identity_client_timeout_is_finite(identity_authority, monkeypatch, timeout):
+    calls = _identity_http_response(monkeypatch, _identity_response())
+    with pytest.raises(fleet_client.FleetClientError):
+        fleet_client_messages.identity(peers=["agent:peer"], authority=identity_authority, timeout=timeout)
+    assert calls == []
+
+
+def test_identity_client_typed_failure_and_byte_bound(identity_authority, monkeypatch):
+    calls = _identity_http_response(monkeypatch, {"code": "message_sender_inactive"}, status=403)
+    with pytest.raises(credentials.FleetMessageHubError) as exc:
+        fleet_client_messages.identity(peers=["agent:peer"], authority=identity_authority)
+    assert exc.value.status == 403 and exc.value.code == "message_sender_inactive"
+    assert len(calls) == 1
+    calls = _identity_http_response(monkeypatch, {"padding": "x" * fleet_client_messages.MESSAGE_RESPONSE_LIMIT})
+    with pytest.raises(fleet_client.FleetClientError):
+        fleet_client_messages.identity(peers=["agent:peer"], authority=identity_authority)
+    assert len(calls) == 1
+
+
+def test_identity_client_real_http_contract(message_hub, tmp_path, monkeypatch):
+    base, token_a, _, db = message_hub
+    caller, _ = _identity_pair(db)
+    token = tmp_path / "caller.token"
+    token.write_text(caller["token"])
+    token.chmod(0o600)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    authority = credentials.MessageAuthority.capture(str(token))
+    result = fleet_client_messages.identity(
+        peers=["agent:peer"], authority=authority, expected_scope=authority.scope, timeout=2
+    )
+    assert result["principal"] == "agent:caller"
+    assert result["peers"][0]["authorized"] is True
+    assert fleet_client_messages.identity(authority=authority) == {"principal": "agent:caller"}
+    assert fleet_client_messages.identity() == {"principal": NODE_A}
+
+
+@pytest.mark.parametrize("mutation", ["caller_grants", "peer_grants", "revoke", "reenroll"])
+def test_identity_snapshot_coherence(message_hub, monkeypatch, mutation):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brigade import fleet_hub_message_grants as grants
+
+    base, _, _, db = message_hub
+    caller, peer = _identity_pair(db)
+    before = _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})
+    assert before[0] == 200 and before[1]["peers"][0]["authorized"] is True
+    reached, resume = threading.Event(), threading.Event()
+    grants_for = grants.grants_for
+
+    def paused(conn, principal):
+        patterns = grants_for(conn, principal)
+        if principal == "agent:caller" and threading.current_thread().name != "MainThread":
+            reached.set()
+            assert resume.wait(5)
+        return patterns
+
+    monkeypatch.setattr(grants, "grants_for", paused)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_request, base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})
+        try:
+            assert reached.wait(5)
+            conn = fleet_hub.open_db(db)
+            try:
+                if mutation in {"caller_grants", "peer_grants"}:
+                    grants.set_grants(conn, {"action": "grants", "name": mutation.split("_")[0], "may_send_to": []})
+                else:
+                    fleet_hub_messages.revoke_principal(
+                        conn, {"action": "revoke", "name": "peer", "expected_enrollment_id": peer["enrollment_id"]}
+                    )
+                    if mutation == "reenroll":
+                        fleet_hub_messages.add_principal(
+                            conn,
+                            {
+                                "name": "peer",
+                                "expected_enrollment_id": peer["enrollment_id"],
+                                "may_send_to": ["agent:caller"],
+                            },
+                        )
+            finally:
+                conn.close()
+        finally:
+            resume.set()
+        assert future.result(timeout=5) == before
+    monkeypatch.setattr(grants, "grants_for", grants_for)
+    after = _request(base, caller["token"], {"action": "identity", "peers": ["agent:peer"]})
+    assert after[0] == 200
+    if mutation == "reenroll":
+        assert after[1]["peers"][0]["authorized"] is True
+        assert after[1]["peers"][0]["enrollment_epoch"] != before[1]["peers"][0]["enrollment_epoch"]
+        assert after[1]["peers"][0]["grant_epoch"] != before[1]["peers"][0]["grant_epoch"]
+    else:
+        assert after[1]["peers"] == [_denied_identity_peer()]

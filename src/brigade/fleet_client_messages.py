@@ -544,14 +544,22 @@ def send(
 
 def identity(
     *,
+    peers: list[str] | None = None,
     token_file: str | None = None,
     timeout: float | None = None,
     authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
     """Read the Hub-authenticated active principal, without sending or flushing messages."""
+    request: dict[str, Any] = {"action": "identity"}
+    if peers is not None:
+        peers = _identity_peers(peers)
+        request["peers"] = peers
     authority = _authority(authority, token_file, expected_scope)
-    payload = _online({"action": "identity"}, authority=authority, timeout=timeout)
+    payload = _online(request, authority=authority, timeout=timeout)
+    if peers is not None:
+        _validate_identity_authorization(payload, peers)
+        return payload
     principal = payload.get("principal")
     if (
         set(payload) != {"principal"}
@@ -562,6 +570,55 @@ def identity(
     ):
         raise fleet_client.FleetClientError("fleet hub returned an invalid message identity")
     return payload
+
+
+def _identity_agent(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"agent:[a-z][a-z0-9._-]{0,62}", value) is not None
+
+
+def _identity_peers(value: object) -> list[str]:
+    if (
+        not isinstance(value, list)
+        or not 1 <= len(value) <= 16
+        or any(not _identity_agent(peer) for peer in value)
+        or len(set(value)) != len(value)
+    ):
+        raise fleet_client.FleetClientError("invalid message identity peers")
+    return list(value)
+
+
+def _identity_epoch(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", value) is not None
+
+
+def _validate_identity_authorization(payload: dict[str, Any], peers: list[str]) -> None:
+    error = "fleet hub returned an invalid message identity"
+    records = payload.get("peers")
+    if (
+        set(payload) != {"schema", "principal", "enrollment_epoch", "grant_epoch", "peers"}
+        or payload.get("schema") != "brigade.message_authorization.v1"
+        or not _identity_agent(payload.get("principal"))
+        or payload["principal"] in peers
+        or not _identity_epoch(payload.get("enrollment_epoch"))
+        or not _identity_epoch(payload.get("grant_epoch"))
+        or not isinstance(records, list)
+        or len(records) != len(peers)
+    ):
+        raise fleet_client.FleetClientError(error)
+    for peer, record in zip(peers, records, strict=True):
+        if (
+            not isinstance(record, dict)
+            or set(record) != {"principal", "authorized", "enrollment_epoch", "grant_epoch"}
+            or record.get("principal") != peer
+            or type(record.get("authorized")) is not bool
+        ):
+            raise fleet_client.FleetClientError(error)
+        if record["authorized"]:
+            valid = _identity_epoch(record["enrollment_epoch"]) and _identity_epoch(record["grant_epoch"])
+        else:
+            valid = record["enrollment_epoch"] is None and record["grant_epoch"] is None
+        if not valid:
+            raise fleet_client.FleetClientError(error)
 
 
 def unread_count(

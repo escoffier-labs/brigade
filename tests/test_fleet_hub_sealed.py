@@ -317,7 +317,7 @@ def test_startup_repairs_schema_without_request_time_ddl(hub):
     hub.commit()
     repaired = fleet_hub.init_db(path)
     try:
-        assert repaired.execute("PRAGMA user_version").fetchone()[0] == 45
+        assert repaired.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         statements = []
         repaired.set_trace_callback(statements.append)
         assert messages.handle(repaired, {"action": "sent"}, caller="node-a")[1]["messages"] == [legacy]

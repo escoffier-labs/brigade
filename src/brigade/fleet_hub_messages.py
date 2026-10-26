@@ -216,6 +216,25 @@ def ensure_schema(
     principal_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
     if "enrollment_id" not in principal_columns:
         conn.execute("ALTER TABLE fleet_message_principals ADD COLUMN enrollment_id TEXT")
+    from . import fleet_hub_message_grants
+
+    if "authorization_enrollment_epoch" not in principal_columns:
+        conn.execute("ALTER TABLE fleet_message_principals ADD COLUMN authorization_enrollment_epoch TEXT")
+    for principal, enrollment_id, token_hash in conn.execute(
+        "SELECT principal_id,enrollment_id,token_hash "
+        "FROM fleet_message_principals WHERE authorization_enrollment_epoch IS NULL"
+    ).fetchall():
+        excluded: tuple[str, ...] = (enrollment_id, token_hash)
+        if "grant_epoch" in principal_columns:
+            excluded += (
+                conn.execute(
+                    "SELECT grant_epoch FROM fleet_message_principals WHERE principal_id=?", (principal,)
+                ).fetchone()[0],
+            )
+        conn.execute(
+            "UPDATE fleet_message_principals SET authorization_enrollment_epoch=? WHERE principal_id=?",
+            (fleet_hub_message_grants.new_authorization_epoch(excluded=excluded), principal),
+        )
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fleet_message_sends (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -246,8 +265,6 @@ def ensure_schema(
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_message_sends_received ON fleet_message_sends (received_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS fleet_messages_sender_client ON fleet_messages (sender, client_id)")
-    from . import fleet_hub_message_grants
-
     fleet_hub_message_grants.ensure_schema(conn)
     if prune_messages:
         if storage_policy is None:
@@ -523,10 +540,12 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, Any]:
     conn.execute("BEGIN IMMEDIATE")
     try:
         existing = conn.execute(
-            "SELECT revoked_at,enrollment_id,token_hash,label FROM fleet_message_principals WHERE principal_id=?",
+            "SELECT revoked_at,enrollment_id,token_hash,label,authorization_enrollment_epoch,grant_epoch "
+            "FROM fleet_message_principals WHERE principal_id=?",
             (principal_id,),
         ).fetchone()
         created_at = datetime.now(timezone.utc).isoformat()
+        unchanged_replay = False
         if existing is None:
             if expected_enrollment_id is not None:
                 raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
@@ -555,9 +574,16 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, Any]:
                     "principal send grants changed since enrollment. Inspect principals show or revoke before re-enrolling",
                     code="principal_enrollment_grants_changed",
                 )
+            unchanged_replay = True
         else:
             raise MessageError("message principal already exists")
-        grants.replace_grants(conn, principal_id, patterns)
+        if not unchanged_replay:
+            excluded = (request_id, secret, token_hash) + (tuple(existing[4:]) if existing else ())
+            conn.execute(
+                "UPDATE fleet_message_principals SET authorization_enrollment_epoch=? WHERE principal_id=?",
+                (grants.new_authorization_epoch(excluded=excluded), principal_id),
+            )
+            grants.replace_grants(conn, principal_id, patterns)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1290,9 +1316,31 @@ def handle(
             result = _as_active_principal(conn, caller, lambda: read_station(snapshot_write=True))
         return 200, result
     if action == "identity":
-        if set(raw) != {"action"}:
-            raise MessageError("identity accepts only action")
-        return 200, _as_active_principal(conn, caller, lambda: {"principal": caller}, read_only=True)
+        if set(raw) == {"action"}:
+            return 200, _as_active_principal(conn, caller, lambda: {"principal": caller}, read_only=True)
+        peers = raw.get("peers")
+        if (
+            set(raw) != {"action", "peers"}
+            or not isinstance(peers, list)
+            or not 1 <= len(peers) <= 16
+            or any(
+                not isinstance(peer, str) or re.fullmatch(r"agent:[a-z][a-z0-9._-]{0,62}", peer) is None
+                for peer in peers
+            )
+            or len(set(peers)) != len(peers)
+            or caller in peers
+        ):
+            raise MessageError("invalid identity arguments", code="invalid_argument")
+        from .fleet_hub_message_grants import authorization_identity
+
+        return 200, _as_active_principal(
+            conn,
+            caller,
+            lambda: authorization_identity(
+                conn, caller=caller, peers=peers, authenticated_generation=authenticated_generation
+            ),
+            read_only=True,
+        )
     if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
 
         def insert_reply() -> dict[str, Any] | None:

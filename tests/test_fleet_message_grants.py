@@ -237,3 +237,364 @@ def test_grant_validation_does_not_load_hub_server():
         text=True,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_authorization_upgrade_from_intact_v45_via_init_db(tmp_path):
+    import re
+
+    from tests.test_fleet_hub_message_keys import publish, record
+    from tests.test_fleet_hub_sealed import envelope
+
+    db = tmp_path / "upgrade.db"
+    conn = fleet_hub.init_db(db)
+    for name, seed in (("node-a", 1), ("node-b", 2)):
+        fleet_hub.add_node(conn, name)
+        publish(conn, record(name, seed=seed))
+    messages.handle(conn, {"action": "send", "to": "node-b", "subject": "Plain", "body": "Body"}, caller="node-a")
+    messages.handle(conn, {"action": "send", "envelope": envelope()}, caller="node-a")
+    active = messages.add_principal(conn, {"name": "active", "may_send_to": ["agent:revoked"]})
+    revoked = messages.add_principal(conn, {"name": "revoked"})
+    messages.revoke_principal(
+        conn, {"action": "revoke", "name": "revoked", "expected_enrollment_id": revoked["enrollment_id"]}
+    )
+    conn.execute("UPDATE fleet_message_principals SET enrollment_id=NULL WHERE name='revoked'")
+    # Reconstruct the intact v45 principal layout, leaving all other v45 schema intact.
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
+    for column in ("authorization_enrollment_epoch", "grant_epoch"):
+        if column in columns:
+            conn.execute(f"ALTER TABLE fleet_message_principals DROP COLUMN {column}")
+    prior_principals = conn.execute("SELECT * FROM fleet_message_principals ORDER BY name").fetchall()
+    prior_grants = conn.execute("SELECT * FROM fleet_message_send_grants").fetchall()
+    prior_messages = conn.execute("SELECT * FROM fleet_messages ORDER BY id").fetchall()
+    conn.execute("PRAGMA user_version=45")
+    conn.commit()
+    assert not fleet_hub._missing_additive_columns(conn)
+    conn.close()
+
+    conn = fleet_hub.init_db(db)
+    try:
+        columns = {row[1]: row[2] for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
+        assert columns.get("authorization_enrollment_epoch") == "TEXT"
+        assert columns.get("grant_epoch") == "TEXT"
+        epochs = conn.execute(
+            "SELECT authorization_enrollment_epoch,grant_epoch FROM fleet_message_principals ORDER BY name"
+        ).fetchall()
+        assert len({value for pair in epochs for value in pair}) == 4
+        assert all(re.fullmatch(r"[A-Za-z0-9_-]{16,128}", value) for pair in epochs for value in pair)
+        assert active["enrollment_id"] not in {value for pair in epochs for value in pair}
+        assert (
+            conn.execute(
+                "SELECT principal_id,name,label,token_hash,created_at,revoked_at,enrollment_id "
+                "FROM fleet_message_principals ORDER BY name"
+            ).fetchall()
+            == prior_principals
+        )
+        assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == prior_grants
+        assert conn.execute("SELECT * FROM fleet_messages ORDER BY id").fetchall() == prior_messages
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+    finally:
+        conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        assert (
+            conn.execute(
+                "SELECT authorization_enrollment_epoch,grant_epoch FROM fleet_message_principals ORDER BY name"
+            ).fetchall()
+            == epochs
+        )
+    finally:
+        conn.close()
+
+
+def test_epoch_generator_collision_is_bounded(monkeypatch):
+    from brigade import fleet_hub_message_grants as grants
+
+    calls = []
+    values = iter(["a" * 32, "b" * 32])
+
+    def generate(size):
+        calls.append(size)
+        return next(values)
+
+    monkeypatch.setattr(messages.secrets, "token_urlsafe", generate)
+    assert grants.new_authorization_epoch(excluded=("a" * 32,)) == "b" * 32
+    assert calls == [24, 24]
+    calls.clear()
+
+    def collide(size):
+        calls.append(size)
+        return "a" * 32
+
+    monkeypatch.setattr(messages.secrets, "token_urlsafe", collide)
+    with pytest.raises(messages.MessageForbidden) as exc:
+        grants.new_authorization_epoch(excluded=("a" * 32,))
+    assert exc.value.code == "message_authorization_unavailable"
+    assert calls == [24] * 4
+
+
+def _public_epochs(conn, name="fixture"):
+    return conn.execute(
+        "SELECT authorization_enrollment_epoch,grant_epoch FROM fleet_message_principals WHERE name=?", (name,)
+    ).fetchone()
+
+
+def test_public_epochs_independent_of_request_and_token(tmp_path):
+    import re
+
+    conn = fleet_hub.init_db(tmp_path / "epochs.db")
+    try:
+        request = {"name": "fixture", "request_id": "a" * 40, "token": "a" * 40}
+        principal = messages.add_principal(conn, request)
+        epochs = _public_epochs(conn)
+        assert all(isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", value) for value in epochs)
+        assert len(set(epochs)) == 2
+        assert not set(epochs).intersection(
+            {principal["token"], principal["enrollment_id"], fleet_hub.hash_node_token(principal["token"])}
+        )
+    finally:
+        conn.close()
+
+
+def test_enrollment_replay_preserves_authorization_epochs(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "replay.db")
+    try:
+        request = {"name": "fixture", "request_id": "r" * 32, "token": "t" * 40, "may_send_to": [NODE_A]}
+        messages.add_principal(conn, request)
+        before = _public_epochs(conn)
+        assert all(isinstance(value, str) for value in before)
+        grants_before = conn.execute("SELECT * FROM fleet_message_send_grants").fetchall()
+        messages.add_principal(conn, request)
+        assert _public_epochs(conn) == before
+        assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == grants_before
+        for change in ({"token": "u" * 40}, {"label": "Changed"}, {"may_send_to": []}):
+            with pytest.raises(messages.MessageConflict):
+                messages.add_principal(conn, {**request, **change})
+            assert _public_epochs(conn) == before
+            assert not conn.in_transaction
+        messages.revoke_principal(
+            conn, {"action": "revoke", "name": "fixture", "expected_enrollment_id": request["request_id"]}
+        )
+        assert _public_epochs(conn) == before
+        with pytest.raises(messages.MessageConflict) as exc:
+            messages.add_principal(conn, request)
+        assert exc.value.code == "principal_enrollment_revoked"
+        assert _public_epochs(conn) == before
+    finally:
+        conn.close()
+
+
+def test_reenrollment_reused_token_and_request_aba_changes_public_epoch(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "aba.db")
+    try:
+        token = "t" * 40
+        seen = set()
+        previous = None
+        for request_id in ("a" * 32, "b" * 32, "a" * 32):
+            messages.add_principal(
+                conn, {"name": "fixture", "request_id": request_id, "token": token, "expected_enrollment_id": previous}
+            )
+            epochs = _public_epochs(conn)
+            assert all(isinstance(value, str) for value in epochs)
+            assert not seen.intersection(epochs)
+            seen.update(epochs)
+            # Token reuse remains permitted by the existing enrollment policy.
+            assert messages.lookup_principal_token(conn, token) == "agent:fixture"
+            messages.revoke_principal(
+                conn, {"action": "revoke", "name": "fixture", "expected_enrollment_id": request_id}
+            )
+            assert _public_epochs(conn) == epochs
+            previous = request_id
+    finally:
+        conn.close()
+
+
+def test_equal_empty_restored_grants_advance_epoch(tmp_path):
+    from brigade import fleet_hub_message_grants as grants
+
+    conn = fleet_hub.init_db(tmp_path / "grants.db")
+    try:
+        messages.add_principal(conn, {"name": "fixture", "may_send_to": [NODE_A]})
+        enrollment, current = _public_epochs(conn)
+        assert isinstance(enrollment, str) and isinstance(current, str)
+        seen = {current}
+        for patterns in ([NODE_A], [], [], [NODE_A]):
+            grants.set_grants(conn, {"action": "grants", "name": "fixture", "may_send_to": patterns})
+            new_enrollment, current = _public_epochs(conn)
+            assert new_enrollment == enrollment
+            assert current not in seen
+            seen.add(current)
+            assert grants.grants_for(conn, "agent:fixture") == patterns
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("operation", ["grants", "reenroll"])
+def test_epoch_and_grant_rollback(tmp_path, operation):
+    import sqlite3
+
+    from brigade import fleet_hub_message_grants as grants
+
+    conn = fleet_hub.init_db(tmp_path / "rollback.db")
+    try:
+        original = messages.add_principal(conn, {"name": "fixture", "may_send_to": [NODE_A]})
+        if operation == "reenroll":
+            messages.revoke_principal(
+                conn, {"action": "revoke", "name": "fixture", "expected_enrollment_id": original["enrollment_id"]}
+            )
+        before = conn.execute("SELECT * FROM fleet_message_principals").fetchall()
+        rows = conn.execute("SELECT * FROM fleet_message_send_grants").fetchall()
+        conn.execute(
+            "CREATE TRIGGER fail_epoch BEFORE UPDATE OF grant_epoch ON fleet_message_principals BEGIN SELECT RAISE(ABORT,'fixture epoch failure'); END"
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="fixture epoch failure"):
+            if operation == "grants":
+                grants.set_grants(conn, {"action": "grants", "name": "fixture", "may_send_to": [NODE_B]})
+            else:
+                messages.add_principal(
+                    conn,
+                    {"name": "fixture", "expected_enrollment_id": original["enrollment_id"], "may_send_to": [NODE_B]},
+                )
+        assert conn.execute("SELECT * FROM fleet_message_principals").fetchall() == before
+        assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == rows
+        assert not conn.in_transaction
+    finally:
+        conn.close()
+
+
+def test_authorization_migration_rollback_and_concurrent_startup(tmp_path, monkeypatch):
+    import sqlite3
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from brigade import fleet_hub_message_grants as grants
+
+    db = tmp_path / "concurrent-upgrade.db"
+    conn = fleet_hub.init_db(db)
+    messages.add_principal(conn, {"name": "fixture"})
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
+    for column in ("authorization_enrollment_epoch", "grant_epoch"):
+        if column in columns:
+            conn.execute(f"ALTER TABLE fleet_message_principals DROP COLUMN {column}")
+    conn.execute("PRAGMA user_version=45")
+    conn.commit()
+    before = conn.execute("SELECT * FROM fleet_message_principals").fetchall()
+    conn.close()
+    generate = grants.new_authorization_epoch
+    calls = []
+
+    def fail_second(**kwargs):
+        calls.append(True)
+        if len(calls) == 2:
+            raise messages.MessageForbidden("fixture migration failure", code="message_authorization_unavailable")
+        return generate(**kwargs)
+
+    monkeypatch.setattr(grants, "new_authorization_epoch", fail_second)
+    with pytest.raises(messages.MessageForbidden, match="fixture migration failure"):
+        fleet_hub.init_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+        assert conn.execute("SELECT * FROM fleet_message_principals").fetchall() == before
+        assert "authorization_enrollment_epoch" not in {
+            row[1] for row in conn.execute("PRAGMA table_info(fleet_message_principals)")
+        }
+    finally:
+        conn.close()
+    monkeypatch.setattr(grants, "new_authorization_epoch", generate)
+    start = threading.Barrier(2)
+
+    def initialize():
+        start.wait(timeout=5)
+        local = fleet_hub.init_db(db)
+        try:
+            return _public_epochs(local), local.execute("PRAGMA user_version").fetchone()[0]
+        finally:
+            local.close()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        left, right = pool.submit(initialize), pool.submit(initialize)
+        result = left.result(timeout=10)
+        assert right.result(timeout=10) == result
+    assert result[1] == 46 and all(isinstance(value, str) for value in result[0])
+
+
+def test_authorization_backfill_preserves_nonnull_metadata(tmp_path):
+    db = tmp_path / "partial-metadata.db"
+    conn = fleet_hub.init_db(db)
+    try:
+        principal = messages.add_principal(conn, {"name": "fixture"})
+        messages.revoke_principal(
+            conn, {"action": "revoke", "name": "fixture", "expected_enrollment_id": principal["enrollment_id"]}
+        )
+        # Non-null corruption is preserved for fail-closed reads, not repaired.
+        conn.execute("UPDATE fleet_message_principals SET authorization_enrollment_epoch='bad',grant_epoch=NULL")
+        conn.execute("PRAGMA user_version=45")
+        conn.commit()
+    finally:
+        conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        enrollment, grant = _public_epochs(conn)
+        assert enrollment == "bad" and isinstance(grant, str)
+        conn.execute("UPDATE fleet_message_principals SET authorization_enrollment_epoch=NULL")
+        conn.execute("PRAGMA user_version=45")
+        conn.commit()
+    finally:
+        conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        enrollment, preserved = _public_epochs(conn)
+        assert isinstance(enrollment, str) and enrollment != grant
+        assert preserved == grant
+    finally:
+        conn.close()
+
+
+def test_epoch_replacements_retry_current_values_and_fail_atomically(tmp_path, monkeypatch):
+    from brigade import fleet_hub_message_grants as grants
+
+    conn = fleet_hub.init_db(tmp_path / "epoch-collisions.db")
+    try:
+        principal = messages.add_principal(
+            conn, {"name": "fixture", "request_id": "r" * 32, "token": "t" * 40, "may_send_to": [NODE_A]}
+        )
+        enrollment, grant = _public_epochs(conn)
+        calls = []
+        values = iter([grant, "g" * 32])
+
+        def generate(size):
+            calls.append(size)
+            return next(values)
+
+        monkeypatch.setattr(messages.secrets, "token_urlsafe", generate)
+        grants.set_grants(conn, {"action": "grants", "name": "fixture", "may_send_to": [NODE_B]})
+        assert _public_epochs(conn) == (enrollment, "g" * 32)
+        assert calls == [24, 24]
+        messages.revoke_principal(
+            conn, {"action": "revoke", "name": "fixture", "expected_enrollment_id": principal["enrollment_id"]}
+        )
+        before = conn.execute("SELECT * FROM fleet_message_principals").fetchall()
+        rows = conn.execute("SELECT * FROM fleet_message_send_grants").fetchall()
+        calls.clear()
+        # Enrollment changes first, but grant collision exhaustion must roll
+        # the entire re-enrollment and its credential change back.
+        values = iter([enrollment, "e" * 32, "g" * 32, "g" * 32, "g" * 32, "g" * 32])
+        with pytest.raises(messages.MessageForbidden) as exc:
+            messages.add_principal(
+                conn,
+                {
+                    "name": "fixture",
+                    "request_id": "s" * 32,
+                    "token": "u" * 40,
+                    "expected_enrollment_id": principal["enrollment_id"],
+                    "may_send_to": [],
+                },
+            )
+        assert exc.value.code == "message_authorization_unavailable"
+        assert calls == [24] * 6
+        assert conn.execute("SELECT * FROM fleet_message_principals").fetchall() == before
+        assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == rows
+        assert not conn.in_transaction
+    finally:
+        conn.close()
