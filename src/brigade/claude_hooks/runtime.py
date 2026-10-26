@@ -2364,11 +2364,12 @@ def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> d
                 _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
-            if _is_routed_verify(command):
-                _record_exercised_artifact(state, _parse_capture_flag(command))
+            capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
+            )
             return None
         wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash"

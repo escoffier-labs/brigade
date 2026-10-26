@@ -277,8 +277,9 @@ def _write_session_state_preserving_latch(
     *,
     log_target: Path | None = None,
     patch_fields: tuple[str, ...] | None = None,
+    capture_artifact_id: str | None = None,
 ) -> bool:
-    """Save state, or patch observer-owned fields, preserving concurrent evidence."""
+    """Preserve concurrent evidence; explicit capture intent may change attribution."""
     try:
         with _rt()._session_state_lock(target, session_id):
             current = _rt().read_session_state(target, session_id)
@@ -306,6 +307,20 @@ def _write_session_state_preserving_latch(
                         state.get("exercised_artifact_id"),
                         kind=state.get("exercised_artifact_kind", "skill"),
                     )
+            else:
+                if updated.get("task_epoch") == current_epoch:
+                    # A full snapshot is not an artifact observation. Keep the
+                    # latest locked attribution, including its paired kind.
+                    current_kind = current_state.get("exercised_artifact_kind")
+                    _rt()._record_exercised_artifact(
+                        updated,
+                        current_state.get("exercised_artifact_id"),
+                        kind=current_kind if isinstance(current_kind, str) and current_kind.strip() else "skill",
+                    )
+                # The requested value, rather than a changed-state flag, also
+                # preserves deliberate same-value captures and generic fallback
+                # semantics when a Read completed after the snapshot was loaded.
+                _rt()._record_exercised_artifact(updated, capture_artifact_id)
             dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation
@@ -359,6 +374,10 @@ def _write_session_state_preserving_latch(
             )
             _rt().write_session_state(target, session_id, updated)
             dependencies.restore(state, updated)
+            for key in ("exercised_artifact_id", "exercised_artifact_kind"):
+                state.pop(key, None)
+                if key in updated:
+                    state[key] = updated[key]
             return True
     except inbox_lock.InboxLockTimeout:
         if log_target is not None:
