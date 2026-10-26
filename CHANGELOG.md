@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Windows care install plans create and binary-pin the selected patrol runbook before printing scheduler commands; dry runs leave the workspace unchanged (#1958).
 - Deck sidebar telemetry follows the Hub's stale verdict for enrolled machines while preserving the freshest age and unknown-time display (#2054).
 - Message identity can report mutual peer authorization and independent enrollment and grant epochs for up to 16 external agents (#2070).
 - Patrol returns its documented error status when action history exceeds the receipt size limit, preserving the last durable receipt (#1956).

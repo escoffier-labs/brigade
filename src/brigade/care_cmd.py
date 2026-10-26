@@ -1178,6 +1178,10 @@ def install(
         return 2
 
     if _uses_schtasks(backend):
+        if not dry_run:
+            rc = care_patrol.ensure_selected(target, entries)
+            if rc != 0:
+                return rc
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
     rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)

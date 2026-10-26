@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -80,10 +82,77 @@ def test_crontab_entry_rejection_leaves_target_unchanged(tmp_path, monkeypatch, 
     assert list(target.iterdir()) == []
 
 
-def test_patrol_windows_plan(tmp_path, capsys):
+def test_patrol_windows_plan(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(runbook_cmd.shutil, "which", lambda command: sys.executable)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("must not mutate the scheduler"))
     assert care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["run-patrol"], json_output=True) == 3
-    payload = capsys.readouterr().out
-    assert "run-patrol" in payload and "/SC MINUTE /MO 10" in payload
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "printed-plan"
+    assert payload["mutates_scheduler"] is False
+    assert payload["tasks"][0]["id"] == "run-patrol"
+    assert payload["tasks"][0]["schedule_flags"] == "/SC MINUTE /MO 10"
+    book = json.loads((tmp_path / ".brigade/runbooks/run-patrol.json").read_text())
+    command = book["steps"][0]["run"]
+    assert "--json --receipt --fail-on stalled,zombie,dead" in command
+    assert "--apply" not in command
+    assert book["pins"] == [
+        {
+            "command": "brigade",
+            "path": sys.executable,
+            "sha256": hashlib.sha256(Path(sys.executable).read_bytes()).hexdigest(),
+        }
+    ]
+    assert {path.name for path in (tmp_path / ".brigade/runbooks").iterdir()} == {"run-patrol.json"}
+
+
+def test_patrol_windows_dry_run_leaves_target_unchanged(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: pytest.fail("dry run must not pin"))
+    assert (
+        care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["run-patrol"], dry_run=True, json_output=True)
+        == 3
+    )
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "printed-plan"
+    assert payload["dry_run"] is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_patrol_windows_preserves_existing_runbook(tmp_path, monkeypatch, capsys):
+    book = tmp_path / ".brigade/runbooks/run-patrol.json"
+    book.parent.mkdir(parents=True)
+    original = '{"id": "run-patrol", "description": "operator-owned runbook"}\n'
+    book.write_text(original)
+    monkeypatch.setattr(
+        runbook_cmd, "_pin_payload_from_runbook", lambda *args: pytest.fail("must not repin existing book")
+    )
+    assert care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["run-patrol"]) == 3
+    capsys.readouterr()
+    assert book.read_text() == original
+
+
+@pytest.mark.parametrize("failure", ["validation", "pinning"])
+def test_patrol_windows_runbook_error_prevents_plan(tmp_path, monkeypatch, capsys, failure):
+    if failure == "validation":
+        monkeypatch.setattr(runbook_cmd, "_read_runbook", lambda *args, **kwargs: (None, "invalid patrol runbook"))
+    else:
+        monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: (None, "cannot pin patrol command"))
+    assert care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["run-patrol"], json_output=True) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert captured.err == (
+        "error: invalid patrol runbook\n" if failure == "validation" else "error: cannot pin patrol command\n"
+    )
+    assert not (tmp_path / ".brigade/runbooks/run-patrol.json").exists()
+    assert not (tmp_path / ".brigade/runbooks/.run-patrol.json.init-tmp").exists()
+
+
+def test_windows_unselected_patrol_leaves_target_unchanged(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        runbook_cmd, "_pin_payload_from_runbook", lambda *args: pytest.fail("unselected patrol must not pin")
+    )
+    assert care_cmd.install(target=tmp_path, backend="schtasks", json_output=True) == 3
+    capsys.readouterr()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_status_includes_latest_direct_patrol_receipt(tmp_path, capsys):
