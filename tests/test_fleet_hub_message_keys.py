@@ -543,7 +543,7 @@ def test_schema_44_upgrade_preserves_cursor(hub):
     hub.commit()
     for _ in range(2):
         conn = fleet_hub.init_db(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         conn.close()
     conn = fleet_hub.open_db(path)
     try:

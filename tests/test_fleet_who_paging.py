@@ -579,10 +579,10 @@ def _add_question(conn):
 
 
 def test_fresh_database_reaches_schema_45_with_questions_and_paging(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 45
+    assert fleet_hub.SCHEMA_VERSION == 46
     conn = fleet_hub.init_db(tmp_path / "fleet.db")
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         questions, paging = _both_schemas(conn)
         assert ("table", "fleet_questions") in questions and ("trigger", "fleet_questions_reply") in questions
         assert ("table", "fleet_read_snapshots") in paging and ("index", "fleet_read_snapshots_expiry") in paging
@@ -609,7 +609,7 @@ def test_pre_paging_schemas_upgrade_to_45_and_keep_question_rows(tmp_path, stamp
     for _startup in range(2):
         conn = fleet_hub.init_db(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             assert _both_schemas(conn) == (questions, paging)
             kept = conn.execute("SELECT question_id FROM fleet_questions").fetchall()
             assert kept == ([("q-kept",)] if stamped == 43 else [])
@@ -639,7 +639,7 @@ def test_schema_44_missing_question_objects_are_repaired_at_startup(tmp_path, da
     for _startup in range(2):
         conn = fleet_hub.init_db(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             assert _both_schemas(conn) == (questions, paging)
             # The repair leaves the paging snapshot, and its cursor, untouched.
             assert conn.execute("SELECT * FROM fleet_read_snapshots").fetchall() == snapshots
