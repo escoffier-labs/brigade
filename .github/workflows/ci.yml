@@ -21,13 +21,112 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}
-      code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
-      evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
-      notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
-      fleet_hub_container: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
+      docs_only: ${{ steps.docs.outputs.docs_only }}
+      docs_reason: ${{ steps.docs.outputs.reason }}
+      mesh: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}
+      code_graph: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
+      evidence_ledger: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
+      notify: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
+      fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Classify authoritative event diff
+        id: docs
+        run: |
+          # Bootstrap from the event's trusted base, never proposal-owned Python.
+          # A base without this helper deliberately takes full CI on first install.
+          python3 -I -S - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import subprocess
+          import sys
+          import tempfile
+
+          def git(*args):
+              return subprocess.run(
+                  ["git", "--no-replace-objects", *args], check=True,
+                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60,
+              ).stdout
+
+          def oid(value):
+              if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{40}", value) or value == "0" * 40:
+                  raise ValueError("invalid object id")
+              return value
+
+          def ensure_commit(value):
+              try:
+                  kind = git("cat-file", "-t", value)
+              except subprocess.CalledProcessError:
+                  git("fetch", "--no-tags", "--no-recurse-submodules", "--depth=1", "origin", value)
+                  kind = git("cat-file", "-t", value)
+              if kind != b"commit\n":
+                  raise ValueError("not a commit")
+
+          result = {"docs_only": "false", "uncertain": "true", "reason": "trusted-classifier-unavailable"}
+          try:
+              event = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text())
+              head = oid(os.environ["GITHUB_SHA"])
+              if git("rev-parse", "HEAD").decode().strip() != head:
+                  raise ValueError("checkout mismatch")
+              ensure_commit(head)
+              name = os.environ["GITHUB_EVENT_NAME"]
+              if name == "pull_request":
+                  # Raw commit headers retain parents even at a shallow boundary.
+                  headers = git("cat-file", "-p", head).split(b"\n\n", 1)[0].splitlines()
+                  parents = [line[7:].decode("ascii") for line in headers if line.startswith(b"parent ")]
+                  if len(parents) != 2 or parents[1] != oid(event["pull_request"]["head"]["sha"]):
+                      raise ValueError("not the PR test merge")
+                  base = oid(parents[0])
+              elif name == "merge_group":
+                  base = oid(event["merge_group"]["base_sha"])
+                  if oid(event["merge_group"]["head_sha"]) != head:
+                      raise ValueError("merge group mismatch")
+              elif name == "push":
+                  base = oid(event["before"])
+                  if oid(event["after"]) != head:
+                      raise ValueError("push mismatch")
+              else:
+                  raise ValueError("unsupported event")
+              ensure_commit(base)
+              entry = git("ls-tree", "-z", base, "--", "scripts/ci_docs_only.py")
+              match = re.fullmatch(rb"100644 blob ([0-9a-f]{40})\tscripts/ci_docs_only.py\x00", entry)
+              if not match:
+                  raise ValueError("missing or unsafe classifier")
+              blob = match[1].decode("ascii")
+              if not 0 < int(git("cat-file", "-s", blob)) <= 131072:
+                  raise ValueError("invalid classifier size")
+              source = git("cat-file", "blob", blob)
+              with tempfile.TemporaryDirectory(prefix="ci-classifier-", dir=os.environ["RUNNER_TEMP"]) as directory:
+                  trusted = Path(directory) / "classifier.py"
+                  trusted.write_bytes(source)
+                  output = Path(directory) / "output"
+                  subprocess.run(
+                      [sys.executable, "-I", "-S", str(trusted)], check=True, timeout=300,
+                      env=dict(os.environ, GITHUB_OUTPUT=str(output)),
+                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                  )
+                  candidate = dict(line.split("=", 1) for line in output.read_text().splitlines())
+                  if (
+                      set(candidate) != {"docs_only", "uncertain", "reason"}
+                      or candidate["docs_only"] not in {"true", "false"}
+                      or candidate["uncertain"] not in {"true", "false"}
+                      or (candidate["docs_only"] == "true" and candidate["uncertain"] != "false")
+                      or not re.fullmatch(r"[a-z-]{1,80}", candidate["reason"])
+                  ):
+                      raise ValueError("invalid classifier output")
+                  result = candidate
+          except (KeyError, TypeError, ValueError, UnicodeError, OSError, subprocess.SubprocessError):
+              pass
+          output = "".join(f"{key}={value}\n" for key, value in result.items())
+          print(output, end="")
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a") as stream:
+              stream.write(output)
+          PY
       - uses: dorny/paths-filter@v4
         if: ${{ github.event_name != 'merge_group' }}
         id: filter
@@ -63,7 +162,7 @@ jobs:
   code-graph-msrv:
     name: MSRV (Rust 1.85)
     needs: changes
-    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.code_graph == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -82,7 +181,7 @@ jobs:
   code-graph-build-and-test:
     name: build-and-test
     needs: changes
-    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.code_graph == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -108,7 +207,7 @@ jobs:
   code-graph-feature-configurations:
     name: Feature configuration (${{ matrix.name }})
     needs: changes
-    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.code_graph == 'true' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -143,7 +242,7 @@ jobs:
   code-graph-windows:
     name: Windows (stable, default features)
     needs: changes
-    if: ${{ needs.changes.outputs.code_graph == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.code_graph == 'true' }}
     runs-on: windows-latest
     defaults:
       run:
@@ -161,7 +260,7 @@ jobs:
 
   evidence-ledger-test:
     needs: changes
-    if: ${{ needs.changes.outputs.evidence_ledger == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.evidence_ledger == 'true' }}
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -183,6 +282,7 @@ jobs:
       - run: scripts/smoke_http.sh
 
   notify-build-and-test:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
     name: notify-build-and-test (ubuntu-latest)
     needs: changes
     runs-on: ubuntu-latest
@@ -232,6 +332,7 @@ jobs:
         run: govulncheck ./...
 
   notify-windows:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
     name: notify-build-and-test (windows-latest)
     needs: changes
     runs-on: windows-latest
@@ -268,8 +369,9 @@ jobs:
   # a required check, so the queue does not wait on Windows. The 45-minute driver
   # budget covers the largest selection from the last 200 main commits (257 files).
   windows-affected-tests:
+    needs: changes
     name: windows-affected-tests
-    if: ${{ github.event_name == 'pull_request' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' }}
     runs-on: windows-latest
     timeout-minutes: 50
     defaults:
@@ -358,6 +460,8 @@ jobs:
           retention-days: 7
 
   lint:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -422,6 +526,8 @@ jobs:
         run: python scripts/template_profile_snapshot.py --check
 
   test-shards:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     name: test shard (${{ matrix.python }}, ${{ matrix.shard }})
     runs-on: ubuntu-latest
     strategy:
@@ -484,7 +590,7 @@ jobs:
 
   fleet-hub-container:
     needs: changes
-    if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.fleet_hub_container == 'true' }}
     name: Fleet Hub container (${{ matrix.platform }})
     runs-on: ubuntu-latest
     strategy:
@@ -502,7 +608,8 @@ jobs:
         run: python tests/fleet_hub_container_smoke.py --platform "${{ matrix.platform }}"
 
   coverage:
-    needs: test-shards
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.test-shards.result == 'success' }}
+    needs: [changes, test-shards]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -529,7 +636,7 @@ jobs:
   test:
     name: test (${{ matrix.python }})
     needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]
-    if: ${{ always() }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -567,7 +674,7 @@ jobs:
   # checks in docs/runbooks/ci-runner-pilot.md passed. Keep its needs list
   # equal to the policy set below; a mismatch fails closed.
   ci-gate:
-    if: always()
+    if: ${{ !cancelled() }}
     needs:
       - changes
       - lint
@@ -596,9 +703,8 @@ jobs:
           import json
           import os
 
-          # Shadow policy: every current required job and dependency must
-          # succeed, except a container explicitly classified as unchanged.
-          # Merge groups require all components, regardless of path filtering.
+          # Full CI retains the existing exact native exceptions. Confirmed
+          # documentation-only runs may skip only the enumerated runtime jobs.
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
               "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
@@ -614,6 +720,16 @@ jobs:
                   f"extra={set(needs) - mandatory}"
               )
           changes = needs.get("changes", {})
+          docs_flag = changes.get("outputs", {}).get("docs_only")
+          if docs_flag not in {"true", "false"}:
+              errors.append("changes: required success, got missing/invalid docs classification")
+          docs_only = changes.get("result") == "success" and docs_flag == "true"
+          docs_skips = {
+              "lint", "test", "test-shards", "coverage", "cosign-integration",
+              "fleet-hub-container", "component-manifest-provenance", "install-from-source",
+              "quickstart-smoke", "windows-native-acceptance", "mesh-compatibility",
+              "mesh-cross-version", "mesh-without-extra",
+          }
           container_skip_allowed = (
               changes.get("result") == "success"
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
@@ -627,6 +743,8 @@ jobs:
           )
           for name in sorted(mandatory):
               result = needs.get(name, {}).get("result")
+              if docs_only and name in docs_skips and result == "skipped":
+                  continue
               if name == "fleet-hub-container" and result == "skipped" and container_skip_allowed:
                   continue
               if name in mesh_jobs and result == "skipped" and mesh_skip_allowed:
@@ -639,6 +757,8 @@ jobs:
           PY
 
   component-manifest-provenance:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -655,6 +775,8 @@ jobs:
         run: python -m pytest tests/test_component_manifest_provenance.py -q
 
   cosign-integration:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     name: cosign (${{ matrix.cosign }})
     runs-on: ubuntu-latest
     strategy:
@@ -757,6 +879,8 @@ jobs:
         run: brigade security template-audit --target . --json
 
   install-from-source:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -815,6 +939,8 @@ jobs:
           esac
 
   quickstart-smoke:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     name: quickstart-smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -886,7 +1012,8 @@ jobs:
 
   # Optional capacity probe. Existing protected checks remain hosted.
   trusted-runner-canary:
-    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BRIGADE_SELF_HOSTED == 'on' }}
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BRIGADE_SELF_HOSTED == 'on' }}
     runs-on:
       group: brigade-trusted
       labels: [self-hosted, linux, x64]
@@ -910,6 +1037,8 @@ jobs:
           python3 -m brigade doctor --target "$target"
 
   windows-native-acceptance:
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    needs: changes
     name: windows-native-acceptance
     runs-on: windows-latest
     steps:
@@ -1009,8 +1138,8 @@ jobs:
 
   pr-tier-shadow:
     name: PR test tiers (shadow observation)
-    needs: test-shards
-    if: ${{ always() && github.event_name == 'pull_request' && github.repository != '' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
+    needs: [changes, test-shards]
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && github.event_name == 'pull_request' && github.repository != '' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 75
@@ -1237,10 +1366,10 @@ jobs:
           retention-days: 30
 
   # Security-critical mesh compatibility is protected by ci-gate. Only PRs
-  # with no mesh changes may skip these jobs. Pushes and merge groups run all.
+  # with no mesh changes and confirmed docs-only events may skip these jobs.
   mesh-compatibility:
     needs: changes
-    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.mesh == 'true' }}
     name: mesh (${{ matrix.os }}, ${{ matrix.crypto }})
     runs-on: ${{ matrix.os }}
     strategy:
@@ -1325,7 +1454,7 @@ jobs:
       MESH_ENV: present
     name: mesh cross-version (${{ matrix.crypto }})
     needs: [changes, mesh-compatibility]
-    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.mesh == 'true' && needs.mesh-compatibility.result == 'success' }}
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -1381,7 +1510,7 @@ jobs:
     env:
       MESH_ENV: absent
     needs: changes
-    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.mesh == 'true' }}
     name: mesh core without extra
     runs-on: ubuntu-latest
     steps:

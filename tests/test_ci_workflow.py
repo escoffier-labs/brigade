@@ -11,6 +11,117 @@ import sys
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts/ci_docs_only.py"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "none",
+        "full",
+        "unknown",
+        "missing-classification",
+        "failed-classification",
+        "cancelled-classification",
+        "guard-failed",
+        "guard-cancelled",
+        "metadata-skipped",
+        "runtime-failed",
+        "runtime-cancelled",
+        "missing-job",
+        "extra-job",
+    ],
+)
+def test_ci_gate_accepts_confirmed_docs_skips_but_keeps_lightweight_checks_required(mutation):
+    """Exercise the actual aggregate program, including its fail-closed path."""
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    names = re.findall(r"^      - ([a-z0-9-]+)$", gate, re.MULTILINE)
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    for event in ("pull_request", "merge_group", "push"):
+        needs = {name: {"result": "skipped"} for name in names}
+        for name in ("changes", "content-guard", "repo-metadata"):
+            needs[name] = {"result": "success"}
+        needs["changes"]["outputs"] = {"docs_only": "true"}
+        if mutation in {"full", "unknown", "missing-classification"}:
+            needs["changes"]["outputs"] = {"docs_only": {"full": "false", "unknown": ""}.get(mutation)}
+        elif mutation in {"failed-classification", "cancelled-classification"}:
+            needs["changes"]["result"] = "failure" if mutation.startswith("failed") else "cancelled"
+        elif mutation in {"guard-failed", "guard-cancelled"}:
+            needs["content-guard"]["result"] = "failure" if mutation.endswith("failed") else "cancelled"
+        elif mutation == "metadata-skipped":
+            needs["repo-metadata"]["result"] = "skipped"
+        elif mutation in {"runtime-failed", "runtime-cancelled"}:
+            needs["test-shards"]["result"] = "failure" if mutation.endswith("failed") else "cancelled"
+        elif mutation == "missing-job":
+            del needs["lint"]
+        elif mutation == "extra-job":
+            needs["unexpected-job"] = {"result": "skipped"}
+        result = subprocess.run(
+            _workflow_bash_command(script),
+            env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == (0 if mutation == "none" else 1), result.stdout + result.stderr
+
+
+def _job_admitted(text, name, *, docs="false", cancelled=False, dependency="success", event="pull_request"):
+    """Evaluate literal Actions guards, including the implicit success() rule."""
+    header = _workflow_job_section(text, name).split("    steps:", 1)[0]
+    guard = re.search(r"^    if: (.+)$", header, re.MULTILINE)
+    expression = guard[1].removeprefix("${{ ").removesuffix(" }}") if guard else "success()"
+    if not re.search(r"\b(?:always|cancelled|failure|success)\(\)", expression):
+        expression = f"success() and ({expression})"
+    github = {
+        "github.event_name": event,
+        "github.ref": "refs/heads/main",
+        "github.repository": "example/project",
+        "github.event.pull_request.head.repo.full_name": "example/project",
+        "vars.BRIGADE_SELF_HOSTED": "on",
+    }
+    expression = re.sub(r"\b(?:github|vars)\.[a-zA-Z0-9_.]+", lambda m: repr(github[m[0]]), expression)
+
+    def needs_value(match):
+        job, field = match.groups()
+        if field == "result":
+            return repr("success" if job == "changes" else dependency)
+        return repr(docs if field == "outputs.docs_only" else "true")
+
+    expression = re.sub(r"needs\.([a-z-]+)\.(result|outputs\.[a-z_]+)", needs_value, expression)
+    expression = re.sub(r"!(?!=)", "not ", expression).replace("&&", "and").replace("||", "or")
+    functions = {
+        "always": lambda: True,
+        "cancelled": lambda: cancelled,
+        "success": lambda: dependency == "success" and not cancelled,
+        "failure": lambda: dependency == "failure",
+    }
+    return bool(eval(expression, {"__builtins__": {}}, functions))
+
+
+@pytest.mark.parametrize("dependency", ["success", "failure", "skipped"])
+def test_aggregate_and_shadow_job_guards_preserve_failures_and_honor_cancellation(dependency):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job in ("test", "ci-gate", "pr-tier-shadow"):
+        assert _job_admitted(text, job, dependency=dependency)
+        assert not _job_admitted(text, job, dependency=dependency, cancelled=True)
+
+
+def test_docs_classification_gates_every_runtime_job_without_implicit_success():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    jobs = re.findall(r"^  ([a-z][a-z0-9-]*):$", text.split("jobs:\n", 1)[1], re.MULTILINE)
+    for event in ("pull_request", "merge_group", "push"):
+        for name in jobs:
+            if name in {"changes", "content-guard", "repo-metadata", "ci-gate"}:
+                assert _job_admitted(text, name, docs="true", event=event)
+                continue
+            assert not _job_admitted(text, name, docs="true", event=event), name
+            # All event-eligible runtime work remains enabled for code/unknown.
+            eligible = name not in {"windows-affected-tests", "pr-tier-shadow", "trusted-runner-canary"}
+            eligible |= name in {"windows-affected-tests", "pr-tier-shadow"} and event == "pull_request"
+            eligible |= name == "trusted-runner-canary" and event == "push"
+            assert _job_admitted(text, name, event=event) is eligible, name
+            assert _job_admitted(text, name, docs="", event=event) is eligible, name
 
 
 def _workflow_bash() -> str:
@@ -66,7 +177,8 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
     assert "uses: dorny/paths-filter@v4" in changes
     for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
         assert (
-            f"{flag}: ${{{{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}" in changes
+            f"{flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}"
+            in changes
         )
     assert "if: ${{ github.event_name != 'merge_group' }}" in changes
     assert "code-graph:" not in changes
@@ -108,16 +220,13 @@ def test_ci_workflow_gates_native_engine_jobs_with_valid_expressions():
     for job_name, output_name in expected_jobs.items():
         section = _workflow_job_section(text, job_name)
         assert "needs: changes" in section
-        assert f"if: ${{{{ needs.changes.outputs.{output_name} == 'true' }}}}" in section
+        assert f"needs.changes.outputs.{output_name} == 'true'" in section
+        assert "needs.changes.outputs.docs_only != 'true'" in section
         assert "self-hosted" not in section
 
 
-def test_ci_workflow_notify_jobs_always_run_and_gate_steps_not_job_level():
-    """Required notify checks must not skip at job level (issue #692).
-
-    When notify paths are unchanged the job still completes successfully via the
-    explicit skip step; Go build/test steps stay behind step-level guards.
-    """
+def test_ci_workflow_notify_jobs_preserve_unchanged_success_on_full_ci():
+    """Full CI keeps the #692 unchanged-notify success step; docs can skip."""
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     expected_jobs = {
         "notify-build-and-test": "notify",
@@ -132,8 +241,7 @@ def test_ci_workflow_notify_jobs_always_run_and_gate_steps_not_job_level():
     for job_name in expected_jobs:
         section = _workflow_job_section(text, job_name)
         assert "needs: changes" in section
-        # Job-level skip was the root cause of permanently blocked unrelated PRs.
-        assert re.search(r"^    if:", section, re.MULTILINE) is None
+        assert "needs.changes.outputs.docs_only != 'true'" in section
         assert "self-hosted" not in section
         assert "Skip notify tests (unchanged paths)" in section
         assert skip_if in section
@@ -541,7 +649,7 @@ def test_ci_workflow_limits_pull_request_shards_to_python312_only():
     assert other_events == ["3.10", "3.11", "3.12"]
     # The shard name expands per leg, and the required test (X) names keep
     # the full matrix, so no check reports an unexpanded matrix expression.
-    assert "    if:" not in shards.split("    steps:", 1)[0]
+    assert "matrix." not in re.search(r"^    if: (.+)$", shards, re.MULTILINE)[1]
     protected = _workflow_job_section(text, "test")
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
     notice = _workflow_step_section(text, "test", "Note Python shards deferred to the merge queue")
@@ -578,7 +686,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "name: test (${{ matrix.python }})" in protected
     assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
-    assert "if: ${{ always() }}" in protected
+    assert "if: ${{ !cancelled() && needs.changes.result == 'success'" in protected
     assert "CHANGES_RESULT: ${{ needs.changes.result }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
     assert "COVERAGE_RESULT: ${{ needs.coverage.result }}" in protected
@@ -595,7 +703,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
 def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     gate = _workflow_job_section(text, "ci-gate")
-    assert re.search(r"^    if: always\(\)$", gate, re.MULTILINE)
+    assert "    if: ${{ !cancelled() }}" in gate
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
     # main's 20 required contexts, including the test/installer/quickstart
@@ -635,7 +743,7 @@ def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, cha
     gate = _workflow_job_section(text, "ci-gate")
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     needs = {name: {"result": "success"} for name in re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)}
-    needs["changes"] = {"result": changes_result, "outputs": {"fleet_hub_container": flag}}
+    needs["changes"] = {"result": changes_result, "outputs": {"fleet_hub_container": flag, "docs_only": "false"}}
     needs["fleet-hub-container"] = {"result": container_result}
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     result = subprocess.run(
@@ -661,7 +769,7 @@ def test_ci_shadow_gate_rejects_bad_results_and_dependency_mismatches(mutation):
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     for name in names if mutation != "extra" else ["unexpected-job"]:
         needs = {job: {"result": "success"} for job in names}
-        needs["changes"]["outputs"] = {"fleet_hub_container": "true"}
+        needs["changes"]["outputs"] = {"fleet_hub_container": "true", "docs_only": "false"}
         if mutation == "missing":
             del needs[name]
         else:
@@ -682,7 +790,7 @@ def test_ci_workflow_filters_container_builds_without_scheduling_the_required_ma
     changes = _workflow_job_section(text, "changes")
     container = _workflow_job_section(text, "fleet-hub-container")
     assert (
-        "fleet_hub_container: ${{ github.event_name == 'merge_group' && 'true' || "
+        "fleet_hub_container: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || "
         "steps.filter.outputs.fleet_hub_container }}" in changes
     )
     paths = changes.split("            fleet_hub_container:\n", 1)[1]
@@ -691,7 +799,8 @@ def test_ci_workflow_filters_container_builds_without_scheduling_the_required_ma
     assert "schedule:" not in text[: text.index("jobs:")]
     assert "github.event_name == 'schedule'" not in text
     assert "needs: changes" in container
-    assert "if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in container
+    assert "needs.changes.outputs.fleet_hub_container == 'true'" in container
+    assert "needs.changes.outputs.docs_only != 'true'" in container
     assert "platform: [linux/amd64, linux/arm64]" in container
 
 
@@ -1643,7 +1752,7 @@ def test_ci_merge_groups_request_all_component_checks_without_path_filter():
     assert "        if: ${{ github.event_name != 'merge_group' }}\n" in filter_step
     for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
         assert (
-            f"      {flag}: ${{{{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}\n"
+            f"      {flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}\n"
             in changes
         )
 
@@ -1652,7 +1761,7 @@ def test_ci_canary_is_one_opt_in_trusted_main_job_with_minimal_permissions():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     canary = _workflow_job_section(text, "trusted-runner-canary")
     assert (
-        "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+        "github.event_name == 'push' && github.ref == 'refs/heads/main' && "
         "vars.BRIGADE_SELF_HOSTED == 'on' }}\n" in canary
     )
     assert "    runs-on:\n      group: brigade-trusted\n      labels: [self-hosted, linux, x64]\n" in canary
@@ -1660,7 +1769,7 @@ def test_ci_canary_is_one_opt_in_trusted_main_job_with_minimal_permissions():
     timeout = re.search(r"^    timeout-minutes: (\d+)$", canary, re.MULTILINE)
     assert timeout is not None and 0 < int(timeout[1]) <= 15
     assert "strategy:" not in canary
-    assert "needs:" not in canary
+    assert "needs: changes" in canary
     assert "continue-on-error" not in canary
     assert re.findall(r"uses: (.+)", canary) == ["actions/checkout@v7"]
     assert "        with:\n          persist-credentials: false\n" in canary
@@ -1700,7 +1809,8 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     job = _workflow_job_section(text, "windows-affected-tests")
     assert "name: windows-affected-tests" in job
-    assert "if: ${{ github.event_name == 'pull_request' }}" in job
+    assert "github.event_name == 'pull_request'" in job
+    assert "needs.changes.outputs.docs_only != 'true'" in job
     assert "runs-on: windows-latest" in job
     assert "timeout-minutes: 50" in job
     assert "timeout-minutes: 45" in job
@@ -1873,7 +1983,7 @@ def test_mesh_jobs_are_protected_and_path_filtered():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
     assert (
-        "mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
+        "mesh: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
         in changes
     )
     mesh_filter = changes.split("            mesh:\n", 1)[1].split("            code_graph:", 1)[0]
@@ -1923,7 +2033,7 @@ def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
     needs = {name: {"result": "success"} for name in names}
-    needs["changes"]["outputs"] = {"mesh": flag}
+    needs["changes"]["outputs"] = {"mesh": flag, "docs_only": "false"}
     needs[job] = {"result": "skipped"}
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     result = subprocess.run(
@@ -1951,3 +2061,300 @@ def test_mesh_checkouts_do_not_persist_credentials():
         checkout = re.search(r"uses: actions/checkout@[^\n]+\n((?:        [^\n]*\n)*)", section)
         assert checkout, job
         assert "persist-credentials: false" in checkout.group(1), job
+
+
+@pytest.fixture
+def history(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    (repo / "README.md").write_text("base\n")
+    (repo / "scripts").mkdir()
+    (repo / "scripts/ci_docs_only.py").write_text(SCRIPT.read_text())
+    git("add", ".")
+    git("commit", "-qm", "base")
+    return repo, git, git("rev-parse", "HEAD")
+
+
+def commit(repo, git, path, content="new\n"):
+    target = repo / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(content)
+    git("add", "--", path)
+    git("commit", "-qm", "change")
+    return git("rev-parse", "HEAD")
+
+
+def classify(repo, event, payload, sha, **environment):
+    event_path = repo.parent / "event.json"
+    output = repo.parent / "output.txt"
+    event_path.write_text(json.dumps(payload))
+    output.write_text("")
+    step = _workflow_step_section(
+        (ROOT / ".github/workflows/ci.yml").read_text(), "changes", "Classify authoritative event diff"
+    )
+    run = step.split("        run: ", 1)[1].split("\n      - ", 1)[0]
+    script = textwrap.dedent(run[2:]) if run.startswith("|\n") else run.strip()
+    runner_temp = repo.parent / "runner-temp"
+    runner_temp.mkdir(exist_ok=True)
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        cwd=repo,
+        env=dict(
+            os.environ,
+            GITHUB_EVENT_NAME=event,
+            GITHUB_EVENT_PATH=str(event_path),
+            GITHUB_SHA=sha,
+            GITHUB_OUTPUT=str(output),
+            RUNNER_TEMP=str(runner_temp),
+            **environment,
+        ),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    values = dict(line.split("=", 1) for line in output.read_text().splitlines())
+    assert values["docs_only"] in {"true", "false"}
+    assert values["reason"] in result.stdout
+    return values
+
+
+def test_workflow_classifier_uses_trusted_base_even_when_proposal_forges_result(history):
+    repo, git, base = history
+    git("switch", "-qc", "feature")
+    commit(
+        repo,
+        git,
+        "scripts/ci_docs_only.py",
+        "import os\nfrom pathlib import Path\n"
+        "output = 'docs_only=true\\nuncertain=false\\nreason=forged\\n'\n"
+        "print(output)\nPath(os.environ['GITHUB_OUTPUT']).write_text(output)\n",
+    )
+    feature = commit(repo, git, "src/runtime.py", "raise RuntimeError('proposal')\n")
+    git("switch", "-q", "main")
+    git("merge", "--no-ff", "-qm", "test merge", "feature")
+    head = git("rev-parse", "HEAD")
+    result = classify(repo, "pull_request", {"pull_request": {"head": {"sha": feature}, "base": {"sha": base}}}, head)
+    assert result == {"docs_only": "false", "uncertain": "false", "reason": "non-documentation-change"}
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "missing",
+        "broken",
+        "partial-output",
+        "directory",
+        pytest.param("symlink", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks")),
+        pytest.param("executable", marks=pytest.mark.skipif(os.name == "nt", reason="POSIX executable bits")),
+    ],
+)
+def test_workflow_classifier_unavailable_at_base_requires_full_ci(history, problem):
+    repo, git, _ = history
+    helper = repo / "scripts/ci_docs_only.py"
+    if problem in {"missing", "directory", "symlink"}:
+        helper.unlink()
+        if problem == "directory":
+            helper.mkdir()
+            (helper / "__init__.py").write_text("raise RuntimeError('not a regular helper')\n")
+        elif problem == "symlink":
+            helper.symlink_to("../README.md")
+    elif problem == "executable":
+        helper.chmod(0o755)
+    elif problem == "partial-output":
+        helper.write_text(
+            "import os\nfrom pathlib import Path\n"
+            "Path(os.environ['GITHUB_OUTPUT']).write_text('docs_only=true\\nuncertain=false\\nreason=partial\\n')\n"
+            "raise RuntimeError('load failure after output')\n"
+        )
+    else:
+        helper.write_text("invalid python syntax!\n")
+    git("add", "-A")
+    git("commit", "-qm", "base without usable classifier")
+    base = git("rev-parse", "HEAD")
+    # First install must not execute the newly added proposal helper either.
+    if problem == "missing":
+        commit(repo, git, "scripts/ci_docs_only.py", SCRIPT.read_text())
+    head = commit(repo, git, "docs/guide.md")
+    result = classify(repo, "push", {"before": base, "after": head}, head)
+    assert result == {"docs_only": "false", "uncertain": "true", "reason": "trusted-classifier-unavailable"}
+
+
+def test_workflow_classifier_excludes_checkout_and_pythonpath_imports(history):
+    repo, git, base = history
+    head = commit(repo, git, "docs/guide.md")
+    marker = repo.parent / "poison-imported"
+    poison = f"from pathlib import Path\nPath({str(marker)!r}).touch()\nraise RuntimeError('poison import')\n"
+    pythonpath = repo.parent / "pythonpath"
+    pythonpath.mkdir()
+    for directory in (repo, repo / "scripts", pythonpath):
+        for module in ("json.py", "subprocess.py", "sitecustomize.py"):
+            (directory / module).write_text(poison)
+    result = classify(repo, "push", {"before": base, "after": head}, head, PYTHONPATH=str(pythonpath))
+    assert result == {"docs_only": "true", "uncertain": "false", "reason": "documentation-only"}
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group", "push"])
+def test_authoritative_event_range_includes_all_changes(history, event):
+    repo, git, base = history
+    git("switch", "-qc", "feature")
+    feature = commit(repo, git, "docs/guide.md")
+    git("switch", "-q", "main")
+    # A stale PR base must not blame this unrelated code change on the PR.
+    main = commit(repo, git, "runtime.py")
+    git("merge", "--no-ff", "-qm", "test merge", "feature")
+    head = git("rev-parse", "HEAD")
+    payload = {
+        "pull_request": {"head": {"sha": feature}, "base": {"sha": base}},
+        "merge_group": {"base_sha": base, "head_sha": head},
+        "before": base,
+        "after": head,
+    }
+    result = classify(repo, event, payload, head)
+    assert result["docs_only"] == ("true" if event == "pull_request" else "false")
+    # Queue and main comparisons can also positively establish docs-only.
+    payload["merge_group"]["base_sha"] = main
+    payload["before"] = main
+    assert classify(repo, event, payload, head)["docs_only"] == "true"
+    payload["pull_request"]["head"]["sha"] = base
+    payload["merge_group"]["head_sha"] = base
+    payload["after"] = base
+    assert classify(repo, event, payload, head)["docs_only"] == "false"
+
+
+@pytest.mark.parametrize(
+    "path,expected",
+    [
+        ("README.md", True),
+        ("CHANGELOG.md", True),
+        ("CONTRIBUTING.md", True),
+        ("SECURITY.md", True),
+        ("docs/guide with spaces.md", True),
+        ("docs/diagram.png", True),
+        ("docs/phase-agent-mesh.md", False),
+        ("docs/AGENTS.md", False),
+        ("AGENTS.md", False),
+        ("src/brigade/templates/README.md", False),
+        ("scripts/guide.md", False),
+        ("tests/guide.md", False),
+        ("docs/example.py", False),
+        ("docs/settings.yml", False),
+        ("docs/diagram.svg", False),
+        (".github/workflows/ci.yml", False),
+        ("pyproject.toml", False),
+    ],
+)
+def test_documentation_allowlist(history, path, expected):
+    repo, git, base = history
+    head = commit(repo, git, path)
+    result = classify(repo, "push", {"before": base, "after": head}, head)
+    assert result["docs_only"] == str(expected).lower()
+
+
+def test_deletion_and_both_sides_of_renames(history):
+    repo, git, _ = history
+    base = commit(repo, git, "docs/old.md")
+    git("mv", "docs/old.md", "docs/new.md")
+    git("commit", "-qm", "rename docs")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+    base = head
+    git("mv", "docs/new.md", "code.py")
+    git("commit", "-qm", "rename to code")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    git("mv", "code.py", "docs/new.md")
+    git("commit", "-qm", "rename from code")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    git("rm", "docs/new.md")
+    git("commit", "-qm", "delete docs")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX file names, executable bits and symlinks")
+def test_nul_delimited_paths_and_unsafe_modes(history):
+    repo, git, base = history
+    head = commit(repo, git, "docs/-guide\nnotes.md")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "true"
+    base = head
+    (repo / "README.md").chmod(0o755)
+    git("add", "README.md")
+    git("commit", "-qm", "executable docs")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    (repo / "README.md").unlink()
+    (repo / "README.md").symlink_to("docs/-guide\nnotes.md")
+    git("add", "README.md")
+    git("commit", "-qm", "symlink docs")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+    base = head
+    git("rm", "README.md")
+    git("commit", "-qm", "delete symlink")
+    head = git("rev-parse", "HEAD")
+    assert classify(repo, "push", {"before": base, "after": head}, head)["docs_only"] == "false"
+
+
+@pytest.mark.parametrize("problem", ["missing", "zero", "invalid", "unavailable", "empty", "wrong-checkout", "event"])
+def test_uncertain_diff_requires_full_ci(history, problem):
+    repo, git, base = history
+    head = commit(repo, git, "docs/guide.md")
+    before = {"missing": None, "zero": "0" * 40, "invalid": "--all", "unavailable": "f" * 40}.get(problem, base)
+    payload = {"before": before, "after": head}
+    if problem == "empty":
+        payload["before"] = head
+    result = classify(
+        repo, "unknown" if problem == "event" else "push", payload, base if problem == "wrong-checkout" else head
+    )
+    assert result["docs_only"] == "false"
+    assert result["uncertain"] == "true"
+
+
+def test_pr_requires_two_parent_synthetic_merge(history):
+    repo, git, base = history
+    head = commit(repo, git, "docs/guide.md")
+    result = classify(repo, "pull_request", {"pull_request": {"head": {"sha": base}}}, head)
+    assert result["docs_only"] == "false"
+    assert result["uncertain"] == "true"
+
+
+def test_missing_base_is_fetched_by_object_id_in_a_shallow_checkout(history):
+    repo, git, base = history
+    for number in range(4):
+        head = commit(repo, git, f"docs/guide-{number}.md")
+    shallow = repo.parent / "shallow"
+    subprocess.run(["git", "clone", "-q", "--depth=2", repo.as_uri(), str(shallow)], check=True)
+    probe = subprocess.run(["git", "-C", str(shallow), "cat-file", "-e", base], capture_output=True)
+    assert probe.returncode != 0
+    result = classify(shallow, "push", {"before": base, "after": head}, head)
+    assert result["docs_only"] == "true"
+    assert result["uncertain"] == "false"
+
+
+@pytest.mark.parametrize("flag", ["false", "", None])
+def test_ci_gate_requires_classification_even_when_every_job_succeeded(flag):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    names = re.findall(r"^      - ([a-z0-9-]+)$", gate, re.MULTILINE)
+    needs = {name: {"result": "success"} for name in names}
+    needs["changes"]["outputs"] = {"docs_only": flag}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME="push"),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if flag == "false" else 1), result.stdout + result.stderr

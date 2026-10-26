@@ -742,6 +742,9 @@ def test_shadow_job_admission_requires_same_repository_pr(
 
     # Evaluate the literal job expression, with absent Actions properties empty.
     expression = re.sub(r"\bgithub\.[A-Za-z_][A-Za-z0-9_.]*", lookup, expression)
+    expression = expression.replace("needs.changes.result", repr("success"))
+    expression = expression.replace("needs.changes.outputs.docs_only", repr("false"))
+    expression = expression.replace("!cancelled()", "not cancelled()")
     expression = expression.replace("&&", "and").replace("||", "or")
     functions = {
         "always": lambda: True,
@@ -757,8 +760,9 @@ def test_shadow_job_is_read_only_and_outside_required_dag():
     match = re.search(r"^  pr-tier-shadow:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", text, re.M | re.S)
     assert match, "missing non-gating shadow job"
     job = match.group()
-    assert "needs: test-shards" in job
-    assert "always() && github.event_name == 'pull_request'" in job
+    assert "needs: [changes, test-shards]" in job
+    assert "!cancelled() && needs.changes.result == 'success'" in job
+    assert "github.event_name == 'pull_request'" in job
     assert "continue-on-error: true" in job
     assert "contents: read" in job and "actions: read" in job
     assert "persist-credentials: false" in job
