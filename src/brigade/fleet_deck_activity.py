@@ -134,7 +134,8 @@ def render_octopool_observation(view: deck.DeckView) -> str:
     window = f"{seconds // 3600}h" if seconds % 3600 == 0 else f"{seconds}s"
     labels = {
         "requests": ("request", "requests"),
-        "saved_github_requests": ("GitHub read saved", "GitHub reads saved"),
+        "cache_served_responses": ("cache-served response", "cache-served responses"),
+        "uncached_outcomes": ("uncached outcome", "uncached outcomes"),
         "fallbacks": ("fallback", "fallbacks"),
         "service_errors": ("service errors", "service errors"),
     }
@@ -151,6 +152,9 @@ def render_octopool_observation(view: deck.DeckView) -> str:
         "Pool-wide, includes clients outside this fleet.</p>"
         f'<p class="row-meta">{metrics or "No valid counters provided."}</p>'
         "<details><summary>Metric details</summary><p>Source: Octopool stats capture</p>"
+        "<p>Cache-served responses include cache hits and stale responses, including revalidations. "
+        "Uncached outcomes count responses served outside the cache. Neither counter measures upstream request savings. "
+        "Fallbacks count expected local fallbacks and do not necessarily indicate failure.</p>"
         + details
         + "</details></section>"
     )

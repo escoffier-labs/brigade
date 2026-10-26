@@ -457,7 +457,9 @@ class OctopoolObservation:
     window_seconds: int
     scope: str = "pool-wide"
     requests: int | None = None
-    saved_github_requests: int | None = None
+    saved_github_requests: int | None = None  # Historical cache-served alias, never upstream savings.
+    cache_served_responses: int | None = None
+    uncached_outcomes: int | None = None
     fallbacks: int | None = None
     service_errors: int | None = None
     eligible_cache_hit_rate: float | None = None
@@ -971,13 +973,24 @@ def _safe_display_text(value: object, *, limit: int = CLOUD_TEXT_LIMIT) -> str:
 
 def octopool_observation_from_snapshot(raw: object) -> OctopoolObservation | None:
     """Project only bounded capture provenance and allowlisted usage counters."""
-    names = ("requests", "saved_github_requests", "fallbacks", "service_errors")
+    names = (
+        "requests",
+        "saved_github_requests",
+        "cache_served_responses",
+        "uncached_outcomes",
+        "fallbacks",
+        "service_errors",
+    )
     if isinstance(raw, OctopoolObservation):
         raw = {
             "captured_at": raw.captured_at,
             "scope": raw.scope,
             "window": {"seconds": raw.window_seconds},
-            "pool_usage": {name: getattr(raw, name) for name in (*names, "eligible_cache_hit_rate")},
+            "pool_usage": {
+                name: getattr(raw, name)
+                for name in (*names, "eligible_cache_hit_rate")
+                if getattr(raw, name) is not None
+            },
         }
     if not isinstance(raw, Mapping) or raw.get("scope") != "pool-wide":
         return None
@@ -996,6 +1009,11 @@ def octopool_observation_from_snapshot(raw: object) -> OctopoolObservation | Non
         stamp = captured.astimezone(_UTC).isoformat()
     except (ValueError, OverflowError):
         return None
+    usage = dict(usage)
+    if "cache_served_responses" not in usage:
+        usage["cache_served_responses"] = usage.get("saved_github_requests")
+    if "uncached_outcomes" not in usage:
+        usage["uncached_outcomes"] = usage.get("backend_requests")
     counters = {
         name: value if type(value) is int and 0 <= value <= 2**53 - 1 else None
         for name in names
@@ -1008,6 +1026,8 @@ def octopool_observation_from_snapshot(raw: object) -> OctopoolObservation | Non
         window_seconds=seconds,
         requests=counters["requests"],
         saved_github_requests=counters["saved_github_requests"],
+        cache_served_responses=counters["cache_served_responses"],
+        uncached_outcomes=counters["uncached_outcomes"],
         fallbacks=counters["fallbacks"],
         service_errors=counters["service_errors"],
         eligible_cache_hit_rate=rate,

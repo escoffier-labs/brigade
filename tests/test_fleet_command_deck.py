@@ -382,8 +382,11 @@ def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_head
     visible = _visible_text(panel)
     assert "Captured" in visible and "2026-08-25T12:00:00+00:00" in visible
     assert "24h" in visible and "Pool-wide" in visible and "includes clients outside this fleet" in visible
-    assert "41 requests" in visible and "7 GitHub reads saved" in visible
+    assert "41 requests" in visible and "7 cache-served responses" in visible
     assert "2 fallbacks" in visible and "1 service errors" in visible
+    assert "GitHub reads saved" not in panel and "avoided GitHub" not in panel
+    assert "cache hits and stale responses" in panel
+    assert "expected local fallbacks" in panel
     assert "Source: Octopool stats capture" in panel
     assert "Eligible cache hit rate: 25.00%" in panel and "25.00%" not in visible
     assert "ignored-private-client" not in html and "untrusted window label" not in html
@@ -410,7 +413,7 @@ def test_octopool_renderer_revalidates_provided_counters_and_omits_invalid_value
     html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
     panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
     assert "8 requests" in panel
-    assert "GitHub reads saved" not in panel and "fallbacks" not in panel and "service errors" not in panel
+    assert "cache-served responses" not in panel and "service errors" not in panel
     assert "Eligible cache hit rate" not in panel
     assert "private-metadata" not in panel and "https://example.test/untrusted" not in panel
 
@@ -2021,3 +2024,15 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
         alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
         assert 'class="attention-kind">stale telemetry</span>' in alerts_page
+
+
+def test_octopool_prefers_canonical_cache_and_uncached_counters():
+    from brigade import fleet_deck_activity as activity
+
+    raw = _octopool_capture()
+    raw["pool_usage"].update(cache_served_responses=11, uncached_outcomes=30, backend_requests=99)
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), octopool_observation=raw)
+    html = activity.render_octopool_observation(view)
+    assert "11 cache-served responses" in html and "30 uncached outcomes" in html
+    assert "7 cache-served responses" not in html and "99 uncached" not in html
+    assert "reads saved" not in html and "requests avoided" not in html
