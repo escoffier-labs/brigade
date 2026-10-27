@@ -750,7 +750,7 @@ hub-chosen verification key. Exact objects (all fields required, no others):
 | key manifest, `/manifest` | `{v, hub, seq, created_at, keys, sig}` where each key is exactly `{principal, hub, kid, fingerprint}` |
 | cumulative revocation, `/revocation` | `{v, hub, seq, created_at, revocations, sig}` where each revocation is exactly `{principal, kid, compromised_from}` |
 | identity, `/hub-identity` | `{v, hub_id, hub_sig_pub, endpoint, require_sealed, max_envelope_bytes, envelope_versions, suites, backend, capabilities, created_at, seq, sig}` |
-| migration, `/hub-migration` | `{v, old_hub_id, new_hub_id, new_hub_sig_pub, endpoint, created_at, seq, sig}` |
+| migration, `/hub-migration` | `{v, old_hub_id, new_hub_id, new_hub_sig_pub, new_identity_seq, new_identity_sha256, endpoint, created_at, seq, sig}` |
 
 For every kind, remove only the top-level `sig` and sign
 `LABELS[label_name] + canonical(object_without_sig)`, where `label_name` is
@@ -828,7 +828,16 @@ Before signature verification or state changes:
   Migration requires distinct old/new ids, the stored old signer and the new
   served identity's exact id, key and endpoint. Its `created_at` is the
   identity supersession instant. It has its own `(kind, signer)` sequence
-  stream and never resets identity or manifest sequences.
+  stream and never resets identity or manifest sequences. `new_identity_seq`
+  has the same integer bounds as `seq`. `new_identity_sha256` is the unpadded
+  base64url encoding of the complete 32-byte SHA-256 digest of the signed new
+  identity object, including `sig`. The served new identity must match both
+  fields exactly before migration commits. Install that exact object as the
+  new signer's identity floor in the same transaction. Only then may later
+  statements advance it. If policy advanced before this client migrated, the
+  operator supplies a fresh old-key migration binding the served statement,
+  or the client fails closed. A higher new sequence alone is not a substitute
+  for the referenced digest.
 
 Acceptance is all-or-nothing, including key-manifest entries. Persist accepted
 objects, their complete digests and `(kind, signer)` marks in one transaction.
@@ -836,6 +845,13 @@ Here signer is the full SHA-256 of the signing public key.
 Across hubs preserve that signer's marks and continue its sequence stream for
 that kind. A different signer starts a distinct stream only after explicit
 anchor acceptance. Neither changing hub nor changing kind discards old marks.
+Hub publication also has one administrative counter per manifest kind,
+matching its existing opaque storage. Anchor replacement continues above that
+counter, even when the new signer's independent client stream has no mark.
+Persist the publication counter across anchor rotation and restart. Never
+derive authority from it. Identity server guards compare sequences within the
+same identity signer, while a new identity is admitted only by its authenticated
+migration or explicit operator acceptance and the bound identity floor.
 Every floor binds kind, signer, hub, minimum sequence and complete digest.
 A statement at that sequence must have that digest. A higher statement may
 satisfy the minimum only under the same authenticated scope and signer.
@@ -872,9 +888,12 @@ its original `observed`/`verified` provenance and acceptance evidence even when
 use is blocked. Check irreversible kid revocation first, then unresolved
 `changed` or `pending_binding`, then current-hub membership for observed keys,
 then require-verified. Relisting a member clears only `observed_not_member`.
-Neither membership nor fingerprint acceptance can revive a revoked kid, erase
-`changed`, or complete an invite binding. A replacement for a revoked kid
-needs a fresh key and explicit verification. Require-verified is checked at
+Membership cannot erase `changed`. Explicit operator acceptance of an exact,
+independently checked fingerprint may replace a nonrevoked changed head after
+validating the replacement's self-signature. Preserve the old records,
+revocations and acceptance evidence. Fingerprint acceptance cannot revive a
+revoked kid or complete `pending_binding`. A replacement for a revoked kid
+needs a fresh nonrevoked key and explicit verification. Require-verified is checked at
 every seal, open, reply link and spool transmission, including existing pins.
 It blocks observed use without erasing the pin or its history.
 
@@ -1811,6 +1830,16 @@ transition, never restoration of the old sequence, omitted fields or an older
 binary. Relaxing policy requires a separate operator decision. Existing schema
 version refusal remains the downgrade boundary. A staged candidate is not a
 current identity, cannot seed pins, and is never returned as active policy.
+Automatic client policy changes may only tighten confidentiality. A staged
+candidate must keep the same identity, endpoint, backend, suites and envelope
+versions, cannot add capabilities, cannot turn required sealing off, and
+cannot raise the envelope cap. Clients apply these restrictions even if a
+malicious Hub serves an inactive candidate as its current identity. A higher
+sequence does not authorize relaxation. Version 1 does not implement automatic
+remote relaxation. A future local operator-acceptance or independently signed
+activation protocol needs its own reviewed contract. Tightening early can
+reduce availability, but cannot authorize plaintext that the accepted policy
+previously forbade.
 Tests must kill/restart around every stage/activation boundary, attempt concurrent
 plaintext writes, simulate stale candidates and old runtime rollback, and
 check that advertised strictness always equals effective enforcement. This

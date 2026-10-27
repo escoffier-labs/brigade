@@ -165,7 +165,7 @@ bm1 known answers and all existing adversarial expectations intact.
 | Opus B / bootstrap dependency | `test_hub_fetch_requires_persisted_current_identity`: local custody works first, network accept/import refuses without identity and never trusts a new hub namespace from fetched content. A persisted observed identity retains its documented semantics. | 2, 2b |
 | Daybreak rollback / Opus C | `test_identity_origin_normalization_and_endpoint_mismatch`: case/default ports normalize consistently, invalid paths/userinfo/query/fragment/escapes/Unicode/trailing-dot/IPv6 zones fail, signed other origin or cross-origin redirect writes nothing. `test_bootstrap_policy_requires_seq_digest_floors`: id-only acceptance cannot claim fresh policy, old valid identity/membership below trusted floors fails, a later withheld statement remains an explicit limitation. | 2, 2b, 10 |
 | Astra 3 / Opus A / Fable lookup | `test_migration_crash_preserves_history_revocations_and_highwater`: kill before/after journal commit and reopen, observing exactly old/new generation with provenance, floors and `(kind, signer)` marks intact. Old membership replay and revoked-kid acceptance fail after restart. `test_migration_requires_fresh_kid_and_current_hub_membership`: same-kid rebind fails, predecessor-signed new pairs pass only in accepted lineage, no observed use before newly signed membership and carried-floor reconciliation. `test_record_for_original_hub_principal_kid_at_signed_time`: old mail finds immutable old record and intervals, with no rewriting of current-hub records. | 2, 2b, 5, 6 |
-| Astra 5 / trust-state precedence | `test_require_verified_blocks_existing_observed_pin`: seal/open/reply/spool drain refuse after policy change with provenance intact. `test_accept_cannot_unrevoke_kid`, `test_membership_relisting_cannot_clear_changed_or_pending_binding`: no acceptance or relisting clears those independent barriers. `test_mcp_automatic_continuity_has_no_operator_acceptance_tool`: normal messaging may persist validated automatic state, but cannot install an anchor or manually accept a changed identity. | 2, 5, 6 |
+| Astra 5 / trust-state precedence | `test_require_verified_blocks_existing_observed_pin`: seal/open/reply/spool drain refuse after policy change with provenance intact. `test_accept_cannot_unrevoke_kid`, `test_membership_relisting_cannot_clear_changed_or_pending_binding`: relisting never clears changed or pending binding, and fingerprint acceptance never revives a revoked kid or completes binding. `test_exact_fingerprint_accepts_nonrevoked_replacement`: explicit independent acceptance resolves changed after a nine-link chain or replacement of a revoked old key, while preserving old refusal evidence. `test_mcp_automatic_continuity_has_no_operator_acceptance_tool`: normal messaging may persist validated automatic state, but cannot install an anchor or manually accept a changed identity. | 2, 5, 6 |
 | Astra 4 / Opus D/E / Daybreak namespace | `test_response_loss_then_hub_migration_recovers_original_send`: validate old stored header, use recorded old hub/rc/deadline and recover original id before any B send. Include old request committing after first lookup, both sides of the identity fence, timeout/restart and uncertain stale-key retry. `test_plaintext_lookup_is_content_unverifiable`: never count a prior plaintext row as sealed delivery. `test_expired_attempt_never_reseals`: missing/expired attempt state cannot become a fresh send. | 4, 6, 7b |
 | Astra 7 / publication loss | `test_publish_response_loss_reconciles_exact_record_after_restart`: persist candidate, reconcile exact active/retired state, reject substitution/revocation and never regenerate due to timeout. `test_statement_upload_response_loss_reconciles_full_signed_digest`: identical rejected upload retry is reconciled by read-back, higher/different bytes are not assumed success. | 2, 2b, 3, 6 |
 | Astra 6 / receipt identity | `test_revoked_tombstone_matches_original_receipt_without_authority`: full and verified-header digests match prior qualifying receipt, tombstone has only historical evidence, no label/reply/authority power. `test_full_to_tombstone_replay_transition`: same id/header transitions once, changed id/header and tombstone-to-full resurrection fail, fresh tombstone cannot create qualifying history. | 5, 7b |
@@ -183,6 +183,19 @@ availability. Prefer staged restart for policy activation. In-process atomic
 activation needs stronger concurrency evidence and must preserve the same
 advertisement/enforcement invariant. Parent, Astra and Daybreak review settles
 these proposals before source changes.
+
+Revision 5 follow-up checks from Astra and Daybreak:
+
+- `test_migration_rejects_older_valid_new_identity_policy`: the old-key
+  migration binds the exact first new identity sequence and complete signed
+  digest. Commit its new-signer floor atomically. Another valid new-key policy
+  cannot substitute for that object, even with the same endpoint and key.
+- `test_manifest_anchor_rotation_continues_publication_counter`: K2's
+  publication advances above K1's per-kind Hub counter, while independent
+  client signer marks and old revocations remain intact after restart.
+- `test_inactive_relaxation_cannot_change_client_sealing`: serving a higher
+  sequence lax candidate cannot turn accepted strict policy into plaintext.
+  Staged candidates tighten only. Remote relaxation remains outside version 1.
 
 The first sealed-mail milestone needs opening, sealing, labels, docs,
 adversarial tests, Hub prerequisites and mixed-version handling together.
