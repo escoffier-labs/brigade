@@ -3,12 +3,30 @@
 const { spawn } = require('node:child_process');
 const { constants } = require('node:os');
 
+let launcher;
 try {
-  const launcher = require.resolve('@escoffier-labs/brigade/launcher.cjs');
-  if (process.platform !== 'win32') {
-    // Replace the bridge, preserving its PID, process group and controlling tty.
-    process.execve(process.execPath, [process.execPath, launcher, ...process.argv.slice(2)], process.env);
+  launcher = require.resolve('@escoffier-labs/brigade/launcher.cjs');
+} catch (error) {
+  console.error(`brigadestack: could not resolve dependency. Reinstall brigadestack with dependencies enabled. ${error.message}`);
+  process.exitCode = 1;
+  return;
+}
+
+if (process.platform !== 'win32') {
+  if (typeof process.execve !== 'function') {
+    console.error(`brigadestack: process replacement requires Node.js ^22.15.0 || >=23.11.0 with process.execve available (running ${process.version}).`);
+    process.exitCode = 1;
   } else {
+    try {
+      // Replace the bridge, preserving its PID, process group and controlling tty.
+      process.execve(process.execPath, [process.execPath, launcher, ...process.argv.slice(2)], process.env);
+    } catch (error) {
+      console.error(`brigadestack: could not replace process: ${error.message}`);
+      process.exitCode = 1;
+    }
+  }
+} else {
+  try {
     const child = spawn(process.execPath, [launcher, ...process.argv.slice(2)], {
       stdio: 'inherit', shell: false,
     });
@@ -28,15 +46,15 @@ try {
     }
     child.once('error', error => {
       cleanup();
-      console.error(`brigadestack: could not launch dependency: ${error.message}`);
+      console.error(`brigadestack: could not spawn dependency: ${error.message}`);
       process.exitCode = 1;
     });
     child.once('exit', (code, signal) => {
       cleanup();
       process.exitCode = code !== null ? code : 128 + (constants.signals[signal] || 1);
     });
+  } catch (error) {
+    console.error(`brigadestack: could not spawn dependency: ${error.message}`);
+    process.exitCode = 1;
   }
-} catch (error) {
-  console.error(`brigadestack: could not launch dependency. Reinstall brigadestack with dependencies enabled. ${error.message}`);
-  process.exitCode = 1;
 }

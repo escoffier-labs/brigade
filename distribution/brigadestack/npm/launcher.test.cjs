@@ -50,9 +50,52 @@ test('missing dependency fails with an installation diagnostic', t => {
   const result = spawnSync(process.execPath, [f.launcher], { encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, 1);
   assert.match(result.stderr, /brigadestack.*dependency|brigadestack.*install/i);
+  assert.match(result.stderr, /Reinstall brigadestack with dependencies enabled/);
 });
 
 const posix = { skip: process.platform === 'win32' && 'POSIX signal and process group contract', timeout: 12000 };
+
+test('missing execve reports the supported Node runtime instead of reinstall advice', posix, t => {
+  const f = fixture(t, "throw new Error('dependency must not run');");
+  const result = spawnSync(process.execPath, ['-e',
+    'process.execve = undefined; require(process.argv[1]);', f.launcher,
+  ], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /requires Node\.js \^22\.15\.0 \|\| >=23\.11\.0/);
+  assert.doesNotMatch(result.stderr, /reinstall/i);
+  assert.equal(result.stdout, '');
+});
+
+test('process replacement rejection reports its cause instead of reinstall advice', posix, t => {
+  const f = fixture(t, "throw new Error('dependency must not run');");
+  // execve exists but Node rejects replacing the process from a worker thread.
+  const result = spawnSync(process.execPath, ['-e', `
+    const { Worker } = require('node:worker_threads');
+    new Worker(process.argv[1]).on('exit', code => { process.exitCode = code; });
+  `, f.launcher], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, 1, result.stderr);
+  assert.match(result.stderr, /brigadestack: could not replace process: .*worker/i);
+  assert.doesNotMatch(result.stderr, /reinstall/i);
+  assert.equal(result.stdout, '');
+});
+
+for (const executable of ['missing', 'invalid']) {
+  test(`Windows ${executable} executable reports a spawn error instead of reinstall advice`, t => {
+    const f = fixture(t, "throw new Error('dependency must not run');");
+    // Exercise the Windows branch with real spawn errors on any development host.
+    const execPath = executable === 'missing' ? path.join(f.root, 'missing-node') : null;
+    const result = spawnSync(process.execPath, ['-e', `
+      Object.defineProperty(process, 'platform', { value: 'win32' });
+      process.execPath = ${JSON.stringify(execPath)};
+      require(process.argv[1]);
+    `, f.launcher], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(result.status, 1, result.stderr);
+    assert.match(result.stderr, /brigadestack: could not spawn dependency:/);
+    assert.match(result.stderr, executable === 'missing' ? /ENOENT/ : /string.*null/is);
+    assert.doesNotMatch(result.stderr, /reinstall/i);
+    assert.equal(result.stdout, '');
+  });
+}
 
 for (const delivery of ['pid', 'group']) {
   for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
