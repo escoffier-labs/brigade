@@ -505,7 +505,9 @@ Files:
 
 Current foundation status: the common Hub storage guard refuses plaintext
 replies to retained sealed/tombstoned parents even with plaintext optional,
-including legacy retry replays. After parent deletion, only an existing
+including legacy retry replays. Pre-upgrade plaintext replies already stored
+remain readable under existing retention and are not retroactively encrypted
+or quarantined. After parent deletion, only an existing
 detached reply with an exact non-null stored payload hash can be retried.
 New missing-parent replies and ambiguous null-hash retries are refused. The
 other prerequisites above remain open. This storage boundary does not

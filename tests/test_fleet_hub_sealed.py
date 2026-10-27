@@ -281,7 +281,51 @@ def legacy_hub(tmp_path):
 
 
 @pytest.mark.parametrize("entry", ["reply", "send"])
-@pytest.mark.parametrize("variation", ["same", "body", "parent", "new", "null_hash"])
+@pytest.mark.parametrize("parent_kind", ["plaintext", "sealed", "content_expired"])
+def test_plaintext_retry_conflict_hides_foreign_parent_presence(hub, entry, parent_kind):
+    if parent_kind == "plaintext":
+        foreign = messages.send(hub, {"to": "node-a", "subject": "Foreign", "body": "Private"}, sender="node-c")
+    else:
+        foreign = send(hub, envelope("node-c", "node-a"), caller="node-c")
+        if parent_kind == "content_expired":
+            messages.ack(hub, foreign["id"], recipient="node-a")
+            hub.execute(
+                "UPDATE fleet_messages SET acked_at=? WHERE id=?",
+                ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(), foreign["id"]),
+            )
+            hub.commit()
+            foreign = lookup(hub, caller="node-c")[1]["message"]
+        assert foreign["content_state"] == parent_kind
+    raw = {"subject": "Ordinary", "body": "Accepted", "client_id": "own-ordinary"}
+    accepted = messages.send(hub, {"to": "node-a", **raw}, sender="node-b")
+    # A NULL reply_to makes reply() reach _send through its retry fallback.
+    assert accepted["reply_to"] is None
+    before = "\n".join(hub.iterdump())
+
+    def retry(parent_id, payload):
+        if entry == "reply":
+            return messages.reply(hub, {"id": parent_id, **payload}, sender="node-b")
+        return messages.send(hub, {"to": "node-a", **payload}, sender="node-b", reply_to=parent_id)
+
+    errors = []
+    for parent_id in (foreign["id"], foreign["id"] + 100):
+        with pytest.raises(messages.MessageError) as caught:
+            retry(parent_id, raw)
+        errors.append((type(caught.value), caught.value.code, getattr(caught.value, "message_id", None)))
+        assert "\n".join(hub.iterdump()) == before
+    assert errors == [(messages.MessageConflict, "message_client_id_conflict", accepted["id"])] * 2
+
+    fresh = {**raw, "client_id": "never-accepted"}
+    if entry == "reply":
+        assert retry(foreign["id"], fresh) is None
+    else:
+        with pytest.raises(messages.MessageError, match="reply_to must identify"):
+            retry(foreign["id"], fresh)
+    assert "\n".join(hub.iterdump()) == before
+
+
+@pytest.mark.parametrize("entry", ["reply", "send"])
+@pytest.mark.parametrize("variation", ["same", "body", "parent", "foreign_parent", "new", "null_hash"])
 def test_detached_plaintext_reply_retry_requires_original_hash(legacy_hub, entry, variation):
     hub = legacy_hub
     parent = messages.send(hub, {"to": "node-b", "subject": "Parent", "body": "Old"}, sender="node-a")
@@ -307,6 +351,10 @@ def test_detached_plaintext_reply_retry_requires_original_hash(legacy_hub, entry
         raw = {**raw, "body": "Changed"}
     elif variation == "parent":
         parent_id += 100
+    elif variation == "foreign_parent":
+        fleet_hub.add_node(hub, "node-c")
+        foreign = messages.send(hub, {"to": "node-c", "subject": "Foreign", "body": "Private"}, sender="node-a")
+        parent_id = foreign["id"]
     elif variation == "new":
         raw = {**raw, "client_id": "never-accepted"}
     elif variation == "null_hash":
@@ -315,7 +363,7 @@ def test_detached_plaintext_reply_retry_requires_original_hash(legacy_hub, entry
     before = "\n".join(hub.iterdump())
     if variation == "same":
         assert retry(parent_id, raw) == detached
-    elif variation in ("body", "parent"):
+    elif variation in ("body", "parent", "foreign_parent"):
         with pytest.raises(messages.MessageConflict) as caught:
             retry(parent_id, raw)
         assert caught.value.code == "message_client_id_conflict"

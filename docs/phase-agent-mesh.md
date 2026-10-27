@@ -99,8 +99,10 @@ integration. Foundation storage does not establish a deployed sealed-mail flow.
 
 Current foundation status: the common Hub storage guard refuses plaintext
 replies to retained sealed or `content_expired` parents even with plaintext
-optional, including retries of legacy plaintext rows. After retention deletes
-a parent, its former content state cannot be classified. An existing detached
+optional, including retries of legacy plaintext rows. Pre-upgrade plaintext
+replies already stored remain readable under existing retention and are not
+retroactively encrypted or quarantined. After retention deletes a parent,
+its former content state cannot be classified. An existing detached
 plaintext reply can be retried only with its exact non-null stored payload
 hash. New replies to missing parents and ambiguous null-hash retries are
 refused. This does not establish deployed enforcement or an end-to-end

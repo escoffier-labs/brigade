@@ -753,12 +753,11 @@ def _send(
             if not _sqlite_integer(reply_to):
                 raise MessageError("reply_to must be a positive integer within SQLite's range")
             original = _fetch(conn, reply_to, storage_policy=storage_policy)
+            if original is not None and (original["recipient"] != sender or original["sender"] != recipient):
+                original = None
             plaintext_parent_missing = original is None
-            if original is not None:
-                if original["recipient"] != sender or original["sender"] != recipient:
-                    raise MessageError("reply_to must identify an inbox message from the recipient")
-                if original.get("content_state") in ("sealed", "content_expired"):
-                    raise MessageError("a sealed parent requires a sealed reply", code="message_sealing_required")
+            if original is not None and original.get("content_state") in ("sealed", "content_expired"):
+                raise MessageError("a sealed parent requires a sealed reply", code="message_sealing_required")
         existing = conn.execute(
             "SELECT id,payload_hash FROM fleet_messages WHERE sender=? AND client_id=?", (sender, client_id)
         ).fetchone()
