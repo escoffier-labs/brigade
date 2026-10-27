@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Brigade Stack bridge packages add `brigadestack` install names and commands backed by the existing stable Brigade 0.30.0 packages, preserving current commands and workspace formats.
+
 - Successful manifest-backed card outcomes feed memory reflection with receipt evidence and original verification timestamps. Capture, reflection, and reviewed proposals reject support whose card bindings or retained receipts have changed, without editing canonical cards.
 
 - Message replies can bound spool-lock acquisition while preserving the default blocking behavior.
