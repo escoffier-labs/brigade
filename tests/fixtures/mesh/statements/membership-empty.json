@@ -1,0 +1,19 @@
+{
+  "kind": "membership",
+  "provenance": "Synthetic public vector; Ed25519 pyca, stdlib json and hashlib; no Brigade helpers.",
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "public_key_fingerprint": "KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA",
+  "signature": "ogiL5p4piErgW8NwvCnmIq7TMKVn3FWhG4pzvcmqrfC_tFixNV_fltcRSJREiTeJtdy_qG01kqfgE7ZKKLesBw",
+  "signed_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"members\":[],\"seq\":9007199254740991,\"sig\":\"ogiL5p4piErgW8NwvCnmIq7TMKVn3FWhG4pzvcmqrfC_tFixNV_fltcRSJREiTeJtdy_qG01kqfgE7ZKKLesBw\",\"v\":1}",
+  "signed_sha256_hex": "ee66cbc92063a7879dcb82260541a13363c1f7da9f164fbf12e1d9a8e9f039a2",
+  "signing_input_hex": "627269676164652d6d6573682f76312f6d656d62657273686970007b22637265617465645f6174223a22323032362d30312d30325430333a30343a30355a222c22687562223a22685f675631377354705458494c345373504c766976447977222c226d656d62657273223a5b5d2c22736571223a393030373139393235343734303939312c2276223a317d",
+  "statement": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "hub": "h_gV17sTpTXIL4SsPLvivDyw",
+    "members": [],
+    "seq": 9007199254740991,
+    "sig": "ogiL5p4piErgW8NwvCnmIq7TMKVn3FWhG4pzvcmqrfC_tFixNV_fltcRSJREiTeJtdy_qG01kqfgE7ZKKLesBw",
+    "v": 1
+  },
+  "unsigned_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"members\":[],\"seq\":9007199254740991,\"v\":1}"
+}

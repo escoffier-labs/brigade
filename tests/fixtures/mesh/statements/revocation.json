@@ -1,0 +1,25 @@
+{
+  "kind": "revocation",
+  "provenance": "Synthetic public vector; Ed25519 pyca, stdlib json and hashlib; no Brigade helpers.",
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "public_key_fingerprint": "KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA",
+  "signature": "chtCVieSmhcYec5x6N8rkhRbaDUDs0Ddk3ZXeK4J6XLKXiGkYbT8yqqCHfWppw17NXikOSQa-T3oXSvfRJM6Dw",
+  "signed_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"revocations\":[{\"compromised_from\":\"2026-01-01T01:02:03.123456+02:00\",\"kid\":\"k1_AAECAwQFBgcICQoLDA0ODw\",\"principal\":\"test-node\"}],\"seq\":0,\"sig\":\"chtCVieSmhcYec5x6N8rkhRbaDUDs0Ddk3ZXeK4J6XLKXiGkYbT8yqqCHfWppw17NXikOSQa-T3oXSvfRJM6Dw\",\"v\":1}",
+  "signed_sha256_hex": "7b1d1c1e58b84c34b8b366e2eb56aa644e2ec0a9f1f3bad23ceeebd93c522dfa",
+  "signing_input_hex": "627269676164652d6d6573682f76312f7265766f636174696f6e007b22637265617465645f6174223a22323032362d30312d30325430333a30343a30355a222c22687562223a22685f675631377354705458494c345373504c766976447977222c227265766f636174696f6e73223a5b7b22636f6d70726f6d697365645f66726f6d223a22323032362d30312d30315430313a30323a30332e3132333435362b30323a3030222c226b6964223a226b315f41414543417751464267634943516f4c4441304f4477222c227072696e636970616c223a22746573742d6e6f6465227d5d2c22736571223a302c2276223a317d",
+  "statement": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "hub": "h_gV17sTpTXIL4SsPLvivDyw",
+    "revocations": [
+      {
+        "compromised_from": "2026-01-01T01:02:03.123456+02:00",
+        "kid": "k1_AAECAwQFBgcICQoLDA0ODw",
+        "principal": "test-node"
+      }
+    ],
+    "seq": 0,
+    "sig": "chtCVieSmhcYec5x6N8rkhRbaDUDs0Ddk3ZXeK4J6XLKXiGkYbT8yqqCHfWppw17NXikOSQa-T3oXSvfRJM6Dw",
+    "v": 1
+  },
+  "unsigned_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"revocations\":[{\"compromised_from\":\"2026-01-01T01:02:03.123456+02:00\",\"kid\":\"k1_AAECAwQFBgcICQoLDA0ODw\",\"principal\":\"test-node\"}],\"seq\":0,\"v\":1}"
+}

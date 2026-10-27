@@ -1,0 +1,26 @@
+{
+  "kind": "manifest",
+  "provenance": "Synthetic public vector; Ed25519 pyca, stdlib json and hashlib; no Brigade helpers.",
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "public_key_fingerprint": "KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA",
+  "signature": "qMXijCdlRUPA7eZatg3Tj3_XTSBgqFHbbu3SqgInwBF1TXDGg6s_gtLO1QO8z1_XxmcNCY3u1waNeKXepGKfCA",
+  "signed_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"keys\":[{\"fingerprint\":\"KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"kid\":\"k1_AAECAwQFBgcICQoLDA0ODw\",\"principal\":\"test-node\"}],\"seq\":0,\"sig\":\"qMXijCdlRUPA7eZatg3Tj3_XTSBgqFHbbu3SqgInwBF1TXDGg6s_gtLO1QO8z1_XxmcNCY3u1waNeKXepGKfCA\",\"v\":1}",
+  "signed_sha256_hex": "f86dacaa651764304722dfb9f12d1a0337041665c828b3d8818404494a990ebf",
+  "signing_input_hex": "627269676164652d6d6573682f76312f6d616e6966657374007b22637265617465645f6174223a22323032362d30312d30325430333a30343a30355a222c22687562223a22685f675631377354705458494c345373504c766976447977222c226b657973223a5b7b2266696e6765727072696e74223a224b5a44562d564a32552d4d4e44552d594155462d33354f332d364b364b2d573436322d4d554a562d524134362d544e33552d51475a4f2d564d49482d4f434741222c22687562223a22685f675631377354705458494c345373504c766976447977222c226b6964223a226b315f41414543417751464267634943516f4c4441304f4477222c227072696e636970616c223a22746573742d6e6f6465227d5d2c22736571223a302c2276223a317d",
+  "statement": {
+    "created_at": "2026-01-02T03:04:05Z",
+    "hub": "h_gV17sTpTXIL4SsPLvivDyw",
+    "keys": [
+      {
+        "fingerprint": "KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA",
+        "hub": "h_gV17sTpTXIL4SsPLvivDyw",
+        "kid": "k1_AAECAwQFBgcICQoLDA0ODw",
+        "principal": "test-node"
+      }
+    ],
+    "seq": 0,
+    "sig": "qMXijCdlRUPA7eZatg3Tj3_XTSBgqFHbbu3SqgInwBF1TXDGg6s_gtLO1QO8z1_XxmcNCY3u1waNeKXepGKfCA",
+    "v": 1
+  },
+  "unsigned_canonical_ascii": "{\"created_at\":\"2026-01-02T03:04:05Z\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"keys\":[{\"fingerprint\":\"KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA\",\"hub\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"kid\":\"k1_AAECAwQFBgcICQoLDA0ODw\",\"principal\":\"test-node\"}],\"seq\":0,\"v\":1}"
+}

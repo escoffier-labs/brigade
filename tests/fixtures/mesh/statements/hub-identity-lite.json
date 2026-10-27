@@ -1,0 +1,30 @@
+{
+  "kind": "hub-identity",
+  "provenance": "Synthetic public vector; Ed25519 pyca, stdlib json and hashlib; no Brigade helpers.",
+  "public_key": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "public_key_fingerprint": "KZDV-VJ2U-MNDU-YAUF-35O3-6K6K-W462-MUJV-RA46-TN3U-QGZO-VMIH-OCGA",
+  "signature": "xi9YeaeYHWmSazlLyDJTbuWQyPrrn-1QA6nrqhdFfZr3tvmRJc-d9DZYi9sIJXbJxIT4yNV_IC2H20G6jTgzBw",
+  "signed_canonical_ascii": "{\"backend\":\"hub-lite\",\"capabilities\":[],\"created_at\":\"2026-01-02T03:04:05Z\",\"endpoint\":\"https://example.invalid:8443\",\"envelope_versions\":[1],\"hub_id\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"hub_sig_pub\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"max_envelope_bytes\":32768,\"require_sealed\":true,\"seq\":3,\"sig\":\"xi9YeaeYHWmSazlLyDJTbuWQyPrrn-1QA6nrqhdFfZr3tvmRJc-d9DZYi9sIJXbJxIT4yNV_IC2H20G6jTgzBw\",\"suites\":[\"bm1\"],\"v\":1}",
+  "signed_sha256_hex": "8c014763fa9d246f48bef57c9424e151d65040606d927bbfdf34985ddc63cf90",
+  "signing_input_hex": "627269676164652d6d6573682f76312f6875622d6964656e74697479007b226261636b656e64223a226875622d6c697465222c226361706162696c6974696573223a5b5d2c22637265617465645f6174223a22323032362d30312d30325430333a30343a30355a222c22656e64706f696e74223a2268747470733a2f2f6578616d706c652e696e76616c69643a38343433222c22656e76656c6f70655f76657273696f6e73223a5b315d2c226875625f6964223a22685f675631377354705458494c345373504c766976447977222c226875625f7369675f707562223a2241364548765f504f454c3464634e3059353076416d57666b316a436270513166486479475a424a564d6267222c226d61785f656e76656c6f70655f6279746573223a33323736382c22726571756972655f7365616c6564223a747275652c22736571223a332c22737569746573223a5b22626d31225d2c2276223a317d",
+  "statement": {
+    "backend": "hub-lite",
+    "capabilities": [],
+    "created_at": "2026-01-02T03:04:05Z",
+    "endpoint": "https://example.invalid:8443",
+    "envelope_versions": [
+      1
+    ],
+    "hub_id": "h_gV17sTpTXIL4SsPLvivDyw",
+    "hub_sig_pub": "A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+    "max_envelope_bytes": 32768,
+    "require_sealed": true,
+    "seq": 3,
+    "sig": "xi9YeaeYHWmSazlLyDJTbuWQyPrrn-1QA6nrqhdFfZr3tvmRJc-d9DZYi9sIJXbJxIT4yNV_IC2H20G6jTgzBw",
+    "suites": [
+      "bm1"
+    ],
+    "v": 1
+  },
+  "unsigned_canonical_ascii": "{\"backend\":\"hub-lite\",\"capabilities\":[],\"created_at\":\"2026-01-02T03:04:05Z\",\"endpoint\":\"https://example.invalid:8443\",\"envelope_versions\":[1],\"hub_id\":\"h_gV17sTpTXIL4SsPLvivDyw\",\"hub_sig_pub\":\"A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg\",\"max_envelope_bytes\":32768,\"require_sealed\":true,\"seq\":3,\"suites\":[\"bm1\"],\"v\":1}"
+}

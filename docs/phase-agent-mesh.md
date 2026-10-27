@@ -1130,7 +1130,9 @@ trailing DNS dot, use ASCII DNS labels (including already encoded `xn--`
 labels), and do no implicit Unicode/IDNA conversion. DNS labels have 1 through
 63 characters, start/end with an ASCII letter or digit, and otherwise contain
 only letters, digits or hyphens, with at most 253 host characters. Reject an
-all-numeric/dotted host unless it is the IPv4 form below. Bound the normalized
+all-numeric/dotted or legacy hexadecimal address-like host unless it is the
+IPv4 form below. A hexadecimal label with a non-address DNS suffix remains a
+DNS name. Bound the normalized
 origin to 2048 ASCII bytes. IPv4 uses four decimal
 octets without leading zeros. Bracketed IPv6 has no zone id and renders its
 compressed lowercase address. Ports are decimal 1 through 65535, no leading
