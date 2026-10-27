@@ -430,4 +430,23 @@ _SHARED_IMPORTS: dict[str, tuple[str, ...]] = {
     for name in _SHARED_IMPORT_NAMES
 }
 
+
+def _forwarded_property(name: str) -> property:
+    def get(module: _FacadeModule) -> _Any:
+        return module.__getattr__(name)
+
+    def set(module: _FacadeModule, value: _Any) -> None:
+        module.__setattr__(name, value)
+
+    def delete(module: _FacadeModule) -> None:
+        module.__delattr__(name)
+
+    return property(get, set, delete)
+
+
+# Forwarded names are data descriptors, not facade dictionary entries. Attribute
+# tools can therefore save and restore live values without deleting the owner.
+for _name in (*_OWNERS, *_SHARED_IMPORTS):
+    setattr(_FacadeModule, _name, _forwarded_property(_name))
+
 _sys.modules[__name__].__class__ = _FacadeModule

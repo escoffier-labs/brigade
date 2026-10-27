@@ -57,22 +57,41 @@ def test_facade_matches_every_top_level_name_from_main_aboyeur() -> None:
 def test_facade_monkeypatches_forward_to_owning_module(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(PATCHED_FACADE_NAMES) >= 15
     for name in PATCHED_FACADE_NAMES:
+        owner = _owner_module(name)
+        original = getattr(owner, name)
         sentinel = object()
-        monkeypatch.setattr(aboyeur, name, sentinel)
-        assert getattr(_owner_module(name), name) is sentinel
+        with monkeypatch.context() as patch:
+            patch.setattr(aboyeur, name, sentinel)
+            assert getattr(owner, name) is sentinel
+        assert getattr(owner, name) is original
+        assert getattr(aboyeur, name) is original
 
 
 @pytest.mark.parametrize("name", ("os", "proc"))
 def test_facade_monkeypatches_broadcast_shared_imports(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    original = getattr(aboyeur, name)
     sentinel = object()
-    monkeypatch.setattr(aboyeur, name, sentinel)
+    with monkeypatch.context() as patch:
+        patch.setattr(aboyeur, name, sentinel)
+        for module_name in aboyeur._SHARED_IMPORTS[name]:
+            module = importlib.import_module(f"{aboyeur.__name__}.{module_name}")
+            assert getattr(module, name) is sentinel
+        assert name not in vars(aboyeur)
+        first = importlib.import_module(f"{aboyeur.__name__}.{aboyeur._SHARED_IMPORTS[name][0]}")
+        replacement = object()
+        with monkeypatch.context() as direct:
+            direct.setattr(first, name, replacement)
+            assert getattr(aboyeur, name) is replacement
+        assert getattr(aboyeur, name) is sentinel
     for module_name in aboyeur._SHARED_IMPORTS[name]:
         module = importlib.import_module(f"{aboyeur.__name__}.{module_name}")
-        assert getattr(module, name) is sentinel
+        assert getattr(module, name) is original
+    assert getattr(aboyeur, name) is original
 
 
 def test_cross_module_calls_read_live_owner_attributes(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(aboyeur, "_read_only_rules", lambda: "LIVE-PATCH-MARKER")
+    monkeypatch.setattr(_owner_module("_read_only_rules"), "_read_only_rules", lambda: "LIVE-PATCH-MARKER")
+    assert aboyeur._read_only_rules() == "LIVE-PATCH-MARKER"
     roster = Roster(
         orchestrator="chef",
         agents={
@@ -98,6 +117,30 @@ def test_facade_shared_import_assignment_reads_back(monkeypatch: pytest.MonkeyPa
     import sys as real_sys
 
     assert aboyeur.sys is real_sys
+
+
+@pytest.mark.parametrize("name", ("_read_only_rules", "proc"))
+def test_facade_deletion_and_missing_attribute_errors(name: str) -> None:
+    modules = (
+        [_owner_module(name)]
+        if name in aboyeur._OWNERS
+        else [importlib.import_module(f"{aboyeur.__name__}.{part}") for part in aboyeur._SHARED_IMPORTS[name]]
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        for module in modules:
+            patch.setattr(module, name, getattr(module, name))
+        delattr(aboyeur, name)
+        assert all(not hasattr(module, name) for module in modules)
+        with pytest.raises(AttributeError, match=name):
+            getattr(aboyeur, name)
+        with pytest.raises(AttributeError, match=name):
+            delattr(aboyeur, name)
+    assert getattr(aboyeur, name) is getattr(modules[0], name)
+    missing = "missing_facade_attribute"
+    with pytest.raises(AttributeError, match=missing):
+        getattr(aboyeur, missing)
+    with pytest.raises(AttributeError, match=missing):
+        delattr(aboyeur, missing)
 
 
 def test_direct_worker_finish_imports_first_without_orchestrator_cycle() -> None:
