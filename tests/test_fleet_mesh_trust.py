@@ -1110,6 +1110,87 @@ def test_next_actual_write_reaps_safe_orphan_without_opening_it(trust, home, mon
     assert state["marks"]["membership:" + signer()]["digest"] == digest(raw)
 
 
+@pytest.mark.parametrize("extra", [0, 1, 3], ids=["exact-cap", "cap-plus-one", "bounded-scan"])
+def test_directory_entry_capacity_precedes_cleanup_and_publication(trust, home, monkeypatch, extra):
+    bootstrap(trust, home)
+    orphan = abandoned_trust_temp(home)
+    directory = saved(home).parent
+    for name, mode in [("unrelated", 0o600), ("." + "b" * 32 + ".tmp", 0o600), (".trust-" + "c" * 32 + ".tmp", 0o640)]:
+        path = directory / name
+        path.write_bytes(b"not a safe trust orphan")
+        path.chmod(mode)
+    for index in range(extra):
+        (directory / f"extra-{index}").write_bytes(b"unrelated entry")
+    before = {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()}
+    cap = 5  # Snapshot, safe orphan, unrelated file, custody temporary and unsafe trust temporary.
+    monkeypatch.setattr(trust, "_MAX_DIRECTORY_ENTRIES", cap, raising=False)
+    original_names = dirfd.child_names
+    original_open = dirfd.open_child_file
+    original_unlink = dirfd.unlink_child
+    original_replace = dirfd.replace_children
+    scans, mutations = [], []
+
+    def names(parent, limit):
+        result = original_names(parent, limit)
+        scans.append(len(result))
+        return result
+
+    def open_child(parent, name, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            mutations.append("create")
+        assert name != orphan.name, "cleanup opened orphan contents"
+        return original_open(parent, name, flags, *args, **kwargs)
+
+    def unlink(*args, **kwargs):
+        mutations.append("unlink")
+        return original_unlink(*args, **kwargs)
+
+    def replace(*args, **kwargs):
+        mutations.append("replace")
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "child_names", names)
+    monkeypatch.setattr(dirfd, "open_child_file", open_child)
+    monkeypatch.setattr(dirfd, "unlink_child", unlink)
+    monkeypatch.setattr(dirfd, "replace_children", replace)
+    raw = signed(seq=2)
+    if extra:
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+            accept(trust, home, raw)
+        assert mutations == []
+        assert {path.name: (path.stat().st_ino, path.read_bytes()) for path in directory.iterdir()} == before
+        state = trust.load_trust(brigade_home=home).data
+        assert state["objects"] == state["marks"] == state["conflicts"] == {}
+    else:
+        assert accept(trust, home, raw).status == "accepted"
+        assert not orphan.exists()
+        for name, contents in before.items():
+            if name not in {orphan.name, saved(home).name}:
+                path = directory / name
+                assert (path.stat().st_ino, path.read_bytes()) == contents
+        state = trust.load_trust(brigade_home=home).data
+        assert state["generation"] == json.loads(before[saved(home).name][1])["generation"] + 1
+        assert set(state["objects"]) == {digest(raw)}
+    assert scans and max(scans) <= cap + 1
+
+
+def test_overfull_directory_load_and_replay_do_not_enumerate(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    raw = signed()
+    accept(trust, home, raw)
+    orphan = abandoned_trust_temp(home)
+    before = saved(home).read_bytes()
+    monkeypatch.setattr(trust, "_MAX_DIRECTORY_ENTRIES", 1, raising=False)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("load or replay enumerated an overfull directory")
+
+    monkeypatch.setattr(dirfd, "child_names", forbidden)
+    assert digest(raw) in trust.load_trust(brigade_home=home).data["objects"]
+    assert accept(trust, home, raw).status == "replay"
+    assert orphan.exists() and saved(home).read_bytes() == before
+
+
 def test_readonly_load_and_replay_leave_safe_orphan_and_snapshot_unchanged(trust, home, monkeypatch):
     bootstrap(trust, home)
     raw = signed()

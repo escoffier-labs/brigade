@@ -34,7 +34,6 @@ from pathlib import Path
 import re
 import secrets
 import stat
-import sys
 import time
 from typing import Any, Iterator
 
@@ -47,6 +46,9 @@ _ORDINARY_BYTES = 56 * 1024 * 1024
 _MAX_OBJECTS = 4096
 _MAX_CONFLICTS = 4096
 _MAX_ENTRIES = 8192
+# Bound shared-custody directory enumeration independently of snapshot bytes.
+# Every name counts; read at most this cap plus one before any cleanup or write.
+_MAX_DIRECTORY_ENTRIES = 65_536
 _MAX_STRING = 2 * 1024 * 1024
 _MAX_SEQUENCE = 2**53 - 1
 _LOCK_SECONDS = 10.0
@@ -569,9 +571,11 @@ def _flush(descriptor: int) -> None:
 
 def _reap_trust_temporaries(descriptor: int) -> None:
     """Remove safe crash leftovers under the directory lock, without opening them."""
+    names = dirfd.child_names(descriptor, _MAX_DIRECTORY_ENTRIES + 1)
+    _require(len(names) <= _MAX_DIRECTORY_ENTRIES, "mesh_trust_capacity")
     removed = False
     try:
-        for name in dirfd.child_names(descriptor, sys.maxsize):
+        for name in names:
             if not re.fullmatch(r"\.trust-[0-9a-f]{32}\.tmp", name, re.ASCII):
                 continue
             try:
