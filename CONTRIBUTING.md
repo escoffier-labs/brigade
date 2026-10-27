@@ -128,6 +128,14 @@ pip install -e ".[dev,grokbot]"
 
 On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails. A virtual environment avoids that.
 
+The npm launcher tests in `tests/test_brigadestack_distribution.py` require Node.js
+`^22.15.0 || >=23.11.0` on `PATH`. Node 22.15.0 is the tested minimum and is
+installed explicitly in the Python test shards and affected Windows test job.
+On POSIX, the launcher uses `process.execve` to preserve signals and terminal job
+control. An older Node runtime fails these contracts. Upgrade Node before
+running the launcher tests locally. When Node is absent, the existing no-Node
+skips still apply.
+
 **Docs-only changes:** CI retains content-guard, repository metadata, and the required aggregate check. A complete, positively classified documentation diff skips runtime tests and installation matrices. Mixed changes, executable files, templates, workflow changes, and uncertain diffs use full validation. Locally, scan each edited markdown file before you push (one path per invocation):
 
 ```bash

@@ -419,6 +419,10 @@ jobs:
       - name: Skip empty selection
         if: ${{ steps.selection.outputs.count == '0' }}
         run: Write-Output "No affected Windows tests."
+      - name: Set up supported Node for npm launcher tests
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22.15.0"
       - uses: actions/setup-python@v7
         if: ${{ steps.selection.outputs.count != '0' }}
         with:
@@ -541,6 +545,10 @@ jobs:
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
+      - name: Set up supported Node for npm launcher tests
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: "22.15.0"
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
