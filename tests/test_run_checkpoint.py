@@ -987,12 +987,13 @@ def test_validate_checkpoint_translates_raw_oserror_on_fstat(tmp_path, monkeypat
     _place_checkpoint_file(run_dir, run_json_bytes)
     payload = _checkpoint_payload(run_json_bytes)
 
-    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
 
-    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
-        run_checkpoint.validate_checkpoint(run_dir, payload)
-    assert excinfo.value.category == "fstat"
-    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+        with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+            run_checkpoint.validate_checkpoint(run_dir, payload)
+        assert excinfo.value.category == "fstat"
+        assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
 
 
 def test_validate_checkpoint_translates_raw_oserror_on_open_missing(tmp_path):
@@ -1083,12 +1084,13 @@ def test_verify_collision_translates_raw_oserror_on_fstat(tmp_path, monkeypatch)
     final = _place_checkpoint_file(run_dir, run_json_bytes)
     sha = hashlib.sha256(run_json_bytes).hexdigest()
 
-    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
 
-    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
-        run_checkpoint._verify_collision(final, run_json_bytes, sha)
-    assert excinfo.value.category == "fstat"
-    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+        with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+            run_checkpoint._verify_collision(final, run_json_bytes, sha)
+        assert excinfo.value.category == "fstat"
+        assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
 
 
 def test_verify_collision_translates_raw_oserror_on_read(tmp_path, monkeypatch):
@@ -1205,12 +1207,13 @@ def test_fsync_directory_translates_raw_oserror_on_open(tmp_path, monkeypatch):
 def test_fsync_directory_translates_raw_oserror_on_fstat(tmp_path, monkeypatch):
     real_dir = tmp_path / "real"
     real_dir.mkdir()
-    monkeypatch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fstat", lambda fd: (_ for _ in ()).throw(OSError(errno.EIO, "fstat denied")))
 
-    with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
-        run_checkpoint._fsync_directory(real_dir)
-    assert excinfo.value.category == "dir-fsync"
-    assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+        with pytest.raises(run_checkpoint.CheckpointError) as excinfo:
+            run_checkpoint._fsync_directory(real_dir)
+        assert excinfo.value.category == "dir-fsync"
+        assert len(str(excinfo.value)) <= run_events.MAX_DIAGNOSTIC_LEN
 
 
 def test_fsync_directory_translates_raw_oserror_on_close(tmp_path, monkeypatch):
