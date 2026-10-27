@@ -991,6 +991,15 @@ omitting an earlier kid, changing its principal or moving its cutoff later
 still refuses the whole list. Replacing the signer starts an independent
 baseline, and reactivating a signer resumes its earlier baseline.
 
+Binding disagreements use ordinary storage, with up to 8192 groups bounded by
+the retained barriers. A separate table holds up to 4096 authenticated signer
+or floor conflicts. The operator approved up to 12,288 evidence records across
+the two tables, with the existing 56 MiB ordinary and 64 MiB total limits.
+Ordinary accounting includes binding groups and their source claims.
+Authenticated evidence can use the remaining total capacity. A new floor
+still needs ordinary storage and table headroom. Capacity refusal preserves
+the complete previous generation without dropping claims or evidence.
+
 The internal `fleet_mesh_trust` library stores manifest anchors, membership,
 revocations, rollback floors and conflict evidence in one POSIX snapshot.
 It makes no peer-use decision and adds no key-manifest acceptance, identity
