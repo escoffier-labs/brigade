@@ -95,7 +95,7 @@ for (const delivery of ['pid', 'group']) {
   }
 }
 
-test('unhandled dependency signal is reflected as a signal on the bridge', posix, t => {
+test('unhandled dependency signal is preserved by process replacement', posix, t => {
   const f = fixture(t, "process.kill(process.pid, 'SIGTERM');");
   const result = spawnSync(process.execPath, [f.launcher], { encoding: 'utf8', timeout: 5000 });
   assert.equal(result.status, null, result.stderr);
