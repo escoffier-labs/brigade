@@ -813,14 +813,24 @@ def test_floor_second_records_contradicted_history_below_a_higher_head(trust, ho
     assert len(after.unsatisfied_floors) == (0 if head_hub == HUB else 1)
     for table in ("objects", "marks", "baselines", "barriers"):
         assert before[table] == after.data[table]
+
+    def repeat_accepted_raw():
+        unchanged = saved(home).read_bytes()
+        result = accept(trust, home, raw)
+        assert result.status == "signed_statement_conflict"
+        assert result.digest == digest(raw)
+        assert result.evidence_recorded and result.storage_error is None
+        assert saved(home).read_bytes() == unchanged
+
     # Repeating either side reuses evidence, even after a later floor is installed.
-    for operation in (lambda: floor(trust, home, target), lambda: accept(trust, home, raw)):
+    for operation in (lambda: floor(trust, home, target), repeat_accepted_raw):
         unchanged = saved(home).read_bytes()
         operation()
         assert saved(home).read_bytes() == unchanged
     old_conflicts = after.data["conflicts"]
     later = floor(trust, home, signed(seq=7))
     assert later.data["conflicts"] == old_conflicts
+    repeat_accepted_raw()
     script = """
 from pathlib import Path
 import sys

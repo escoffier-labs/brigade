@@ -82,10 +82,14 @@ class ImportResult:
     """Fixed import disposition; conflict storage failure preserves diagnosis.
 
     ``status`` is accepted, replay, or signed_statement_conflict. A conflict
-    never advances accepted heads for a rejected signer/floor conflict. Accepted
+    never advances accepted heads for a signer/floor conflict. A retained,
+    previously accepted object can report signed_statement_conflict when a
+    trusted floor contradicts it; accepted history and heads remain unchanged.
+    Active-anchor signature and scope authentication precede classification.
+    Accepted
     attribution disagreements instead remain accepted: ``evidence_recorded``
-    confirms their binding evidence was flushed (also on replay). For rejected
-    statements it confirms durable rejected-object evidence; ``storage_error``
+    confirms their binding evidence was flushed (also on replay). For signer/
+    floor conflicts it confirms conflict evidence was flushed; ``storage_error``
     reports fixed evidence-write failures. Accepted-transaction failures raise.
     """
 
@@ -772,7 +776,13 @@ def _record_conflict(descriptor: int, state: dict[str, Any], evidence: dict[str,
 
 
 def import_statement(*, brigade_home: Path, hub: str, kind: str, raw: bytes) -> ImportResult:
-    """Authenticate scope/signature first, then accept or durably record a conflict."""
+    """Authenticate active-anchor signature/scope before any disposition.
+
+    A retained accepted object contradicted by a trusted floor reports
+    signed_statement_conflict, including after heads or floors advance.
+    Accepted history and heads remain unchanged; evidence_recorded is true
+    only after the conflict evidence is flushed.
+    """
     _platform()
     _kind(kind)
     _tag(hub, "h_")
