@@ -97,13 +97,14 @@ can retain an unrelated migration, and plaintext replies to sealed parents are
 accepted when plaintext is optional. D4, D5 and D8 require closure before client
 integration. Foundation storage does not establish a deployed sealed-mail flow.
 
-Current foundation status: the common Hub storage guard now refuses new
-plaintext replies to sealed or `content_expired` parents even with plaintext
-optional. Legacy plaintext retry replays can still bypass that guard on this
-foundation. A parallel foundation fix is closing that reject-before-reflect
-gap. Parent integration must verify both paths. This does not establish
-deployed enforcement or an end-to-end sealed-mail flow. The remaining D4,
-D5 and D8 prerequisites below stay open.
+Current foundation status: the common Hub storage guard refuses plaintext
+replies to retained sealed or `content_expired` parents even with plaintext
+optional, including retries of legacy plaintext rows. After retention deletes
+a parent, its former content state cannot be classified. An existing detached
+plaintext reply can be retried only with its exact non-null stored payload
+hash. New replies to missing parents and ambiguous null-hash retries are
+refused. This does not establish deployed enforcement or an end-to-end
+sealed-mail flow. The remaining D4, D5 and D8 prerequisites below stay open.
 
 The following baseline facts explain the original integration work.
 

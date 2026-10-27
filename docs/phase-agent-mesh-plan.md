@@ -503,13 +503,13 @@ Files:
   rows in `_row()`, and `count` (#2009) treating sealed rows like any row.
 - `brigade fleet serve --require-sealed` and its environment variable.
 
-Current foundation status: the common Hub storage guard implements refusal of
-new plaintext replies to sealed/tombstoned parents even with plaintext
-optional. The legacy plaintext retry-replay bypass is being closed by a
-parallel foundation worker. Parent integration must verify rejection before
-reflection for both new requests and those replays. The other prerequisites
-above remain open. This storage boundary does not establish deployed or
-end-to-end enforcement.
+Current foundation status: the common Hub storage guard refuses plaintext
+replies to retained sealed/tombstoned parents even with plaintext optional,
+including legacy retry replays. After parent deletion, only an existing
+detached reply with an exact non-null stored payload hash can be retried.
+New missing-parent replies and ambiguous null-hash retries are refused. The
+other prerequisites above remain open. This storage boundary does not
+establish deployed or end-to-end enforcement.
 
 Tests (`tests/test_fleet_hub_sealed.py`), using syntactically valid fake
 envelopes because the hub never verifies cryptography:
