@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an internal POSIX trust snapshot for manifest anchors, signed membership and revocations, rollback floors, and attributed conflicts. Message opening and sealing remain unfinished.
+
 - Add internal POSIX key custody and signed fleet-statement validation for future encrypted clients. Client opening and sealing remain unimplemented.
 
 - `brigade model trial run|resume --retry-transient` re-runs `adapter_error` and timeout-reason `execution_error` cells as new attempts (caps: 2 and 1), keeping each failed attempt in the cell's `prior_attempts` record. Deterministic results are never retried.
