@@ -2803,15 +2803,25 @@ def test_scanner_inbox_helpers_reject_path_swap_without_no_follow(
 
     original_open = scanners_mod.os.open
     original_fstat = scanners_mod.os.fstat
+    # Missing/zero O_NOFOLLOW currently refuses at the capability guard.
+    # Scope the fake to the inbox so test-runner capture gets real stat results.
+    inbox_handle = None
 
     def swap_path_before_open(path, flags, mode=0o777):
+        nonlocal inbox_handle
         if Path(path) == inbox:
             inbox.unlink()
             inbox.symlink_to(outside)
+            descriptor = original_open(path, flags, mode)
+            opened = original_fstat(descriptor)
+            inbox_handle = (descriptor, opened.st_dev, opened.st_ino)
+            return descriptor
         return original_open(path, flags, mode)
 
     def platform_fstat(descriptor):
         opened = original_fstat(descriptor)
+        if inbox_handle != (descriptor, opened.st_dev, opened.st_ino):
+            return opened
         if identity == "zero":
             return SimpleNamespace(st_mode=opened.st_mode, st_dev=0, st_ino=0)
         return SimpleNamespace(st_mode=opened.st_mode)
