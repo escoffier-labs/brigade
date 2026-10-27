@@ -1420,10 +1420,16 @@ jobs:
         if: runner.os == 'Linux'
         env:
           MESH_EXPORT: mesh-envelope.json
-        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py' --capture brigade-work
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py tests/test_fleet_mesh_keys.py' --capture brigade-work
       - name: Native frozen profile, KATs and envelope tests
         if: runner.os != 'Linux'
         run: brigade work verify run --target . --command "$MESH_PYTHON -m mypy src/brigade/fleet_mesh_crypto.py" --command "$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_crypto.py" --capture brigade-work
+      - name: Native POSIX key custody
+        if: runner.os == 'macOS'
+        run: brigade work verify run --target . --command "$MESH_PYTHON -m mypy src/brigade/fleet_mesh_keys.py" --command "$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_keys.py" --capture brigade-work
+      - name: Native Windows custody refusal
+        if: runner.os == 'Windows'
+        run: brigade work verify run --target . --command "$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_keys.py::test_non_posix_custody_fails_closed_without_writes" --capture brigade-work
       - name: Show verification logs
         if: always()
         run: |

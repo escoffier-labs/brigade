@@ -16,6 +16,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -83,8 +84,9 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
         raise crypto.MeshError("mesh_keys_unsafe")
     home = home.absolute()
     flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
-    fd = os.open(home.anchor, flags)
+    fd = None
     try:
+        fd = os.open(home.anchor, flags)
         components = (*home.parts[1:], "fleet", "mesh-keys")
         for index, component in enumerate(components):
             private = index >= len(home.parts) - 2
@@ -104,10 +106,15 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
             if private:
                 _private_stat(fd, directory=True)
         yield fd
-    except OSError:
+    except OSError as error:
+        # Errors raised by reads/writes through yield also arrive here. Storage
+        # failures must not be diagnosed as a path or permission violation.
+        if error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS}:
+            raise crypto.MeshError("mesh_keys_io_error") from None
         raise crypto.MeshError("mesh_keys_unsafe") from None
     finally:
-        os.close(fd)
+        if fd is not None:
+            os.close(fd)
 
 
 @contextmanager
@@ -186,6 +193,10 @@ def _decode(raw: bytes, *, principal: str, hub_id: str) -> LocalKeys:
         return LocalKeys(principal, hub_id, entries[-1], tuple(entries[:-1]), retry_key)
     except crypto.MeshExtraMissing:
         raise
+    except crypto.MeshError as error:
+        if error.code == "mesh_backend_unsupported":
+            raise
+        raise crypto.MeshError("mesh_keys_invalid") from None
     except (ValueError, KeyError, TypeError, RecursionError):
         raise crypto.MeshError("mesh_keys_invalid") from None
 
@@ -208,6 +219,22 @@ def _read(fd: int, name: str, *, principal: str, hub_id: str) -> LocalKeys | Non
         os.close(source)
 
 
+def _reap_temporary_files(fd: int) -> None:
+    # Called only under the exclusive directory lock before a write. Never
+    # open, decode or promote abandoned contents, and leave unsafe entries alone.
+    for name in os.listdir(fd):
+        if not re.fullmatch(r"\.[0-9a-f]{32}\.tmp", name, re.ASCII):
+            continue
+        info = os.stat(name, dir_fd=fd, follow_symlinks=False)
+        if (
+            stat.S_ISREG(info.st_mode)
+            and info.st_uid == os.geteuid()
+            and stat.S_IMODE(info.st_mode) == 0o600
+            and info.st_nlink == 1
+        ):
+            os.unlink(name, dir_fd=fd)
+
+
 def _write(fd: int, name: str, state: LocalKeys) -> None:
     raw = crypto.canonical(
         {
@@ -228,6 +255,7 @@ def _write(fd: int, name: str, state: LocalKeys) -> None:
     )
     if len(raw) > _MAX_STATE_BYTES:
         raise crypto.MeshError("mesh_keys_invalid")
+    _reap_temporary_files(fd)
     temporary = "." + secrets.token_hex(16) + ".tmp"
     dest = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
     try:
