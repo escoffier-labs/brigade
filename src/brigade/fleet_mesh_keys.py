@@ -84,6 +84,8 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
     if ".." in home.parts:
         raise crypto.MeshError("mesh_keys_unsafe")
     home = home.absolute()
+    if home == Path(home.anchor):
+        raise crypto.MeshError("mesh_keys_unsafe")
     flags = directory_flags()
     fd = None
     try:

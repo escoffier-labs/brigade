@@ -139,6 +139,33 @@ def test_missing_state_does_not_initialize_implicitly(tmp_path, operation):
     assert not (tmp_path / "missing").exists()
 
 
+@POSIX_ONLY
+@pytest.mark.parametrize("home", ["/", "//", "/./", "///./"])
+@pytest.mark.parametrize("operation", ["read", "create", "rotate"])
+def test_anchor_only_home_refused_before_filesystem_access(monkeypatch, home, operation):
+    from brigade import fleet_mesh_keys
+
+    home = Path(home)
+    assert home == Path(home.anchor)
+    calls = []
+
+    def forbidden(*args, **kwargs):
+        calls.append((args, kwargs))
+        raise AssertionError("custody accessed the filesystem for an anchor-only home")
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(fleet_mesh_keys.os, "open", forbidden)
+        boundary.setattr(fleet_mesh_keys.os, "mkdir", forbidden)
+        with pytest.raises(crypto.MeshError) as caught:
+            if operation == "rotate":
+                _rotate(home)
+            else:
+                _load(home, create=operation == "create")
+    assert caught.value.code == "mesh_keys_unsafe"
+    assert str(caught.value) == "mesh_keys_unsafe"
+    assert calls == []
+
+
 @pytest.mark.parametrize("component", ["ancestor", "home", "fleet", "mesh-keys", "state"])
 @POSIX_ONLY
 def test_symlinks_are_refused_at_every_traversed_component(tmp_path, component):
