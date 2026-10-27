@@ -485,17 +485,24 @@ def _read(descriptor: int) -> dict[str, Any]:
 
 
 def _snapshot(state: dict[str, Any]) -> TrustSnapshot:
+    scopes = {(floor["kind"], floor["signer"], floor["hub"]) for floor in state["floors"].values()}
+    heads: dict[tuple[str, str, str], tuple[int, set[str]]] = {}
+    for digest, obj in state["objects"].items():
+        scope = (obj["kind"], obj["signer"], obj["hub"])
+        if scope not in scopes:
+            continue
+        seq = json.loads(obj["canonical"])["seq"]
+        head = heads.get(scope)
+        if head is None or seq > head[0]:
+            heads[scope] = (seq, {digest})
+        elif seq == head[0]:
+            head[1].add(digest)
+    # A higher sequence suffices regardless of digest. At the maximum sequence,
+    # retain all tied digests so the exact-match predicate is order-independent.
     unsatisfied = []
     for floor in state["floors"].values():
-        satisfied = False
-        for digest, obj in state["objects"].items():
-            if (obj["kind"], obj["signer"], obj["hub"]) != (floor["kind"], floor["signer"], floor["hub"]):
-                continue
-            seq = json.loads(obj["canonical"])["seq"]
-            if seq > floor["seq"] or (seq == floor["seq"] and digest == floor["digest"]):
-                satisfied = True
-                break
-        if not satisfied:
+        head = heads.get((floor["kind"], floor["signer"], floor["hub"]))
+        if head is None or head[0] < floor["seq"] or (head[0] == floor["seq"] and floor["digest"] not in head[1]):
             unsatisfied.append(deepcopy(floor))
     return TrustSnapshot(deepcopy(state), tuple(unsatisfied))
 

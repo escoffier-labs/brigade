@@ -1156,3 +1156,66 @@ def test_validation_and_capacity_refusals_do_not_reap_orphans(trust, home, monke
     with pytest.raises(crypto.MeshError):
         accept(trust, home, raw)
     assert orphan.exists() and saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize("reverse_objects", [False, True])
+@pytest.mark.parametrize("reverse_floors", [False, True])
+def test_snapshot_floor_predicate_across_scopes_ties_and_insertion_order(trust, reverse_objects, reverse_floors):
+    """View computation only; stored-state authentication remains independently tested.
+
+    The two same-scope/sequence digests exercise the complete existential view
+    predicate, even though the store separately refuses accepting that conflict.
+    """
+    third = "h_" + crypto.encode_binary(bytes([2]) * 16)
+    fourth = "h_" + crypto.encode_binary(bytes([3]) * 16)
+    objects = {}
+    by_label = {}
+
+    def add(label, hub, seed, kind, seq, entries=None):
+        raw = signed(hub=hub, seed=seed, kind=kind, seq=seq, entries=entries)
+        value = digest(raw)
+        objects[value] = {"hub": hub, "signer": signer(seed), "kind": kind, "canonical": raw.decode("ascii")}
+        by_label[label] = value
+
+    add("exact-low", HUB, SEED, "membership", 3)
+    add("exact", HUB, SEED, "membership", 5)
+    add("lower", OTHER, SEED, "membership", 4)
+    add("higher-equal", HUB, SEED2, "membership", 5)
+    add("higher", HUB, SEED2, "membership", 6)
+    add("kind", HUB, SEED, "revocation", 5)
+    add("wrong-digest", OTHER, SEED2, "revocation", 5)
+    add("wrong-seq-low", third, SEED, "membership", 3)
+    add("wrong-seq-equal", third, SEED, "membership", 5)
+    add("tie-low", third, SEED2, "membership", 3)
+    add("tie-a", third, SEED2, "membership", 5, ["test-one"])
+    add("tie-b", third, SEED2, "membership", 5, ["test-two"])
+    unknown = hashlib.sha256(bytes([9]) * 32).hexdigest()
+    cases = [
+        ("exact", HUB, signer(), "membership", by_label["exact"]),
+        ("lower", OTHER, signer(), "membership", "0" * 64),
+        ("higher", HUB, signer(SEED2), "membership", "0" * 64),
+        ("kind", HUB, signer(), "revocation", by_label["kind"]),
+        ("wrong-digest", OTHER, signer(SEED2), "revocation", "0" * 64),
+        ("wrong-sequence", third, signer(), "membership", by_label["wrong-seq-low"]),
+        ("multiple-digests", third, signer(SEED2), "membership", by_label["tie-b"]),
+        ("absent", fourth, signer(), "membership", "0" * 64),
+        ("unknown-signer", HUB, unknown, "membership", "0" * 64),
+    ]
+    if reverse_objects:
+        objects = dict(reversed(list(objects.items())))
+    if reverse_floors:
+        cases.reverse()
+    floors = {}
+    expected = []
+    # Explicit outcomes, independent of the implementation's matching logic.
+    unsatisfied = {"lower", "wrong-digest", "wrong-sequence", "absent", "unknown-signer"}
+    for label, hub, stream_signer, kind, required_digest in cases:
+        value = {"kind": kind, "signer": stream_signer, "hub": hub, "seq": 5, "digest": required_digest}
+        floors[f"{kind}:{stream_signer}:{hub}"] = value
+        if label in unsatisfied:
+            expected.append(value)
+    state = {"objects": objects, "floors": floors}
+    snapshot = trust._snapshot(state)
+    assert snapshot.unsatisfied_floors == tuple(expected)
+    assert snapshot.data == state
+    assert len(snapshot.unsatisfied_floors) == 5
