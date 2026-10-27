@@ -72,6 +72,14 @@ def test_tampering_wrong_key_and_cross_domain(statements, kind):
         statements.verify_statement(raw(value), expected_kind=kind, public_key=public(v))
 
 
+def test_identity_signing_refuses_a_different_private_key_without_mutation(statements):
+    unsigned = {k: x for k, x in vector("hub-identity")["statement"].items() if k != "sig"}
+    before = deepcopy(unsigned)
+    with pytest.raises(crypto.MeshError, match="^statement_signer_mismatch$"):
+        statements.sign_statement(unsigned, bytes(reversed(range(32))), expected_kind="hub-identity")
+    assert unsigned == before
+
+
 @pytest.mark.parametrize("kind", ["migration", "hub-migration", "unknown", "", None, True, []])
 def test_unsupported_kind_is_explicit(statements, kind):
     with pytest.raises(crypto.MeshError, match="^statement_kind_unsupported$"):
@@ -314,6 +322,7 @@ def test_lite_limits(statements, change):
         ("https://[2001:0DB8:0000::1]:443/", "https://[2001:db8::1]"),
         ("https://a", "https://a"),
         ("https://123.example.invalid:65535", "https://123.example.invalid:65535"),
+        ("http://0x1.example", "http://0x1.example"),
     ],
 )
 def test_normalized_origin(statements, url, expected):
@@ -347,6 +356,13 @@ def test_normalized_origin(statements, url, expected):
         "http://3232235777",
         "http://127.1",
         "http://0x7f.0.0.1",
+        "http://0x",
+        "http://1.2.3.0x",
+        "http://0x.0x",
+        "http://example.0x",
+        "http://example.123",
+        "http://example.0x1",
+        "http://example.0XfF",
         "http://256.0.2.1",
         "https://example.invalid:0",
         "https://example.invalid:01",
@@ -388,17 +404,18 @@ def test_shape_validation_precedes_crypto(statements, monkeypatch):
         statements.verify_statement(b"{}", expected_kind="membership", public_key=bytes(32))
 
 
+@pytest.mark.parametrize("kind", ["membership", "hub-identity"])
 @pytest.mark.parametrize("code", ["mesh_extra_missing", "mesh_backend_unsupported"])
-def test_unavailable_backend_diagnostics_survive(statements, monkeypatch, code):
+def test_unavailable_backend_diagnostics_survive(statements, monkeypatch, code, kind):
     def unavailable():
         raise crypto.MeshExtraMissing() if code == "mesh_extra_missing" else crypto.MeshError(code)
 
     monkeypatch.setattr(crypto, "probe_backend", unavailable)
-    v = vector()
+    v = vector(kind)
     unsigned = {k: x for k, x in v["statement"].items() if k != "sig"}
     for operation in [
-        lambda: statements.sign_statement(unsigned, bytes(32), expected_kind="membership"),
-        lambda: statements.verify_statement(raw(v["statement"]), expected_kind="membership", public_key=public(v)),
+        lambda: statements.sign_statement(unsigned, bytes(32), expected_kind=kind),
+        lambda: statements.verify_statement(raw(v["statement"]), expected_kind=kind, public_key=public(v)),
     ]:
         with pytest.raises(crypto.MeshError) as exc:
             operation()

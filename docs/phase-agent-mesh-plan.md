@@ -315,8 +315,19 @@ Files:
   accepted identity still has D4's existing semantics, without claiming current
   policy from an id alone. Never derive a new pin namespace from a fetch.
 
+Current local custody foundation: private files require exactly 0600, and
+`<brigade_home>`, `fleet` and `mesh-keys` require current-user ownership and
+exactly 0700. Every custody-path component, including ancestors, must be
+physical. If a home or temporary-directory ancestor is symlinked, the operator
+must choose an already physical path. No automatic path resolution occurs.
+Native Windows custody is unsupported. Retired keys are not automatically
+pruned. Rotation that would exceed the 8 MiB serialized-state bound fails
+closed with `mesh_keys_invalid` without changing the saved generation. A
+dedicated capacity diagnostic remains deferred.
+
 Tests (`tests/test_fleet_mesh_keys.py`):
-- Key files are 0600 under a 0700 directory, and a symlinked path is refused.
+- Key files are exactly 0600 under exactly 0700 Brigade home, fleet and private
+  directories, and symlinks anywhere in the custody path are refused.
 - A first key for a principal the accepted membership manifest lists is
   recorded `observed`, never `verified`. With
   `BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` it is `unverified`.
@@ -482,8 +493,7 @@ Files:
   7 day post-ack purge to a `content_expired` tombstone, the unacked TTL, and
   per-sender and fleet stored-bytes admission. Close the D5/D8 prerequisites:
   hub-scoped sealed uniqueness and lookup, ordered identity fence, 90-day sealed
-  admission/hard TTL independent of routing, refusal of plaintext replies to
-  sealed/tombstoned parents even with plaintext optional, and dual-parser corpus.
+  admission/hard TTL independent of routing, and dual-parser corpus.
   Implement separate retry receipts only after the proposed D8 metadata-retention
   choice is settled. Keep 1..3650-day routing config and retained `sealed_reply_to`.
   D8 staged activation is likewise a review prerequisite, not permission to
@@ -492,6 +502,14 @@ Files:
   `content_state` columns, the sealed path in `send()` and `reply()`, sealed
   rows in `_row()`, and `count` (#2009) treating sealed rows like any row.
 - `brigade fleet serve --require-sealed` and its environment variable.
+
+Current foundation status: the common Hub storage guard implements refusal of
+new plaintext replies to sealed/tombstoned parents even with plaintext
+optional. The legacy plaintext retry-replay bypass is being closed by a
+parallel foundation worker. Parent integration must verify rejection before
+reflection for both new requests and those replays. The other prerequisites
+above remain open. This storage boundary does not establish deployed or
+end-to-end enforcement.
 
 Tests (`tests/test_fleet_hub_sealed.py`), using syntactically valid fake
 envelopes because the hub never verifies cryptography:

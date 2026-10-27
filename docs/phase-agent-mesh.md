@@ -97,6 +97,14 @@ can retain an unrelated migration, and plaintext replies to sealed parents are
 accepted when plaintext is optional. D4, D5 and D8 require closure before client
 integration. Foundation storage does not establish a deployed sealed-mail flow.
 
+Current foundation status: the common Hub storage guard now refuses new
+plaintext replies to sealed or `content_expired` parents even with plaintext
+optional. Legacy plaintext retry replays can still bypass that guard on this
+foundation. A parallel foundation fix is closing that reject-before-reflect
+gap. Parent integration must verify both paths. This does not establish
+deployed enforcement or an end-to-end sealed-mail flow. The remaining D4,
+D5 and D8 prerequisites below stay open.
+
 The following baseline facts explain the original integration work.
 
 - Messages live in the hub's `fleet_messages` table
@@ -580,6 +588,21 @@ on first need. Private keys, the retry key and retired keys are stored under
 `read_message_token_file` applies to token files. Private keys never leave the
 machine. The planned `fleet keys show` subcommand prints this machine's
 principal, kid and fingerprint, which is what a peer compares out of band.
+
+The current local custody foundation requires `<brigade_home>`, its `fleet`
+directory and its private `mesh-keys` directory to be owned by the current
+user with exactly 0700 permissions. Private files require exactly 0600.
+No component anywhere in the custody path, including ancestors above
+`<brigade_home>`, may be a symlink. If a home or temporary-directory ancestor
+is symlinked, the operator must choose an already physical path. Custody does
+not resolve that path automatically and refuses symlinks with
+`mesh_keys_unsafe`. Native Windows custody is unsupported and fails with
+`mesh_keys_platform_unsupported` before filesystem access.
+
+Custody retains retired keys without automatic pruning. If the serialized
+history would exceed 8 MiB, rotation fails closed with `mesh_keys_invalid`
+and leaves the saved generation unchanged. A dedicated capacity diagnostic
+is deferred. This bound does not authorize deleting retained private keys.
 
 Publication. A new `keys_publish` action on `POST /messages` takes a key
 record. The hub requires `principal` to equal the authenticated caller and
@@ -1129,10 +1152,12 @@ paths other than absent or `/`. Lowercase scheme and DNS host, reject a
 trailing DNS dot, use ASCII DNS labels (including already encoded `xn--`
 labels), and do no implicit Unicode/IDNA conversion. DNS labels have 1 through
 63 characters, start/end with an ASCII letter or digit, and otherwise contain
-only letters, digits or hyphens, with at most 253 host characters. Reject an
-all-numeric/dotted or legacy hexadecimal address-like host unless it is the
-IPv4 form below. A hexadecimal label with a non-address DNS suffix remains a
-DNS name. Bound the normalized
+only letters, digits or hyphens, with at most 253 host characters. If the
+final label is all decimal digits or matches `0[xX][0-9a-fA-F]*` (including
+bare `0x`), require the entire host to be the strict dotted-decimal IPv4 form
+below. Reject candidates such as `example.123` and `example.0x` that do not
+meet that form. A hexadecimal label with a normal DNS suffix, such as
+`0x1.example`, remains a DNS name. Bound the normalized
 origin to 2048 ASCII bytes. IPv4 uses four decimal
 octets without leading zeros. Bracketed IPv6 has no zone id and renders its
 compressed lowercase address. Ports are decimal 1 through 65535, no leading

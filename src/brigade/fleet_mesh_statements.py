@@ -137,11 +137,11 @@ def normalize_origin(value: str) -> str:
         assert match is not None
         host, port = match.groups()
         _require(len(host) <= 253, code)
-        # Legacy numeric/hex IPv4 spellings must not become DNS origins. URL
-        # stacks can interpret them as addresses, so require the dotted decimal
-        # profile rather than letting different clients name different origins.
-        numeric_host = re.fullmatch(r"(?:[0-9]+|0x[0-9a-f]+)(?:\.(?:[0-9]+|0x[0-9a-f]+))*", host, re.I | re.ASCII)
-        if re.fullmatch(r"[0-9.]+", host, re.ASCII) or numeric_host:
+        # WHATWG treats a final decimal/hex label, including bare 0x, as an
+        # IPv4 candidate. Require strict dotted decimal for that entire host
+        # so clients cannot disagree about whether it names an address or DNS.
+        final_label = host.rsplit(".", 1)[-1]
+        if re.fullmatch(r"[0-9]+|0[xX][0-9a-fA-F]*", final_label, re.ASCII):
             try:
                 host = str(ipaddress.IPv4Address(host))
             except ValueError:
@@ -324,7 +324,15 @@ def sign_statement(unsigned: dict[str, Any], signing_key: bytes, *, expected_kin
     _validate(unsigned, expected_kind, signed=False)
     # Copy the validated structure before primitive use; never mutate caller data.
     value = json.loads(crypto.canonical(unsigned))
-    value["sig"] = crypto.sign(value, signing_key, label=expected_kind)
+    signature = crypto.sign(value, signing_key, label=expected_kind)
+    if expected_kind == "hub-identity":
+        try:
+            crypto.verify(value, signature, _binary(value["hub_sig_pub"], 32), label=expected_kind)
+        except crypto.MeshError as exc:
+            if exc.code == "envelope_signature_invalid":
+                raise crypto.MeshError("statement_signer_mismatch") from None
+            raise
+    value["sig"] = signature
     return value
 
 
