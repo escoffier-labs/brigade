@@ -999,6 +999,8 @@ Ordinary accounting includes binding groups and their source claims.
 Authenticated evidence can use the remaining total capacity. A new floor
 still needs ordinary storage and table headroom. Capacity refusal preserves
 the complete previous generation without dropping claims or evidence.
+Floor, barrier and unsigned-claim table limits are shared across hubs. Filling
+one table for one hub can prevent another hub's admission to that table.
 
 The internal `fleet_mesh_trust` library stores manifest anchors, membership,
 revocations, rollback floors and conflict evidence in one POSIX snapshot.
