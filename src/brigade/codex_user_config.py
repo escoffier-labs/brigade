@@ -7,9 +7,13 @@ and logical source labels leave this module, never paths or parser diagnostics.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import importlib.util
 import os
 from pathlib import Path
 import stat
+import sys
+import sysconfig
+from types import ModuleType
 
 _CONFIG_READ_MAX_BYTES = 1024 * 1024
 _DEFAULT_PROJECT_DOC_MAX_BYTES = 32768
@@ -27,6 +31,27 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _stdlib_tomllib() -> ModuleType | None:
+    """Reject unsupported or shadowed parsers before executing their code."""
+    if sys.version_info < (3, 11):
+        return None
+    try:
+        spec = importlib.util.find_spec("tomllib")
+        expected = Path(sysconfig.get_path("stdlib")) / "tomllib" / "__init__.py"
+        if (
+            spec is None
+            or spec.origin is None
+            or Path(spec.origin).resolve(strict=True) != expected.resolve(strict=True)
+        ):
+            return None
+        # find_spec also checks the spec of an already imported module.
+        import tomllib
+
+        return tomllib
+    except (ImportError, OSError, ValueError):
+        return None
+
+
 def read_user_base_cap() -> UserBaseCap:
     """Read a single top-level setting using the doctor's launch environment."""
     custom = os.environ.get("CODEX_HOME", "")
@@ -40,7 +65,8 @@ def read_user_base_cap() -> UserBaseCap:
         if custom:
             # resolve() uses process cwd, follows symlinks, and requires existence.
             home = Path(custom).resolve(strict=True)
-            if not home.is_dir():
+            home_info = home.stat()
+            if not stat.S_ISDIR(home_info.st_mode):
                 return unknown("config_home_not_directory")
         else:
             home = Path.home() / ".codex"
@@ -52,12 +78,19 @@ def read_user_base_cap() -> UserBaseCap:
             try:
                 path.lstat()
             except FileNotFoundError:
+                if custom:
+                    # Timestamps change for unrelated entries. Only directory
+                    # identity and type determine whether absence is reliable.
+                    current = home.stat()
+                    if not stat.S_ISDIR(current.st_mode) or (current.st_dev, current.st_ino) != (
+                        home_info.st_dev,
+                        home_info.st_ino,
+                    ):
+                        return unknown("config_home_changed_during_read")
                 return default
             return unknown("config_unreadable")
-        try:
-            import tomllib
-        except ImportError:
-            # Python 3.10 must not use the permissive compatibility parser here.
+        tomllib = _stdlib_tomllib()
+        if tomllib is None:
             return unknown("config_parser_unavailable")
         if not hasattr(os, "O_NONBLOCK"):
             return unknown("config_nonblocking_unavailable")

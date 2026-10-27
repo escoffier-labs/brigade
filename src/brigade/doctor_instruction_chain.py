@@ -41,6 +41,7 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     from . import context_preview
 
     cap = read_user_base_cap()
+    over_ceiling = cap.value is not None and cap.value > context_preview.RESOURCE_MAX_BYTES
     assumptions = (
         f"estimate, not observed (codex {_CODEX_CHAIN_VERSION} contract; assumed trust=trusted, "
         "read_access=full, cwd=target, fallbacks=none, root markers=.git, no global scope); "
@@ -51,7 +52,18 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     )
     if cap.value is not None:
         label = "Configured user-base cap" if cap.source == "user-base-config" else "Assumed default cap"
-        assumptions += f"; {label}: {_bytes(cap.value)}"
+        # Keep ordinary over-ceiling values exact, but bound decimal rendering
+        # independently of the interpreter's configurable integer digit limit.
+        rendered = _bytes(cap.value) if cap.value.bit_length() <= 64 else "above the Brigade resource ceiling"
+        assumptions += f"; {label}: {rendered}"
+    if over_ceiling:
+        return (
+            MANUAL,
+            _CODEX_CHAIN_NAME,
+            f"not evaluated (project_resource_limit_not_evaluated); {assumptions}; "
+            f"above the Brigade resource ceiling of {_bytes(context_preview.RESOURCE_MAX_BYTES)} "
+            "for instruction inspection",
+        )
     flags = f"--codex-version {_CODEX_CHAIN_VERSION} --trust trusted --read-access full --assume-codex-defaults"
     if cap.value is not None:
         flags += f" --project-doc-max-bytes {cap.value}"
@@ -78,16 +90,13 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
         )
     if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
         remedy = "preview is unsupported on this platform (requires POSIX nofollow capabilities)"
+    elif cap.value is None:
+        remedy = (
+            "supply a known effective cap with --project-doc-max-bytes and effective settings "
+            "to brigade context preview"
+        )
     if cap.value is None:
         return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated ({cap.reason}); {assumptions}; {remedy}")
-    if cap.value > context_preview.RESOURCE_MAX_BYTES:
-        return (
-            MANUAL,
-            _CODEX_CHAIN_NAME,
-            f"not evaluated (project_resource_limit_not_evaluated); {assumptions}; "
-            f"above the Brigade resource ceiling of {_bytes(context_preview.RESOURCE_MAX_BYTES)} "
-            "for instruction inspection",
-        )
     if cap.value == 0:
         return (
             WARN,

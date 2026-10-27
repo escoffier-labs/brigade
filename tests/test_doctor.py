@@ -3603,12 +3603,6 @@ _requires_nonblocking_config = pytest.mark.skipif(
 )
 
 
-@pytest.fixture(autouse=True)
-def _isolate_codex_config_environment(monkeypatch):
-    # The shared home fixture supplies a synthetic default home.
-    monkeypatch.delenv("CODEX_HOME", raising=False)
-
-
 @pytest.fixture
 def codex_user_config(tmp_path: Path, monkeypatch):
     home = tmp_path / "synthetic-codex-home"
@@ -3869,8 +3863,13 @@ def test_doctor_codex_config_read_boundary(tmp_path: Path, codex_user_config: Pa
 
 
 @pytest.mark.parametrize("change", ["in-place", "replace", "overflow"])
+@pytest.mark.parametrize("runtime", ["native", "python310"])
 @_requires_nonblocking_config
-def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_config: Path, monkeypatch, change):
+def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_config: Path, monkeypatch, change, runtime):
+    import sys
+
+    if runtime == "python310":
+        monkeypatch.setattr(sys, "version_info", (3, 10))
     codex_user_config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
     real_open, real_read = os.open, os.read
     held = []
@@ -3904,8 +3903,13 @@ def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_conf
     assert status == doctor_mod.MANUAL
     assert "not evaluated" in detail
     assert "cap source default-assumption" not in detail
-    assert bytes_read
-    assert sum(bytes_read) <= 1048577
+    if sys.version_info < (3, 11):
+        assert "config_parser_unavailable" in detail
+        assert not held
+        assert not bytes_read
+    else:
+        assert bytes_read
+        assert sum(bytes_read) <= 1048577
 
 
 @pytest.mark.parametrize(("body", "expected"), [("project_doc_max_bytes = 0\n", "WARN"), ("broken = [", "MANUAL")])
@@ -3938,3 +3942,119 @@ def test_doctor_codex_invalid_utf8_config_is_opaque(tmp_path: Path, codex_user_c
     assert status == doctor_mod.MANUAL
     assert "not evaluated" in detail
     assert "private" not in detail
+
+
+@pytest.mark.parametrize("literal", ["0x" + "f" * 4000, "0b" + "1" * 16000], ids=["hex", "binary"])
+@pytest.mark.parametrize("digit_limit", [0, 640])
+@_requires_nonblocking_config
+def test_doctor_codex_huge_cap_is_bounded(tmp_path: Path, codex_user_config: Path, monkeypatch, literal, digit_limit):
+    import sys
+
+    pytest.importorskip("tomllib")
+    from brigade import doctor_agent
+
+    codex_user_config.write_text(f"project_doc_max_bytes = {literal}\n", encoding="utf-8")
+    repo = _codex_repo(tmp_path)
+
+    def forbidden(**kwargs):
+        pytest.fail("over-ceiling doctor must not inspect the instruction chain")
+
+    monkeypatch.setattr(context_preview, "preview", forbidden)
+    previous = sys.get_int_max_str_digits()
+    try:
+        sys.set_int_max_str_digits(digit_limit)
+        status, _name, detail = _codex_chain_check(repo)
+    finally:
+        sys.set_int_max_str_digits(previous)
+    assert status == doctor_mod.MANUAL
+    assert "project_resource_limit_not_evaluated" in detail
+    assert "Brigade resource ceiling" in detail
+    assert "cap source user-base-config" in detail
+    assert len(detail) < 2000
+    assert doctor_agent.extract_commands(detail) == []
+
+
+@pytest.mark.parametrize("version", [(3, 10), (3, 11)], ids=["python310", "supported"])
+@pytest.mark.parametrize("loaded", [False, True], ids=["before-import", "already-loaded"])
+def test_doctor_codex_untrusted_parser_is_not_executed_or_used(
+    tmp_path: Path, codex_user_config: Path, monkeypatch, version, loaded
+):
+    import importlib.util
+    import sys
+    from types import ModuleType
+
+    from brigade import codex_user_config as config_mod
+
+    codex_user_config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    shadow = tmp_path / "parser-shadow"
+    shadow.mkdir()
+    parser = shadow / "tomllib.py"
+    parser.write_text('raise AssertionError("untrusted parser executed")\n', encoding="utf-8")
+    if loaded:
+        standin = ModuleType("tomllib")
+        standin.__spec__ = importlib.util.spec_from_file_location("tomllib", parser)
+        standin.__file__ = str(parser)
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("untrusted parser used")
+
+        standin.loads = forbidden
+        monkeypatch.setitem(sys.modules, "tomllib", standin)
+    else:
+        monkeypatch.delitem(sys.modules, "tomllib", raising=False)
+        monkeypatch.syspath_prepend(str(shadow))
+    monkeypatch.setattr(sys, "version_info", version)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "config_parser_unavailable" in detail
+    assert "cap source default-assumption" not in detail
+    assert str(parser) not in detail
+    # Missing config remains a default assumption even without a trusted parser.
+    codex_user_config.unlink()
+    assert config_mod.read_user_base_cap().value == 32768
+
+
+@pytest.mark.parametrize("change", ["remove", "replace", "unrelated-entry"])
+def test_doctor_codex_absent_config_revalidates_custom_home(
+    tmp_path: Path, codex_user_config: Path, monkeypatch, change
+):
+    home = codex_user_config.parent
+    real_lstat = Path.lstat
+    changed = False
+
+    def lstat(path, *args, **kwargs):
+        nonlocal changed
+        if path == codex_user_config and not changed:
+            changed = True
+            if change == "unrelated-entry":
+                (home / "other.txt").write_text("unrelated", encoding="utf-8")
+            else:
+                home.rename(home.with_name("renamed-home"))
+                if change == "replace":
+                    home.mkdir()
+        return real_lstat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", lstat)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert changed
+    if change == "unrelated-entry":
+        assert "cap source default-assumption" in detail
+        assert "32,768 bytes (32 KiB)" in detail
+    else:
+        assert status == doctor_mod.MANUAL
+        assert "not evaluated" in detail
+        assert "cap source default-assumption" not in detail
+        assert str(home) not in detail
+
+
+def test_doctor_codex_unknown_cap_requires_explicit_value_without_default_command(
+    tmp_path: Path, codex_user_config: Path
+):
+    from brigade import doctor_agent
+
+    codex_user_config.write_text('project_doc_max_bytes = "unknown"\n', encoding="utf-8")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "known effective cap" in detail
+    assert "--project-doc-max-bytes" in detail
+    assert doctor_agent.extract_commands(detail) == []

@@ -251,6 +251,9 @@ def _isolate_user_brigade_dir(_isolation_temp_root, monkeypatch):
     user_dir = home / ".brigade"
     user_dir.mkdir(mode=PRIVATE_DIRECTORY_MODE)
     set_home(monkeypatch, home)
+    # Codex otherwise prefers an inherited operator config over synthetic HOME.
+    # Individual tests may opt back in with their own synthetic CODEX_HOME.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
     monkeypatch.setenv("BRIGADE_USER_DIR", str(user_dir))
     monkeypatch.setenv("BRIGADE_HOME", str(user_dir))
 

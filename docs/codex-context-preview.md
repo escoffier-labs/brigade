@@ -252,7 +252,7 @@ access `full`, cwd equal to the doctor target, no fallback filenames, `.git`
 root markers, and no global scope. The detail retains `estimate, not observed`
 and `actual_session_observed: false`, even when the cap came from configuration.
 A configured cap does not establish the effective configuration or a live
-session's consumption. For example:
+session's consumption. An illustrative summary, paraphrased from the detail:
 
 > Configured user-base cap: 65,536 bytes (64 KiB). This fresh-disk chain estimate
 > leaves the active session unobserved and other configuration layers unresolved.
@@ -274,8 +274,10 @@ instruction file helps only where that file is excluded from the selected
 chain. Doctor inspects the target chain, so nested chains below it need the
 preview command with an explicit `--cwd`.
 
-`WARN` and `MANUAL` results retain the explicit preview remedy, carrying
-`--project-doc-max-bytes <N>` when the cap is known. The command enables extras
+When the cap is known and within the resource ceiling, `WARN` and `MANUAL`
+results retain the explicit preview remedy with `--project-doc-max-bytes <N>`.
+An unknown cap requires a known effective value before rerunning preview.
+Doctor offers no executable default-cap remedy for that case. The command enables extras
 first when needed and quotes targets without control characters or backticks.
 On platforms lacking POSIX nofollow capabilities, including native Windows,
 the detail states that preview is unsupported and offers no rerun command.
