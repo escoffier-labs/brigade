@@ -112,6 +112,11 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
     jobs = re.findall(r"^  ([a-z][a-z0-9-]*):$", text.split("jobs:\n", 1)[1], re.MULTILINE)
     for event in ("pull_request", "merge_group", "push"):
         for name in jobs:
+            for docs in ("true", "false", ""):
+                for dependency in ("success", "failure", "skipped"):
+                    assert not _job_admitted(
+                        text, name, docs=docs, cancelled=True, dependency=dependency, event=event
+                    ), (name, event, docs, dependency)
             if name in {"changes", "content-guard", "repo-metadata", "ci-gate"}:
                 assert _job_admitted(text, name, docs="true", event=event)
                 continue

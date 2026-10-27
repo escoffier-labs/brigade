@@ -299,7 +299,7 @@ def test_hook_run_latches_after_repeated_timeouts(tmp_path: Path, monkeypatch, c
     def timeout(_event: str, _payload: dict, *, pin=None) -> dict | None:
         # Exercise the real worker and parent follow-up after target discovery,
         # without racing the worker prologue against a shortened deadline.
-        raise runtime.HookDegraded("hook operation timed out", log_target=target)
+        raise runtime.HookDegraded("hook operation timed out")
 
     monkeypatch.setattr(runtime, "handle_payload", timeout)
     payload = json.dumps(_payload(target, "PreToolUse"))

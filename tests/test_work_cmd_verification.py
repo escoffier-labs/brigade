@@ -2390,6 +2390,15 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
     _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=2)
 
+    # Isolate the post-sync deadline from the unrelated SQLite backup deadline.
+    # test_backup_sqlite_honors_timeout covers backup timeout enforcement.
+    real_backup = graphtrail_delta._backup_sqlite
+
+    def backup_without_timeout(source, destination, *, timeout=None):
+        real_backup(source, destination, timeout=None)
+
+    monkeypatch.setattr(graphtrail_delta, "_backup_sqlite", backup_without_timeout)
+
     assert (
         work_cmd.verify_run(
             target=tmp_path,
