@@ -15,7 +15,7 @@ brigade context preview --target /approved/project --cwd /approved/project/sub \
 Both paths must be absolute. Brigade normalizes separators and dot components
 lexically, collapses leading `//` to `/`, and checks containment without resolving
 symlinks. `--codex-home /approved/global --global-max-bytes 65536` adds an
-explicit global scope. There is no automatic home or configuration scan.
+explicit global scope. The preview has no automatic home or configuration scan.
 
 ## Supplied configuration
 
@@ -198,28 +198,90 @@ and [marker search](https://github.com/openai/codex/blob/a956835d020762cb2b57005
 
 ## Doctor integration
 
-When the codex harness is selected, `brigade doctor` adds an
-`instruction-chain: codex` check. It runs this preview with stated assumptions:
-Codex 0.160.0 contract, trust `trusted`, read access `full`, cwd equal to the
-doctor target, Codex defaults for omitted settings, and no global scope. The
-detail labels the result `estimate, not observed` and names the cap source,
-which is `default-assumption`. Doctor reads no Codex configuration, so it does
-not apply a configured `project_doc_max_bytes`. `WARN` and `MANUAL` results
-print a preview command for rerunning with effective settings, except when the
-platform lacks the required POSIX nofollow capabilities. In that case, including
-native Windows, doctor reports `MANUAL` with `posix_nofollow_required`, states
-that preview is unsupported on this platform, and offers no rerun command.
-The command spells out the target only when the path has no control characters
-or backticks.
+When the Codex harness is selected, `brigade doctor` adds an
+`instruction-chain: codex` check. It discovers the top-level user-base
+`project_doc_max_bytes` at `$CODEX_HOME/config.toml` when `CODEX_HOME` is
+nonempty. Empty or unset uses `~/.codex/config.toml`. A custom home must exist
+and be a directory. Relative homes resolve against the doctor process's launch
+directory, even when the doctor target is another repository. Home and config
+symlinks are followed. A missing or invalid custom home reports `MANUAL`
+without falling back to the default home.
 
-Each selected file shows its byte count, contribution and Brigade advisory
-budget, and the detail repeats that the consumer cap is separate from those
-budgets. The check reports `OK` within the cap, `WARN` when a selected file is
-truncated or cap-exhausted, and `MANUAL` with reason codes when the preview is
-not evaluated, for example when no `.git` marker exists at the target. Doctor
-inspects only the target directory, so nested chains below it need the preview
-command with an explicit `--cwd`. Bodies are never included in the detail.
+Discovery uses the doctor's environment and launch directory, which may differ
+from a Codex session's environment. Only the top-level user-base cap is read.
+Profile, project, system, managed, and launch-time overrides remain unresolved.
+Doctor does not infer an active profile or observe an existing session.
 
-This bounded preview and doctor check address part of issue #1564.
-Existing-session consumption and automatic effective-config observation remain
-outside these slices.
+Doctor opens configuration non-blocking and requires a regular file after
+opening. It reads at most 1,048,576 bytes (1,024 KiB), plus one byte to detect
+overflow, and checks for changes during the read. Nonregular, unreadable,
+changed, oversized, or malformed inputs report `MANUAL` with opaque reasons.
+Logical source labels are shown instead of resolved personal paths. Config
+bodies, unrelated values, credentials, and parser diagnostics are never printed.
+
+Present configuration requires stdlib `tomllib`. On Python 3.10 it reports
+`MANUAL` with `config_parser_unavailable`, without using the permissive
+compatibility parser. A platform without non-blocking open support reports
+`config_nonblocking_unavailable` for present configuration. A missing file
+still permits a default assumption. The explicit supplied-cap preview route
+remains available on supported platforms, including Python 3.10:
+
+```sh
+brigade context preview --target /approved/project --cwd /approved/project \
+  --codex-version 0.160.0 --trust trusted --read-access full \
+  --assume-codex-defaults --project-doc-max-bytes 65536 --json
+```
+
+A missing file or top-level key uses the pinned default of
+32,768 bytes (32 KiB), labeled `default-assumption`. A valid configured cap is
+labeled `user-base-config`. Doctor owns these detail labels. The public preview
+continues to label an explicit value `caller-supplied`. Doctor adds no new
+structured fields to its result tuple or JSON envelope.
+
+Caps must be nonnegative integers. Booleans, negative values, strings, and
+other types report `MANUAL`. Zero reports `WARN`: project instruction loading
+is disabled under that cap, and instruction files were not inspected. Caps
+above the preview's 1,048,576-byte (1,024 KiB) instruction inspection ceiling
+report `MANUAL` without clamping or offering an unusable preview command.
+This Brigade resource ceiling is independent of the config-read bound and
+does not describe a Codex limit.
+
+Doctor feeds a positive cap within that ceiling into the existing preview,
+with the Codex 0.160.0 contract and stated assumptions: trust `trusted`, read
+access `full`, cwd equal to the doctor target, no fallback filenames, `.git`
+root markers, and no global scope. The detail retains `estimate, not observed`
+and `actual_session_observed: false`, even when the cap came from configuration.
+A configured cap does not establish the effective configuration or a live
+session's consumption. For example:
+
+> Configured user-base cap: 65,536 bytes (64 KiB). This fresh-disk chain estimate
+> leaves the active session unobserved and other configuration layers unresolved.
+
+Each selected file shows exact bytes, secondary KiB, contribution, and Brigade
+advisory budget. The check reports `OK` for a complete chain within a positive
+modeled cap, `WARN` for truncation or disabled loading, and `MANUAL` for
+unevaluated accounting. An `OK` applies only under the stated assumptions.
+Bodies are never included in the detail. Codex byte accounting and Brigade
+advisory budgets remain separate from OpenClaw characters, which retain their
+UTF-16 code-unit accounting and trimming rules.
+
+When truncation is modeled, reduce startup instructions or increase
+`project_doc_max_bytes` if the full chain is necessary. Configuration changes
+require a new run or restarted session. The cap applies once across the selected
+chain for one cwd, with each file consuming that shared byte budget.
+Moving content into a nested
+instruction file helps only where that file is excluded from the selected
+chain. Doctor inspects the target chain, so nested chains below it need the
+preview command with an explicit `--cwd`.
+
+`WARN` and `MANUAL` results retain the explicit preview remedy, carrying
+`--project-doc-max-bytes <N>` when the cap is known. The command enables extras
+first when needed and quotes targets without control characters or backticks.
+On platforms lacking POSIX nofollow capabilities, including native Windows,
+the detail states that preview is unsupported and offers no rerun command.
+Doctor writes no configuration or instruction files, invokes no Codex process
+or model, installs no tools, and performs no repository trimming.
+
+This doctor integration covers slice 1 of issue #2088. Existing-session
+consumption and automatic effective-config observation remain outside this
+slice.

@@ -8,6 +8,7 @@ import shlex
 from pathlib import Path
 
 from . import extras
+from .codex_user_config import read_user_base_cap
 from .doctor import MANUAL, OK, WARN, CheckResult
 
 _CODEX_CHAIN_NAME = "instruction-chain: codex"
@@ -25,21 +26,35 @@ _CODEX_CHAIN_BASELINE_LIMITATIONS = frozenset(
 )
 
 
-def check_codex_instruction_chain(target: Path) -> CheckResult:
-    """Estimate the Codex project instruction chain at the target (#1564).
+def _bytes(value: int) -> str:
+    whole, remainder = divmod(value, 1024)
+    fraction = f"{remainder / 1024:.10f}"[1:].rstrip("0") if remainder else ""
+    return f"{value:,} bytes ({whole:,}{fraction} KiB)"
 
-    Doctor supplies stated assumptions to the pinned preview contract: cwd is
-    the target, trust is trusted, read access is full, omitted settings use
-    Codex defaults, and no global scope is inspected. The result is a fresh-disk
-    estimate, never observed session consumption.
+
+def check_codex_instruction_chain(target: Path) -> CheckResult:
+    """Estimate the chain under a discovered user-base cap and stated assumptions.
+
+    Configuration provenance does not establish effective settings or observed
+    session consumption. The preview itself remains caller-supplied only.
     """
     from . import context_preview
 
+    cap = read_user_base_cap()
     assumptions = (
         f"estimate, not observed (codex {_CODEX_CHAIN_VERSION} contract; assumed trust=trusted, "
-        "read_access=full, cwd=target, no global scope"
+        "read_access=full, cwd=target, fallbacks=none, root markers=.git, no global scope); "
+        "Fresh-disk chain estimate. Active session not observed. actual_session_observed: false; "
+        "profile, project, system, managed, and launch-time overrides unresolved; "
+        "config discovery uses the doctor's environment and launch directory, which may differ from a Codex session; "
+        f"config source {cap.config_label}; cap source {cap.source}"
     )
+    if cap.value is not None:
+        label = "Configured user-base cap" if cap.source == "user-base-config" else "Assumed default cap"
+        assumptions += f"; {label}: {_bytes(cap.value)}"
     flags = f"--codex-version {_CODEX_CHAIN_VERSION} --trust trusted --read-access full --assume-codex-defaults"
+    if cap.value is not None:
+        flags += f" --project-doc-max-bytes {cap.value}"
     target_text = str(target)
     # Controls would reach the terminal and backticks would split agent command
     # extraction, so only display-safe targets are spelled out.
@@ -61,6 +76,25 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
             f"{enable}replace assumptions with effective settings and run brigade context preview "
             f"with --target and --cwd set to this target and {flags}"
         )
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        remedy = "preview is unsupported on this platform (requires POSIX nofollow capabilities)"
+    if cap.value is None:
+        return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated ({cap.reason}); {assumptions}; {remedy}")
+    if cap.value > context_preview.RESOURCE_MAX_BYTES:
+        return (
+            MANUAL,
+            _CODEX_CHAIN_NAME,
+            f"not evaluated (project_resource_limit_not_evaluated); {assumptions}; "
+            f"above the Brigade resource ceiling of {_bytes(context_preview.RESOURCE_MAX_BYTES)} "
+            "for instruction inspection",
+        )
+    if cap.value == 0:
+        return (
+            WARN,
+            _CODEX_CHAIN_NAME,
+            f"project instruction loading disabled under this cap; instruction files were not inspected; "
+            f"{assumptions}; {remedy}",
+        )
     try:
         result = context_preview.preview(
             target=target,
@@ -69,33 +103,33 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
             trust="trusted",
             read_access="full",
             assume_codex_defaults=True,
+            project_doc_max_bytes=cap.value,
             codex_home=None,
         )
     except Exception as exc:  # noqa: BLE001 - doctor must stay advisory
-        return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated ({type(exc).__name__}); {assumptions}); {remedy}")
+        return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated ({type(exc).__name__}); {assumptions}; {remedy}")
     reasons = [item for item in result["limitations"] if item not in _CODEX_CHAIN_BASELINE_LIMITATIONS]
     reason_text = ", ".join(reasons) or result["status"]
     if "posix_nofollow_required" in reasons:
         return (
             MANUAL,
             _CODEX_CHAIN_NAME,
-            f"not evaluated (reasons: {reason_text}); {assumptions}); "
+            f"not evaluated (reasons: {reason_text}); {assumptions}; "
             "preview is unsupported on this platform (requires POSIX nofollow capabilities)",
         )
     if result["status"] != "complete" or result["matches_codex"] is not True:
-        return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated (reasons: {reason_text}); {assumptions}); {remedy}")
-    cap = result["settings"]["project_doc_max_bytes"]
+        return (MANUAL, _CODEX_CHAIN_NAME, f"not evaluated (reasons: {reason_text}); {assumptions}; {remedy}")
     totals = result["totals"]["project"]
     rows = [row for row in result["files"] if row["scope"] == "project"]
     parts = [
-        f"{assumptions}; cap source {cap['source']}): selected {totals['selected_bytes']}/{cap['value']} bytes, "
-        f"consumed {totals['consumed_raw_bytes']}"
+        f"{assumptions}; selected {_bytes(totals['selected_bytes'])} / cap {_bytes(cap.value)}, "
+        f"consumed {_bytes(totals['consumed_raw_bytes'])}"
     ]
     for row in rows:
         advisory = row["brigade_advisory_budget_bytes"]
-        advisory_text = f" (advisory budget {advisory})" if advisory is not None else ""
+        advisory_text = f" (Brigade advisory budget {_bytes(advisory)})" if advisory is not None else ""
         label = json.dumps(row["path"], ensure_ascii=True)
-        parts.append(f"{label} {row['size_bytes']} bytes {row['contribution']}{advisory_text}")
+        parts.append(f"{label} {_bytes(row['size_bytes'])} {row['contribution']}{advisory_text}")
     if not rows:
         parts.append("no project instruction files selected")
     if reasons:
@@ -103,6 +137,10 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     parts.append("consumer cap is separate from Brigade advisory budgets")
     truncated = any(row["contribution"] in {"truncated", "cap_exhausted"} for row in rows)
     if truncated:
+        parts.append(
+            "reduce startup instructions or increase project_doc_max_bytes if the full chain is necessary; "
+            "configuration changes require a new run or restarted session"
+        )
         parts.append(remedy)
         return (WARN, _CODEX_CHAIN_NAME, "; ".join(parts))
     return (OK, _CODEX_CHAIN_NAME, "; ".join(parts))

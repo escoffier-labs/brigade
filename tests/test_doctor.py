@@ -3396,8 +3396,8 @@ def test_doctor_codex_instruction_chain_reports_estimate_within_cap(tmp_path: Pa
         return
     assert status == doctor_mod.OK
     assert "estimate, not observed" in detail
-    assert '"AGENTS.md" 20 bytes loaded' in detail
-    assert "selected 20/32768 bytes" in detail
+    assert '"AGENTS.md" 20 bytes (0.01953125 KiB) loaded' in detail
+    assert "selected 20 bytes (0.01953125 KiB) / cap 32,768 bytes (32 KiB)" in detail
     assert "cap source default-assumption" in detail
     assert "codex 0.160.0 contract" in detail
     assert "trust=trusted" in detail
@@ -3413,7 +3413,7 @@ def test_doctor_codex_instruction_chain_selects_override_over_agents(tmp_path: P
         _assert_unsupported_codex_chain(status, detail)
         return
     assert status == doctor_mod.OK
-    assert '"AGENTS.override.md" 6 bytes loaded' in detail
+    assert '"AGENTS.override.md" 6 bytes (0.005859375 KiB) loaded' in detail
     assert '"AGENTS.md"' not in detail
 
 
@@ -3425,9 +3425,9 @@ def test_doctor_codex_instruction_chain_warns_on_consumer_truncation(tmp_path: P
         _assert_unsupported_codex_chain(status, detail)
         return
     assert status == doctor_mod.WARN
-    assert '"AGENTS.md" 40000 bytes truncated' in detail
-    assert "selected 40000/32768 bytes" in detail
-    assert "consumed 32768" in detail
+    assert '"AGENTS.md" 40,000 bytes (39.0625 KiB) truncated' in detail
+    assert "selected 40,000 bytes (39.0625 KiB) / cap 32,768 bytes (32 KiB)" in detail
+    assert "consumed 32,768 bytes (32 KiB)" in detail
     assert "brigade context preview" in detail
 
 
@@ -3440,7 +3440,7 @@ def test_doctor_codex_instruction_chain_empty_override_reports_empty(tmp_path: P
         _assert_unsupported_codex_chain(status, detail)
         return
     assert status == doctor_mod.OK
-    assert '"AGENTS.override.md" 3 bytes empty' in detail
+    assert '"AGENTS.override.md" 3 bytes (0.0029296875 KiB) empty' in detail
     assert '"AGENTS.md"' not in detail
 
 
@@ -3452,7 +3452,7 @@ def test_doctor_codex_instruction_chain_missing_files(tmp_path: Path):
         return
     assert status == doctor_mod.OK
     assert "no project instruction files selected" in detail
-    assert "selected 0/32768 bytes" in detail
+    assert "selected 0 bytes (0 KiB) / cap 32,768 bytes (32 KiB)" in detail
 
 
 def test_doctor_codex_instruction_chain_unknown_root_is_manual(tmp_path: Path):
@@ -3596,3 +3596,345 @@ def test_doctor_codex_instruction_chain_remedy_enables_extras_when_off(
     commands = doctor_agent.extract_commands(detail)
     assert any(command.startswith("brigade context preview") for command in commands)
     assert ("brigade extras on" in commands) is (not extras_on)
+
+
+_requires_nonblocking_config = pytest.mark.skipif(
+    not hasattr(os, "O_NONBLOCK"), reason="config discovery requires nonblocking open"
+)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_codex_config_environment(monkeypatch):
+    # The shared home fixture supplies a synthetic default home.
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+
+@pytest.fixture
+def codex_user_config(tmp_path: Path, monkeypatch):
+    home = tmp_path / "synthetic-codex-home"
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    default = Path.home() / ".codex" / "config.toml"
+    default.parent.mkdir()
+    default.write_text('project_doc_max_bytes = "must-not-fall-back"\n', encoding="utf-8")
+    return home / "config.toml"
+
+
+@pytest.mark.skipif(not context_preview._POSIX_NOFOLLOW_SUPPORTED, reason="preview requires POSIX")
+@pytest.mark.parametrize(("cap", "size", "expected"), [(8, 20, "WARN"), (65536, 40000, "OK"), (1048576, 20, "OK")])
+@_requires_nonblocking_config
+def test_doctor_codex_configured_cap_controls_accounting(tmp_path: Path, codex_user_config: Path, cap, size, expected):
+    pytest.importorskip("tomllib")
+    codex_user_config.write_text(f'project_doc_max_bytes = {cap}\napi_key = "private-config-token"\n', encoding="utf-8")
+    repo = _codex_repo(tmp_path)
+    (repo / "AGENTS.md").write_bytes(b"x" * size)
+    status, _name, detail = _codex_chain_check(repo)
+    assert status == expected
+    assert f"{cap:,} bytes" in detail
+    assert "cap source user-base-config" in detail
+    assert "$CODEX_HOME/config.toml" in detail
+    assert str(codex_user_config.parent) not in detail
+    assert "private-config-token" not in detail
+    assert "caller-supplied" not in detail
+    assert "actual_session_observed: false" in detail
+    for assumption in ("cwd=target", "trust=trusted", "read_access=full", "fallback", "root marker"):
+        assert assumption in detail
+    assert "profile, project, system, managed, and launch-time overrides unresolved" in detail
+    assert "doctor's environment and launch directory" in detail
+    assert "repo trim" not in detail
+    if expected == "WARN":
+        assert f"--project-doc-max-bytes {cap}" in detail
+        assert "reduce startup instructions" in detail
+        assert "increase project_doc_max_bytes" in detail
+        assert "new run or restarted session" in detail
+
+
+@pytest.mark.parametrize("missing", ["file", "key"])
+@_requires_nonblocking_config
+def test_doctor_codex_missing_config_uses_labeled_assumption(tmp_path: Path, codex_user_config: Path, missing):
+    if missing == "key":
+        pytest.importorskip("tomllib")
+        codex_user_config.write_text("[profiles.example]\nproject_doc_max_bytes = 1\n", encoding="utf-8")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert "cap source default-assumption" in detail
+    assert "32,768 bytes (32 KiB)" in detail
+    assert "$CODEX_HOME/config.toml" in detail
+    assert "assumed" in detail.lower()
+    if context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        assert status == doctor_mod.OK
+
+
+@pytest.mark.parametrize("home_value", [None, ""])
+@_requires_nonblocking_config
+def test_doctor_codex_default_home_for_unset_or_empty(tmp_path: Path, monkeypatch, home_value):
+    pytest.importorskip("tomllib")
+    config = Path.home() / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    if home_value is not None:
+        monkeypatch.setenv("CODEX_HOME", home_value)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.WARN
+    assert "~/.codex/config.toml" in detail
+    assert "cap source user-base-config" in detail
+    assert "loading disabled" in detail
+
+
+@pytest.mark.parametrize("kind", ["relative", "symlink-home", "symlink-config"])
+@_requires_nonblocking_config
+def test_doctor_codex_custom_home_discovery_uses_launch_directory(tmp_path: Path, monkeypatch, kind):
+    pytest.importorskip("tomllib")
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    home = launch / "custom"
+    home.mkdir()
+    source = home / "config.toml"
+    source.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    default = Path.home() / ".codex" / "config.toml"
+    default.parent.mkdir()
+    default.write_text('project_doc_max_bytes = "must-not-use"\n', encoding="utf-8")
+    if kind == "symlink-home":
+        link = launch / "linked"
+        try:
+            link.symlink_to(home, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+        home = link
+    elif kind == "symlink-config":
+        original = home / "original.toml"
+        source.rename(original)
+        try:
+            source.symlink_to(original)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    monkeypatch.chdir(launch)
+    monkeypatch.setenv("CODEX_HOME", home.name)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.WARN
+    assert "loading disabled" in detail
+    assert "$CODEX_HOME/config.toml" in detail
+    assert str(launch) not in detail
+
+
+@pytest.mark.parametrize("kind", ["missing", "file", "controls", "loop"])
+def test_doctor_codex_invalid_custom_home_never_falls_back(tmp_path: Path, monkeypatch, kind):
+    home = tmp_path / "custom"
+    if kind == "file":
+        home.write_text("not a directory", encoding="utf-8")
+    elif kind == "loop":
+        try:
+            home.symlink_to(home)
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    default = Path.home() / ".codex" / "config.toml"
+    default.parent.mkdir()
+    default.write_text("project_doc_max_bytes = 65536\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", "unsafe\nhome" if kind == "controls" else str(home))
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+    assert "cap source default-assumption" not in detail
+    assert "65,536 bytes" not in detail
+    assert str(home) not in detail
+    assert "unsafe" not in detail
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "project_doc_max_bytes = -1\n",
+        "project_doc_max_bytes = true\n",
+        'project_doc_max_bytes = "8"\n',
+        "project_doc_max_bytes = 1.0\n",
+        "project_doc_max_bytes = []\n",
+        "project_doc_max_bytes = 4\nproject_doc_max_bytes = 8\n",
+        'project_doc_max_bytes = [\nsecret = "private-config-token"\n',
+    ],
+)
+def test_doctor_codex_invalid_config_is_unevaluated_and_opaque(tmp_path: Path, codex_user_config: Path, body):
+    codex_user_config.write_text(body, encoding="utf-8")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+    assert "cap source default-assumption" not in detail
+    assert "private-config-token" not in detail
+    assert str(codex_user_config) not in detail
+    assert "line " not in detail
+    assert "TOMLDecodeError" not in detail
+
+
+@_requires_nonblocking_config
+def test_doctor_codex_strict_parser_accepts_multiline_strings(tmp_path: Path, codex_user_config: Path):
+    pytest.importorskip("tomllib")
+    codex_user_config.write_text('project_doc_max_bytes = 0\nnote = """first\nsecond"""\n', encoding="utf-8")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.WARN
+    assert "loading disabled" in detail
+
+
+def test_doctor_codex_present_config_needs_stdlib_parser(tmp_path: Path, codex_user_config: Path, monkeypatch):
+    import sys
+
+    codex_user_config.write_text("project_doc_max_bytes = 8\n", encoding="utf-8")
+    monkeypatch.setitem(sys.modules, "tomllib", None)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "config_parser_unavailable" in detail
+    assert "cap source default-assumption" not in detail
+
+
+@_requires_nonblocking_config
+def test_doctor_codex_zero_cap_does_not_inspect_instructions(tmp_path: Path, codex_user_config: Path, monkeypatch):
+    pytest.importorskip("tomllib")
+    codex_user_config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    repo = _codex_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("private instructions", encoding="utf-8")
+
+    def forbidden(**kwargs):
+        pytest.fail("zero-cap doctor must not inspect the instruction chain")
+
+    monkeypatch.setattr(context_preview, "preview", forbidden)
+    status, _name, detail = _codex_chain_check(repo)
+    assert status == doctor_mod.WARN
+    assert "loading disabled" in detail
+    assert "instruction files were not inspected" in detail
+    assert "no project instruction files" not in detail
+    assert "private instructions" not in detail
+    assert "--project-doc-max-bytes 0" in detail
+
+
+@_requires_nonblocking_config
+def test_doctor_codex_over_ceiling_cap_has_no_unusable_remedy(tmp_path: Path, codex_user_config: Path, monkeypatch):
+    pytest.importorskip("tomllib")
+    from brigade import doctor_agent
+
+    codex_user_config.write_text("project_doc_max_bytes = 1048577\n", encoding="utf-8")
+
+    def forbidden(**kwargs):
+        pytest.fail("over-ceiling doctor must not inspect the instruction chain")
+
+    monkeypatch.setattr(context_preview, "preview", forbidden)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "1,048,577 bytes" in detail
+    assert "Brigade resource ceiling" in detail
+    assert "Codex limit" not in detail
+    assert doctor_agent.extract_commands(detail) == []
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo", "dangling-symlink", "symlink-loop"])
+def test_doctor_codex_nonregular_config_is_unevaluated(tmp_path: Path, codex_user_config: Path, kind):
+    if kind == "directory":
+        codex_user_config.mkdir()
+    elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO unavailable")
+        os.mkfifo(codex_user_config)
+    else:
+        try:
+            codex_user_config.symlink_to(codex_user_config if kind == "symlink-loop" else "absent.toml")
+        except OSError:
+            pytest.skip("symlinks unavailable")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+    assert "cap source default-assumption" not in detail
+
+
+def test_doctor_codex_denied_config_read_is_opaque(tmp_path: Path, codex_user_config: Path, monkeypatch):
+    codex_user_config.write_text("project_doc_max_bytes = 8\n", encoding="utf-8")
+    real_open = os.open
+
+    def denied(path, flags, *args, **kwargs):
+        if Path(path) == codex_user_config:
+            raise PermissionError("private-config-token")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", denied)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "private-config-token" not in detail
+    assert "not evaluated" in detail
+
+
+@pytest.mark.parametrize("size", [1048576, 1048577])
+@_requires_nonblocking_config
+def test_doctor_codex_config_read_boundary(tmp_path: Path, codex_user_config: Path, size):
+    pytest.importorskip("tomllib")
+    prefix = b"project_doc_max_bytes = 0\n#"
+    codex_user_config.write_bytes(prefix + b"x" * (size - len(prefix)))
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == (doctor_mod.WARN if size == 1048576 else doctor_mod.MANUAL)
+    assert ("loading disabled" if size == 1048576 else "config_read_resource_limit") in detail
+
+
+@pytest.mark.parametrize("change", ["in-place", "replace", "overflow"])
+@_requires_nonblocking_config
+def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_config: Path, monkeypatch, change):
+    codex_user_config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
+    real_open, real_read = os.open, os.read
+    held = []
+    bytes_read = []
+
+    def opening(path, flags, *args, **kwargs):
+        fd = real_open(path, flags, *args, **kwargs)
+        if Path(path) == codex_user_config:
+            assert flags & os.O_NONBLOCK
+            held.append(fd)
+        return fd
+
+    def reading(fd, count):
+        if held and fd == held[0] and not bytes_read:
+            if change == "overflow":
+                codex_user_config.write_bytes(b"x" * (1048576 + 20))
+            elif change == "replace":
+                replacement = codex_user_config.with_suffix(".replacement")
+                replacement.write_text("project_doc_max_bytes = 1\n", encoding="utf-8")
+                replacement.replace(codex_user_config)
+            else:
+                codex_user_config.write_text("project_doc_max_bytes = 42\n", encoding="utf-8")
+        data = real_read(fd, count)
+        if held and fd == held[0]:
+            bytes_read.append(len(data))
+        return data
+
+    monkeypatch.setattr(os, "open", opening)
+    monkeypatch.setattr(os, "read", reading)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+    assert "cap source default-assumption" not in detail
+    assert bytes_read
+    assert sum(bytes_read) <= 1048577
+
+
+@pytest.mark.parametrize(("body", "expected"), [("project_doc_max_bytes = 0\n", "WARN"), ("broken = [", "MANUAL")])
+@_requires_nonblocking_config
+def test_doctor_codex_config_result_omits_unsupported_remedy(
+    tmp_path: Path, codex_user_config: Path, monkeypatch, body, expected
+):
+    pytest.importorskip("tomllib")
+    from brigade import doctor_agent
+
+    codex_user_config.write_text(body, encoding="utf-8")
+    monkeypatch.setattr(context_preview, "_POSIX_NOFOLLOW_SUPPORTED", False)
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == expected
+    assert ("loading disabled" if expected == "WARN" else "config_invalid_toml") in detail
+    assert "unsupported on this platform" in detail
+    assert doctor_agent.extract_commands(detail) == []
+
+
+def test_doctor_codex_deep_config_is_unevaluated(tmp_path: Path, codex_user_config: Path):
+    codex_user_config.write_text("project_doc_max_bytes = " + "[" * 10000 + "]" * 10000, encoding="utf-8")
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+
+
+def test_doctor_codex_invalid_utf8_config_is_opaque(tmp_path: Path, codex_user_config: Path):
+    codex_user_config.write_bytes(b'project_doc_max_bytes = 8\nprivate = "\xff"')
+    status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
+    assert status == doctor_mod.MANUAL
+    assert "not evaluated" in detail
+    assert "private" not in detail
