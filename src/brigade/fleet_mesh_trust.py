@@ -609,21 +609,32 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
         raise crypto.MeshError("mesh_trust_storage_failure") from None
     temporary = ".trust-" + secrets.token_hex(16) + ".tmp"
     destination = None
+    created = False
     try:
         destination = dirfd.open_child_file(
             descriptor, temporary, dirfd.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         )
+        created = True
         _private(destination)
         with os.fdopen(destination, "wb", closefd=False) as stream:
             stream.write(raw)
             stream.flush()
             os.fsync(destination)
+        # close may consume the fd even when it raises. Relinquish ownership
+        # before attempting it, and never publish after an ambiguous close.
+        closing, destination = destination, None
+        os.close(closing)
         dirfd.replace_children(descriptor, temporary, _NAME)
     except OSError:
         raise crypto.MeshError("mesh_trust_storage_failure") from None
     finally:
         if destination is not None:
-            os.close(destination)
+            closing, destination = destination, None
+            try:
+                os.close(closing)
+            except OSError:
+                pass  # Preserve the primary failure; an ambiguous close is not retried.
+        if created:
             try:
                 dirfd.unlink_child(descriptor, temporary)
             except OSError:

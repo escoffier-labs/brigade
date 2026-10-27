@@ -458,6 +458,92 @@ def test_transaction_faults_and_durable_idempotent_recovery(trust, home, monkeyp
     assert not list(saved(home).parent.glob(".trust-*.tmp"))
 
 
+@pytest.mark.parametrize("point", ["close-before", "close-after", "write-and-close", "file-fsync-and-close"])
+def test_writable_close_failure_never_publishes_or_masks_storage_error(trust, home, monkeypatch, point):
+    bootstrap(trust, home)
+    before = saved(home).read_bytes()
+    raw = signed(seq=2)
+    original_open = dirfd.open_child_file
+    original_close = os.close
+    original_fdopen = os.fdopen
+    original_sync = os.fsync
+    writable = None
+    retained = None
+    closes = []
+    replacements = []
+
+    def open_child(parent, name, flags, *args, **kwargs):
+        nonlocal writable
+        descriptor = original_open(parent, name, flags, *args, **kwargs)
+        if flags & os.O_WRONLY:
+            writable = descriptor
+        return descriptor
+
+    def fail(*args, **kwargs):
+        raise OSError("private write/close diagnostic")
+
+    def fdopen(descriptor, mode, *args, **kwargs):
+        stream = original_fdopen(descriptor, mode, *args, **kwargs)
+        if descriptor == writable and point == "write-and-close":
+            monkeypatch.setattr(stream, "write", fail)
+        return stream
+
+    def sync(descriptor):
+        if descriptor == writable and point == "file-fsync-and-close":
+            fail()
+        original_sync(descriptor)
+
+    def close(descriptor):
+        nonlocal retained
+        if descriptor == writable:
+            closes.append(descriptor)
+            if len(closes) == 1:
+                if point == "close-before":
+                    retained = descriptor  # Model the bounded case where close did not consume the fd.
+                else:
+                    original_close(descriptor)
+                    retained = os.open(os.devnull, os.O_RDONLY)
+                    if retained != descriptor:
+                        os.dup2(retained, descriptor)
+                        original_close(retained)
+                        retained = descriptor
+                fail()  # Ownership is ambiguous, so the transaction must never retry close.
+        original_close(descriptor)
+
+    def replace(*args, **kwargs):
+        replacements.append(args)
+        return original_replace(*args, **kwargs)
+
+    original_replace = dirfd.replace_children
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(dirfd, "open_child_file", open_child)
+            fault.setattr(dirfd, "replace_children", replace)
+            fault.setattr(os, "close", close)
+            fault.setattr(os, "fdopen", fdopen)
+            fault.setattr(os, "fsync", sync)
+            with pytest.raises(crypto.MeshError) as caught:
+                accept(trust, home, raw)
+            assert caught.value.code == "mesh_trust_storage_failure"
+            assert str(caught.value) == "mesh_trust_storage_failure"
+            assert replacements == []
+            assert writable is not None and closes == [writable]
+            assert retained is not None
+            os.fstat(retained)  # A descriptor reused after kernel-close must remain owned by its new caller.
+        assert saved(home).read_bytes() == before
+        assert not list(saved(home).parent.glob(".trust-*.tmp"))
+        state = trust.load_trust(brigade_home=home).data
+        assert state["objects"] == state["marks"] == state["conflicts"] == {}
+    finally:
+        if retained is not None:
+            original_close(retained)
+    assert accept(trust, home, raw).status == "accepted"
+    state = trust.load_trust(brigade_home=home).data
+    assert state["generation"] == json.loads(before)["generation"] + 1
+    assert set(state["objects"]) == {digest(raw)}
+    assert accept(trust, home, raw).status == "replay"
+
+
 def test_failed_conflict_evidence_keeps_diagnosis_without_claiming_recorded(trust, home, monkeypatch):
     bootstrap(trust, home)
     accept(trust, home)
