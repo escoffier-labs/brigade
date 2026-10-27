@@ -254,8 +254,8 @@ def test_extreme_timestamps_compare_without_utc_datetime_overflow(trust, home):
 
 
 def test_kid_binding_disagreement_accepts_complete_list_and_keeps_hubs_separate(trust, home):
-    # Policy A is explicitly approved: unsigned attribution cannot suppress a
-    # complete signed list, including revocation of an unrelated key.
+    # Policy A accepts complete disputed lists, including unrelated keys,
+    # subject to ordinary capacity and the existing authenticity checks.
     trust.initialize_trust(brigade_home=home)
     earlier = "2026-01-01T00:00:00Z"
     trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=earlier)
@@ -269,8 +269,8 @@ def test_kid_binding_disagreement_accepts_complete_list_and_keeps_hubs_separate(
     assert disputed["cutoff"] == earlier
     assert state["barriers"][HUB + ":" + KID2]["principals"] == ["test-node"]
     assert state["marks"]["revocation:" + signer()]["digest"] == digest(raw)
-    assert len(state["baselines"]) == len(state["objects"]) == len(state["conflicts"]) == 1
-    evidence = next(iter(state["conflicts"].values()))
+    assert len(state["baselines"]) == len(state["objects"]) == len(state["binding_conflicts"]) == 1
+    evidence = next(iter(state["binding_conflicts"].values()))
     assert evidence["reason"] == "kid_binding_conflict" and evidence["hub"] == HUB and evidence["kid"] == KID
     assert {(c["principal"], c["source"]) for c in evidence["claims"]} == {
         ("bogus-node", "hub"),
@@ -284,7 +284,7 @@ def test_kid_binding_disagreement_accepts_complete_list_and_keeps_hubs_separate(
     state = trust.load_trust(brigade_home=home).data
     assert len(state["barriers"]) == 3
     assert state["barriers"][OTHER + ":" + KID]["principals"] == ["test-other"]
-    assert len(state["conflicts"]) == 1
+    assert len(state["binding_conflicts"]) == 1
 
 
 @pytest.mark.parametrize("case", ["bad-signature", "wrong-scope", "duplicate", "unknown", "too-deep"])
@@ -1483,7 +1483,7 @@ def test_unsigned_after_signed_retains_all_claims_minima_and_detached_views(trus
         brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff="2026-01-03T00:00:00Z"
     )
     first = trust.load_trust(brigade_home=home)
-    identity = next(iter(first.data["conflicts"]))
+    identity = next(iter(first.data["binding_conflicts"]))
     assert first.data["barriers"][HUB + ":" + KID]["cutoff"] == TIME
     for cutoff in ("2026-01-03T01:00:00+01:00", "2026-01-04T00:00:00Z"):
         before = saved(home).read_bytes()
@@ -1499,13 +1499,13 @@ def test_unsigned_after_signed_retains_all_claims_minima_and_detached_views(trus
     assert barrier["principals"] == ["agent:test", "bogus-node", "test-node"]
     assert barrier["cutoff"] == "2026-01-01T00:00:00Z"
     assert len(barrier["sources"]) == 3 and len(state.data["hub_revocations"]) == 2
-    assert set(state.data["conflicts"]) == {identity}
-    assert state.data["conflicts"][identity]["claims"] == barrier["sources"]
+    assert set(state.data["binding_conflicts"]) == {identity}
+    assert state.data["binding_conflicts"][identity]["claims"] == barrier["sources"]
     assert state.data["marks"] == first.data["marks"] and state.data["baselines"] == first.data["baselines"]
     assert state.data["objects"] == first.data["objects"]
     before = saved(home).read_bytes()
     barrier["principals"].clear()
-    state.data["conflicts"][identity]["claims"][0]["principal"] = "test-forged"
+    state.data["binding_conflicts"][identity]["claims"][0]["principal"] = "test-forged"
     assert trust.load_trust(brigade_home=home).data == json.loads(before)
     replay = accept(trust, home, raw, kind="revocation")
     assert replay.status == "replay" and replay.evidence_recorded
@@ -1522,16 +1522,16 @@ def test_replaced_signer_cumulative_lists_revoke_unrelated_keys_and_preserve_his
     result = accept(trust, home, second, kind="revocation")
     assert result.status == "accepted" and result.evidence_recorded
     state = trust.load_trust(brigade_home=home).data
-    identity = next(iter(state["conflicts"]))
+    identity = next(iter(state["binding_conflicts"]))
     third_kid = "k1_" + crypto.encode_binary(bytes([2]) * 16)
     third = signed(kind="revocation", seq=1, seed=SEED2, entries=[revoked(), revoked(kid=KID2), revoked(kid=third_kid)])
     result = accept(trust, home, third, kind="revocation")
     assert result.status == "accepted" and result.evidence_recorded
     state = trust.load_trust(brigade_home=home).data
     assert len(state["barriers"]) == len(state["objects"]) == 3
-    assert set(state["conflicts"]) == {identity}
-    assert len(state["conflicts"][identity]["claims"]) == 3
-    assert {c["source"] for c in state["conflicts"][identity]["claims"]} == {
+    assert set(state["binding_conflicts"]) == {identity}
+    assert len(state["binding_conflicts"][identity]["claims"]) == 3
+    assert {c["source"] for c in state["binding_conflicts"][identity]["claims"]} == {
         digest(first),
         digest(second),
         digest(third),
@@ -1549,8 +1549,8 @@ import sys
 from brigade import fleet_mesh_trust as trust
 state = trust.load_trust(brigade_home=Path(sys.argv[1])).data
 assert len(state["objects"]) == len(state["barriers"]) == 3
-assert len(state["conflicts"]) == 1
-assert len(next(iter(state["conflicts"].values()))["claims"]) == 3
+assert len(state["binding_conflicts"]) == 1
+assert len(next(iter(state["binding_conflicts"].values()))["claims"]) == 3
 """
     result = subprocess.run([sys.executable, "-c", script, str(home)], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
@@ -1584,16 +1584,25 @@ def test_same_signer_principal_relabel_refuses_entire_list_without_mutation(trus
         "identity",
         "unsigned-key",
         "foreign-signed-source",
+        "missing-binding-table",
+        "missing-authenticated-table",
+        "extra-binding-group",
+        "binding-in-authenticated",
+        "authenticated-in-binding",
+        "reason-only-reserve",
+        "forged-authenticated-payload",
+        "legacy-shared-table",
     ],
 )
 def test_tampered_binding_claims_and_evidence_are_refused(trust, home, case):
     bootstrap(trust, home)
     membership = signed()
     accept(trust, home, membership)
+    assert accept(trust, home, entries=["test-other"]).evidence_recorded
     trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
     accept(trust, home, kind="revocation", entries=[revoked(), revoked(kid=KID2)])
     state = json.loads(saved(home).read_bytes())
-    identity, evidence = next(iter(state["conflicts"].items()))
+    identity, evidence = next(iter(state["binding_conflicts"].items()))
     if case == "principal-set":
         state["barriers"][HUB + ":" + KID]["principals"] = ["test-node"]
     elif case == "source-principal":
@@ -1604,20 +1613,47 @@ def test_tampered_binding_claims_and_evidence_are_refused(trust, home, case):
     elif case == "source-cutoff":
         evidence["claims"][0]["cutoff"] = "2026-01-03T00:00:00Z"
     elif case == "missing-evidence":
-        state["conflicts"] = {}
+        state["binding_conflicts"] = {}
     elif case == "identity":
-        state["conflicts"] = {"0" * 64: evidence}
-    else:
+        state["binding_conflicts"] = {"0" * 64: evidence}
+    elif case == "unsigned-key":
         next(iter(state["hub_revocations"].values()))["principal"] = "test-forged"
+    elif case == "missing-binding-table":
+        del state["binding_conflicts"]
+    elif case == "missing-authenticated-table":
+        del state["conflicts"]
+    elif case == "extra-binding-group":
+        state["binding_conflicts"]["0" * 64] = evidence
+    elif case == "binding-in-authenticated":
+        state["conflicts"][identity] = state["binding_conflicts"].pop(identity)
+    elif case == "authenticated-in-binding":
+        auth_id = next(iter(state["conflicts"]))
+        state["binding_conflicts"][auth_id] = state["conflicts"].pop(auth_id)
+    elif case == "reason-only-reserve":
+        forged = dict(evidence, reason="signer_equivocation")
+        state["conflicts"][hashlib.sha256(crypto.canonical(forged)).hexdigest()] = forged
+    elif case == "legacy-shared-table":
+        state["conflicts"].update(state.pop("binding_conflicts"))
+    else:
+        auth_id = next(iter(state["conflicts"]))
+        forged = state["conflicts"].pop(auth_id)
+        canonical = forged["rejected"]["canonical"].replace('"seq":1', '"seq":2')
+        forged["rejected"]["canonical"] = canonical
+        forged["digest"] = hashlib.sha256(canonical.encode("ascii")).hexdigest()
+        state["conflicts"][hashlib.sha256(crypto.canonical(forged)).hexdigest()] = forged
     raw = crypto.canonical(state)
     saved(home).write_bytes(raw)
     with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
         trust.load_trust(brigade_home=home)
     assert saved(home).read_bytes() == raw
+    if case == "legacy-shared-table":
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
+            trust.initialize_trust(brigade_home=home)
+        assert saved(home).read_bytes() == raw
 
 
 @pytest.mark.parametrize("operation", ["signed", "unsigned"])
-@pytest.mark.parametrize("point", ["file-fsync", "replace", "directory-fsync"])
+@pytest.mark.parametrize("point", ["file-close", "file-fsync", "replace", "directory-fsync"])
 def test_binding_evidence_transaction_faults_publish_none_or_complete_generation(
     trust, home, monkeypatch, operation, point
 ):
@@ -1636,6 +1672,21 @@ def test_binding_evidence_transaction_faults_publish_none_or_complete_generation
 
     with monkeypatch.context() as fault:
         original = os.fsync
+        original_open = dirfd.open_child_file
+        original_close = os.close
+        writable = None
+
+        def open_child(parent, name, flags, *args, **kwargs):
+            nonlocal writable
+            descriptor = original_open(parent, name, flags, *args, **kwargs)
+            if flags & os.O_WRONLY:
+                writable = descriptor
+            return descriptor
+
+        def close(descriptor):
+            original_close(descriptor)
+            if descriptor == writable:
+                raise OSError("private binding close fault")
 
         def sync(descriptor):
             directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
@@ -1646,7 +1697,10 @@ def test_binding_evidence_transaction_faults_publish_none_or_complete_generation
         def replace(*args, **kwargs):
             raise OSError("private binding replacement fault")
 
-        if point == "replace":
+        if point == "file-close":
+            fault.setattr(dirfd, "open_child_file", open_child)
+            fault.setattr(os, "close", close)
+        elif point == "replace":
             fault.setattr(dirfd, "replace_children", replace)
         else:
             fault.setattr(os, "fsync", sync)
@@ -1656,7 +1710,7 @@ def test_binding_evidence_transaction_faults_publish_none_or_complete_generation
         if point == "directory-fsync":
             complete = saved(home).read_bytes()
             state = trust.load_trust(brigade_home=home).data
-            assert len(state["conflicts"]) == len(state["objects"]) == len(state["baselines"]) == 1
+            assert len(state["binding_conflicts"]) == len(state["objects"]) == len(state["baselines"]) == 1
             assert len(state["barriers"]) == 2
             assert state["generation"] == json.loads(before)["generation"] + 1
             assert state["barriers"][HUB + ":" + KID]["principals"] == ["bogus-node", "test-node"]
@@ -1668,7 +1722,8 @@ def test_binding_evidence_transaction_faults_publish_none_or_complete_generation
             assert saved(home).read_bytes() == before
     result = apply()
     state = trust.load_trust(brigade_home=home).data
-    assert len(state["conflicts"]) == 1 and len(state["barriers"]) == 2
+    assert len(state["binding_conflicts"]) == 1 and len(state["barriers"]) == 2
+    assert state["conflicts"] == {}
     assert state["generation"] == json.loads(before)["generation"] + 1
     if operation == "signed":
         assert result.status == ("replay" if point == "directory-fsync" else "accepted")
@@ -1678,16 +1733,14 @@ def test_binding_evidence_transaction_faults_publish_none_or_complete_generation
     assert saved(home).read_bytes() == unchanged
 
 
-@pytest.mark.parametrize("bound", ["conflict-count", "ordinary", "total", "object-count", "claim-count"])
+@pytest.mark.parametrize("bound", ["ordinary", "total", "object-count", "claim-count"])
 def test_binding_capacity_refuses_complete_transaction_without_eviction(trust, home, monkeypatch, bound):
     bootstrap(trust, home)
     accept(trust, home)
     assert accept(trust, home, entries=["test-other"]).evidence_recorded
     trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
     before = saved(home).read_bytes()
-    if bound == "conflict-count":
-        monkeypatch.setattr(trust, "_MAX_CONFLICTS", 1)
-    elif bound == "ordinary":
+    if bound == "ordinary":
         ordinary = len(crypto.canonical(dict(json.loads(before), conflicts={})))
         monkeypatch.setattr(trust, "_ORDINARY_BYTES", ordinary + 50)
     elif bound == "total":
@@ -1701,7 +1754,8 @@ def test_binding_capacity_refuses_complete_transaction_without_eviction(trust, h
     assert saved(home).read_bytes() == before
 
 
-def test_binding_evidence_requires_reserved_bytes_even_when_ordinary_transaction_fits(trust, home, monkeypatch):
+def test_binding_evidence_must_fit_ordinary_bytes_despite_reserved_headroom(trust, home, monkeypatch):
+    # Approved budget revision: binding groups consume ordinary bytes, not the authenticated reserve.
     homes = [home / name for name in ("control", "limited")]
     for directory in homes:
         directory.mkdir(mode=0o700)
@@ -1710,13 +1764,78 @@ def test_binding_evidence_requires_reserved_bytes_even_when_ordinary_transaction
     before = saved(homes[1]).read_bytes()
     raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
     assert accept(trust, homes[0], raw, kind="revocation").evidence_recorded
-    complete = trust.load_trust(brigade_home=homes[0]).data
-    ordinary = len(crypto.canonical(dict(complete, conflicts={})))
-    assert len(before) < ordinary < len(saved(homes[0]).read_bytes())
-    monkeypatch.setattr(trust, "_MAX_BYTES", ordinary)
+    complete = saved(homes[0]).read_bytes()
+    # With no authenticated conflicts, this entire snapshot must fit ordinary bytes.
+    bound = len(complete) - 1
+    assert len(before) < bound < trust._MAX_BYTES
+    monkeypatch.setattr(trust, "_ORDINARY_BYTES", bound)
     with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
         accept(trust, homes[1], raw, kind="revocation")
     assert saved(homes[1]).read_bytes() == before
+    assert trust.load_trust(brigade_home=homes[1]).data == json.loads(before)
+
+
+def test_full_authenticated_conflict_count_allows_complete_binding_acceptance(trust, home, monkeypatch):
+    # Approved replacement of the old conflict-count refusal branch; other refusal cases remain above.
+    bootstrap(trust, home)
+    accept(trust, home)
+    assert accept(trust, home, entries=["test-other"]).evidence_recorded
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    before = trust.load_trust(brigade_home=home).data
+    monkeypatch.setattr(trust, "_MAX_CONFLICTS", 1)
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    result = accept(trust, home, raw, kind="revocation")
+    assert result.status == "accepted" and result.evidence_recorded and result.storage_error is None
+    state = trust.load_trust(brigade_home=home).data
+    assert state["conflicts"] == before["conflicts"] and len(state["conflicts"]) == 1
+    assert len(state["binding_conflicts"]) == 1
+    assert state["barriers"][HUB + ":" + KID]["principals"] == ["bogus-node", "test-node"]
+    assert state["barriers"][HUB + ":" + KID2]["principals"] == ["test-node"]
+    assert state["marks"]["revocation:" + signer()]["digest"] == digest(raw)
+    assert set(state["objects"]) == set(before["objects"]) | {digest(raw)}
+    assert state["generation"] == before["generation"] + 1
+    unchanged = saved(home).read_bytes()
+    replay = accept(trust, home, raw, kind="revocation")
+    assert replay.status == "replay" and replay.evidence_recorded and replay.storage_error is None
+    assert saved(home).read_bytes() == unchanged
+
+
+@pytest.mark.parametrize("allegations", [False, True], ids=["control", "unsigned-other-hub"])
+def test_unsigned_groups_leave_authenticated_conflict_and_floor_reserve(trust, home, monkeypatch, allegations):
+    bootstrap(trust, home)
+    accepted = signed()
+    accept(trust, home, accepted)
+    monkeypatch.setattr(trust, "_MAX_CONFLICTS", 2)
+    monkeypatch.setattr(trust, "_MAX_ENTRIES", 4)
+    if allegations:
+        # Two disputed kids saturate the four-entry unsigned-claim source table.
+        for kid in (KID, KID2):
+            for principal in ("bogus-one", "bogus-two"):
+                trust.record_hub_revocation(brigade_home=home, hub=OTHER, principal=principal, kid=kid, cutoff=TIME)
+    before = trust.load_trust(brigade_home=home).data
+    equivocation = signed(entries=["test-other"])
+    result = accept(trust, home, equivocation)
+    assert result.status == "signed_statement_conflict"
+    assert result.evidence_recorded and result.storage_error is None
+    state = floor(trust, home, signed(entries=["floor-node"])).data
+    assert {e["reason"] for e in state["conflicts"].values()} == {"signer_equivocation", "trusted_floor_contradiction"}
+    assert len(state["conflicts"]) == 2 and len(state["floors"]) == 1
+    assert len(state.get("binding_conflicts", {})) == (2 if allegations else 0)
+    for table in ("objects", "marks", "baselines", "barriers", "hub_revocations"):
+        assert state[table] == before[table]
+    assert state.get("binding_conflicts", {}) == before.get("binding_conflicts", {})
+    unchanged = saved(home).read_bytes()
+    for raw in (equivocation, accepted):
+        replay = accept(trust, home, raw)
+        assert replay.status == "signed_statement_conflict" and replay.evidence_recorded
+        assert replay.storage_error is None
+    floor(trust, home, signed(entries=["floor-node"]))
+    assert saved(home).read_bytes() == unchanged
+    # The authenticated count is now genuinely exhausted; no third record can evict any evidence.
+    refusal = accept(trust, home, entries=["test-third"])
+    assert refusal.status == "signed_statement_conflict" and not refusal.evidence_recorded
+    assert refusal.storage_error == "mesh_trust_capacity"
+    assert saved(home).read_bytes() == unchanged
 
 
 def test_binding_evidence_coexists_with_rejected_statement_conflicts(trust, home):
@@ -1733,10 +1852,11 @@ def test_binding_evidence_coexists_with_rejected_statement_conflicts(trust, home
     assert accept(trust, home, contradiction).status == "signed_statement_conflict"
     state = trust.load_trust(brigade_home=home).data
     assert {evidence["reason"] for evidence in state["conflicts"].values()} == {
-        "kid_binding_conflict",
         "signer_equivocation",
         "trusted_floor_contradiction",
     }
+    assert len(state["conflicts"]) == 2 and len(state["binding_conflicts"]) == 1
+    assert state["binding_conflicts"] == before["binding_conflicts"]
     for name in ("objects", "marks", "baselines", "barriers", "hub_revocations"):
         assert state[name] == before[name]
     unchanged = saved(home).read_bytes()
@@ -1746,3 +1866,92 @@ def test_binding_evidence_coexists_with_rejected_statement_conflicts(trust, home
     result = accept(trust, home, revocations, kind="revocation")
     assert result.status == "replay" and result.evidence_recorded
     assert saved(home).read_bytes() == unchanged
+
+
+@pytest.mark.parametrize("budget", ["ordinary", "total"])
+def test_mixed_evidence_byte_boundaries_match_on_save_and_load(trust, home, monkeypatch, budget):
+    homes = [home / name for name in ("control", "limited")]
+    for directory in homes:
+        directory.mkdir(mode=0o700)
+        bootstrap(trust, directory)
+        trust.record_hub_revocation(brigade_home=directory, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+        accept(trust, directory, kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+        accept(trust, directory)
+    rejected = signed(entries=["test-other"])
+    control = accept(trust, homes[0], rejected)
+    assert control.status == "signed_statement_conflict" and control.evidence_recorded
+    complete = saved(homes[0]).read_bytes()
+    state = json.loads(complete)
+    ordinary = len(crypto.canonical(dict(state, conflicts={})))
+    assert len(state["binding_conflicts"]) == len(state["conflicts"]) == 1
+    assert len(complete) - ordinary > 100
+    with monkeypatch.context() as limits:
+        limits.setattr(trust, "_ORDINARY_BYTES", ordinary + (100 if budget == "total" else 0))
+        limits.setattr(trust, "_MAX_BYTES", len(complete) + (100 if budget == "ordinary" else 0))
+        result = accept(trust, homes[1], rejected)
+        assert result.status == "signed_statement_conflict" and result.evidence_recorded
+        assert result.storage_error is None
+        assert saved(homes[1]).read_bytes() == complete
+        assert trust.load_trust(brigade_home=homes[1]).data == state
+        if budget == "ordinary":
+            limits.setattr(trust, "_ORDINARY_BYTES", ordinary - 1)
+        else:
+            # Authenticated evidence can use unused ordinary space as well as the reserved difference.
+            assert len(complete) - ordinary > trust._MAX_BYTES - trust._ORDINARY_BYTES
+            limits.setattr(trust, "_MAX_BYTES", len(complete) - 1)
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
+            trust.load_trust(brigade_home=homes[1])
+        assert saved(homes[1]).read_bytes() == complete
+
+
+def test_binding_group_entry_boundary_keeps_authenticated_table_independent(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    accepted = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    accept(trust, home, accepted, kind="revocation")
+    monkeypatch.setattr(trust, "_MAX_ENTRIES", 2)
+    monkeypatch.setattr(trust, "_MAX_CONFLICTS", 2)
+    for kid in (KID, KID2):
+        trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=kid, cutoff=TIME)
+    before = trust.load_trust(brigade_home=home).data
+    assert len(before["binding_conflicts"]) == 2
+    result = accept(trust, home, kind="revocation", entries=[revoked()])
+    assert result.status == "signed_statement_conflict" and result.evidence_recorded
+    state = floor(trust, home, signed(kind="revocation"), kind="revocation").data
+    assert len(state["conflicts"]) == len(state["binding_conflicts"]) == 2
+    assert state["binding_conflicts"] == before["binding_conflicts"]
+    for table in ("objects", "marks", "baselines", "barriers", "hub_revocations"):
+        assert state[table] == before[table]
+    assert trust.load_trust(brigade_home=home).data == state
+
+
+@pytest.mark.parametrize("bound", ["unsigned-claims", "barriers", "sources"])
+def test_ordinary_source_bounds_preserve_all_evidence_and_heads(trust, home, monkeypatch, bound):
+    bootstrap(trust, home)
+    if bound == "sources":
+        accept(trust, home, kind="revocation", entries=[revoked()])
+        accept(trust, home, kind="revocation", seq=2, entries=[revoked()])
+    else:
+        for index, principal in enumerate(("test-one", "test-two")):
+            trust.record_hub_revocation(
+                brigade_home=home,
+                hub=HUB,
+                principal=principal,
+                kid=KID if bound == "unsigned-claims" or index == 0 else KID2,
+                cutoff=TIME,
+            )
+    before = saved(home).read_bytes()
+    monkeypatch.setattr(trust, "_MAX_ENTRIES", 2)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+        if bound == "barriers":
+            third = "k1_" + crypto.encode_binary(bytes([2]) * 16)
+            accept(trust, home, kind="revocation", entries=[revoked(), revoked(kid=KID2), revoked(kid=third)])
+        else:
+            trust.record_hub_revocation(
+                brigade_home=home,
+                hub=HUB,
+                principal="test-node",
+                cutoff=TIME,
+                kid=KID2 if bound == "unsigned-claims" else KID,
+            )
+    assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)

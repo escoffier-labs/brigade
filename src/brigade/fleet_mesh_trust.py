@@ -15,6 +15,15 @@ Principal names are attributed claims, not ownership. Future peer use must
 consult the (hub, kid) barrier without filtering by principal. No use API exists
 here. The unpublished v1 representation retains unsigned minima per principal.
 
+Binding conflicts are ordinary evidence, bounded by the 8192 barriers. The
+separate conflicts table holds up to 4096 authenticated signer/floor conflicts,
+including contradictions of retained accepted history: up to 12,288 evidence
+rows combined. Ordinary bytes include binding groups and all other metadata;
+only authenticated conflicts can use the headroom between 56 and 64 MiB.
+That difference is protected headroom, not a separate conflict-byte cap.
+Both tables are required in this unpublished v1 schema; incompatible snapshots
+are refused without conversion or reset.
+
 There is no arbitrary save API, pruning, migration, network, or private key
 storage. Same-user rollback/deletion is outside this filesystem boundary. A
 post-replace directory-fsync failure has an indeterminate durability outcome;
@@ -54,7 +63,18 @@ _MAX_STRING = 2 * 1024 * 1024
 _MAX_SEQUENCE = 2**53 - 1
 _LOCK_SECONDS = 10.0
 _NAME = "trust-state.json"
-_TABLES = {"anchors", "hubs", "objects", "marks", "floors", "baselines", "hub_revocations", "barriers", "conflicts"}
+_TABLES = {
+    "anchors",
+    "hubs",
+    "objects",
+    "marks",
+    "floors",
+    "baselines",
+    "hub_revocations",
+    "barriers",
+    "binding_conflicts",
+    "conflicts",
+}
 _KINDS = {"membership", "revocation"}
 _HEX = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _PRINCIPAL = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|agent:[a-z][a-z0-9._-]{0,62})", re.ASCII)
@@ -425,20 +445,16 @@ def _binding_conflicts(barriers: dict[str, Any]) -> dict[str, Any]:
 
 
 def _update_binding_conflicts(state: dict[str, Any]) -> bool:
-    changed = False
-    for identity, evidence in _binding_conflicts(state["barriers"]).items():
-        previous = state["conflicts"].get(identity)
-        _require(previous is None or previous["reason"] == "kid_binding_conflict")
-        if previous != evidence:
-            state["conflicts"][identity] = evidence
-            changed = True
+    bindings = _binding_conflicts(state["barriers"])
+    changed = state["binding_conflicts"] != bindings
+    state["binding_conflicts"] = bindings
     return changed
 
 
 def _binding_evidence_for_digest(state: dict[str, Any], digest: str) -> bool:
     return any(
-        evidence["reason"] == "kid_binding_conflict" and any(claim["source"] == digest for claim in evidence["claims"])
-        for evidence in state["conflicts"].values()
+        any(claim["source"] == digest for claim in evidence["claims"])
+        for evidence in state["binding_conflicts"].values()
     )
 
 
@@ -472,19 +488,13 @@ def _validate(state: Any) -> dict[str, dict[str, Any]]:
     for name, floor in state["floors"].items():
         _floor(floor)
         _require(name == _scope(floor["kind"], floor["signer"], floor["hub"]))
-    bindings = _binding_conflicts(barriers)
-    seen_bindings = set()
+    # Full equality proves schema, stable identities, complete coverage and
+    # every claim's principal/source/cutoff against authenticated derivation.
+    _require(state["binding_conflicts"] == _binding_conflicts(barriers))
     for identity, evidence in state["conflicts"].items():
         _hex(identity)
         _require(type(evidence) is dict)
         reason = evidence.get("reason")
-        if reason == "kid_binding_conflict":
-            _fields(evidence, {"reason", "hub", "kid", "claims"})
-            # Equality against authenticated derivation resolves every signed
-            # object and unsigned minimum, including principal and cutoff.
-            _require(identity in bindings and evidence == bindings[identity])
-            seen_bindings.add(identity)
-            continue
         _require(identity == _conflict_id(evidence))
         if reason == "signer_equivocation":
             _fields(evidence, {"reason", "rejected", "digest", "accepted_digest"})
@@ -511,7 +521,6 @@ def _validate(state: Any) -> dict[str, dict[str, Any]]:
             )
             current = state["floors"][_scope(floor["kind"], floor["signer"], floor["hub"])]
             _require(current["seq"] > floor["seq"] or current == floor)
-    _require(seen_bindings == bindings.keys())
     return values
 
 
