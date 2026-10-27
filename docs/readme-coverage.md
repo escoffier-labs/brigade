@@ -23,6 +23,9 @@ The root README is a short landing page. Every topic that left the previous READ
 | Verify receipt example | [work closeout](work-closeout.md#abridged-receipt-example-schema_version-2) |
 | Evidence log / receipt export | [evidence packages](evidence-package.md), [receipt schemas](receipt-schemas.md), [operator center](operator-center.md) |
 | Code graph queries and impact | [code intelligence](code-intelligence.md) |
+| Memory MCP tools, HTTP transport, and uvx launch | [memory MCP tools](agent-plugin.md#tools), [MCP transports](technical-guide.md#streamable-http-for-the-mcp-servers) |
+| Bug-report triage | [bug reports](technical-guide.md#bug-reports) |
+| npm trial with npx and first-launch network access | [npm package notes](../npm/feasibility/README.md) |
 | MCP sync walkthrough and per-tool table | [mcp-sync](mcp-sync.md) |
 | Shared memory workflow diagram | [memory care](memory-care.md), [memory operations](memory-operations.md), assets under `docs/assets/` |
 | Outcome rank / capture / reconcile / explain | [outcome scoring](outcome-scoring.md) |

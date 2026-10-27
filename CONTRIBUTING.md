@@ -4,17 +4,29 @@ Brigade coordinates autonomous coding agents across machines and cloud seats und
 
 ## Your first PR
 
-External contributions are welcome. This section is the short path; [Pull requests](#pull-requests) below lists the full merge gates.
+External contributions are welcome. This section is the short path. [Pull requests](#pull-requests) below lists the full merge gates.
 
 1. **Pick work.** Look for issues labeled `good first issue` or `help wanted`. If nothing fits, comment on an existing issue or open one before you spend time on a surprise scope.
 2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
-3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change (content-guard scan for docs-only; `./scripts/verify` for code).
+3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change: content-guard for docs, the focused gate while developing code, and the full gate before a code PR.
 4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
 5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge waits on the applicable review and gate rules in [Pull requests](#pull-requests), plus any explicit maintainer hold.
 
+## CI workload contract
+
+CI changes must preserve these behaviors:
+
+- A documentation-only pull request, merge group, or main push runs the lightweight checks without scheduling the runtime suites.
+- Classification uses the complete event diff. A mixed merge group, unknown path, or uncertain classification cannot authorize skipping tests.
+- The required `ci-gate` rejects failed checks, missing dependencies, and unclassified skips. It accepts only the documented, positively classified skips.
+- Cancelling a superseded run stops dependent jobs so its replacement can proceed. Cleanup steps may still collect artifacts.
+- A shadow experiment adds observational work until a separately reviewed change makes it gating. Do not count it as a reduction in required tests.
+
+Exercise the event and gate behavior when changing selection. Matching YAML text alone does not establish which jobs GitHub will schedule.
+
 ## Pull requests
 
-`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces the configured required checks, conversation resolution, and review requirements. Follow the current branch protection and any explicit maintainer review requirements; this document does not authorize bypassing them.
+`main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces the configured required checks, conversation resolution, and review requirements. Follow the current branch protection and any explicit maintainer review requirements. This document does not authorize bypassing them.
 
 **GitHub-enforced gates** on `main`:
 
@@ -27,11 +39,11 @@ External contributions are welcome. This section is the short path; [Pull reques
 - No review conversation is left unresolved. Branch protection enforces this.
 - `main` requires a merge queue. The queue tests each pull request combined with current `main` and any pull requests ahead of it, so a branch does not need to be rebased only because it is behind `main`.
 
-Satisfy the applicable branch's current approval requirements and any explicit maintainer hold before merging. Verify that any review relied on covers the current head; a green bot check alone does not establish approval.
+Satisfy the applicable branch's current approval requirements and any explicit maintainer hold before merging. Verify that any review relied on covers the current head. A green bot check alone does not establish approval.
 
 The pull request author cannot approve their own pull request. `gh pr review --approve` fails with "Can not approve your own pull request" when the author and reviewer share one GitHub identity, so a self-approval gate would be unsatisfiable for single-maintainer work.
 
-Follow the effective repository/app configuration when requesting CodeRabbit review. The current shared configuration uses the `coderabbit-review` label and disables automatic and automatic incremental review. Fix actionable findings and reply with fix and test evidence, or explain justified disagreement; resolve only addressed threads. For an obsolete change request, seek re-review or an explicitly authorized maintainer dismissal through a supported GitHub route. A skipped, absent, or rate-limited review is not approval, and a passing "Review rate limited" check can coexist with a stale approval.
+Follow the effective repository/app configuration when requesting CodeRabbit review. The current shared configuration uses the `coderabbit-review` label and disables automatic and automatic incremental review. Fix actionable findings and reply with fix and test evidence, or explain justified disagreement. Resolve only addressed threads. For an obsolete change request, seek re-review or an explicitly authorized maintainer dismissal through a supported GitHub route. A skipped, absent, or rate-limited review is not approval, and a passing "Review rate limited" check can coexist with a stale approval.
 
 Inspect the gate before attempting a merge:
 
@@ -40,11 +52,11 @@ gh pr checks <number> --required
 gh pr view <number> --json reviewDecision,mergeStateStatus
 ```
 
-`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
+`reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations. GitHub still blocks merge when any remain.
 
 Merging into `main` is asynchronous. `gh pr merge <number>` adds a pull request whose required checks have passed to the merge queue, or enables auto-merge if checks are still running. No merge-method flag is needed because the queue squashes. The queue reruns `ci.yml` on a `merge_group` event against the combined change and merges only if the required checks pass, so two pull requests that pass separately but conflict in behavior are caught before `main` goes red. `ci-gate` is the only required check. Pull requests run the Python 3.12 test shards. The queue runs 3.10, 3.11, and 3.12, so a failure that only appears on 3.10 or 3.11 surfaces there. A pull request that fails in the queue is removed from it and stays open. Merge verification means waiting until `gh pr view <number> --json state,mergeCommit` reports `MERGED`, not the exit status of `gh pr merge`. The queue ruleset has no bypass actors. Do not use `gh pr merge --admin` to skip it.
 
-For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session; explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
+For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session. Explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
 
 After applying the required repository label, use `@coderabbitai review` for an incremental pass or `@coderabbitai full review` for a pass over all eligible files when warranted. Verify the actual reviewed head. If a required review is unavailable, follow an approved alternative or report the exact blocker without bypassing the gate. Do not enable paid review credits or add-ons to obtain a review.
 
@@ -52,9 +64,9 @@ After applying the required repository label, use `@coderabbitai review` for an 
 
 User-visible PRs append a bullet under the root `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). `.gitattributes` marks `/CHANGELOG.md merge=union` so sibling PRs that each add their own Unreleased line combine instead of conflicting. Nested `CHANGELOG.md` files are not marked.
 
-The union driver applies to local merges and rebases only. GitHub does not read `.gitattributes` merge drivers when it computes pull-request mergeability, so sibling Unreleased appends still show as `CONFLICTING` on github.com even though they merge clean locally. Rebase the branch on `main` locally, let the union driver combine the bullets, and force-push; the pull request then reports `MERGEABLE`.
+The union driver applies to local merges and rebases only. GitHub does not read `.gitattributes` merge drivers when it computes pull-request mergeability, so sibling Unreleased appends still show as `CONFLICTING` on github.com even though they merge clean locally. Rebase the branch on `main` locally, let the union driver combine the bullets, and force-push. The pull request then reports `MERGEABLE`.
 
-Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read; a human must reconcile.
+Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read. A human must reconcile.
 
 ## Command-path deprecations
 
@@ -114,9 +126,9 @@ pip install -e ".[dev]"
 pip install -e ".[dev,grokbot]"
 ```
 
-On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails; a virtual environment avoids that.
+On PEP 668-managed Python (many Linux distributions), installing into the system interpreter fails. A virtual environment avoids that.
 
-**Docs-only changes:** CI runs the `content-guard` job on the repo. Locally, scan each edited markdown file before you push (one path per invocation):
+**Docs-only changes:** CI retains content-guard, repository metadata, and the required aggregate check. A complete, positively classified documentation diff skips runtime tests and installation matrices. Mixed changes, executable files, templates, workflow changes, and uncertain diffs use full validation. Locally, scan each edited markdown file before you push (one path per invocation):
 
 ```bash
 brigade guard scan <edited-file>.md --policy src/brigade/guard/policies/public-repo.json
@@ -129,7 +141,7 @@ brigade guard scan CONTRIBUTING.md --policy src/brigade/guard/policies/public-re
 brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.json
 ```
 
-**Code or test changes:** run the full local gate before you push:
+**Code or test changes:** use the focused gate for bounded development slices. Run the full local gate before opening a code PR, merging, releasing, or changing verification infrastructure:
 
 ```bash
 ./scripts/verify
@@ -230,7 +242,7 @@ When writing or changing a user-facing error, refusal, blocker, hint, or
    - **Destructive or gate-bypassing** - never name `--force`,
      `--allow-*` overrides, `--operator-confirm`, `--no-verify`, bulk release
      overrides, or similar flags as the remediation. Operators already know
-     those flags from `--help`; agents must not learn them from refusals.
+     those flags from `--help`. Agents must not learn them from refusals.
 3. **Structured before textual.** When a caller might branch on the failure,
    put machine-readable fields on the JSON payload (`reason`, ids, holders,
    expected/observed). Keep the text form from becoming a second parser
