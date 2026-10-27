@@ -151,6 +151,8 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     from .memory_reflect import _evidence_log
     from .memory_reflect_candidates import Card, _evidence_id, _pending_rows, _sort_timestamp, _timestamp
 
+    if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+        raise legacy.ProposalError("op evidence does not resolve")
     ledger = _evidence_log(target)
     if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
         raise legacy.ProposalError("evidence log is incomplete or unreadable")
@@ -175,7 +177,7 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     invalid = _invalid_outcome_ids(target, card, set(list(newest)[: io.MAX_LIST]) | cited | support)
     rows = [row for row in rows if row["evidence_id"] not in invalid]
     card.rows = rows
-    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in refs]
+    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in support]
     if not stamps:
         return None
     stamp = max(stamps, key=_sort_timestamp)
@@ -184,7 +186,7 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
         value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
         if not isinstance(value, str) or _timestamp(value) is None:
             pending = rows
-    accounted = set(refs) | cited
+    accounted = support | cited
     if any(
         row["kind"] != "reinforced"
         and _sort_timestamp(row["ts"]) <= _sort_timestamp(stamp)
