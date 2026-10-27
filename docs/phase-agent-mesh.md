@@ -33,6 +33,14 @@ statement carries a signed `backend` and capability list (D4, D11). D3 states
 what the rollback rule cannot detect on a fresh station and offers a trusted
 minimum manifest as a mitigation.
 
+Revision 5 (2026-10-27), proposed contract closure, answers the Daybreak,
+Opus, Astra and Fable foundation reviews. D3 and D4 specify signed statement
+bytes, bootstrap, trust precedence and atomic migration. D5 and D6 specify
+attempt recovery and receipt transitions. D8 proposes separate retry receipts
+and staged policy activation for parent, Astra and Daybreak review. These
+proposals do not authorize implementation, migration or deployment. The frozen
+`bm1` construction, invite, no-hub and Hub Lite scope remain unchanged.
+
 Research was retrieved on 2026-10-22. Sources are listed at the end with their
 URLs. Claims the research could not confirm from a primary source are marked
 UNVERIFIED.
@@ -45,7 +53,7 @@ written with the prefix exist on `main` today.
 
 | Topic | Decision |
 |---|---|
-| Crypto library | Optional extra `brigade-cli[mesh]` on pyca `cryptography>=48,<52`. Approved by the operator (G1). |
+| Crypto library | Optional extra `brigade-cli[mesh]` on pyca `cryptography>=50.0.2,<52`. G1 approved the extra. The current source and CI floor is 50.0.2, pending platform review (D1). |
 | Suite | `bm1`, frozen: HPKE base mode `0x00`, KEM `0x647A` (X-Wing), KDF `0x0001` (HKDF-SHA256), AEAD `0x0002` (AES-256-GCM), plus Ed25519 signatures. The KEM and its HPKE binding are Internet-Drafts, pinned by revision. Version 1 ships no classical-only suite. |
 | Envelope | A random single-use content key encrypts the payload with AES-256-GCM and a zero nonce. HPKE wraps that key for the recipient and for the sender. The routing header is bound through HPKE `info` and the payload AAD. An Ed25519 signature covers the whole envelope through digests of the ciphertext and the wraps. |
 | Sealed fields | Subject, body, ref, thread and sender_label. |
@@ -80,7 +88,16 @@ corresponding merge.
 
 ## Current state
 
-These facts come from `main` and the baseline pull requests at the heads above.
+This section records the original integration baseline. At foundation commit
+`c32ad821d482a4714573bead711e5f44f01d6467`, crypto, key-directory and sealed-storage
+foundations exist. Client opening, sealing and authority verification below
+remain planned. Source inspection confirms that sealed uniqueness/lookup still
+omit `hub`, retention is configurable from 1 through 3650 days, identity upload
+can retain an unrelated migration, and plaintext replies to sealed parents are
+accepted when plaintext is optional. D4, D5 and D8 require closure before client
+integration. Foundation storage does not establish a deployed sealed-mail flow.
+
+The following baseline facts explain the original integration work.
 
 - Messages live in the hub's `fleet_messages` table
   (`src/brigade/fleet_hub_messages.py`). `subject` and `body` are `TEXT NOT
@@ -162,7 +179,7 @@ an extra:
 
 ```toml
 [project.optional-dependencies]
-mesh = ["cryptography>=48,<52"]
+mesh = ["cryptography>=50.0.2,<52"]
 ```
 
 Comparison as of 2026-10-22 [CRY-PYPI] [CRY-CHG] [NACL-PYPI] [NACL-CHG]:
@@ -191,20 +208,24 @@ changelog adds ML-KEM when built against OpenSSL 3.5.0 or later and says
 [CRY-CHG]. On 2026-10-22 a 48.0.0 wheel on Linux x86_64 produced a 1168 byte
 HPKE ciphertext for a 32 byte key under `MLKEM768_X25519`, against 80 bytes
 under `X25519`, and decrypted it [CRY-MEAS]. The hybrid KEM is therefore the
-default and only suite in slice 1, and no upstream release is pending.
+default and only suite in slice 1. That historical measurement does not
+establish support on other platforms or versions.
 
-The floor moves from 47 (round 1) to 48 because 48.0.0 is the first release
-whose wheels carry ML-KEM. That stays inside G1, which approved the extra with
-a floor chosen for HPKE. Intel Mac users install with
-`pip install "brigade-cli[mesh]" --only-binary cryptography`, which resolves to
-48.0.x, the last `universal2` release, and that release has ML-KEM. Windows
-arm64 still has no wheel. A build from source against OpenSSL older than 3.5,
-or a distribution package of `cryptography`, can lack ML-KEM. The client probes
-for it on first use and fails with `mesh_backend_unsupported`, naming the
-wheel install as the fix, rather than falling back to a classical suite.
+The original G1 rationale chose floor 48 for wheel ML-KEM availability.
+Current `pyproject.toml` and mesh CI use `>=50.0.2,<52` after the dependency
+update. Keep that floor pending a source-backed platform review. This revision
+changes no dependency or CI configuration. The earlier Intel macOS guidance
+that `--only-binary cryptography` would resolve to 48.0.x is stale with this
+floor and must not be offered as an installation route. Intel macOS and Windows
+arm64 support need fresh platform evidence before install guidance is published.
+The comparison above and [CRY-MEAS] are dated research, not a current platform
+support guarantee.
 
-The upper bound `<52` follows the project's two majors in 2026. CI tests the
-floor (48) and the newest release.
+A source build or distribution package may lack the required backend. The
+client probes on first use and fails with `mesh_backend_unsupported` rather
+than selecting a classical suite. The floor/newest cross-version acceptance
+now means 50.0.2 and the newest version within `<52`. Review supported wheels,
+backend availability and the pinned-profile fixtures before changing that floor.
 
 ### The `bm1` wire profile, frozen before implementation
 
@@ -268,7 +289,7 @@ so pyca cannot consume them directly. Slice 1 therefore checks three layers:
 
 A checked-in `bm1` envelope fixture, generated once and verified by both pyca
 and the reference schedule, guards against drift. Cross-version check: CI
-seals a fixture with the floor (48) and the newest release, and each version
+seals a fixture with the floor (50.0.2) and the newest release, and each version
 must open the other's envelopes and the checked-in fixture byte for byte.
 
 Size budget. The round 2 review measured a 20 KiB padded payload at a 31,639
@@ -389,7 +410,7 @@ applying the offset, not the timestamp strings.
 
 All envelope authentication entry points MUST accept raw bytes through
 `parse_envelope(raw: bytes)` before any normalization. The raw envelope MUST
-be ASCII; non-ASCII bytes are rejected before parsing. Readers MUST also reject
+be ASCII. Non-ASCII bytes are rejected before parsing. Readers MUST also reject
 NUL bytes before the structural scan, decode as ASCII and pass text to the JSON
 parser so encoding auto-detection cannot run. Before allocating a JSON tree, it
 MUST reject more than 99,328 bytes (the 96 KiB envelope cap plus a fixed
@@ -457,11 +478,16 @@ Why this shape:
   AES-GCM and not ChaCha20 [CF-WC]. WebCrypto has no ML-KEM, so a future
   browser client (the desktop panel in #1887 slice 6) would need a WebAssembly
   ML-KEM to open mail. Hub Lite never decrypts.
-- Wrapping a content key keeps a large body from being duplicated per
-  recipient and leaves room for multi-recipient mail.
+- Wrapping a content key keeps a large body from being duplicated between
+  the sender and recipient copies. `bm1` admits those two parties only.
+  AES-GCM does not commit to one key: a malicious sender can construct different
+  sender/recipient views using different wrapped keys. A sender-wrap recovery
+  proves only the sender's own view. Multi-recipient or stronger
+  audit claims require separately reviewed `bm2` work, not a `bm1` change.
 
 Replay identity. `(hub, from, client_id)` is the unique per-sender message id.
-The hub's unique `(sender, client_id)` index enforces it on the hub, and each
+Sealed storage must enforce `(hub, sender, client_id)` before client integration
+(D5, D8). The current `(sender, client_id)` index does not do that. Each
 client's seen-id cache enforces it locally whatever the hub does (D6 step 5).
 The signed `created_at` is the timestamp the freshness check uses.
 
@@ -605,9 +631,15 @@ manifest:
 }
 ```
 
-It is signed under `brigade-mesh/v1/membership` with the operator manifest
+The example is schematic: producers sort `members` in ASCII order. It is signed under `brigade-mesh/v1/membership` with the operator manifest
 key, the same key whose fingerprint each machine pins once out of band with a
-planned `fleet keys trust-manifest-key --fingerprint <fp>`. It lists principal ids only, never keys or
+planned `fleet keys trust-manifest-key --public-key-file <file>
+--fingerprint <fp>`. The file is exactly the unpadded base64url encoding of a
+32-byte Ed25519 public key, with no whitespace or newline. The fingerprint is
+supplied independently over a channel outside the hub and must exactly match
+D3's full grouped base32 SHA-256 fingerprint. No hub response installs or
+replaces this trust anchor. A mismatch changes nothing. Replacement is an
+explicit operator action and retains the old anchor and its marks as history. It lists principal ids only, never keys or
 roles. The admin builds it with a planned `fleet keys membership sign`, which
 proposes the nodes and agent principals the admin enrolled, shows each one for
 confirmation, and leaves out every principal created by a teammate invite.
@@ -679,8 +711,8 @@ fetched. It requires the expected fingerprint as input, fetches the current
 record, verifies `self_sig`, and accepts only on an exact match. Bulk
 acceptance takes one of two inputs:
 
-- `--manifest <file>`: a key manifest, a list of `{principal, hub, kid,
-  fingerprint}` with a `seq` and `created_at`, signed under
+- `--manifest <file>`: the exact key-manifest object below, with a `keys`
+  list of `{principal, hub, kid, fingerprint}`, signed under
   `brigade-mesh/v1/manifest` by the operator manifest key.
 - `--fingerprints <file>`: principal and fingerprint pairs the operator
   verified out of band. Every entry must match.
@@ -693,7 +725,7 @@ Signed statements and rollback. Four kinds of statement carry a sequence
 number `seq` under their signature: hub identity statements (D4), membership
 manifests, key manifests and revocation statements. For each kind, and per
 signing key, the client persists the highest accepted `seq` and the SHA-256
-of that statement's canonical form. It refuses a statement with a lower `seq`
+of that complete signed statement's canonical form. It refuses a statement with a lower `seq`
 (`signed_statement_rollback`) and a statement with the same `seq` and a
 different digest (`signed_statement_conflict`), and records the conflict as
 evidence that the signing key is misused. A replay of the accepted statement
@@ -704,6 +736,119 @@ every revocation so far, so the latest one is complete, and a statement that
 drops an earlier entry is refused. These marks live in the key
 directory with the pin store and follow the same file rules.
 
+### Revision 5 signed statement contract
+
+This is the proposed interoperable statement profile for slices 2 and 2b.
+It uses the existing Ed25519 signing helper, SHA-256 and D2 canonical encoder.
+It changes neither envelope bytes nor any existing domain label. A statement's
+kind is selected by its import/upload route and expected verifier, never by a
+hub-chosen verification key. Exact objects (all fields required, no others):
+
+| Kind and label suffix | Complete signed object |
+|---|---|
+| membership, `/membership` | `{v, hub, seq, created_at, members, sig}` |
+| key manifest, `/manifest` | `{v, hub, seq, created_at, keys, sig}` where each key is exactly `{principal, hub, kid, fingerprint}` |
+| cumulative revocation, `/revocation` | `{v, hub, seq, created_at, revocations, sig}` where each revocation is exactly `{principal, kid, compromised_from}` |
+| identity, `/hub-identity` | `{v, hub_id, hub_sig_pub, endpoint, require_sealed, max_envelope_bytes, envelope_versions, suites, backend, capabilities, created_at, seq, sig}` |
+| migration, `/hub-migration` | `{v, old_hub_id, new_hub_id, new_hub_sig_pub, endpoint, created_at, seq, sig}` |
+
+For every kind, remove only the top-level `sig` and sign
+`LABELS[label_name] + canonical(object_without_sig)`, where `label_name` is
+exactly `membership`, `manifest`, `revocation`, `hub-identity` or `hub-migration`
+from the table. Each label is
+`b"brigade-mesh/v1/" + label_name.encode("ascii") + b"\0"`. The NUL is
+one byte `0x00`, as in `LABELS`. `sig` decodes to
+exactly 64 bytes. The rollback/floor digest is the full 32-byte SHA-256 of
+`canonical(complete_object_including_sig)`, never the unsigned object, raw
+HTTP text, wrapper or a truncated hash. Display `--sha256` as 64 lowercase hex
+characters. Invite floor digests use the same 32 bytes in unpadded base64url.
+Manifest kinds verify with the locally pinned manifest public key. Identity
+verifies with `hub_sig_pub` after deriving its id. Migration verifies with the
+persisted old identity key and must derive `new_hub_id` from its new key.
+
+HTTP/file authentication entry points must parse raw bytes with the bounded,
+duplicate-rejecting parser, not accept an already decoded untrusted dict.
+`GET /mesh/identity` may return a bare complete identity object or exactly
+`{"identity":<complete identity>,"migration":<complete migration>}`. No partial
+object, null migration or extra wrapper field is accepted. The wrapper carries
+no authority or digest of its own. Bound that response to 34,816 raw bytes,
+then validate each inner object at its own bound. The manifests response is
+exactly `{"statements":{<kind>:<complete statement>,...}}` with any subset of
+`membership`, `manifest`, `revocation`, no duplicate/unknown kind, and at most
+8 MiB raw. Response-wrapper depth adds at most two containers to the inner
+four-level bound. Verify and digest each statement independently.
+
+Before signature verification or state changes:
+
+- Bound raw input before JSON allocation: membership, key manifest and
+  revocation at 2,098,176 bytes each (2 MiB plus 1024), identity and migration
+  at 17,408 bytes each (16 KiB plus 1024). Bound canonical complete objects to
+  2 MiB or 16 KiB respectively. The three-manifest response, including its
+  wrapper, remains within the existing 8 MiB response cap. Refuse nesting
+  deeper than four containers, counting the root as one.
+- Input is ASCII JSON with no BOM or literal NUL. Reject duplicate keys at
+  every level, unknown fields, nulls, floats, NaN, infinities, booleans where
+  integers are expected, malformed strings and escaped lone surrogates.
+  All decoded strings in these schemas are ASCII. JSON whitespace and key
+  order may vary for statements and never affect their canonical digest.
+  Unlike statements, frozen `bm1` envelopes still require canonical raw bytes.
+- `v` is integer 1. `seq` is an integer from 0 through 9,007,199,254,740,991
+  (the JavaScript exact-integer bound). This is intentionally narrower than
+  the current hub's SQLite bound of `2**63-1`. Reject, never round, larger
+  sequences. Every time uses D2's exact timestamp grammar and valid instants.
+  Comparison uses UTC instants, never strings. No timestamp proves freshness.
+- Binary fields use D2 unpadded base64url with exact decode/re-encode equality.
+  `hub_sig_pub` and `new_hub_sig_pub` are 32 bytes. A hub id is `h_` followed
+  by the canonical encoding of its 16-byte derivation. Hub statements never
+  use literal `mesh`. A kid is `k1_` plus 16 encoded bytes. Principal ids use
+  the crypto core's node `[A-Za-z0-9][A-Za-z0-9._-]{0,127}` or agent
+  `agent:[a-z][a-z0-9._-]{0,62}` grammar with ASCII full matching.
+- `members` has 0 through 4096 distinct principal ids in ASCII order. `keys`
+  has 0 through 4096 entries ordered by `(hub, principal, kid)`, with each
+  entry's `hub` equal to the statement's `hub`, one entry per principal and
+  no shared kid. Each fingerprint is the exact 13 groups of four uppercase
+  base32 characters from the full 32-byte hash, joined with hyphens, checked
+  by decode/re-encode equality and against the fetched self-signed key.
+- `revocations` has 0 through 8192 entries ordered by `(principal, kid)`,
+  with unique kids and no duplicate pair. `compromised_from` is a timestamp,
+  not a command alias such as `now`. Every later statement must include each
+  previously accepted revocation for this hub/signer with an equal or earlier
+  cutoff. An imported cutoff and an unsigned hub cutoff combine by earlier
+  instant. Reaching a count/size bound fails closed and requires a reviewed
+  profile extension, never truncation or forgetting a revoked kid.
+- Identity `require_sealed` is a boolean. `max_envelope_bytes` is an integer
+  1 through 98,304. `envelope_versions` is exactly `[1]`, `suites` exactly
+  `["bm1"]`, `backend` exactly `full` or `hub-lite`. `capabilities` has 0
+  through 32 unique names in ASCII order, each `[a-z][a-z0-9_-]{0,63}`.
+  Known names are the seven in D4. Clients ignore unknown names and never
+  enable a feature from them. Current hub upload accepts only known names,
+  so an extension also needs a reviewed server change. Hub Lite must require
+  sealing and cap envelopes at no more than 32,768 bytes.
+- Identity and migration `endpoint` must equal the normalized origin of D4.
+  Migration requires distinct old/new ids, the stored old signer and the new
+  served identity's exact id, key and endpoint. Its `created_at` is the
+  identity supersession instant. It has its own `(kind, signer)` sequence
+  stream and never resets identity or manifest sequences.
+
+Acceptance is all-or-nothing, including key-manifest entries. Persist accepted
+objects, their complete digests and `(kind, signer)` marks in one transaction.
+Here signer is the full SHA-256 of the signing public key.
+Across hubs preserve that signer's marks and continue its sequence stream for
+that kind. A different signer starts a distinct stream only after explicit
+anchor acceptance. Neither changing hub nor changing kind discards old marks.
+Every floor binds kind, signer, hub, minimum sequence and complete digest.
+A statement at that sequence must have that digest. A higher statement may
+satisfy the minimum only under the same authenticated scope and signer.
+Existing minimum/high-water marks can increase, never decrease.
+
+Before hub-facing code, check in deterministic fake-key fixtures for all five
+kinds: complete object, unsigned canonical bytes, exact labeled signing input,
+public key, signature and full canonical digest. Python and the future Worker
+must verify the same bytes, including a boundary sequence and empty lists.
+One malformed corpus covers duplicate/nested keys, Unicode, limits, order,
+range, wrong label, unsigned digest and same-sequence conflicts. These are
+known answers for encoding/signatures, separate from the frozen HPKE vectors.
+
 What the high-water rule cannot detect. It only compares a statement with
 what this station accepted before. A fresh station, or one whose marks were
 lost, has no mark, so a hub can serve it an old but validly signed first copy,
@@ -713,7 +858,7 @@ statement from any station, which leaves that station on the last version it
 accepted (D8). Neither case lets the hub exceed what the operator once signed,
 but both can keep a removed member `observed`. The optional mitigation is a
 trusted floor: the operator gives a station a minimum `seq` and the SHA-256 of
-that statement's canonical form, either out of band with a planned
+that complete signed statement's canonical form, either out of band with a planned
 `fleet keys membership require --seq <n> --sha256 <digest>` or inside an
 invite (D9). The station refuses any membership manifest below the floor,
 refuses one at the floor whose digest differs, and until it accepts a manifest
@@ -722,9 +867,22 @@ it had no manifest. A floor shortens what a withheld update can hide to the
 time since the floor was issued. Nothing short of a fresh out-of-band check
 detects a withheld update after that.
 
-The local boundary, stated exactly. Fleet MCP exposes no tool that changes
-pins, keys, hub identities or manifests, so an agent restricted to MCP cannot
-accept a substituted key. An agent with shell access running as the same OS
+Trust provenance and use refusal are separate state. Keep the accepted record,
+its original `observed`/`verified` provenance and acceptance evidence even when
+use is blocked. Check irreversible kid revocation first, then unresolved
+`changed` or `pending_binding`, then current-hub membership for observed keys,
+then require-verified. Relisting a member clears only `observed_not_member`.
+Neither membership nor fingerprint acceptance can revive a revoked kid, erase
+`changed`, or complete an invite binding. A replacement for a revoked kid
+needs a fresh key and explicit verification. Require-verified is checked at
+every seal, open, reply link and spool transmission, including existing pins.
+It blocks observed use without erasing the pin or its history.
+
+The local boundary, stated exactly. Fleet MCP exposes no operator acceptance,
+anchor replacement or manual identity-acceptance tool. Normal MCP messaging
+may persist validated automatic first observation, continuity, statement marks
+or authenticated identity migration through the same verifier as the CLI.
+These automatic writes cannot substitute for operator confirmation. An agent with shell access running as the same OS
 user is not stopped. It can edit the pin store, copy the private keys, or run
 the CLI with a fingerprint it read from the hub's own `who` output. Requiring
 an out-of-band fingerprint stops accidental and naive acceptance, not a
@@ -751,15 +909,24 @@ trust level.
 Key history. The client keeps every accepted public record with a validity
 interval: from its signed `created_at` to its successor's signed `created_at`,
 or to `compromised_from` if it was revoked. Archived mail verifies against the
-record named by `from_kid` when the envelope's signed `created_at` falls
-inside that interval, allowing `MAX_FUTURE_SKEW`. Hub timestamps
+record named by `(hub, principal, kid)` when the envelope's signed
+`created_at` falls inside that interval, allowing `MAX_FUTURE_SKEW` for the
+retirement bound only. The lookup returns the immutable record plus provenance,
+revocation and validity evidence. Intervals start inclusively and end
+exclusively at the successor time. Revoked history uses only the separate
+receipt rule below, never skew to extend the compromise cutoff. Hub timestamps
 (`received_at`, `created_at` columns) never enter these checks.
 
 Revocation. Revoking a node (`revoke_node`) or a principal
 (`revoke_principal`) marks all its key records revoked in the same
 transaction and records `compromised_from`. The operator states that time with
 a planned `--compromised-from <time|key-creation|now>` option, defaulting to
-`key-creation`, the conservative choice. A revoked kid can never be published
+`key-creation`, the conservative choice. Keep that compromise default. Before
+sealed-mail rollout add a distinct authenticated routine credential-rotation
+operation that atomically replaces only the bearer-token digest/generation,
+invalidates the old token and leaves principal keys, grants, pins and signed
+history intact. It is not revoke-then-reenroll and cannot revive a previously
+revoked key or principal. A revoked kid can never be published
 again, and continuity from a revoked key is never accepted. A hub's revocation
 can only reduce trust, so clients honor it without a signature: no new mail is
 sealed to the key. A revocation statement signed with the manifest key carries
@@ -776,11 +943,13 @@ compromise, so it must be rejected. The rule therefore uses only evidence the
 station recorded about the envelope itself:
 
 - Every station keeps an append-only receipt log, an owner-only SQLite table
-  in the key directory. When the station first stores or opens a sealed
-  envelope (the hub inbox, `sent`, live delivery or the no-hub inbox), it
-  appends the envelope's SHA-256 digest, `(hub, from, from_kid, client_id)`
-  and the local receive time, before the opened row is returned. Rows are
-  never updated. Triggers refuse `UPDATE` and `DELETE`, and pruning removes
+  in the key directory. When the station first validates a complete sealed
+  envelope for storage/opening (the hub inbox, `sent`, live delivery or the
+  no-hub inbox), under D6's signature/content/context/freshness checks it
+  appends the full-envelope SHA-256 digest and a verified signed-header digest
+  (D6), `(hub, from, from_kid, client_id)`,
+  the original hub message id and the local receive time, before the opened
+  row is returned. Rows are never updated. Triggers refuse `UPDATE` and `DELETE`, and pruning removes
   only rows older than the 90 day freshness window whose kid is not revoked.
 - The clock policy: the receive time is the station's own UTC wall clock at
   the moment of receipt, never a hub timestamp or the envelope's
@@ -816,7 +985,8 @@ station recorded about the envelope itself:
   toward refusal. The receipt rule grants readability, so it takes the full
   relative bound.
 - A message signed by a revoked key opens as history only when the receipt
-  log holds that exact envelope digest with a qualifying receive time.
+  log holds that exact full-envelope digest with a qualifying receive time. A tombstone
+  may inherit only the matching earlier receipt by the D6 transition rule.
   Everything else from that key opens as `sender_key_revoked`: mail received
   after the cutoff, mail with no receipt (a fresh station, a pruned log, or a
   station that never saw it), and mail whose digest differs from the receipt.
@@ -868,8 +1038,8 @@ hub identity is now a key the hub process does not hold.
   signature work.
 - Backend identification. `backend` is `full` or `hub-lite`, and any other
   value makes the statement malformed. `capabilities` is a sorted list of
-  distinct names from a fixed set: `messages`, `invites`, `presence`,
-  `questions`, `claims`, `events` and `runs`. A full hub lists all seven, and
+  distinct names, with these known meanings: `messages`, `invites`, `presence`,
+  `questions`, `claims`, `events` and `runs`. D3 bounds names and future unknown names. A full hub lists all seven, and
   Hub Lite in version 1 lists `messages`, `invites` and `presence`. A client
   ignores a name it does not know, so a later capability never switches on a
   code path in an older client. A tool whose capability is not listed returns
@@ -899,8 +1069,13 @@ hub identity is now a key the hub process does not hold.
   - operator verification of the new hub id obtained out of band, with
     `fleet hub-identity accept --hub-id <new id>`, which also carries the pins.
   
-  After either, principals republish records bound to the new hub id with a
-  `prev_sig` from their pinned keys, which the client accepts as continuity.
+  After either, every principal generates fresh signing and KEM keypairs,
+  a different kid and a new-hub record with `prev_sig` by its pinned predecessor.
+  Rebinding the same public keys reuses the kid, which both the frozen crypto
+  continuity check and directory reject. Only the authenticated lineage may
+  authorize this cross-hub link. Until a peer publishes its valid successor,
+  new sends to it fail `recipient_key_missing` and stay sealed-pending, never
+  plaintext. Old-hub records remain available for original-attempt recovery.
 - Lineage. The store keeps, per endpoint, the ordered list of every hub
   identity it has accepted: `hub_id`, key, how it was accepted (`invite`,
   `operator`, or `migration` with the digest of the signed migration
@@ -921,9 +1096,90 @@ hub identity is now a key the hub process does not hold.
   under the new id never collide, and a replay check under one id says
   nothing about the other. A reply made after the migration links to an older
   request because its signed `in_reply_to` names the original's hub (D2).
-- A new endpoint for the same identity (the hub moved) is accepted when a
-  fresh statement signed by the same key lists it. The key is the identity,
-  and the URL is only its location.
+- A new endpoint for the same identity (the hub moved) is accepted when an
+  independently configured new origin serves a higher-sequence statement
+  signed by the locally stored key naming exactly that origin. Redirects alone
+  never change configuration, move credentials or create a new trust entry.
+
+### Origin, bootstrap and migration persistence
+
+The signed origin is computed by one algorithm in CLI, client and Worker.
+Require an absolute HTTP(S) URL with ASCII host and scheme, no userinfo,
+query, fragment, percent escapes, backslash, controls or whitespace. Reject
+paths other than absent or `/`. Lowercase scheme and DNS host, reject a
+trailing DNS dot, use ASCII DNS labels (including already encoded `xn--`
+labels), and do no implicit Unicode/IDNA conversion. DNS labels have 1 through
+63 characters, start/end with an ASCII letter or digit, and otherwise contain
+only letters, digits or hyphens, with at most 253 host characters. Reject an
+all-numeric/dotted host unless it is the IPv4 form below. Bound the normalized
+origin to 2048 ASCII bytes. IPv4 uses four decimal
+octets without leading zeros. Bracketed IPv6 has no zone id and renders its
+compressed lowercase address. Ports are decimal 1 through 65535, no leading
+zeros. Remove default 443 for HTTPS and 80 for HTTP. Render no trailing slash.
+The signed `endpoint` must already be this normalized string. Configured URLs
+may normalize by these rules, but a valid signature for another origin fails
+`hub_endpoint_mismatch` before any pin or anchor write. Do not follow a
+cross-origin redirect with credentials or treat it as identity continuity.
+HTTP is permitted for explicit local/test configurations and supplies no TLS
+protection for bearer tokens. Production onboarding uses HTTPS.
+
+Local custody and file-only statement validation may precede identity support.
+Every hub-fetching key/statement command takes its namespace from a persisted
+current endpoint identity, never the response being fetched. Without that
+entry, fail `hub_identity_unverified`. This name means missing accepted
+identity state. It does not silently upgrade the existing `observed` identity
+path to mandatory out-of-band verification. First-contact identity acquisition
+is the dedicated bootstrap exception: verify self-signature, derived id and
+origin, persist it as `observed`, then permit dependent operations subject to
+local sealing/key policy. Invite or operator confirmation still gives
+`verified` identity provenance as D4 previously specified.
+
+Identity provenance and policy freshness are different. Verifying a key/id
+alone does not prove the identity statement is the current policy. Bootstrap
+that claims current-policy verification must also receive independently trusted
+identity and applicable membership floors: `(kind, signer, hub, seq, digest)`.
+The planned identity accept command gains `--seq <n> --sha256 <digest>` for
+that claim. An invite's existing optional `m` field binds membership only.
+Without a separately delivered identity floor it verifies the hub id, not the
+latest sealing policy. Persist these distinctions and show `policy_freshness:
+"unproven"` until floors are satisfied. Missing floors need not forbid the
+existing observed or invite-verified identity semantics, but cannot be hidden
+by that label. Local `seal=always` and require-verified avoid relying on old
+optional-sealing/membership policy. Even floors cannot detect a later withheld
+update or prevent a signed fork above the floor without external comparison.
+
+Slice 2b depends on slice 2's trust store. One observable crash-safe commit
+advances the endpoint identity and supersession instant while preserving:
+immutable original-hub records and validity intervals, pin provenance and
+barriers, cumulative revocations, all `(kind, signer)` high-water marks,
+floors, membership provenance and authenticated lineage. Use a transactional
+local journal or database with a commit marker and recovery before any reader
+uses current state. Readers see either the complete old generation or the
+complete new generation, never a new namespace missing old refusal state.
+Separate identity/pin files remain logical stores and cannot be independently
+committed without that journal. A restart finishes or rolls back an incomplete
+migration before any network use. No reader may select mixed generations.
+
+Carry constraints forward, not signed bytes rewritten as new statements.
+Keep old manifests/floors under the original hub. Current-hub observed use
+requires a newly signed membership with a sequence above the preserved mark.
+If there is an old-hub membership floor, also require an independently trusted
+current-hub floor or explicit operator acceptance mapping that old floor to
+the new signed digest. Until these checks pass observed use is blocked. With
+no old floor, a valid higher-sequence current-hub manifest suffices, preserving
+the optional-floor semantics and their unproven-freshness limitation. Old membership cannot authorize the new hub. Revoked kids remain
+revoked across namespaces, and pending bindings and changed pins remain
+blocked. An operator-accepted identity change does not waive these barriers.
+The lookup exposed to the opener is `record_for(hub, principal, kid,
+signed_created_at)`, returning historical validity and current refusal evidence.
+Never rewrite receipt, seen-id, outbox or pending-request triples.
+
+Server-side identity replacement must clear an unrelated stored migration in
+the same transaction. Same-identity policy updates may retain a proof only if
+its new id/key/endpoint still match. A client always validates that pairing
+and rejects unrelated proofs, regardless of server cleanup. Enforce identity
+sequence rollback/conflict checks as defense in depth. The staged policy
+proposal in D8 must preserve these rules.
 
 ## D5. Sealing on send, reply, retry and the spool
 
@@ -958,13 +1214,15 @@ codes it does not recognize today, so both codes join its retained set.
 Drain rechecks the recipient key's status before each transmission, so a
 record sealed while the recipient was usable and drained after it became
 `observed_not_member`, `changed` or revoked fails with that status's code and
-is not sent.
+is not sent. A policy change to require-verified blocks an existing observed
+spool entry at transmission time even if its envelope was already persisted.
 
 Retry commitment. `rc` is `HMAC-SHA256(retry_key, b"brigade-mesh/v1/retry\0"
 + canonical(semantic fields))`, where the semantic fields are `hub`, `from`,
 `to`, `kind`, `priority`, `client_id`, `deadline`, `in_reply_to` and the five
 payload fields. All five payload fields are present in the commitment object,
-including JSON `null` for `None`. An empty `ref` contributes `""`, so it MUST
+including JSON `null` for `None`. Absent `deadline` and `in_reply_to`
+are omitted, as in the frozen retry helper, never replaced by `null`. An empty `ref` contributes `""`, so it MUST
 produce a different commitment from `None`. It leaves out everything that changes between seals of the
 same request: the content key, the wraps, `created_at`, padding and the
 signature. The hub has no retry key, so `rc` lets it test no guesses, and
@@ -976,26 +1234,73 @@ resend after a crash (patrol and the Dot pack derive `client_id` from their
 own state) or a #2010 tool retry with the same `client_id` meets a conflict.
 The contract:
 
-1. The hub's 409 `message_client_id_conflict` for an authenticated sender
-   includes the existing message `id`. The caller learns only about its own
-   mail.
-2. A new sender-scoped `sent_lookup` action returns the caller's own row for a
-   `client_id`, as an envelope or a tombstone, or `not_found`.
-3. The client verifies the stored signed header with its own key, so a hub
-   cannot pass off a fabricated row, and compares `rc` with a recomputed
-   value. Equal means delivered, and the call returns the existing id,
-   matching #2010's replay contract.
-4. Different `rc` is a permanent 409 `message_client_id_conflict`, matching
-   #2010's rule for a different body.
-5. After ciphertext purge the tombstone still carries the signed header with
-   `rc`, so step 3 works unchanged. If the retry key is gone (a lost key
-   file), the client falls back to opening its sender wrap. When neither is
-   possible, it reports the permanent conflict with the existing id and
-   `reason: "content_unverifiable"` rather than guessing.
+1. Persist an attempt before its first network write: original `(hub, from,
+   client_id)`, envelope bytes/digest, `rc`, original deadline, semantic-input
+   commitment, retry-key identifier and local expiry. Keep prior attempts and
+   their outcomes across migration. The new current identity never overwrites
+   an outstanding attempt's `hub`, `rc` or reply triple.
+2. Recovery precedes any new seal/attempt. Sender-scoped `sent_lookup` with
+   explicit original `hub` and `client_id` returns the stored envelope,
+   tombstone or retry receipt (D8). The authenticated 409 includes the existing
+   id. First validate canonical bytes, signed header, own signer history,
+   routing triple and accepted identity lineage, including the supersession
+   time. Then recompute `rc` using the recorded attempt's original `hub`,
+   deadline and caller semantics, not today's identity. Do not copy unverified
+   header fields into the commitment calculation. A mismatching triple fails
+   before commitment comparison.
+3. Equal verified `rc` returns the existing id as delivered, including after
+   ciphertext purge or visible routing deletion when a valid retry receipt
+   remains. Different `rc` is permanent `message_client_id_conflict`. If retry
+   key material is lost, opening the sender wrap and comparing all original
+   semantic fields may recover a full envelope. It cannot recover a tombstone
+   or receipt without that key. A plaintext existing row, missing historical
+   key, or unverifiable content yields permanent conflict with existing id and
+   `reason: "content_unverifiable"`, never delivered and never a new send.
+4. A lookup `not_found` is not evidence that an in-flight request cannot commit
+   later. Keep one attempt owner under the local spool lock and reconcile
+   response loss before replacing it. An explicit stale-key refusal means
+   that request stored nothing, but first reconcile any earlier uncertain
+   request for the same attempt. Resealing uses a fresh content key and the
+   same attempt hub/semantics only while that hub is still current.
+5. Across migration, recover A before creating a B attempt. A new namespace
+   alone does not make the old request absent. The Hub prerequisite is a
+   transactionally ordered identity fence: activation serializes with sealed
+   inserts, permits duplicate/receipt lookup for A, and rejects every new A
+   insert after activation. A lookup for A after that fence can establish
+   absence on an honest hub, including a request completing just before the
+   fence. Without this capability or a terminal outcome for all old requests,
+   retain the attempt as unresolved and send nothing under B. The fence must
+   cover every writer of the original storage. Moving to an independent hub
+   database does not provide that fence automatically and cannot prove old
+   absence while the old writer may still commit. A malicious hub
+   can withhold a committed row, so this provides retry correctness for an
+   honest backend. Hub omission remains undetectable. Do not silently abandon an
+   unresolved attempt and risk delivering twice.
+6. Only after recovery/fenced absence may a new B attempt be persisted. Its
+   `hub` and `rc` are new values. Record the relationship between attempts
+   locally, while all old receipt/seen/pending triples remain unchanged. On
+   expiry of local retry state, fail `message_retry_expired` without resealing
+   or transmitting. Caller reuse of an expired request key is not permission
+   to create a fresh delivery.
 
-The hub runs its `(sender, client_id)` duplicate check before the key id
-checks, so a retry of stored bytes still returns the stored row after a
-rotation.
+The Hub must scope sealed uniqueness to `(hub, sender, client_id)` and expose
+exact scoped lookup before slice 6 uses this recovery. Current source does
+neither. D8 proposes the compatibility and receipt storage contract. Duplicate
+lookup runs before new-attempt freshness, current key-id and current-hub admission checks, so a stored
+A attempt can recover after rotation/migration, but new A inserts cannot.
+
+Publication has an analogous response-loss boundary. Persist a key candidate
+before `keys_publish`. On timeout or `principal_key_exists`, fetch its kid,
+verify its complete canonical record and signatures against the persisted
+candidate, and confirm its state/current active head. An identical active
+record reconciles success. A retired identical record proves publication but
+requires continuity reconciliation before use. Revoked, substituted or
+unrelated active records never count as usable success. Do not generate a new
+key just because a response was lost. Statement/identity uploads similarly
+retain the candidate complete digest and sequence, then read back and verify
+the exact object after timeout or sequence conflict. A higher/different object
+needs explicit reconciliation before reporting successful upload. Restart
+resumes the persisted publication attempt, without re-signing new bytes.
 
 Requests whose semantic fields depend on the clock. A question's signed
 `deadline` is `created_at` plus the timeout, and `deadline` is a semantic
@@ -1004,18 +1309,20 @@ would reseal with a later deadline, a different `rc` and a conflict. So,
 before the first transmission, the client persists an idempotency record in
 the pending request store, keyed by the caller's request key (for
 `fleet_ask_user`, #1951's `(caller, generation, request_id)` under the
-current hub id): the `client_id`, the original `deadline`, and
+original attempt hub id): the `client_id`, the original `deadline`, and
 `HMAC-SHA256(retry_key, b"brigade-mesh/v1/ask\0" + canonical(inputs))` over
 the caller's semantic inputs (recipient, question text, timeout). The record
 holds no plaintext. A later call with the same request key, including after a
-restart, recomputes the input commitment. Equal means a retry: the client
-reuses the stored `client_id` and `deadline` and reseals with a fresh content
-key, so `rc` matches and the hub returns the existing question. Different
+restart, recomputes the input commitment. Equal means a retry: the client first
+recovers the original attempt, reusing
+its hub, `client_id` and deadline. Only after confirmed absence may it reseal
+with a fresh content key under D5's attempt rules, so migration never changes
+the commitment used to reconcile the original question. Different
 means a new request under an old key, and the client fails with
 `question_request_conflict` without contacting the hub. A retry after the
 original deadline still reuses it, and returns the question as timed out.
-The record is kept for the 90 day freshness window, so a late retry still
-finds it.
+The record is kept for the 90 day retry window. After that window a retry
+fails closed, even if longer routing retention still exposes the old row.
 
 Pending requests and replies. Every sealed send is recorded in a local pending
 request store (owner-only SQLite under the key directory) keyed by `(hub,
@@ -1056,6 +1363,14 @@ locally, and sends a sealed message with signed `in_reply_to` and the hub's
 `reply_to` set. A reply written offline to an original this machine has not
 opened is spooled as `seal: "pending"` with the original's hub message id and
 sealed at drain time after opening the original.
+
+A hub must refuse plaintext replies to sealed or `content_expired` parents
+with `message_sealing_required` even when global plaintext is optional. Apply
+this to both `reply` and a plaintext `send` with `reply_to`, before inserting
+or reflecting reply content. A missing parent is not evidence it was plaintext
+and never permits a new fallback reply. Keep the intentionally retained
+`sealed_reply_to` routing hint after parent expiry. Signed `in_reply_to` stays
+the authority for linking, and expiry must not rewrite that triple.
 
 Sender label. The hub refuses `sender_label` from `agent:` senders today. Once
 the label is sealed the hub cannot see it, so the opening client drops it for
@@ -1113,18 +1428,21 @@ For each sealed row, in order:
 4. Find the caller's wrap by kid, open it with HPKE, decrypt `ct`, strip
    padding, and parse the payload with the existing field limits.
 5. Freshness, receipts and replay:
-   - The freshness window is 90 days, the longest unacked retention of any
-     backend. An envelope whose signed `created_at` is older opens as `stale`.
+   - Sealed freshness is fixed at 90 days, independently of the configurable
+     1 through 3650 day routing retention (D8). An envelope whose signed `created_at` is older opens as `stale`.
      One dated more than five minutes past the local clock
      (`MAX_FUTURE_SKEW`) opens as `stale_future`. Stations are expected to run
      a synchronized clock. `brigade doctor` gains a check that warns on a
      visible offset.
-   - The receipt log (D3) gets the envelope digest and local receive time on
-     first sight, in both contexts, before the row is returned.
+   - After full signature, content-digest, context and freshness validation,
+     the receipt log (D3) records the full-envelope digest, verified signed-header
+     digest and local receive time on first sight, in both contexts, before
+     the row is returned. A tombstone cannot create that historical receipt.
    - The seen-id cache maps `(hub, from, client_id)` to the first hub message
-     id, the envelope digest and the local first-seen time, for the whole
-     window. The same triple under a different hub message id, or with a
-     different digest, opens as `replayed`. The entry is written before the
+     id, full-envelope digest, verified signed-header digest, content state and
+     local first-seen time, for the whole window. A different hub message id
+     or different full digest opens as `replayed`, except the exact monotonic
+     full-to-tombstone transition specified below. The entry is written before the
      opened row is returned, so a crash cannot reopen a replay as new.
    - A fresh station starts with an empty cache. It records when its cache
      started, and envelopes created earlier than that open with `replay:
@@ -1163,7 +1481,28 @@ The `send()` and `reply()` responses, `sent()`, `sent_lookup` recovery and
 every rendered projection carry this per-envelope value.
 
 A tombstone (D8) runs steps 1 to 3 against the signed header and returns the
-failed-row shape with `open_error: "content_expired"`.
+failed-row shape with `open_error: "content_expired"`. Its verified signed-header
+representation is exactly `canonical(signed_header + sig)`, namely the complete
+envelope with only `ct` and `recipients` removed. Record the SHA-256 of those
+bytes at the original full-envelope receipt, alongside the SHA-256 of the full
+canonical envelope. Do not confuse it with the signature input, which excludes
+`sig`, or replace the original full digest with a tombstone digest.
+
+A tombstone from a revoked signer inherits historical receipt evidence only
+when its verified signed-header digest, hub/from/kid/client-id and original
+message id match an earlier qualifying full-envelope receipt under D3's clock
+rule. A first-seen tombstone, an altered header, or a header-only receipt cannot
+establish pre-compromise history. Matching history still has no reply-link,
+pending completion, sender-label or operator authority, and no plaintext.
+
+Replay handling accepts one full-to-tombstone transition under the same triple
+and message id only when that verified representation matches the stored
+header digest. Preserve the original full digest/time, add the tombstone state,
+and return `content_expired`. Identical tombstone repeats are ordinary repeats
+of that row. A different id/header is `replayed`. Once tombstoned, a return to
+full content is refused as `replayed`, so an old snapshot cannot resurrect
+content. A fresh station can verify a tombstone's signature but gets no inherited
+receipt or authority, and it records only nonqualifying header/replay state.
 
 Every row, sealed or not, gets its structural fields pattern-checked: integer
 ids, ISO timestamps, principal ids, and `kind` and `priority` from their
@@ -1223,8 +1562,11 @@ plaintext in `fleet_questions`, and its `payload_hash` lets anyone with the
 database confirm a guessed question.
 
 Until the integration slice (plan slice 7b) lands, ask_user answers are
-hub-trusted, and the fleet messaging docs say so: whoever controls the hub can
-produce an answer the client reports as operator-authenticated.
+hub-trusted wherever plaintext is allowed, and the fleet messaging docs say so: whoever controls the hub can
+produce an answer the client reports as operator-authenticated. Under
+`require_sealed`, questions remain disabled until slice 7b, with
+`message_sealing_required`. Do not silently alter the existing authority flag
+or add an adapter that bypasses that refusal before signed verification lands.
 
 Target design:
 
@@ -1323,9 +1665,14 @@ Schema changes on the Python hub. Each slice that changes the schema bumps
 Retention (decision Q2). The hub clears `ct` and `recipients` 7 days after a
 sealed message is acked and keeps the signed header and signature as a
 `content_expired` tombstone, so routing, retries (D5) and audits stay
-verifiable. Unacked mail has a hard TTL: 90 days on the Python hub (the
-existing `RETENTION_DAYS`, configurable) and 14 days on Hub Lite (D12).
-Routing rows and tombstones expire with the existing retention.
+verifiable. Unacked sealed ciphertext has a hard TTL: at most 90 days on the
+Python hub
+and 14 days on Hub Lite (D12), or earlier when routing retention removes it.
+Routing rows and visible tombstones expire with the configured retention.
+Longer routing retention can retain a header, but cannot extend sealed
+freshness or keep unacked ciphertext beyond the sealed hard TTL. This 90-day hard TTL/admission
+separation is a revision 5 proposal, to be reviewed with the receipt policy below,
+not a claim about current runtime enforcement.
 
 On the Python hub, `BRIGADE_FLEET_MESSAGES_RETENTION_DAYS` selects routing
 retention at startup. It accepts decimal integers from 1 through 3650,
@@ -1336,12 +1683,88 @@ legacy rows, sealed rows, tombstones, and legacy operator-question audit rows.
 New mail older than this window is refused. Reads, counts, acknowledgments
 and reply lookup exclude expired routing rows even before cleanup removes
 them. Direct library callers without a policy retain the 90-day default.
-The seven-day post-ack ciphertext purge, statistics retention, and ten-minute
-directory snapshot TTL are separate policies.
+The seven-day post-ack ciphertext purge, 90-day sealed freshness/hard TTL,
+statistics retention and ten-minute directory snapshot TTL are separate policies.
+For a new sealed attempt, admission requires signed `created_at` no
+older than 90 days and no more than five minutes in the future, in addition to
+routing retention admission. A previously stored retry is looked up first and
+never inserted again because its routing row expired. A routing shrink must
+report its prospective deletion count before activation. It is destructive
+operator work, not an incidental part of a dependency or client update.
 
 Routing cleanup uses the existing SQL sweep, without a row batch limit.
 Ciphertext cleanup processes at most 32 envelopes per batch, with commits
 between maintenance batches.
+
+### Proposed retry receipts, pending parent/Astra/Daybreak review
+
+Keep the documented routing setting. Recommend a separate bounded retry-receipt
+table retaining only signed-header/commitment metadata for 90 days after first
+admission, independently of visible routing deletion. This is a product policy
+proposal: routing deletion would no longer delete all sender/idempotency metadata.
+An alternative is to shorten the retry guarantee to routing retention and fail
+closed as soon as that horizon is reached. That avoids additional retention
+but breaks the current 90-day retry promise on short-retention hubs. Neither
+choice authorizes implementation until the parent settles it with the reviewers.
+
+If adopted, the exact lookup/uniqueness prerequisite is:
+
+- Persist `envelope_hub` from the parsed signed header on sealed rows. Enforce
+  unique `(envelope_hub, sender, client_id)` for sealed attempts. Keep a
+  separate legacy `(sender, client_id)` uniqueness rule for plaintext rows
+  (`envelope_hub` absent). Backfill existing sealed rows by parsing their
+  canonical envelope/tombstone and fail migration on ambiguity or malformed
+  data, never infer their hub from the current identity.
+- Create the receipt in the same insert transaction as the message, not during
+  later cleanup. Key it uniquely by `(hub, sender, client_id)` with original
+  message id, original full-envelope digest, canonical signed-header-plus-sig
+  bytes, first admitted time and expiry. That representation retains `rc`,
+  payload/wrap digests and routing linkage, but no `ct`, wraps, plaintext,
+  tokens or private keys. A receipt proves only what its verified signature
+  and commitment cover. It is not a new mailbox row or approval receipt.
+- Proposed scoped request is exactly `{"action":"sent_lookup","hub":<id>,
+  "client_id":<id>}`. Sender is the authenticated caller. It returns the
+  existing `{"message":...}` envelope/tombstone while routing is visible,
+  otherwise `{"receipt":{hub, sender, client_id, id, header, envelope_sha256,
+  first_admitted_at, expires_at}}`. `header` is canonical JSON text of the
+  signed-header-plus-sig, `envelope_sha256` is lowercase full hex, and times
+  use D2 grammar. Clients distrust unsigned ids/times as evidence of content
+  or authority and verify the signed header and locally recorded attempt.
+  Absence is 404 `not_found`, never an instruction to reseal automatically.
+- The existing request without `hub` remains accepted for legacy clients. One
+  matching visible row/receipt returns its existing result shape (a receipt
+  becomes a `content_expired` message projection with its original id/header).
+  More than one match across hub or legacy namespaces returns permanent 409
+  `message_lookup_ambiguous` with no arbitrary row selection. Zero matches
+  stays 404. New clients always supply hub. If scoped lookup has no sealed
+  match but a legacy plaintext row shares the sender/client-id, return that
+  own plaintext row as `{"message":...}` for conflict reconciliation. A new
+  sealed insert with that legacy blocker returns 409 with its existing id.
+  The client reports `content_unverifiable`, never sealed delivery or an
+  implicit plaintext-to-sealed new attempt. An existing exact sealed match
+  takes precedence for scoped lookup. Omitted-hub lookup still refuses ambiguity.
+- Duplicate bytes return the original id before current key/hub checks.
+  Different bytes or a receipt-only match return 409
+  `message_client_id_conflict` with the original id for signed `rc`
+  reconciliation. Never redeliver from the receipt. The duplicate check,
+  identity fence, grants and insert share one transaction. Foreign-hub or
+  `mesh` new envelopes and key publications are refused when an active hub
+  identity exists. Historical lookup remains available to its authenticated
+  sender. Match a sealed reply's parent using all three signed linkage fields.
+- Receipt expiry is fixed at first admission plus 90 days, never extended by
+  reads/retries. Local retry expiry is fixed before first send at its original
+  creation plus 90 days, and never extended by reseal/migration. After local
+  expiry, or loss of the attempt record/commitment needed to prove semantics,
+  fail `message_retry_expired` or `content_unverifiable` without new delivery.
+  The guarantee is bounded: a caller bypassing the client and inventing a
+  new post-expiry attempt cannot get eternal deduplication from deleted state.
+- Account for canonical receipt bytes, visible header/envelope bytes and
+  index/storage overhead in sender and fleet quotas. A committed send reserves
+  its receipt space through expiry. Cleanup cannot evict unexpired receipts
+  to make room. Quota exhaustion refuses new writes. Counts, inbox, ordinary
+  sent lists, ack and reply lookup exclude receipt-only rows, so short routing
+  retention does not leave visible mail. Hub Lite's 30-day visible tombstone
+  deletion must leave the separate bounded receipt if this proposal is adopted.
 
 Static keys give no forward secrecy, so a key stolen later opens every copy that still
 exists. Deletion protects only against a later compromise of an honest hub. A
@@ -1360,6 +1783,38 @@ Policy. `brigade fleet serve --require-sealed` (or
 `BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED=1`) refuses plain-text sends with
 `message_sealing_required`, and the identity statement reports it. Stored
 plain-text rows stay readable as legacy. Hub Lite always requires sealing.
+
+### Proposed safe policy activation, pending parent/Astra/Daybreak review
+
+The current upload guard requires a statement to match frozen runtime policy,
+and startup requires the stored statement to match configuration. Together
+these prevent a safe `require_sealed` flip. Preserve both active-policy guards.
+Do not omit signed fields, loosen both guards, or serve `require_sealed: true`
+before runtime actually refuses plaintext.
+
+Proposed path: admin stages a complete higher-sequence signed identity as an
+inactive candidate, bound to the expected active identity digest/sequence and
+exact target runtime settings. Staging returns `restart_required` and does not
+change `/mesh/identity` or current enforcement. On controlled restart, before
+binding/listening or accepting writes, validate the candidate, expected active
+generation, target configuration and any migration proof. Under the exclusive
+startup/write lock activate the candidate and its policy generation atomically,
+then serve only with that same frozen runtime policy. A mismatch refuses startup
+and leaves active state unchanged. Crash before commit leaves the old generation.
+Crash after commit restarts only with the committed settings, never old flags.
+In-process activation is an alternative only with one atomic enforcement/identity
+generation and a write barrier covering every plaintext/sealed entry point.
+It requires more concurrency proof than the staged restart path.
+
+Rollback after activation is a new explicit higher-sequence operator-signed
+transition, never restoration of the old sequence, omitted fields or an older
+binary. Relaxing policy requires a separate operator decision. Existing schema
+version refusal remains the downgrade boundary. A staged candidate is not a
+current identity, cannot seed pins, and is never returned as active policy.
+Tests must kill/restart around every stage/activation boundary, attempt concurrent
+plaintext writes, simulate stale candidates and old runtime rollback, and
+check that advertised strictness always equals effective enforcement. This
+proposal also needs rollout documentation and parent/security review before code.
 
 For a sealed send the hub derives `to`, `kind`, `priority`, `client_id` and
 `deadline` from the envelope header. It refuses a send when `from` is not the
@@ -1698,6 +2153,8 @@ New fixed error codes join `_SAFE_ERROR_CODES`: `mesh_extra_missing`,
 `recipient_key_stale`, `recipient_key_unverified`,
 `recipient_key_not_member`, `sender_key_stale`,
 `local_key_superseded`, `invite_binding_pending`, `hub_identity_changed`,
+`hub_identity_unverified`, `hub_endpoint_mismatch`, `message_retry_expired`,
+`message_lookup_ambiguous`,
 `signed_statement_rollback`, `signed_statement_conflict`,
 `message_sealing_required`, `message_too_large`,
 `message_client_id_conflict`, `question_request_conflict`,
@@ -1751,9 +2208,12 @@ statements(kind PRIMARY KEY, seq, statement, uploaded_at)
 keys(principal_id, kid PRIMARY KEY, record, state, created_at, retired_at,
      revoked_at, compromised_from)
 messages(id INTEGER PRIMARY KEY AUTOINCREMENT, sender, recipient, kind, priority,
-         client_id, reply_to, header, envelope, envelope_bytes, payload_hash,
+         hub, client_id, reply_to, header, envelope, envelope_bytes, payload_hash,
          content_state, created_at, received_at, acked_at, acked_by,
-         UNIQUE(sender, client_id))
+         UNIQUE(hub, sender, client_id))  -- proposed sealed namespace from D8
+retry_receipts(hub, sender, client_id, id, header, envelope_sha256,
+               first_admitted_at, expires_at, PRIMARY KEY(hub, sender, client_id))
+               -- proposed separate 90-day metadata retention, D8
 usage(sender, day, sends, stored_bytes, PRIMARY KEY(sender, day))
 sessions(node_id, session_id, harness, state, repo_label, branch,
          heartbeat_at, expires_at, PRIMARY KEY(node_id, session_id))
@@ -1787,14 +2247,17 @@ days times the average envelope size, so Hub Lite bounds all three:
 
 - Envelope cap 32 KiB (`max_envelope_bytes` in the identity statement).
 - Ciphertext is deleted at the earlier of 7 days after ack and 14 days after
-  creation (the hard unacked TTL). The tombstone header is deleted at 30 days.
+  creation (the hard unacked TTL). The visible tombstone header is deleted at 30
+  days. The proposed D8 retry
+  receipt has its own 90-day metadata horizon, subject to parent review.
   Cleanup runs from a Durable Object alarm.
 - Admission refuses writes before Cloudflare does: a fleet ciphertext ceiling
   of 800 MB (80 percent of the assumed 1 GB, leaving headroom for tombstones,
   indexes and cleanup lag) returns `hub_storage_full`, a per-sender ceiling of
   100 MB returns `sender_storage_quota`, and a fleet send ceiling of 6,000 a
-  day returns `hub_daily_quota`. All three are retryable for the client's
-  spool and visible in `brigade doctor`.
+  day returns `hub_daily_quota`. Any adopted D8 receipt budget must fit in
+  the total storage ceiling and reserve bytes before admission. All three are
+  retryable for the client's spool and visible in `brigade doctor`.
 
 Worked numbers. Over the 14 day maximum residency, 800 MB holds about 11,000
 typical 5 KiB messages a day, or about 1,800 a day at the 32 KiB cap. The
@@ -1905,7 +2368,8 @@ conductor's decisions for revisions 2 to 4. The operator delegated
 best-practice calls to the conductor.
 
 1. Dependency (G1): approved. `brigade-cli[mesh]` on pyca `cryptography`,
-   floor 48 so the wheels carry ML-KEM (D1).
+   originally floor 48. Current source and CI use 50.0.2. Keep that floor
+   pending source-backed platform review, with the old Intel guidance held (D1).
 2. Retention: ciphertext cleared 7 days after ack, `content_expired`
    tombstones, a hard unacked TTL. A malicious hub cannot be forced to delete
    copies (D8).
@@ -1942,6 +2406,46 @@ best-practice calls to the conductor.
 14. Confidentiality labels: computed per envelope from the key it was sealed
     to, recorded at seal time for sent mail, and separate from signer
     authentication (D6).
+
+## Revision 5 review disposition and rollout boundary
+
+The four foundation reviews were read as claims and compared with current
+crypto, key-directory, identity and sealed-storage source at `c32ad821`. The
+parent's synthetic probe receipt `20261027-190546-work-verify-2cda0a` reproduced
+the named storage behaviors. This receipt establishes those probes, not client
+or live readiness. Earlier round mappings in the plan remain intact.
+
+| Review finding | Revision 5 disposition | Design / plan slices |
+|---|---|---|
+| Astra 2, Opus C: statement bytes and missing manifest public key | Exact schemas, full signed digest, explicit key file plus independent fingerprint, shared fixtures proposed | D3 / 2, 2b, 11 |
+| Astra 3/5, Opus A/B, Fable client contracts: migration and trust precedence | Depend on 2, preserve immutable history/marks/floors atomically, fresh keypairs, new signed membership, use refusal independent of provenance | D3, D4 / 2, 2b, 5, 6 |
+| Daybreak first-contact rollback, Opus C: origin and bootstrap | Exact normalized signed origin, id provenance distinct from seq/digest policy freshness, withholding limits | D3, D4 / 2, 2b, 10 |
+| Astra 4/7, Opus D/E, Daybreak hub namespace | Original attempt recovery before new send, exact publication reconciliation, scoped lookup and fence prerequisites | D5, D8 / 3, 4, 6 |
+| Astra 6: revoked tombstone | Full-envelope and verified signed-header receipt digests, monotonic replay transition, no inherited authority | D3, D6 / 5 |
+| Opus retention, Daybreak routing expiry | Preserve 1..3650 routing configuration, fixed sealed freshness, proposed separate bounded retry receipts. Parent must decide metadata retention versus shorter retry guarantee | D6, D8, D12 / 4, 6, 11, 12c |
+| Fable 1/2/3/4/5, Opus minor 1/2/4 | Keep compromise default, add routine token rotation, refuse plaintext sealed-parent replies, clear unrelated migration, enforce origin/hub and monotone identity. Staged activation remains a proposal | D3, D4, D5, D8 / 3, 4, 6, 7 |
+| Fable 6: retained reply hint | Retain intentional `sealed_reply_to` after parent expiry. Signed triple governs linkage | D5 / 4, 5 |
+| Opus dependency request | Do not restore 48. Retain 50.0.2 floor and mark Intel route stale pending platform evidence | D1 / 1, 7 |
+| Opus sender-view limitation | Document bm1 limit, defer multi-recipient/new commitment to separately reviewed suite | D2 / future bm2 |
+| Daybreak operator authority and all reviewers' rollout findings | Questions disabled under require-sealed until 7b, labeled Hub-trusted elsewhere. Require opening, sealing, renderers, docs and adversarial/mixed-version evidence together | D7, this section / 5, 6, 7, 7b, 11 |
+
+The first sealed-mail milestone requires slices 2, 2b, 5, 6 and 7, closed Hub
+prerequisites, shared parser/statement fixtures, adversarial retry/storage tests,
+visible labels on every projection and explicit mixed-version handling. Opening
+and sealing ship in the same client release. With required sealing enabled,
+legacy clients cannot send or reply in plaintext, questions remain disabled
+until 7b, and old clients must be upgraded or kept off sealed mail surfaces.
+Do not treat their blank-row rendering or ack as successful receipt/opening.
+The deployment checklist inventories every station's opener/sealer version,
+exercises a legacy client against the updated Hub, and proves refusal of
+plaintext replies to full and tombstoned parents even before global enforcement.
+
+Merging foundations, accepting this revision or passing a round trip does not
+deploy that milestone. Runtime policy activation is separately authorized
+operator work after the transition proposal and integrated gates are reviewed.
+A release claiming hub-independent operator authority also requires 7b,
+its plaintext-data migration and adversarial answer verification. Teammate
+invites, Hub Lite and no-hub retain their separate existing milestones.
 
 ## Sources
 

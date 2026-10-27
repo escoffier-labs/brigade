@@ -11,7 +11,12 @@ from revision 1 are kept so review comments still resolve. New slices carry a
 letter suffix. Revisions 3 and 4 add no slices. Revision 3 changed the
 contents of slices 1 to 3, 5 to 12c, 16 and 17, and the dependency headers.
 Revision 4 changes slices 2, 2b, 5, 6, 7, 7b, 10, 11, 13 and 16, and adds
-`7b -> 11` to the dependency order. Every slice runs the focused gate through
+`7b -> 11` to the dependency order. Revision 5 (2026-10-27) proposes contract
+closure in D3 through D8, adds `2 -> 2b`, and names acceptance tests below.
+It does not authorize migration, policy activation or deployment. The separate
+90-day retry-receipt policy and staged policy activation require parent, Astra
+and Daybreak disposition before implementation. Every slice runs the focused
+gate through
 Brigade with its own test selectors:
 
 ```bash
@@ -40,7 +45,10 @@ branch.
 ## Gates
 
 - **G1, dependency: approved** on #2005 (2026-10-22). The optional extra is
-  `mesh = ["cryptography>=48,<52"]`. Design D1 explains the floor of 48.
+  `mesh = ["cryptography>=50.0.2,<52"]`. The original floor was 48. Current
+  source and CI use 50.0.2 after
+  the dependency update. Keep that floor pending source-backed platform review,
+  and hold the stale Intel 48 install route. This revision changes no dependency.
 - **G2, native engine: approved** on #2007 (2026-10-22), staged: slice 15 is a
   bounded spike, slice 15b writes the wire protocol, and slices 18a to 18e
   start only after slice 15 records a go and slice 15b is merged.
@@ -81,7 +89,7 @@ branch.
 ```text
 1 -> 2
 #1939 + 3 -> 4 (4 also needs #2009 and #2010)
-1 + 3 -> 2b
+1 + 2 + 3 -> 2b
 1 + 2 + 2b + 3 + 4 + #2009 -> 5 -> 6 (6 also needs #2010) -> 7
 6 + #1951 -> 7b
 8;  3 + 8 -> 9
@@ -142,6 +150,48 @@ Round 4:
 | Fresh-station membership limitation | D3, D9 | 2, 7, 10 |
 | Earlier `compromised_from` suppresses history | threat model | 7 |
 
+## Revision 5 closure tests and decisions
+
+These are named acceptance tests to implement in the owning slices, not tests
+added by this documentation change. Earlier review mappings remain applicable.
+D3's statement fixtures and malformed corpus are shared by Python verifiers,
+the Hub's format-only parser where applicable, and later Hub Lite. Keep frozen
+bm1 known answers and all existing adversarial expectations intact.
+
+| Review disposition / contract | Named tests and observable result | Owning slices |
+|---|---|---|
+| Astra 2, Opus C: exact signed bytes | `test_statement_known_answer_encodings`: each of five fixtures verifies exact labeled unsigned bytes and complete signed digest. `test_statement_duplicate_fields_rejected`, `test_statement_limits_types_order_and_ranges`: recursive duplicates, floats/bools/nulls, Unicode, unknown fields, wrong label, count/size/depth bounds, unsafe integers and wrong unsigned digest change no state. | 2, 2b, 11, 12b |
+| Astra 2 / manifest anchor | `test_manifest_key_bootstrap_requires_matching_fingerprint`: explicit 32-byte public-key file plus independently supplied full fingerprint succeed, missing file/mismatch/hub-supplied substitute do not write an anchor. | 2 |
+| Opus B / bootstrap dependency | `test_hub_fetch_requires_persisted_current_identity`: local custody works first, network accept/import refuses without identity and never trusts a new hub namespace from fetched content. A persisted observed identity retains its documented semantics. | 2, 2b |
+| Daybreak rollback / Opus C | `test_identity_origin_normalization_and_endpoint_mismatch`: case/default ports normalize consistently, invalid paths/userinfo/query/fragment/escapes/Unicode/trailing-dot/IPv6 zones fail, signed other origin or cross-origin redirect writes nothing. `test_bootstrap_policy_requires_seq_digest_floors`: id-only acceptance cannot claim fresh policy, old valid identity/membership below trusted floors fails, a later withheld statement remains an explicit limitation. | 2, 2b, 10 |
+| Astra 3 / Opus A / Fable lookup | `test_migration_crash_preserves_history_revocations_and_highwater`: kill before/after journal commit and reopen, observing exactly old/new generation with provenance, floors and `(kind, signer)` marks intact. Old membership replay and revoked-kid acceptance fail after restart. `test_migration_requires_fresh_kid_and_current_hub_membership`: same-kid rebind fails, predecessor-signed new pairs pass only in accepted lineage, no observed use before newly signed membership and carried-floor reconciliation. `test_record_for_original_hub_principal_kid_at_signed_time`: old mail finds immutable old record and intervals, with no rewriting of current-hub records. | 2, 2b, 5, 6 |
+| Astra 5 / trust-state precedence | `test_require_verified_blocks_existing_observed_pin`: seal/open/reply/spool drain refuse after policy change with provenance intact. `test_accept_cannot_unrevoke_kid`, `test_membership_relisting_cannot_clear_changed_or_pending_binding`: no acceptance or relisting clears those independent barriers. `test_mcp_automatic_continuity_has_no_operator_acceptance_tool`: normal messaging may persist validated automatic state, but cannot install an anchor or manually accept a changed identity. | 2, 5, 6 |
+| Astra 4 / Opus D/E / Daybreak namespace | `test_response_loss_then_hub_migration_recovers_original_send`: validate old stored header, use recorded old hub/rc/deadline and recover original id before any B send. Include old request committing after first lookup, both sides of the identity fence, timeout/restart and uncertain stale-key retry. `test_plaintext_lookup_is_content_unverifiable`: never count a prior plaintext row as sealed delivery. `test_expired_attempt_never_reseals`: missing/expired attempt state cannot become a fresh send. | 4, 6, 7b |
+| Astra 7 / publication loss | `test_publish_response_loss_reconciles_exact_record_after_restart`: persist candidate, reconcile exact active/retired state, reject substitution/revocation and never regenerate due to timeout. `test_statement_upload_response_loss_reconciles_full_signed_digest`: identical rejected upload retry is reconciled by read-back, higher/different bytes are not assumed success. | 2, 2b, 3, 6 |
+| Astra 6 / receipt identity | `test_revoked_tombstone_matches_original_receipt_without_authority`: full and verified-header digests match prior qualifying receipt, tombstone has only historical evidence, no label/reply/authority power. `test_full_to_tombstone_replay_transition`: same id/header transitions once, changed id/header and tombstone-to-full resurrection fail, fresh tombstone cannot create qualifying history. | 5, 7b |
+| Daybreak / Opus retention | `test_sealed_hub_scoped_uniqueness_and_legacy_lookup_ambiguity`: explicit hub isolates A/B, omitted hub with multiple own matches returns 409, plaintext predecessor never becomes verified sealed success, cross-sender lookup leaks nothing. `test_routing_expiry_keeps_bounded_retry_receipt`: routing set to 1 day, deletion on second day hides inbox/ack/reply rows but preserves original-id reconciliation, never redelivery. `test_sealed_freshness_independent_of_long_routing_retention`: 3650-day routing does not admit old new sealed content or extend 90-day local retries. `test_retry_receipt_quota_and_expiry_fail_closed`: reserved receipt bytes count, retries do not extend expiry, full quota cannot evict unexpired receipt, expired local state sends nothing. These receipt tests depend on the D8 proposal being accepted. | 4, 6, 11, 12c |
+| Fable / source parser drift | `test_plaintext_reply_to_sealed_or_tombstoned_parent_refused_when_optional`: both reply routes fail even under optional plaintext, including legacy client shapes, while legacy plaintext-parent behavior remains. `test_hub_crypto_parser_corpus_agreement`: checked-in bm1 plus malformed corpus have consistent acceptance at admission, and a purged header verifies with the crypto verifier. Keep `test_sealed_reply_hint_survives_parent_expiry` and exercise signed linkage after parent deletion. `test_identity_replacement_clears_only_unrelated_migration`: same-id matching proof survives, C never serves A-to-B proof. `test_new_envelope_and_key_record_match_current_hub`: foreign/mesh new writes fail, original-hub retry lookup succeeds. | 3, 4, 5, 11 |
+| Fable / routine credential rotation | `test_routine_token_rotation_preserves_mesh_keys_and_history`: old bearer loses access, replacement works and keys/grants/history stay. `test_compromise_revocation_still_defaults_to_key_creation`: reenrollment/fingerprint acceptance cannot revive a kid. | 3, 6 |
+| Fable policy deadlock / parent disposition | `test_staged_policy_never_advertises_unenforced_sealing`: inactive strict candidate is not active identity. `test_policy_activation_crash_and_rollback`: crash at every boundary gives old or matching new runtime/identity, concurrent plaintext cannot pass after strict activation, stale candidate/config and old-flag restart refuse, rollback requires higher-seq operator transition. Retain both existing active-policy mismatch guards. The proposed staged D8 path requires parent/Astra/Daybreak review before implementation. | 3, 4, 7, 11 |
+| Opus dependency / rollout | `test_mesh_floor_fixture_compatibility` and supported-platform CI retain 50.0.2 pending evidence, never reintroduce an unsupported Intel route. `test_mixed_version_sealed_mail_rollout`: old clients cannot reply plaintext to sealed/tombstoned parents, labels reach every renderer, downgrade is explicit, question creation under require-sealed refuses until 7b. `test_unsigned_hub_answer_never_authenticates_after_7b` keeps the adversarial authority gate. | 1, 5, 6, 7, 7b, 11 |
+
+Pending product decisions have concrete alternatives: retain minimal retry
+metadata for 90 days after short visible routing deletion, or shorten retry
+support and fail closed at the routing horizon. The former costs metadata
+storage and changes deletion semantics, the latter gives shorter retry
+availability. Prefer staged restart for policy activation. In-process atomic
+activation needs stronger concurrency evidence and must preserve the same
+advertisement/enforcement invariant. Parent, Astra and Daybreak review settles
+these proposals before source changes.
+
+The first sealed-mail milestone needs opening, sealing, labels, docs,
+adversarial tests, Hub prerequisites and mixed-version handling together.
+Merge is separate from deployment. Every station needs the combined opener
+and sealer release before runtime require-sealed activation. Questions stay
+disabled in that mode until 7b, and labeled Hub-trusted elsewhere. A
+hub-independent operator-authority claim also needs 7b's migration
+and negative tests. Invites, no-hub and Hub Lite keep their existing scope.
+
 ## #2005: sealed message bodies
 
 ### Slice 1: crypto core and the `mesh` extra
@@ -149,7 +199,7 @@ Round 4:
 Pure functions, no I/O.
 
 Files:
-- `pyproject.toml`: add the `mesh` extra. Add `cryptography>=48,<52` to the
+- `pyproject.toml`: add the `mesh` extra. Add `cryptography>=50.0.2,<52` to the
   `dev` extra.
 - `src/brigade/fleet_mesh_crypto.py` (new): `MeshExtraMissing`, the ML-KEM
   backend probe (`mesh_backend_unsupported`), Ed25519 and hybrid KEM key
@@ -169,8 +219,9 @@ Files:
   schedule on `hmac` and `hashlib`, used only to check pyca against the
   vectors.
 - `.github/workflows/ci.yml`: one leg runs the mesh tests with the extra, one
-  runs the plain-text suite without it, one installs the floor (48), and the
-  macOS and Windows legs prove the 48.x wheels carry ML-KEM. A
+  runs the plain-text suite without it, one installs the floor (50.0.2). The existing
+  macOS and Windows legs
+  need source-backed supported-platform review before making install claims. A
   cross-version job seals with the floor and with the newest release and
   opens each output with the other.
 
@@ -232,17 +283,24 @@ Files:
   pin, membership manifests, key manifests, revocation statements,
   fingerprint-list verification, the per-kind high-water marks
   (`signed_statement_rollback`, `signed_statement_conflict`), the optional
-  trusted membership floor, membership checked at every use of an `observed`
+  trusted statement floors, exact D3 signed-statement schemas/limits and
+  complete signed-object digests, trust provenance distinct from use refusals,
+  irreversible kid revocation, membership checked at every use of an `observed`
   key with the computed `observed_not_member` status, and pruning.
   File handling follows `read_message_token_file` and
   `src/brigade/authority_key.py`.
 - `src/brigade/cli/fleet_keys.py` (new), registered from `cli/fleet.py`:
   `fleet keys show`, `rotate`, `accept <principal> --fingerprint <fp>`,
   `accept --manifest <file>`, `accept --fingerprints <file>`,
-  `trust-manifest-key --fingerprint <fp>`, `manifest sign` and `membership
-  sign` (admin machine), `membership import <file>`, `membership require
+  `trust-manifest-key --public-key-file <file> --fingerprint <fp>`,
+  `manifest sign` and `membership sign` (admin machine), `membership import <file>`, `membership require
   --seq <n> --sha256 <digest>`, `revoke-statement sign`
-  and `import`, and `prune`. No `--all-changed`. `rotate` writes locally until slice 6.
+  and `import`, and `prune`. No `--all-changed`. `rotate` writes locally until
+  slice 6. File-only custody/verification can land first. Network key/manifest
+  commands remain unavailable until 2b provides the endpoint's persisted current
+  identity, then fail `hub_identity_unverified` without that entry. An observed
+  accepted identity still has D4's existing semantics, without claiming current
+  policy from an id alone. Never derive a new pin namespace from a fetch.
 
 Tests (`tests/test_fleet_mesh_keys.py`):
 - Key files are 0600 under a 0700 directory, and a symlinked path is refused.
@@ -292,29 +350,41 @@ Tests (`tests/test_fleet_mesh_keys.py`):
   non-increasing `created_at` yields `changed`.
 - Archived mail verifies against a retired key inside its interval and fails
   outside it.
-- No MCP tool reaches pin, key, hub identity or manifest writers:
-  `fleet_mcp.tool_specs()` names are unchanged and none maps to these modules.
+- No MCP tool exposes operator pin acceptance, trust-anchor replacement or
+  manual identity acceptance. Existing messaging may trigger validated automatic
+  observation/continuity, statement or authenticated-migration persistence.
+  `fleet_mcp.tool_specs()` names stay unchanged. Automatic paths share the
+  verifier and cannot replace independently supplied acceptance evidence.
 
 Acceptance: the focused gate passes, and the keys help output lists the
 subcommands.
 
-### Slice 2b: hub identity on the client (needs 1 and 3)
+### Slice 2b: hub identity on the client (needs 1, 2 and 3)
 
 Files:
 - `src/brigade/fleet_mesh_hub_identity.py` (new): identity statement signing
   and verification including the signed `backend` and `capabilities` fields,
   the hub id derivation, the endpoint-to-identity store (a
   separate file from the pin store) with its authenticated lineage, migration
-  statements, the identity statement high-water mark, and the
+  statements per D3, exact D4 origin normalization, independently supplied
+  identity seq/digest floors, policy-freshness provenance, the identity statement
+  high-water mark, the journaled trust-state migration transaction, historical
+  `record_for(hub, principal, kid, signed_created_at)` lookup, and the
   `hub_identity_changed` and `hub_identity_superseded` refusals.
 - `src/brigade/cli/fleet_hub_identity.py` (new): `fleet hub-identity init`,
   `show`, `publish` (admin token), `migrate` and `accept --hub-id <id>`.
+  A bootstrap claiming verified current policy also requires `--seq <n>
+  --sha256 <digest>` from an independent source. The bare id still records
+  identity verification only, as before, never a current-policy guarantee.
 
 Tests (`tests/test_fleet_mesh_hub_identity.py`):
 - A known endpoint serving a different hub id or key stops every message
   operation with `hub_identity_changed` and creates no new pin namespace.
-- A migration signed by the old key moves the pins to the new id. One signed by
-  any other key is refused.
+- A migration signed by the old key preserves immutable old-hub history and
+  atomically advances current identity with pins, provenance, revocations,
+  high-water marks and floors. One signed by any other key is refused. Fresh
+  principal keypairs with predecessor signatures are required under the new
+  hub, and new observed use requires a new current-hub signed membership.
 - `accept --hub-id` with the right id carries the pins, and with a wrong id
   changes nothing.
 - A statement whose `hub_id` is not the hash of its key is refused.
@@ -341,8 +411,9 @@ Tests (`tests/test_fleet_mesh_hub_identity.py`):
   `h_new` whose `in_reply_to` names an `h_old` request links to it.
 
 Acceptance: the hub identity can change only through a signed migration or
-operator verification, cannot roll back, and old mail stays readable after a
-migration.
+operator verification, cannot roll back, and original-hub history survives a
+crash during migration. Pass the named revision 5 tests above before any
+hub-facing client code uses the contract.
 
 ### Slice 3: hub key directory and hub identity storage (no crypto, waits for #1939)
 
@@ -350,12 +421,17 @@ Files:
 - `src/brigade/fleet_hub_message_keys.py` (new): `fleet_message_keys` with one
   active key per principal, `keys_publish` and `keys_get`, format checks, the
   `prev_kid` rule, `principal_key_exists`, refusal of revoked kids, and
-  `compromised_from`.
+  `compromised_from`. Validate a new record's hub against active identity by
+  string comparison. Add the distinct routine credential-rotation operation
+  from D3 before rollout, preserving compromise revocation's key-creation default.
 - `src/brigade/fleet_hub_identity.py` (new): `hub_meta` storage of the signed
   statement and migration, the `hashlib` check that `hub_id` matches the key,
   the admin upload action, and `fleet_mesh_statements` with the admin
   `POST /mesh/statements` upload (size check and increasing `seq` only) and
-  the `manifests_get` action.
+  the `manifests_get` action. Reject identity sequence rollback/conflicts,
+  atomically clear unrelated migration proof on identity replacement, and retain
+  only matching proof on same-identity updates. Publication/statement retries
+  need exact candidate read-back reconciliation before any fresh key generation.
 - `src/brigade/fleet_hub_messages.py` and `fleet_hub_paging.py`: route the new
   actions. `who` reads key entries live on every page instead of from the
   #1939 snapshot.
@@ -391,7 +467,14 @@ Files:
   `sender_key_stale`, the symmetric `reply_to` and `in_reply_to` presence
   rule, `sent_lookup` by `client_id`, the existing id in the 409 body, the
   7 day post-ack purge to a `content_expired` tombstone, the unacked TTL, and
-  per-sender and fleet stored-bytes admission.
+  per-sender and fleet stored-bytes admission. Close the D5/D8 prerequisites:
+  hub-scoped sealed uniqueness and lookup, ordered identity fence, 90-day sealed
+  admission/hard TTL independent of routing, refusal of plaintext replies to
+  sealed/tombstoned parents even with plaintext optional, and dual-parser corpus.
+  Implement separate retry receipts only after the proposed D8 metadata-retention
+  choice is settled. Keep 1..3650-day routing config and retained `sealed_reply_to`.
+  D8 staged activation is likewise a review prerequisite, not permission to
+  loosen active-policy guards.
 - `src/brigade/fleet_hub_messages.py`: `envelope`, `envelope_bytes` and
   `content_state` columns, the sealed path in `send()` and `reply()`, sealed
   rows in `_row()`, and `count` (#2009) treating sealed rows like any row.
@@ -436,7 +519,8 @@ Files:
 - `src/brigade/fleet_mesh_receipts.py` (new): the append-only receipt log of
   design D3, insert-only triggers, local UTC receive times, the measured
   clock offset stored with each receipt, the strict
-  `MAX_RELATIVE_SKEW` plus `TIMESTAMP_PRECISION` rule, and pruning limited to
+  `MAX_RELATIVE_SKEW` plus `TIMESTAMP_PRECISION` rule, the full-envelope and
+  verified signed-header digests and full-to-tombstone replay transition, and pruning limited to
   rows past the freshness window whose kid is not revoked.
 - `src/brigade/fleet_mesh_pending.py` (new): the local pending request store
   keyed by the full `(hub, from, client_id)` triple, the outbox records with
@@ -567,8 +651,11 @@ Files:
   seal, `rc`, local reply construction, pending request records, the outbox
   record of the recipient kid and its trust status written before the first
   transmission, and retry
-  recovery (409 with id, `sent_lookup`, header verification, `rc` comparison,
-  the wrap fallback and `content_unverifiable`).
+  recovery (409 with id, hub-scoped `sent_lookup`, original-attempt header
+  verification then `rc` comparison using its recorded hub/deadline, the wrap
+  fallback and `content_unverifiable`). Preserve every attempt across migration,
+  recover/fence it before a new attempt and fail closed after local expiry.
+  Require-verified and every current-use refusal apply on each spool drain.
 - `src/brigade/fleet_client_messages.py`: `send()`, `reply()` and the spool
   call into `fleet_mesh_send`. The spool stores the sealed envelope before the
   first transmission. `seal: "pending"` records for offline sends and replies.
@@ -618,12 +705,17 @@ dump with real sealing.
 Files: `docs/fleet-messages-sealed.md` (new), links from the fleet messaging
 docs and `docs/fleet-mcp-events.md`.
 
-Content: install (the Intel Mac `--only-binary` route to 48.0.x, Windows
-arm64, and `mesh_backend_unsupported` for builds without ML-KEM), hub and
+Content: install with the retained 50.0.2 floor, supported-platform evidence
+before offering Intel macOS/Windows arm64 instructions, and
+`mesh_backend_unsupported` for builds without ML-KEM. Mark the old Intel
+`--only-binary` 48.0.x advice stale. Cover hub and
 local policy, key commands, membership manifests, how to compare
 fingerprints out of band, the local boundary statement from design D3, what
 stays plain text, the threat model, and, until slice 7b merges, the statement
-that ask_user answers are hub-trusted. A visible section titled
+that ask_user answers are Hub-trusted wherever plaintext is allowed, and
+unavailable under require-sealed. Distinguish merged code from deployment,
+require opener/sealer/labels/docs in one release, and document the mixed-version
+upgrade/refusal procedure and fail-closed schema downgrade. A visible section titled
 "Opportunistic confidentiality" explains that mail to and from `observed`
 peers is readable by a hub that substituted the key on first contact, shows
 the `confidentiality: opportunistic` label as each surface renders it, and
@@ -656,7 +748,9 @@ Files:
   `(caller, generation, request_id)` compares `to`, `kind` and `rc` from the
   referenced question row's signed header. The trigger sets only `status`,
   `answer_id` and `answered_at`.
-- `docs/fleet-messages-sealed.md`: remove the hub-trusted note.
+- `docs/fleet-messages-sealed.md`: replace the interim hub-trusted/disabled
+  note only when signed questions, authority checks and plaintext-data migration
+  pass. Older deployments still retain the interim behavior.
 
 Tests (`tests/test_fleet_ask_user_sealed.py`):
 - A hub that writes `status='answered'`, `source='operator_reply'` and
@@ -910,7 +1004,10 @@ Files: `workers/hub-lite/src/fleet.js` and tests. Sealed-only `send` and
 `sent`, `sent_lookup`, tombstones, the alarm that purges ciphertext at the
 earlier of ack plus 7 days and creation plus 14 days, and the admission
 ceilings with `hub_storage_full`, `sender_storage_quota` and
-`hub_daily_quota`.
+`hub_daily_quota`. If the D8 retry-receipt proposal is adopted, retain its
+bounded 90-day metadata after visible 30-day tombstone deletion and include
+receipt bytes in every quota. Otherwise document the explicitly approved
+shorter retry/fail-closed horizon.
 
 Tests: the messaging contract sections, a storage dump with no plaintext
 marker, a send without an envelope refused, a 32 KiB plus one byte envelope
