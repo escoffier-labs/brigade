@@ -5,6 +5,8 @@ Callers supply an already authenticated hub id. One private JSON document per
 rotation is durable before it returns, so publication can use the saved record.
 An interrupted write leaves the previous or next complete generation; abandoned
 temporary files are never considered state. No automatic history pruning occurs.
+Read-only reload observes visible state without a durability barrier. After a
+failed write, explicit create=True flushes publication without another rotation.
 
 The current implementation requires POSIX dirfd/no-follow opens and flock. It
 fails closed elsewhere rather than approximating owner-only permissions with
@@ -100,14 +102,19 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
                     raise crypto.MeshError("mesh_keys_missing") from None
                 try:
                     os.mkdir(component, 0o700, dir_fd=fd)
-                    os.fsync(fd)
                 except FileExistsError:
                     pass  # Another initializer won; validate its directory below.
                 child = os.open(component, flags, dir_fd=fd)
+            try:
+                if private:
+                    _private_stat(child, directory=True)
+                    if create:
+                        os.fsync(fd)
+            except BaseException:
+                os.close(child)
+                raise
             os.close(fd)
             fd = child
-            if private:
-                _private_stat(fd, directory=True)
         yield fd
     except OSError as error:
         # Errors raised by reads/writes through yield also arrive here. Storage
@@ -278,11 +285,15 @@ def _write(fd: int, name: str, state: LocalKeys) -> None:
 
 
 def load_local_keys(*, brigade_home: Path, principal: str, hub_id: str, create: bool = False) -> LocalKeys:
-    """Read saved custody without mutation; initialize only with explicit create.
+    """Read saved custody; explicit create initializes or flushes publication.
 
     Missing state, invalid state and unsafe paths are distinct fixed diagnostics.
     Importing this module needs no crypto extra. Reading verifies the saved
     private/public bindings and therefore does need the extra.
+
+    A read-only reload after a failed write only observes the saved generation.
+    Use create=True to flush its directory barriers before publishing it. Existing
+    state is neither rewritten nor rotated by that explicit reconciliation.
     """
     name = _identity(principal, hub_id)
     with _directory(brigade_home, create=create) as fd, _locked(fd):
@@ -296,14 +307,18 @@ def load_local_keys(*, brigade_home: Path, principal: str, hub_id: str, create: 
             )
             state = LocalKeys(principal, hub_id, LocalKey(keys, record), (), secrets.token_bytes(32))
             _write(fd, name, state)
+        elif create:
+            os.fsync(fd)
         return state
 
 
 def rotate_local_keys(*, brigade_home: Path, principal: str, hub_id: str) -> LocalKeys:
     """Commit a new independently generated pair and retain all previous keys.
 
-    A lost return must be reconciled by reading the saved active record before
-    another rotation. This operation is deliberately local and never publishes.
+    After a lost return, read the saved active record rather than blindly rotating
+    again. A read-only reload is not a durability barrier; use load_local_keys
+    with create=True to flush the observed generation before publication. This
+    operation is deliberately local and never publishes.
     """
     name = _identity(principal, hub_id)
     with _directory(brigade_home, create=False) as fd, _locked(fd):

@@ -131,6 +131,137 @@ def test_namespaces_are_explicit_and_separate(tmp_path):
     assert _load(tmp_path) == own
 
 
+@pytest.fixture
+def custody_descriptors(monkeypatch):
+    opened = set()
+    real_open, real_close = os.open, os.close
+
+    def tracked_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        opened.add(fd)
+        return fd
+
+    def tracked_close(fd):
+        real_close(fd)
+        opened.discard(fd)
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(os, "open", tracked_open)
+        boundary.setattr(os, "close", tracked_close)
+        yield opened
+    leaked = set(opened)
+    for fd in leaked:
+        real_close(fd)
+    assert not leaked, "custody leaked descriptors"
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("component", ["home", "fleet", "mesh-keys"])
+@pytest.mark.parametrize("failure", ["EIO", "ENOSPC", "EDQUOT", "EROFS"])
+def test_create_retry_reflushes_visible_private_directory_parents(
+    tmp_path, monkeypatch, custody_descriptors, component, failure
+):
+    home = tmp_path / "custody"
+    directories = [home, home / "fleet", home / "fleet" / "mesh-keys"]
+    child = directories[["home", "fleet", "mesh-keys"].index(component)]
+    parent = child.parent
+    real_fsync = os.fsync
+    flushed = []
+    failed = False
+
+    def inode(path):
+        info = path.stat()
+        return info.st_dev, info.st_ino
+
+    def fsync(fd):
+        nonlocal failed
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            target = info.st_dev, info.st_ino
+            flushed.append(target)
+            if not failed and parent.exists() and target == inode(parent):
+                failed = True
+                raise OSError(getattr(errno, failure), "private path must not escape", str(child))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(crypto.MeshError) as caught:
+        _load(home, create=True)
+    assert caught.value.code == str(caught.value) == "mesh_keys_io_error"
+    assert failed and child.is_dir()
+    assert not list(home.rglob("*.json"))
+    assert custody_descriptors == set()
+    flushed.clear()
+    saved = _load(home, create=True)
+    assert flushed == [inode(path) for path in (tmp_path, *directories)]
+    assert custody_descriptors == set()
+    path = _state_path(home)
+    snapshot = path.read_bytes(), path.stat().st_mtime_ns
+    for create in (False, True):
+        flushed.clear()
+        assert _load(home, create=create) == saved
+        assert flushed == ([inode(path) for path in (tmp_path, *directories)] if create else [])
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == snapshot
+        assert custody_descriptors == set()
+    flushed.clear()
+    rotated = _rotate(home)
+    assert flushed == [inode(directories[-1])]
+    assert rotated.retry_key == saved.retry_key
+    assert rotated.retired[-1].private_keys == saved.active.private_keys
+    crypto.verify_key_record(rotated.active.record, previous_record=saved.active.record)
+    assert custody_descriptors == set()
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("component", ["home", "fleet", "mesh-keys"])
+@pytest.mark.parametrize("invalid", ["mode", "owner"])
+@pytest.mark.parametrize("existing", [False, True])
+def test_create_validates_child_before_flushing_parent(
+    tmp_path, monkeypatch, custody_descriptors, component, invalid, existing
+):
+    home = tmp_path / "custody"
+    if existing:
+        _load(home, create=True)
+    directories = [home, home / "fleet", home / "fleet" / "mesh-keys"]
+    index = ["home", "fleet", "mesh-keys"].index(component)
+    child = directories[index]
+    child_inode = child.stat().st_ino if existing else None
+    if existing and invalid == "mode":
+        child.chmod(0o750)
+    real_fstat, real_fsync, real_mkdir = os.fstat, os.fsync, os.mkdir
+    flushed = []
+
+    def mkdir(name, *args, **kwargs):
+        nonlocal child_inode
+        real_mkdir(name, *args, **kwargs)
+        if name == child.name:
+            child_inode = child.stat().st_ino
+            if invalid == "mode":
+                child.chmod(0o750)
+
+    def fstat(fd):
+        info = real_fstat(fd)
+        if invalid == "owner" and info.st_ino == child_inode:
+            fields = list(info)
+            fields[4] = os.geteuid() + 1
+            return os.stat_result(fields)
+        return info
+
+    def fsync(fd):
+        info = real_fstat(fd)
+        flushed.append((info.st_dev, info.st_ino))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "fstat", fstat)
+    monkeypatch.setattr(os, "fsync", fsync)
+    monkeypatch.setattr(os, "mkdir", mkdir)
+    with pytest.raises(crypto.MeshError) as caught:
+        _load(home, create=True)
+    assert caught.value.code == str(caught.value) == "mesh_keys_unsafe"
+    assert flushed == [(path.stat().st_dev, path.stat().st_ino) for path in [tmp_path, *directories][:index]]
+    assert custody_descriptors == set()
+
+
 @pytest.mark.parametrize("operation", ["read", "rotate"])
 @POSIX_ONLY
 def test_missing_state_does_not_initialize_implicitly(tmp_path, operation):
@@ -427,6 +558,79 @@ def test_storage_io_failure_is_sanitized_and_preserves_active_keys(tmp_path, mon
     assert path.read_bytes() == original
     assert _load(tmp_path) == saved
     assert list(path.parent.glob(".*.tmp")) == []
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("failure", ["ENOSPC", "EDQUOT", "EIO", "EROFS"])
+@pytest.mark.parametrize("operation", ["initial", "rotate"])
+def test_create_reconciles_post_replace_fsync_failure_without_rewriting(
+    tmp_path, monkeypatch, custody_descriptors, failure, operation
+):
+    home = tmp_path / "custody"
+    previous = None
+    if operation == "rotate":
+        _load(home, create=True)
+        previous = _rotate(home)
+    directory = home / "fleet" / "mesh-keys"
+    real_fsync, real_replace = os.fsync, os.replace
+    flushed = []
+    replacements = []
+    fail = True
+
+    def inode(path):
+        info = path.stat()
+        return info.st_dev, info.st_ino
+
+    def replace(*args, **kwargs):
+        real_replace(*args, **kwargs)
+        replacements.append(_state_path(home).read_bytes())
+
+    def fsync(fd):
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            target = info.st_dev, info.st_ino
+            flushed.append(target)
+            if fail and directory.exists() and target == inode(directory):
+                assert len(replacements) == 1
+                raise OSError(getattr(errno, failure), "private path must not escape", str(directory))
+        return real_fsync(fd)
+
+    monkeypatch.setattr(os, "replace", replace)
+    monkeypatch.setattr(os, "fsync", fsync)
+    with pytest.raises(crypto.MeshError) as caught:
+        if operation == "initial":
+            _load(home, create=True)
+        else:
+            _rotate(home)
+    assert caught.value.code == str(caught.value) == "mesh_keys_io_error"
+    assert custody_descriptors == set()
+    path = _state_path(home)
+    snapshot = path.read_bytes(), path.stat().st_mtime_ns
+    assert replacements == [snapshot[0]]
+    flushed.clear()
+    observed = _load(home)
+    assert flushed == []
+    if previous is None:
+        assert observed.retired == ()
+    else:
+        assert observed.retry_key == previous.retry_key
+        assert observed.retired[:-1] == previous.retired
+        assert observed.retired[-1].private_keys == previous.active.private_keys
+        crypto.verify_key_record(observed.active.record, previous_record=previous.active.record)
+    with pytest.raises(crypto.MeshError) as caught:
+        _load(home, create=True)
+    assert caught.value.code == str(caught.value) == "mesh_keys_io_error"
+    assert custody_descriptors == set()
+    assert replacements == [snapshot[0]]
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == snapshot
+    fail = False
+    for _ in range(2):
+        flushed.clear()
+        assert _load(home, create=True) == observed
+        assert flushed == [inode(parent) for parent in (tmp_path, home, home / "fleet", directory)]
+        assert replacements == [snapshot[0]]
+        assert (path.read_bytes(), path.stat().st_mtime_ns) == snapshot
+        assert custody_descriptors == set()
 
 
 @POSIX_ONLY
