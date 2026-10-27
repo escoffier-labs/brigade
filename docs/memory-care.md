@@ -50,9 +50,41 @@ produce reinforcement previews. A preview triggered by new outcome evidence
 also includes resolved reinforcement ids so its evidence list supports its proof count.
 Reflection considers the newest 64 distinct log evidence ids per card by timestamp,
 with evidence ids breaking ties. Older ids remain in the log.
-The `outcome` row kind is reserved for future outcome capture. No production
-command writes it yet, so ingest alone cannot produce `reinforce` candidates
-in this slice.
+`brigade outcome capture <card-stem> --kind card --run-id <id>` appends an
+`outcome` support row after durable outcome capture when a tracked verifier
+manifest admits the receipt, its subject matches the current contained card's
+kind, id, and content fingerprint, and verification and effectiveness both
+succeeded. The row contains a target-relative receipt pointer and the original
+receipt completion timestamp (or start timestamp when completion is absent).
+Capture and reflection leave canonical card bytes unchanged.
+Reused receipts, audit-only checks, manual and worker-run signals, skill captures,
+failed verification, and checks without successful effectiveness add no support.
+Retrying capture can append the same receipt id and timestamp. Reflection counts
+that id once, and retry does not refresh the observation. If the optional log
+append fails, capture warns after preserving the durable outcome. Retry capture
+to supply the missing evidence. Ordinary non-supporting receipts are excluded
+silently. Capture checks the safely read receipt against the admitted source,
+then rechecks the card snapshot and its linked-card fingerprint after admission.
+
+Reflection revalidates logged `outcome` pointers of the form
+`.brigade/work/verify-runs/<id>/receipt.json` against the retained receipt and
+the candidate's card snapshot, including linked cards. Changed card bindings,
+missing or invalid receipts, and receipt identity or timestamp drift contribute
+no proof or consolidation preview. Their historical log rows remain untouched.
+An invalid logged pointer cannot regain proof through the card's evidence
+metadata. Saved candidates and proposals undergo the same check when proposed
+or applied. Existing citations retained by a new proposal are bound by their
+current file digests, so an approved consolidation does not make future updates
+impossible when its metadata changes the old receipt's card fingerprint. Every
+receipt explicitly used as new operation support still requires the live binding,
+even if already cited. Previews preserve historical citations, but obsolete verify
+bindings do not count as current proof. Previously cited evidence does not block
+consolidation as uncited pending evidence. Validation deduplicates repeated ids
+and timestamps and stays within the newest 64 distinct log ids plus up to 64
+current citations per card.
+Generic evidence under other roots, and manually cited files without a matching
+verify-outcome log row, retain their existing resolution and reviewed-proposal
+semantics. A file's presence alone does not validate logged verify-outcome support.
 Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
 Near-match and opposite-polarity flags use the same cutoff, including the care

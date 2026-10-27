@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
+- Brigade Stack bridge packages add `brigadestack` install names and commands backed by the existing stable Brigade 0.30.0 packages, preserving current commands and workspace formats.
+
+- Successful manifest-backed card outcomes feed memory reflection with receipt evidence and original verification timestamps. Capture, reflection, and reviewed proposals reject support whose card bindings or retained receipts have changed, without editing canonical cards.
+
 - Message replies can bound spool-lock acquisition while preserving the default blocking behavior.
 - The ownership map keeps charter metadata within its response budget and reports omitted owners; claim loading fetches a bounded active page instead of materializing stale claim history (#1799).
 - Patrol refuses corrupt persisted action status, scope, or idempotency keys before applying changes, so malformed history cannot silently discard retry fences (#1955).

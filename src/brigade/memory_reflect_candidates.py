@@ -188,6 +188,29 @@ def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str
     return dict(sorted(result.items()))
 
 
+def _invalid_outcome_ids(target: Path, card: Card, refs: set[str]) -> set[str]:
+    """Validate each selected receipt once, without replaying append-only rows.
+
+    Callers bound refs to the newest distinct window and/or current citations.
+    Conflicting timestamps cannot all describe the retained original receipt.
+    """
+    from .memory_evidence_log import validate_outcome_support, verify_outcome_ref
+
+    stamps: dict[str, set[str]] = {}
+    for row in card.rows:
+        ref = _evidence_id(row["evidence_id"])
+        if ref in refs and row["kind"] == "outcome" and verify_outcome_ref(ref):
+            stamps.setdefault(ref, set()).add(row["ts"])
+    return {
+        ref
+        for ref, values in stamps.items()
+        if len(values) != 1
+        or not validate_outcome_support(
+            target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(values))
+        )
+    }
+
+
 def _structured_preview(card: Card) -> bool:
     """Refuse citation formats the scalar evidence upserter cannot preserve."""
     for key in ("evidence", "sources", "source", "refs", "links"):
@@ -345,14 +368,20 @@ def generate(
     for card in cards:
         refs = sorted({_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)})
         card = replace(card, rows=[{**row, "evidence_id": _evidence_id(row["evidence_id"])} for row in card.rows])
-        current = _resolved(target, refs, roots)
-        sources.update(current)
-        # Keep the newest distinct ids, independent of append order or aliases.
+        # Select before validating so invalid or repeated rows cannot expand the
+        # newest-64 window into unbounded receipt/manifest/card IO.
         newest = dict.fromkeys(
             row["evidence_id"]
             for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         )
-        resolved_rows = _resolved(target, list(newest)[: io.MAX_LIST], roots)
+        selected = list(newest)[: io.MAX_LIST]
+        invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
+        retained_refs = refs
+        refs = [ref for ref in refs if ref not in invalid]
+        card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
+        current = _resolved(target, refs, roots)
+        sources.update(current)
+        resolved_rows = _resolved(target, [ref for ref in selected if ref not in invalid], roots)
         sources.update(resolved_rows)
         row_ids = set(resolved_rows)
         evidence = sorted(set(current) | row_ids)
@@ -375,7 +404,7 @@ def generate(
             groups.setdefault(content_fingerprint(card.text), []).append(card)
         if stale_ids:
             fields: dict[str, Any] = {
-                "evidence": sorted(set(refs) | set(stale_ids)),
+                "evidence": sorted(set(retained_refs) | set(stale_ids)),
                 "proof_count": len(set(current) | set(stale_ids)),
                 "last_consolidated": max(
                     (row["ts"] for row in card.rows if row["evidence_id"] in stale_ids), key=_sort_timestamp
@@ -408,7 +437,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
-                    diff=_diff(card, {"evidence": sorted(set(refs) | set(proof)), "proof_count": len(proof)}),
+                    diff=_diff(card, {"evidence": sorted(set(retained_refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
             )

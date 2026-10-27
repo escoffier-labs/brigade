@@ -34,8 +34,10 @@ parallel-safe waves without launching workers. `brigade work dispatch` claims
 and launches one ready wave, then supervises its children until they finish.
 `--no-wait` returns after launch. A later invocation reconciles those children
 and fills available capacity before waiting. Hub summary mirroring remains
-follow-up work. Run patrol is planned in
-[#1850](https://github.com/escoffier-labs/brigade/issues/1850), and memory reflection in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+follow-up work. Initial run-patrol and memory-reflection slices are available on
+main in the 0.31 beta line. Remaining work is tracked in
+[#1850](https://github.com/escoffier-labs/brigade/issues/1850) and
+[#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ## Long-running modes
 

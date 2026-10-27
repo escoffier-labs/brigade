@@ -1,0 +1,124 @@
+name: Brigade Stack PyPI publication
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: brigadestack-pypi-publication
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
+      - name: Build only the stable bridge sdist and wheel
+        run: |
+          python -m pip install build
+          python -m build --outdir "$RUNNER_TEMP/brigadestack-dist" distribution/brigadestack/pypi
+      - name: Check exact bridge identity and metadata-only contents
+        run: |
+          python - <<'PY'
+          import configparser
+          from email.parser import BytesParser
+          import os
+          from pathlib import Path
+          import tarfile
+          import zipfile
+
+          artifacts = Path(os.environ["RUNNER_TEMP"]) / "brigadestack-dist"
+          wheel = artifacts / "brigadestack-0.30.0-py3-none-any.whl"
+          sdist = artifacts / "brigadestack-0.30.0.tar.gz"
+          assert set(artifacts.iterdir()) == {wheel, sdist}
+          info = "brigadestack-0.30.0.dist-info/"
+          allowed_wheel_files = {
+              info + name for name in (
+                  "METADATA", "WHEEL", "entry_points.txt", "top_level.txt", "RECORD",
+                  "LICENSE", "licenses/LICENSE",
+              )
+          }
+          with zipfile.ZipFile(wheel) as archive:
+              names = archive.namelist()
+              assert len(names) == len(set(names))
+              assert set(names) <= allowed_wheel_files
+              metadata = BytesParser().parsebytes(archive.read(info + "METADATA"))
+              assert metadata["Name"] == "brigadestack"
+              assert metadata["Version"] == "0.30.0"
+              assert metadata["Requires-Python"] == ">=3.10"
+              assert metadata.get_all("Requires-Dist") == ["brigade-cli==0.30.0"]
+              entrypoints = configparser.ConfigParser()
+              entrypoints.read_string(archive.read(info + "entry_points.txt").decode())
+              assert entrypoints.sections() == ["console_scripts"]
+              assert dict(entrypoints["console_scripts"]) == {"brigadestack": "brigade.cli:process_main"}
+          allowed_source_files = {
+              "LICENSE", "PKG-INFO", "README.md", "pyproject.toml", "setup.cfg",
+              "brigadestack.egg-info/PKG-INFO", "brigadestack.egg-info/SOURCES.txt",
+              "brigadestack.egg-info/dependency_links.txt", "brigadestack.egg-info/entry_points.txt",
+              "brigadestack.egg-info/requires.txt", "brigadestack.egg-info/top_level.txt",
+          }
+          with tarfile.open(sdist) as archive:
+              files = set()
+              for member in archive.getmembers():
+                  assert member.name.startswith("brigadestack-0.30.0/") or member.name == "brigadestack-0.30.0"
+                  assert member.isfile() or member.isdir()
+                  if member.isfile():
+                      files.add(member.name.removeprefix("brigadestack-0.30.0/"))
+              assert files <= allowed_source_files
+              assert {"pyproject.toml", "PKG-INFO", "README.md", "LICENSE"} <= files
+          print("Verified brigadestack 0.30.0 wheel/sdist, stable dependency, alias and metadata-only payload")
+          PY
+      - name: Install the wheel with its real stable dependency and exercise the alias
+        run: |
+          python -m venv "$RUNNER_TEMP/brigadestack-smoke"
+          "$RUNNER_TEMP/brigadestack-smoke/bin/python" -m pip install "$RUNNER_TEMP/brigadestack-dist/brigadestack-0.30.0-py3-none-any.whl"
+          "$RUNNER_TEMP/brigadestack-smoke/bin/python" -m pip check
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/brigadestack-smoke/bin/python" -I - <<'PY'
+          from importlib.metadata import version
+
+          assert version("brigadestack") == version("brigade-cli") == "0.30.0"
+          PY
+          version=$(env -u PYTHONPATH "$RUNNER_TEMP/brigadestack-smoke/bin/brigadestack" --version)
+          printf '%s\n' "$version"
+          test "$version" = 'brigade 0.30.0'
+          env -u PYTHONPATH "$RUNNER_TEMP/brigadestack-smoke/bin/brigadestack" --help
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: brigadestack-pypi-0.30.0
+          path: |
+            ${{ runner.temp }}/brigadestack-dist/brigadestack-0.30.0-py3-none-any.whl
+            ${{ runner.temp }}/brigadestack-dist/brigadestack-0.30.0.tar.gz
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main' && github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: brigadestack-pypi-0.30.0
+          path: brigadestack-dist
+      - name: Publish the checked bridge distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
+        with:
+          packages-dir: brigadestack-dist/

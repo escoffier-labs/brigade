@@ -84,7 +84,7 @@ Choose the integrations you need. Each connects a different part of the workflow
 | **Grok Bot** | Role-scoped connector packs for bounded jobs and configured workflows. |
 | **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, workspace setup, and memory care. |
 | **Dot** | A connector for memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
-| **Duet** | A connector for memory, skills, Hub messaging, and read-only fleet views. Duet executes on its own cloud machine. |
+| **Duet** | **0.31 beta:** A connector for memory, skills, Hub messaging, and read-only fleet views. Duet executes on its own cloud machine. |
 
 Capabilities differ by integration, configuration, and release channel. Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), and [Duet guide](docs/duet-connector.md).
 
@@ -97,7 +97,7 @@ npm install --global @escoffier-labs/brigade@0.30.0
 brigade setup
 ```
 
-The npm package manages its own Python environment. Leave optional dependencies enabled, and install Git for repository features. Upgrade npm-managed installs with npm. See the [npm package notes](npm/feasibility/README.md).
+The npm package manages its own Python environment. The first launch downloads a managed Python, so it needs network access. Leave optional dependencies enabled, and install Git for repository features. Upgrade npm-managed installs with npm. See the [npm package notes](npm/feasibility/README.md).
 
 Or use Python 3.10 or newer with `pipx install brigade-cli` or `uv tool install brigade-cli`, followed by `brigade setup`.
 

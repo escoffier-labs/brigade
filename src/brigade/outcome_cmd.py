@@ -2083,6 +2083,14 @@ def capture(
     except OutcomeLedgerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    from .memory_evidence_log import log_outcome
+
+    try:
+        log_outcome(target, record, receipt)
+    except (OSError, ValueError):
+        # The outcome is already durable. Keep this optional failure bounded and
+        # body-free; repeating capture can supply the missing reflection row.
+        print("warning: evidence log append failed; retry outcome capture", file=sys.stderr)
     if json_output:
         print(json.dumps({"target": str(target), "record": _record_payload(record)}, indent=2, sort_keys=True))
         return 0

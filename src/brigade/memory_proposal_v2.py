@@ -17,7 +17,7 @@ from . import memory_proposal_v2_ops as delta
 from .card_identity import IdentityIndex, card_identity
 from .card_fingerprint import strip_frontmatter
 from .handoff_cmd.drafts import _render_handoff_draft
-from .memory_reflect_candidates import _evidence_roots, _resolved
+from .memory_reflect_candidates import Card, _evidence_id, _evidence_roots, _invalid_outcome_ids, _resolved
 from .selection import WRITER_INBOXES
 
 SCHEMA = "brigade.memory-proposal.v2"
@@ -65,8 +65,9 @@ def _sources(
     return sources, paths
 
 
-def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, Any]]) -> dict[str, str]:
-    refs: set[str] = set()
+def _evidence(
+    target: Path, ops: list[dict[str, Any]], sources: list[dict[str, Any]]
+) -> tuple[dict[str, str], set[str]]:
     addressed: set[str] = set()
     for op in ops:
         if not isinstance(op, dict):
@@ -76,13 +77,31 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
     cited = {s["path"]: memory_cmd._evidence_refs(s["metadata"]) for s in sources if s["path"] in addressed}
     if any(len(values) > io.MAX_LIST for values in cited.values()):
         raise legacy.ProposalError("addressed card cites too many evidence references to bind")
-    packets = [*ops, *[{"evidence_ids": values} for values in cited.values()]]
-    for op in packets:
+    support: set[str] = set()
+    for op in ops:
         values = op.get("evidence_ids", []) if isinstance(op, dict) else []
         if isinstance(values, list) and len(values) <= io.MAX_LIST:
-            refs.update(ref for ref in values if isinstance(ref, str) and len(ref) <= 1024)
+            support.update(ref for ref in values if isinstance(ref, str) and len(ref) <= 1024)
+    refs = support | {ref for values in cited.values() for ref in values if len(ref) <= 1024}
     if len(refs) > io.MAX_LIST:
         raise legacy.ProposalError("op evidence count exceeded")
+    from .memory_evidence_log import EvidenceLog
+
+    ledger = EvidenceLog(target)
+    # Bind retained citations by digest without presenting them as fresh support.
+    # Explicit op support must still match the live card, even if already cited.
+    normalized_refs = {_evidence_id(ref) for ref in refs}
+    normalized_support = {_evidence_id(ref) for ref in support}
+    invalid: set[str] = set()
+    for source in sources:
+        if source["path"] not in addressed:
+            continue
+        identity = card_identity(source["metadata"], source["path"])
+        rows = [row for key in (identity.card_id, *identity.aliases) for row in ledger.by_identity.get(key, [])]
+        card = Card(source["path"], source["text"], source["metadata"], identity, rows)
+        invalid.update(_invalid_outcome_ids(target, card, normalized_refs))
+        if normalized_support & invalid:
+            raise legacy.ProposalError("outcome evidence drift; refresh the candidate")
     resolved = _resolved(target, sorted(refs), _evidence_roots(target))
     digests = {}
     for ref in resolved:
@@ -96,7 +115,9 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
                 digests[ref] = io.sha256(raw)
         except (OSError, ValueError):
             continue
-    return digests
+    # Retain historical bytes in the review digest without counting obsolete
+    # verify bindings as proof of the current card. Generic citations are unchanged.
+    return digests, {ref for ref in digests if _evidence_id(ref) not in invalid}
 
 
 def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
@@ -130,26 +151,46 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     from .memory_reflect import _evidence_log
     from .memory_reflect_candidates import Card, _evidence_id, _pending_rows, _sort_timestamp, _timestamp
 
+    if not isinstance(refs, list) or not all(isinstance(ref, str) for ref in refs):
+        raise legacy.ProposalError("op evidence does not resolve")
     ledger = _evidence_log(target)
     if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
         raise legacy.ProposalError("evidence log is incomplete or unreadable")
-    rows = [row for key in (source.get("id"), *source.get("aliases", [])) for row in ledger.by_identity.get(key, [])]
-    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and _evidence_id(row["evidence_id"]) in refs]
-    if not stamps:
-        return None
-    stamp = max(stamps, key=_sort_timestamp)
+    rows = [
+        {**row, "evidence_id": _evidence_id(row["evidence_id"])}
+        for key in (source.get("id"), *source.get("aliases", []))
+        for row in ledger.by_identity.get(key, [])
+    ]
     card = Card(
         source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
     )
+    cited = {_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)}
+    if len(cited) > io.MAX_LIST or len(refs) > io.MAX_LIST:
+        raise legacy.ProposalError("consolidation evidence count exceeded")
+    # Match reflection's bounded validation before treating append-only outcomes
+    # as pending proof. Unselected rows remain fenced, not silently accounted for.
+    newest = dict.fromkeys(
+        row["evidence_id"]
+        for row in sorted(rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+    )
+    support = {_evidence_id(ref) for ref in refs}
+    invalid = _invalid_outcome_ids(target, card, set(list(newest)[: io.MAX_LIST]) | cited | support)
+    rows = [row for row in rows if row["evidence_id"] not in invalid]
+    card.rows = rows
+    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in support]
+    if not stamps:
+        return None
+    stamp = max(stamps, key=_sort_timestamp)
     pending = _pending_rows(card)
     if _timestamp(card.meta.get("last_consolidated")) is None:
         value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
         if not isinstance(value, str) or _timestamp(value) is None:
             pending = rows
+    accounted = support | cited
     if any(
         row["kind"] != "reinforced"
         and _sort_timestamp(row["ts"]) <= _sort_timestamp(stamp)
-        and _evidence_id(row["evidence_id"]) not in refs
+        and _evidence_id(row["evidence_id"]) not in accounted
         for row in pending
     ):
         raise legacy.ProposalError("consolidation would hide uncited pending evidence")
@@ -310,7 +351,7 @@ def compose(
     texts: dict[str, str | None] = {
         s["path"]: delta.anchor_text(s["text"], s["path"]) if anchor_blocks else s["text"] for s in sources
     }
-    evidence = _evidence(target, ops, sources)
+    evidence, current_evidence = _evidence(target, ops, sources)
     accepted, dropped = [], []
     removed: dict[str, str] = {}
     for number, op in enumerate(ops):
@@ -322,7 +363,7 @@ def compose(
             consolidated_at = (
                 _consolidated_at(target, source, op.get("evidence_ids", [])) if "last_consolidated" in op else None
             )
-            delta.apply_op(trial, op, resolved=set(evidence), consolidated_at=consolidated_at)
+            delta.apply_op(trial, op, resolved=current_evidence, consolidated_at=consolidated_at)
             if trial == texts:
                 raise legacy.ProposalError("op has no delta")
             trial_removed = dict(removed)
@@ -341,7 +382,7 @@ def compose(
         raise legacy.ProposalError("generated ops were dropped; refusing a partial proposal")
     if not accepted and (ops or not any(texts[s["path"]] != s["text"] for s in sources)):
         raise legacy.ProposalError("no valid delta ops remain")
-    evidence = _evidence(target, accepted, sources)
+    evidence, _ = _evidence(target, accepted, sources)
     texts = _derived(texts, sources, removed, proposal_id)
     _refuse_dangling_block_links(paths, target, texts, sources, removed)
     references, fences = _references(target, care, paths, texts, removed)

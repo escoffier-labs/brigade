@@ -14,6 +14,7 @@ from brigade import cli, memory_proposals as api, obsidian_vault, memory_reflect
 from brigade.projection import kernel
 from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
 from tests.test_memory_reflect import card, evidence, log
+from tests.test_memory_outcome_evidence import verified_card as verified_card
 
 pytestmark = pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
 PATH = "memory/cards/cache.md"
@@ -129,6 +130,54 @@ def test_invalid_ops_are_dropped_and_all_dropped_writes_no_proposal(tmp_path, ba
     assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
     proposal = create(tmp_path, [invalid, op("add_previously", text="Old wording.")])
     assert len(proposal["ops"]) == 1 and len(proposal["dropped_ops"]) == 1
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("refs", [[1], [{}], None, {}, ".brigade/receipts/support.json"])
+@pytest.mark.parametrize("surface", ["payload", "cli"])
+def test_malformed_consolidation_evidence_is_dropped(tmp_path, capsys, refs, surface):
+    path = setup(tmp_path)
+    before = path.read_bytes()
+    invalid = op("append_evidence", evidence_ids=refs, last_consolidated="2026-10-20T12:00:00Z")
+
+    def propose(ops):
+        if surface == "payload":
+            return create(tmp_path, ops)
+        packet = tmp_path / "ops.json"
+        packet.write_text(json.dumps(ops))
+        code = cli.main(
+            [
+                "memory",
+                "proposal",
+                "create",
+                "--target",
+                str(tmp_path),
+                "--relation",
+                "consolidate",
+                "--source",
+                PATH,
+                "--ops-file",
+                str(packet),
+                "--reason",
+                "Review the exact cited delta.",
+                "--json",
+            ]
+        )
+        output = capsys.readouterr()
+        assert "Traceback" not in output.err
+        result = json.loads(output.out)
+        if code:
+            assert code == 2 and result["status"] == "refused"
+            raise api.ProposalError(result["error"])
+        return result
+
+    with pytest.raises(api.ProposalError, match="no valid delta ops remain"):
+        propose([invalid])
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+    valid = op("add_previously", text="Old wording.")
+    proposal = propose([invalid, valid])
+    assert proposal["ops"] == [valid]
+    assert proposal["dropped_ops"] == [{"index": 0, "reason": "invalid, unresolved, stale or empty op"}]
     assert path.read_bytes() == before
 
 
@@ -414,6 +463,57 @@ def test_manual_consolidation_cannot_hide_uncited_pending_evidence(tmp_path, kin
             ],
         )
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("verified_card", ["anchored-linked"], indirect=True)
+@pytest.mark.parametrize("ref", ["miseledger:example", "miseledger://evidence/example"])
+@pytest.mark.parametrize("pending", [None, "generic", "eligible"])
+def test_bundle_alias_consolidation_preserves_pending_fence(tmp_path, monkeypatch, verified_card, ref, pending):
+    from brigade import memory_proposal_v2_ops as delta
+    from tests.test_memory_outcome_evidence import capture
+
+    path, receipt = verified_card
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    bundle = cache / "miseledger/evidence/example.json"
+    bundle.parent.mkdir(parents=True)
+    bundle.write_text("{}\n")
+    stamp = "2026-10-21T12:00:00Z"
+    if pending == "eligible":
+        assert capture(tmp_path, receipt) == 0
+    log(
+        tmp_path,
+        path,
+        ("miseledger:example", "outcome", "2026-10-21T11:00:00Z"),
+        ("miseledger://evidence/example", "outcome", stamp),
+    )
+    if pending == "generic":
+        other = evidence(tmp_path, ".brigade/receipts/uncited.json")
+        log(tmp_path, path, (other, "outcome", "2026-10-21T10:00:00Z"))
+    before = path.read_bytes()
+    block = delta.blocks(path.read_text())[0]
+    operation = dict(
+        type="append_evidence",
+        card_path=PATH,
+        block_id=block.block_id,
+        expected_block_hash=block.sha256,
+        evidence_ids=[ref],
+        last_consolidated=stamp,
+    )
+    if pending:
+        with pytest.raises(api.ProposalError, match="no valid delta ops remain"):
+            create(tmp_path, [operation])
+        assert path.read_bytes() == before
+        return
+    proposal = create(tmp_path, [operation])
+    assert path.read_bytes() == before
+    assert proposal["ops"] == [operation]
+    assert proposal["op_evidence"] == {ref: hashlib.sha256(bundle.read_bytes()).hexdigest()}
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    meta = api._meta(path.read_text())
+    assert meta["last_consolidated"] == stamp
+    assert meta["evidence"] == [ref]
+    assert meta["proof_count"] == "1"
 
 
 @pytest.mark.parametrize("kind", ["outcome", "opposite-polarity"])
