@@ -90,6 +90,8 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
         raise crypto.MeshError("mesh_keys_unsafe")
     flags = directory_flags()
     fd = None
+    child: int | None
+    completed = False
     try:
         fd = os.open(home.anchor, flags)
         components = (*home.parts[1:], "fleet", "mesh-keys")
@@ -111,11 +113,16 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
                     if create:
                         os.fsync(fd)
             except BaseException:
-                os.close(child)
+                unadopted, child = child, None
+                try:
+                    os.close(unadopted)
+                except BaseException:
+                    pass  # Preserve validation/cancellation; never retry an ambiguous close.
                 raise
-            os.close(fd)
-            fd = child
+            previous, fd = fd, child
+            os.close(previous)
         yield fd
+        completed = True
     except OSError as error:
         # Errors raised by reads/writes through yield also arrive here. Storage
         # failures must not be diagnosed as a path or permission violation.
@@ -123,8 +130,21 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
             raise crypto.MeshError("mesh_keys_io_error") from None
         raise crypto.MeshError("mesh_keys_unsafe") from None
     finally:
-        if fd is not None:
-            os.close(fd)
+        closing, fd = fd, None
+        if closing is not None:
+            try:
+                os.close(closing)
+            except BaseException as error:
+                if completed:
+                    if isinstance(error, OSError):
+                        code = (
+                            "mesh_keys_io_error"
+                            if error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS}
+                            else "mesh_keys_unsafe"
+                        )
+                        raise crypto.MeshError(code) from None
+                    raise
+                # A primary exception already owns the diagnosis, including cancellation.
 
 
 @contextmanager
@@ -294,6 +314,8 @@ def load_local_keys(*, brigade_home: Path, principal: str, hub_id: str, create: 
     A read-only reload after a failed write only observes the saved generation.
     Use create=True to flush its directory barriers before publishing it. Existing
     state is neither rewritten nor rotated by that explicit reconciliation.
+    A directory-close diagnostic can follow a completely flushed commit.
+    After any lost return, reload active custody rather than regenerating or rotating.
     """
     name = _identity(principal, hub_id)
     with _directory(brigade_home, create=create) as fd, _locked(fd):

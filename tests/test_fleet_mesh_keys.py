@@ -1,6 +1,7 @@
 """Local custody contracts; all key material and paths are disposable."""
 
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager
 from datetime import datetime
 import errno
 import json
@@ -740,3 +741,138 @@ def test_mutation_reaps_only_private_regular_exact_temporary_names(tmp_path, mon
     assert outside.read_bytes() == b"leave this alone"
     assert rotated.retry_key == saved.retry_key
     assert _load(tmp_path) == rotated
+
+
+@pytest.fixture
+def custody_directory_close_fault(monkeypatch):
+    @contextmanager
+    def inject(home, point, number=errno.EIO):
+        original_open, original_close = os.open, os.close
+        seen = {"owned": set(), "root": None, "final": None, "parent": None, "fault": None, "reused": None, "calls": 0}
+
+        def opened(path, flags, *args, **kwargs):
+            descriptor = original_open(path, flags, *args, **kwargs)
+            if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                seen["owned"].add(descriptor)
+                if str(path) == home.anchor and "dir_fd" not in kwargs:
+                    seen["root"] = descriptor
+                if str(path) == "mesh-keys":
+                    seen["final"], seen["parent"] = descriptor, kwargs["dir_fd"]
+            return descriptor
+
+        def closed(descriptor):
+            if descriptor == seen["fault"]:
+                seen["calls"] += 1
+            target = (
+                seen["root"] if point == "parent" else seen["parent"] if point == "validation-parent" else seen["final"]
+            )
+            fail = seen["fault"] is None and descriptor == target
+            original_close(descriptor)
+            seen["owned"].discard(descriptor)
+            if fail:
+                seen["fault"], seen["calls"] = descriptor, 1
+                replacement = original_open(os.devnull, os.O_RDONLY)
+                if replacement != descriptor:
+                    os.dup2(replacement, descriptor)
+                    original_close(replacement)
+                seen["reused"] = descriptor
+                raise OSError(number, "private directory close diagnostic", str(home))
+
+        try:
+            with monkeypatch.context() as fault:
+                fault.setattr(os, "open", opened)
+                fault.setattr(os, "close", closed)
+                yield seen
+        finally:
+            # The fake owns the replacement and any descriptors leaked by the old walker.
+            for descriptor in seen["owned"] | ({seen["reused"]} if seen["reused"] is not None else set()):
+                try:
+                    original_close(descriptor)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+
+    return inject
+
+
+@POSIX_ONLY
+def test_consumed_parent_directory_close_preserves_new_owner_and_cleans_child(tmp_path, custody_directory_close_fault):
+    _load(tmp_path, create=True)
+    before = _state_path(tmp_path).read_bytes()
+    with custody_directory_close_fault(tmp_path, "parent") as seen:
+        with pytest.raises(crypto.MeshError, match="^mesh_keys_io_error$"):
+            _load(tmp_path)
+        assert seen["calls"] == 1 and seen["reused"] is not None
+        os.fstat(seen["reused"])
+        assert seen["owned"] == set()
+        assert _state_path(tmp_path).read_bytes() == before
+    assert _load(tmp_path).active.record["kid"]
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("operation", ["read", "create", "rotate"])
+@pytest.mark.parametrize("number, code", [(errno.EIO, "mesh_keys_io_error"), (errno.EACCES, "mesh_keys_unsafe")])
+def test_final_directory_close_has_fixed_diagnosis_and_reload_reconciles(
+    tmp_path, custody_directory_close_fault, operation, number, code
+):
+    home = tmp_path / "custody"
+    first = None if operation == "create" else _load(home, create=True)
+    before = None if first is None else _state_path(home).read_bytes()
+    with custody_directory_close_fault(home, "final", number) as seen:
+        with pytest.raises(crypto.MeshError) as caught:
+            _rotate(home) if operation == "rotate" else _load(home, create=operation == "create")
+        assert caught.value.code == str(caught.value) == code
+        assert seen["calls"] == 1 and seen["owned"] == set()
+        os.fstat(seen["reused"])
+    complete = _state_path(home).read_bytes()
+    active = _load(home)
+    assert len(active.retired) == (1 if operation == "rotate" else 0)
+    if operation == "read":
+        assert complete == before and active == first
+    elif operation == "rotate":
+        assert active.retry_key == first.retry_key
+        assert active.retired[0].private_keys == first.active.private_keys
+        assert active.active.private_keys != first.active.private_keys
+    assert _load(home, create=True) == active
+    assert _state_path(home).read_bytes() == complete
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("primary", ["backend", "extra", "cancel", "unsafe-child", "unsafe-parent"])
+def test_directory_cleanup_preserves_primary_failure(tmp_path, monkeypatch, custody_directory_close_fault, primary):
+    class Cancelled(BaseException):
+        pass
+
+    _load(tmp_path, create=True)
+    path = _state_path(tmp_path)
+    before = path.read_bytes()
+    error = (
+        crypto.MeshError("mesh_backend_unsupported")
+        if primary == "backend"
+        else crypto.MeshExtraMissing()
+        if primary == "extra"
+        else Cancelled()
+    )
+    point = "validation-parent" if primary == "unsafe-parent" else "final"
+    try:
+        with monkeypatch.context() as failure:
+            if primary.startswith("unsafe"):
+                path.parent.chmod(0o750)
+            else:
+
+                def unavailable():
+                    raise error
+
+                failure.setattr(crypto, "_backend", unavailable)
+            with custody_directory_close_fault(tmp_path, point) as seen:
+                with pytest.raises(crypto.MeshError if primary.startswith("unsafe") else type(error)) as caught:
+                    _load(tmp_path, create=primary.startswith("unsafe"))
+                if primary.startswith("unsafe"):
+                    assert caught.value.code == str(caught.value) == "mesh_keys_unsafe"
+                else:
+                    assert caught.value is error
+                assert seen["calls"] == 1 and seen["owned"] == set()
+                os.fstat(seen["reused"])
+                assert path.read_bytes() == before
+    finally:
+        path.parent.chmod(0o700)
+    assert _load(tmp_path).active.record["kid"]
