@@ -474,3 +474,122 @@ def test_bounded_support_preserves_legacy_link_fingerprint(tmp_path, verified_ca
         ref=f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json",
     )
     assert unsafe_reads == []
+
+
+@pytest.mark.parametrize("first_kind", ["reinforce", "stale-newer-evidence"])
+@pytest.mark.parametrize("second_support", ["generic", "verified"])
+def test_successive_approved_consolidations_preserve_historical_receipts(
+    tmp_path, verified_card, monkeypatch, capsys, first_kind, second_support
+):
+    from brigade import memory_proposals as api
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    first_ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    refs = [first_ref]
+    for iteration in range(2):
+        if iteration == 0:
+            assert capture(tmp_path, receipt) == 0
+        else:
+            monkeypatch.setattr(verify_mod.helpers, "_now", lambda: datetime(2026, 10, 21, 12, tzinfo=timezone.utc))
+            if second_support == "verified":
+                receipt = _run_manifest_verify(tmp_path, "card-fixture", monkeypatch=monkeypatch, start_session=False)
+                assert capture(tmp_path, receipt) == 0
+                refs.append(f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json")
+            else:
+                refs.append(evidence(tmp_path, ".brigade/receipts/new.json"))
+                write_log(tmp_path, path, (refs[-1], "outcome", "2026-10-21T12:00:00Z"))
+        capsys.readouterr()
+        code, result = command(tmp_path, capsys, "run")
+        assert code == 0
+        kind = first_kind if iteration == 0 else "stale-newer-evidence"
+        candidate = next(c for c in result["candidates"] if c["kind"] == kind)
+        # A historical receipt is preserved as a citation, never re-admitted as current support.
+        assert candidate["evidence_ids"] == [refs[-1]]
+        code, proposal = command(tmp_path, capsys, "propose", candidate["candidate_id"], "--reason", "Review support.")
+        assert code == 0, proposal
+        assert set(proposal["op_evidence"]) == set(refs)
+        if iteration:
+            assert candidate["diff"] == proposal["diff"]
+        for action in ("review", "apply"):
+            args = [
+                "memory",
+                "proposal",
+                action,
+                proposal["id"],
+                "--digest",
+                proposal["digest"],
+                "--target",
+                str(tmp_path),
+                "--json",
+            ]
+            if action == "review":
+                args.extend(["--reason", "Inspected the exact evidence delta."])
+            assert cli.main(args) == 0, capsys.readouterr()
+            output = json.loads(capsys.readouterr().out)
+            assert output["status"] == ("accepted" if action == "review" else "committed")
+        assert api._meta(path.read_text())["evidence"] == sorted(refs)
+        assert int(api._meta(path.read_text())["proof_count"]) == candidate["proof_count"]
+    assert api._meta(path.read_text())["last_consolidated"] == (
+        receipt["completed_at"] if second_support == "verified" else "2026-10-21T12:00:00Z"
+    )
+
+
+def test_cited_outcome_explicitly_reused_as_support_still_requires_live_binding(tmp_path, verified_card):
+    from brigade import memory_proposals as api
+    from brigade import memory_proposal_v2_ops as delta
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
+    anchored = delta.anchor_text(path.read_text(), "memory/cards/cache.md")
+    block = delta.blocks(anchored)[0]
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError, match="outcome evidence drift"):
+        api.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=["memory/cards/cache.md"],
+            ops=[
+                dict(
+                    type="append_evidence",
+                    card_path="memory/cards/cache.md",
+                    block_id=block.block_id,
+                    expected_block_hash=block.sha256,
+                    evidence_ids=[ref],
+                )
+            ],
+            anchor_blocks=True,
+            reason="Try to reuse a cited receipt as live support.",
+        )
+    assert snapshot(tmp_path) == before
+
+
+def test_historical_receipt_bytes_remain_bound_through_review_and_apply(tmp_path, verified_card):
+    from brigade import memory_proposals as api, memory_reflect
+    from brigade.memory_proposal_v2_reflect import propose_payload
+    from tests.test_memory_proposal_v2 import apply
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    first = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    proposal = propose_payload(target=tmp_path, candidate_id=first["candidate_id"], reason="Inspect first support.")
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    ref = evidence(tmp_path, ".brigade/receipts/new.json")
+    write_log(tmp_path, path, (ref, "outcome", "2026-10-21T12:00:00Z"))
+    second = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    proposal = propose_payload(target=tmp_path, candidate_id=second["candidate_id"], reason="Inspect new support.")
+    assert second["diff"] == proposal["diff"]
+    values = dict(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+    api.review_payload(**values, reason="Inspect current and retained evidence bytes.")
+    retained = Path(receipt["path"]) / "receipt.json"
+    historical_ref = retained.relative_to(tmp_path).as_posix()
+    assert historical_ref in proposal["op_evidence"]
+    assert historical_ref not in proposal["ops"][0]["evidence_ids"]
+    retained.write_text(retained.read_text() + "\n")
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError, match="evidence or reference drift"):
+        api.apply_payload(**values)
+    assert snapshot(tmp_path) == before

@@ -376,6 +376,7 @@ def generate(
         )
         selected = list(newest)[: io.MAX_LIST]
         invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
+        retained_refs = refs
         refs = [ref for ref in refs if ref not in invalid]
         card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
         current = _resolved(target, refs, roots)
@@ -403,7 +404,7 @@ def generate(
             groups.setdefault(content_fingerprint(card.text), []).append(card)
         if stale_ids:
             fields: dict[str, Any] = {
-                "evidence": sorted(set(refs) | set(stale_ids)),
+                "evidence": sorted(set(retained_refs) | set(stale_ids)),
                 "proof_count": len(set(current) | set(stale_ids)),
                 "last_consolidated": max(
                     (row["ts"] for row in card.rows if row["evidence_id"] in stale_ids), key=_sort_timestamp
@@ -436,7 +437,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
-                    diff=_diff(card, {"evidence": sorted(set(refs) | set(proof)), "proof_count": len(proof)}),
+                    diff=_diff(card, {"evidence": sorted(set(retained_refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
             )

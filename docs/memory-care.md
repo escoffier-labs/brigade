@@ -73,8 +73,15 @@ missing or invalid receipts, and receipt identity or timestamp drift contribute
 no proof or consolidation preview. Their historical log rows remain untouched.
 An invalid logged pointer cannot regain proof through the card's evidence
 metadata. Saved candidates and proposals undergo the same check when proposed
-or applied. Validation deduplicates repeated ids and timestamps and stays within
-the newest 64 distinct log ids plus up to 64 current citations per card.
+or applied. Existing citations retained by a new proposal are bound by their
+current file digests, so an approved consolidation does not make future updates
+impossible when its metadata changes the old receipt's card fingerprint. Every
+receipt explicitly used as new operation support still requires the live binding,
+even if already cited. Previews preserve historical citations, but obsolete verify
+bindings do not count as current proof. Previously cited evidence does not block
+consolidation as uncited pending evidence. Validation deduplicates repeated ids
+and timestamps and stays within the newest 64 distinct log ids plus up to 64
+current citations per card.
 Generic evidence under other roots, and manually cited files without a matching
 verify-outcome log row, retain their existing resolution and reviewed-proposal
 semantics. A file's presence alone does not validate logged verify-outcome support.
