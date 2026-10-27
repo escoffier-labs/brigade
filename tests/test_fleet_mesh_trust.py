@@ -252,15 +252,38 @@ def test_extreme_timestamps_compare_without_utc_datetime_overflow(trust, home):
     assert next(iter(trust.load_trust(brigade_home=home).data["barriers"].values()))["cutoff"].startswith("0001-")
 
 
-def test_kid_binding_rejects_cross_principal_but_not_cross_hub(trust, home):
-    bootstrap(trust, home)
-    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="test-node", kid=KID, cutoff=TIME)
+def test_kid_binding_disagreement_accepts_complete_list_and_keeps_hubs_separate(trust, home):
+    # Policy A is explicitly approved: unsigned attribution cannot suppress a
+    # complete signed list, including revocation of an unrelated key.
+    trust.initialize_trust(brigade_home=home)
+    earlier = "2026-01-01T00:00:00Z"
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=earlier)
+    pin(trust, home)
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    result = accept(trust, home, raw, kind="revocation")
+    assert result.status == "accepted" and result.evidence_recorded
+    state = trust.load_trust(brigade_home=home).data
+    disputed = state["barriers"][HUB + ":" + KID]
+    assert disputed["principals"] == ["bogus-node", "test-node"]
+    assert disputed["cutoff"] == earlier
+    assert state["barriers"][HUB + ":" + KID2]["principals"] == ["test-node"]
+    assert state["marks"]["revocation:" + signer()]["digest"] == digest(raw)
+    assert len(state["baselines"]) == len(state["objects"]) == len(state["conflicts"]) == 1
+    evidence = next(iter(state["conflicts"].values()))
+    assert evidence["reason"] == "kid_binding_conflict" and evidence["hub"] == HUB and evidence["kid"] == KID
+    assert {(c["principal"], c["source"]) for c in evidence["claims"]} == {
+        ("bogus-node", "hub"),
+        ("test-node", digest(raw)),
+    }
     before = saved(home).read_bytes()
-    with pytest.raises(crypto.MeshError, match="^mesh_trust_kid_binding_conflict$"):
-        accept(trust, home, kind="revocation", entries=[revoked(principal="test-other")])
+    replay = accept(trust, home, raw, kind="revocation")
+    assert replay.status == "replay" and replay.evidence_recorded
     assert saved(home).read_bytes() == before
     trust.record_hub_revocation(brigade_home=home, hub=OTHER, principal="test-other", kid=KID, cutoff=TIME)
-    assert len(trust.load_trust(brigade_home=home).data["barriers"]) == 2
+    state = trust.load_trust(brigade_home=home).data
+    assert len(state["barriers"]) == 3
+    assert state["barriers"][OTHER + ":" + KID]["principals"] == ["test-other"]
+    assert len(state["conflicts"]) == 1
 
 
 @pytest.mark.parametrize("case", ["bad-signature", "wrong-scope", "duplicate", "unknown", "too-deep"])
@@ -1219,3 +1242,276 @@ def test_snapshot_floor_predicate_across_scopes_ties_and_insertion_order(trust, 
     assert snapshot.unsatisfied_floors == tuple(expected)
     assert snapshot.data == state
     assert len(snapshot.unsatisfied_floors) == 5
+
+
+def test_unsigned_after_signed_retains_all_claims_minima_and_detached_views(trust, home):
+    bootstrap(trust, home)
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    accept(trust, home, raw, kind="revocation")
+    trust.record_hub_revocation(
+        brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff="2026-01-03T00:00:00Z"
+    )
+    first = trust.load_trust(brigade_home=home)
+    identity = next(iter(first.data["conflicts"]))
+    assert first.data["barriers"][HUB + ":" + KID]["cutoff"] == TIME
+    for cutoff in ("2026-01-03T01:00:00+01:00", "2026-01-04T00:00:00Z"):
+        before = saved(home).read_bytes()
+        trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=cutoff)
+        assert saved(home).read_bytes() == before
+    trust.record_hub_revocation(
+        brigade_home=home, hub=HUB, principal="agent:test", kid=KID, cutoff="2026-01-01T23:00:00Z"
+    )
+    state = trust.record_hub_revocation(
+        brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff="2026-01-01T00:00:00Z"
+    )
+    barrier = state.data["barriers"][HUB + ":" + KID]
+    assert barrier["principals"] == ["agent:test", "bogus-node", "test-node"]
+    assert barrier["cutoff"] == "2026-01-01T00:00:00Z"
+    assert len(barrier["sources"]) == 3 and len(state.data["hub_revocations"]) == 2
+    assert set(state.data["conflicts"]) == {identity}
+    assert state.data["conflicts"][identity]["claims"] == barrier["sources"]
+    assert state.data["marks"] == first.data["marks"] and state.data["baselines"] == first.data["baselines"]
+    assert state.data["objects"] == first.data["objects"]
+    before = saved(home).read_bytes()
+    barrier["principals"].clear()
+    state.data["conflicts"][identity]["claims"][0]["principal"] = "test-forged"
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
+    replay = accept(trust, home, raw, kind="revocation")
+    assert replay.status == "replay" and replay.evidence_recorded
+    assert saved(home).read_bytes() == before
+
+
+def test_replaced_signer_cumulative_lists_revoke_unrelated_keys_and_preserve_history(trust, home):
+    bootstrap(trust, home)
+    earlier = "2026-01-01T00:00:00Z"
+    first = signed(kind="revocation", entries=[revoked(principal="bogus-node", cutoff=earlier)])
+    accept(trust, home, first, kind="revocation")
+    pin(trust, home, seed=SEED2, previous=signer())
+    second = signed(kind="revocation", seq=0, seed=SEED2, entries=[revoked(), revoked(kid=KID2)])
+    result = accept(trust, home, second, kind="revocation")
+    assert result.status == "accepted" and result.evidence_recorded
+    state = trust.load_trust(brigade_home=home).data
+    identity = next(iter(state["conflicts"]))
+    third_kid = "k1_" + crypto.encode_binary(bytes([2]) * 16)
+    third = signed(kind="revocation", seq=1, seed=SEED2, entries=[revoked(), revoked(kid=KID2), revoked(kid=third_kid)])
+    result = accept(trust, home, third, kind="revocation")
+    assert result.status == "accepted" and result.evidence_recorded
+    state = trust.load_trust(brigade_home=home).data
+    assert len(state["barriers"]) == len(state["objects"]) == 3
+    assert set(state["conflicts"]) == {identity}
+    assert len(state["conflicts"][identity]["claims"]) == 3
+    assert {c["source"] for c in state["conflicts"][identity]["claims"]} == {
+        digest(first),
+        digest(second),
+        digest(third),
+    }
+    assert state["barriers"][HUB + ":" + KID]["cutoff"] == earlier
+    assert state["marks"]["revocation:" + signer()]["seq"] == 1
+    assert state["marks"]["revocation:" + signer(SEED2)]["digest"] == digest(third)
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^statement_signature_invalid$"):
+        accept(trust, home, first, kind="revocation")
+    assert saved(home).read_bytes() == before
+    script = """
+from pathlib import Path
+import sys
+from brigade import fleet_mesh_trust as trust
+state = trust.load_trust(brigade_home=Path(sys.argv[1])).data
+assert len(state["objects"]) == len(state["barriers"]) == 3
+assert len(state["conflicts"]) == 1
+assert len(next(iter(state["conflicts"].values()))["claims"]) == 3
+"""
+    result = subprocess.run([sys.executable, "-c", script, str(home)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    replay = accept(trust, home, third, kind="revocation")
+    assert replay.status == "replay" and replay.evidence_recorded
+    assert saved(home).read_bytes() == before
+    pin(trust, home, previous=signer(SEED2))
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_revocation_not_cumulative$"):
+        accept(trust, home, kind="revocation", seq=2, entries=[revoked(), revoked(kid=KID2)])
+    assert saved(home).read_bytes() == before
+
+
+def test_same_signer_principal_relabel_refuses_entire_list_without_mutation(trust, home):
+    bootstrap(trust, home)
+    accept(trust, home, kind="revocation", entries=[revoked(principal="bogus-node")])
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_revocation_not_cumulative$"):
+        accept(trust, home, kind="revocation", seq=2, entries=[revoked(), revoked(kid=KID2)])
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "principal-set",
+        "source-principal",
+        "source-digest",
+        "source-cutoff",
+        "missing-evidence",
+        "identity",
+        "unsigned-key",
+        "foreign-signed-source",
+    ],
+)
+def test_tampered_binding_claims_and_evidence_are_refused(trust, home, case):
+    bootstrap(trust, home)
+    membership = signed()
+    accept(trust, home, membership)
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    accept(trust, home, kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    state = json.loads(saved(home).read_bytes())
+    identity, evidence = next(iter(state["conflicts"].items()))
+    if case == "principal-set":
+        state["barriers"][HUB + ":" + KID]["principals"] = ["test-node"]
+    elif case == "source-principal":
+        state["barriers"][HUB + ":" + KID]["sources"][0]["principal"] = "test-forged"
+    elif case in {"source-digest", "foreign-signed-source"}:
+        claim = next(c for c in evidence["claims"] if c["source"] != "hub")
+        claim["source"] = "0" * 64 if case == "source-digest" else digest(membership)
+    elif case == "source-cutoff":
+        evidence["claims"][0]["cutoff"] = "2026-01-03T00:00:00Z"
+    elif case == "missing-evidence":
+        state["conflicts"] = {}
+    elif case == "identity":
+        state["conflicts"] = {"0" * 64: evidence}
+    else:
+        next(iter(state["hub_revocations"].values()))["principal"] = "test-forged"
+    raw = crypto.canonical(state)
+    saved(home).write_bytes(raw)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
+        trust.load_trust(brigade_home=home)
+    assert saved(home).read_bytes() == raw
+
+
+@pytest.mark.parametrize("operation", ["signed", "unsigned"])
+@pytest.mark.parametrize("point", ["file-fsync", "replace", "directory-fsync"])
+def test_binding_evidence_transaction_faults_publish_none_or_complete_generation(
+    trust, home, monkeypatch, operation, point
+):
+    bootstrap(trust, home)
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    if operation == "signed":
+        trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    else:
+        accept(trust, home, raw, kind="revocation")
+    before = saved(home).read_bytes()
+
+    def apply():
+        if operation == "signed":
+            return accept(trust, home, raw, kind="revocation")
+        return trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+
+    with monkeypatch.context() as fault:
+        original = os.fsync
+
+        def sync(descriptor):
+            directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+            if directory == (point == "directory-fsync"):
+                raise OSError("private binding durability fault")
+            original(descriptor)
+
+        def replace(*args, **kwargs):
+            raise OSError("private binding replacement fault")
+
+        if point == "replace":
+            fault.setattr(dirfd, "replace_children", replace)
+        else:
+            fault.setattr(os, "fsync", sync)
+        code = "mesh_trust_durability_indeterminate" if point == "directory-fsync" else "mesh_trust_storage_failure"
+        with pytest.raises(crypto.MeshError, match="^" + code + "$"):
+            apply()
+        if point == "directory-fsync":
+            complete = saved(home).read_bytes()
+            state = trust.load_trust(brigade_home=home).data
+            assert len(state["conflicts"]) == len(state["objects"]) == len(state["baselines"]) == 1
+            assert len(state["barriers"]) == 2
+            assert state["generation"] == json.loads(before)["generation"] + 1
+            assert state["barriers"][HUB + ":" + KID]["principals"] == ["bogus-node", "test-node"]
+            assert state["marks"]["revocation:" + signer()]["digest"] == digest(raw)
+            with pytest.raises(crypto.MeshError, match="^mesh_trust_durability_indeterminate$"):
+                apply()
+            assert saved(home).read_bytes() == complete
+        else:
+            assert saved(home).read_bytes() == before
+    result = apply()
+    state = trust.load_trust(brigade_home=home).data
+    assert len(state["conflicts"]) == 1 and len(state["barriers"]) == 2
+    assert state["generation"] == json.loads(before)["generation"] + 1
+    if operation == "signed":
+        assert result.status == ("replay" if point == "directory-fsync" else "accepted")
+        assert result.evidence_recorded and result.storage_error is None
+    unchanged = saved(home).read_bytes()
+    apply()
+    assert saved(home).read_bytes() == unchanged
+
+
+@pytest.mark.parametrize("bound", ["conflict-count", "ordinary", "total", "object-count", "claim-count"])
+def test_binding_capacity_refuses_complete_transaction_without_eviction(trust, home, monkeypatch, bound):
+    bootstrap(trust, home)
+    accept(trust, home)
+    assert accept(trust, home, entries=["test-other"]).evidence_recorded
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    before = saved(home).read_bytes()
+    if bound == "conflict-count":
+        monkeypatch.setattr(trust, "_MAX_CONFLICTS", 1)
+    elif bound == "ordinary":
+        ordinary = len(crypto.canonical(dict(json.loads(before), conflicts={})))
+        monkeypatch.setattr(trust, "_ORDINARY_BYTES", ordinary + 50)
+    elif bound == "total":
+        monkeypatch.setattr(trust, "_MAX_BYTES", len(before) + 50)
+    elif bound == "object-count":
+        monkeypatch.setattr(trust, "_MAX_OBJECTS", 1)
+    else:
+        monkeypatch.setattr(trust, "_MAX_ENTRIES", 1)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+        accept(trust, home, kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    assert saved(home).read_bytes() == before
+
+
+def test_binding_evidence_requires_reserved_bytes_even_when_ordinary_transaction_fits(trust, home, monkeypatch):
+    homes = [home / name for name in ("control", "limited")]
+    for directory in homes:
+        directory.mkdir(mode=0o700)
+        bootstrap(trust, directory)
+        trust.record_hub_revocation(brigade_home=directory, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    before = saved(homes[1]).read_bytes()
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    assert accept(trust, homes[0], raw, kind="revocation").evidence_recorded
+    complete = trust.load_trust(brigade_home=homes[0]).data
+    ordinary = len(crypto.canonical(dict(complete, conflicts={})))
+    assert len(before) < ordinary < len(saved(homes[0]).read_bytes())
+    monkeypatch.setattr(trust, "_MAX_BYTES", ordinary)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+        accept(trust, homes[1], raw, kind="revocation")
+    assert saved(homes[1]).read_bytes() == before
+
+
+def test_binding_evidence_coexists_with_rejected_statement_conflicts(trust, home):
+    bootstrap(trust, home)
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    revocations = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    assert accept(trust, home, revocations, kind="revocation").evidence_recorded
+    assert accept(trust, home, seq=1).status == "accepted"
+    before = trust.load_trust(brigade_home=home).data
+    equivocation = signed(seq=1, entries=["test-node"])
+    assert accept(trust, home, equivocation).status == "signed_statement_conflict"
+    floor(trust, home, signed(seq=3))
+    contradiction = signed(seq=3, entries=["test-other"])
+    assert accept(trust, home, contradiction).status == "signed_statement_conflict"
+    state = trust.load_trust(brigade_home=home).data
+    assert {evidence["reason"] for evidence in state["conflicts"].values()} == {
+        "kid_binding_conflict",
+        "signer_equivocation",
+        "trusted_floor_contradiction",
+    }
+    for name in ("objects", "marks", "baselines", "barriers", "hub_revocations"):
+        assert state[name] == before[name]
+    unchanged = saved(home).read_bytes()
+    for raw in (equivocation, contradiction):
+        result = accept(trust, home, raw)
+        assert result.status == "signed_statement_conflict" and result.evidence_recorded
+    result = accept(trust, home, revocations, kind="revocation")
+    assert result.status == "replay" and result.evidence_recorded
+    assert saved(home).read_bytes() == unchanged

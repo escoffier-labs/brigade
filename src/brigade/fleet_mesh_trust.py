@@ -11,6 +11,9 @@ makes no peer authorization or current-membership-use decision. Floors expose
 unsatisfied facts without erasing history or reconciling replacement policy.
 Signed cumulative baselines are distinct from source-attributed effective
 revocation barriers, which unsigned authenticated Hub allegations can tighten.
+Principal names are attributed claims, not ownership. Future peer use must
+consult the (hub, kid) barrier without filtering by principal. No use API exists
+here. The unpublished v1 representation retains unsigned minima per principal.
 
 There is no arbitrary save API, pruning, migration, network, or private key
 storage. Same-user rollback/deletion is outside this filesystem boundary. A
@@ -77,9 +80,11 @@ class ImportResult:
     """Fixed import disposition; conflict storage failure preserves diagnosis.
 
     ``status`` is accepted, replay, or signed_statement_conflict. A conflict
-    never advances accepted heads. Only ``evidence_recorded=True`` confirms a
-    flushed conflict generation. ``storage_error`` is a sanitized fixed code
-    when evidence could not be durably recorded, including capacity exhaustion.
+    never advances accepted heads for a rejected signer/floor conflict. Accepted
+    attribution disagreements instead remain accepted: ``evidence_recorded``
+    confirms their binding evidence was flushed (also on replay). For rejected
+    statements it confirms durable rejected-object evidence; ``storage_error``
+    reports fixed evidence-write failures. Accepted-transaction failures raise.
     """
 
     status: str
@@ -278,6 +283,10 @@ def _barrier_key(hub: str, kid: str) -> str:
     return hub + ":" + kid
 
 
+def _hub_claim_key(hub: str, kid: str, principal: str) -> str:
+    return _barrier_key(hub, kid) + ":" + principal
+
+
 def _object(
     raw: bytes, *, kind: str, hub: str, signer: str, public_key: bytes
 ) -> tuple[str, dict[str, str], dict[str, Any]]:
@@ -326,12 +335,12 @@ def _derive(state: dict[str, Any], values: dict[str, dict[str, Any]]) -> tuple[d
     def add(hub: str, principal: str, kid: str, cutoff: str, source: str) -> None:
         name = _barrier_key(hub, kid)
         barrier = barriers.setdefault(
-            name, {"hub": hub, "principal": principal, "kid": kid, "cutoff": cutoff, "sources": []}
+            name, {"hub": hub, "principals": set(), "kid": kid, "cutoff": cutoff, "sources": []}
         )
-        _require(barrier["principal"] == principal, "mesh_trust_kid_binding_conflict")
+        barrier["principals"].add(principal)
         if _instant(cutoff) < _instant(barrier["cutoff"]):
             barrier["cutoff"] = cutoff
-        barrier["sources"].append({"source": source, "cutoff": cutoff})
+        barrier["sources"].append({"principal": principal, "source": source, "cutoff": cutoff})
         _require(len(barriers) <= _MAX_ENTRIES and len(barrier["sources"]) <= _MAX_ENTRIES, "mesh_trust_capacity")
 
     for digest, obj in sorted(state["objects"].items()):
@@ -368,10 +377,11 @@ def _derive(state: dict[str, Any], values: dict[str, dict[str, Any]]) -> tuple[d
         baselines[scope] = max(history)[1]
     for name, entry in sorted(state["hub_revocations"].items()):
         _revocation(entry)
-        _require(name == _barrier_key(entry["hub"], entry["kid"]))
+        _require(name == _hub_claim_key(entry["hub"], entry["kid"], entry["principal"]))
         add(entry["hub"], entry["principal"], entry["kid"], entry["cutoff"], "hub")
     for barrier in barriers.values():
-        barrier["sources"].sort(key=lambda item: (item["source"], item["cutoff"]))
+        barrier["principals"] = sorted(barrier["principals"])
+        barrier["sources"].sort(key=lambda item: (item["principal"], item["source"], item["cutoff"]))
     return marks, baselines, barriers
 
 
@@ -386,6 +396,38 @@ def _floor(value: Any) -> None:
 
 def _conflict_id(evidence: dict[str, Any]) -> str:
     return hashlib.sha256(crypto.canonical(evidence)).hexdigest()
+
+
+def _binding_conflicts(barriers: dict[str, Any]) -> dict[str, Any]:
+    """One stable group per disputed hub/kid, with linear source attribution.
+
+    Group identity hashes reason/hub/kid only. Claims grow with retained signed
+    history and unsigned principal minima, never with pairwise source products.
+    """
+    result = {}
+    for barrier in barriers.values():
+        if len(barrier["principals"]) > 1:
+            identity = {"reason": "kid_binding_conflict", "hub": barrier["hub"], "kid": barrier["kid"]}
+            result[_conflict_id(identity)] = dict(identity, claims=deepcopy(barrier["sources"]))
+    return result
+
+
+def _update_binding_conflicts(state: dict[str, Any]) -> bool:
+    changed = False
+    for identity, evidence in _binding_conflicts(state["barriers"]).items():
+        previous = state["conflicts"].get(identity)
+        _require(previous is None or previous["reason"] == "kid_binding_conflict")
+        if previous != evidence:
+            state["conflicts"][identity] = evidence
+            changed = True
+    return changed
+
+
+def _binding_evidence_for_digest(state: dict[str, Any], digest: str) -> bool:
+    return any(
+        evidence["reason"] == "kid_binding_conflict" and any(claim["source"] == digest for claim in evidence["claims"])
+        for evidence in state["conflicts"].values()
+    )
 
 
 def _validate(state: Any) -> dict[str, dict[str, Any]]:
@@ -418,10 +460,20 @@ def _validate(state: Any) -> dict[str, dict[str, Any]]:
     for name, floor in state["floors"].items():
         _floor(floor)
         _require(name == _scope(floor["kind"], floor["signer"], floor["hub"]))
+    bindings = _binding_conflicts(barriers)
+    seen_bindings = set()
     for identity, evidence in state["conflicts"].items():
         _hex(identity)
-        _require(type(evidence) is dict and identity == _conflict_id(evidence))
+        _require(type(evidence) is dict)
         reason = evidence.get("reason")
+        if reason == "kid_binding_conflict":
+            _fields(evidence, {"reason", "hub", "kid", "claims"})
+            # Equality against authenticated derivation resolves every signed
+            # object and unsigned minimum, including principal and cutoff.
+            _require(identity in bindings and evidence == bindings[identity])
+            seen_bindings.add(identity)
+            continue
+        _require(identity == _conflict_id(evidence))
         if reason == "signer_equivocation":
             _fields(evidence, {"reason", "rejected", "digest", "accepted_digest"})
         else:
@@ -447,6 +499,7 @@ def _validate(state: Any) -> dict[str, dict[str, Any]]:
             )
             current = state["floors"][_scope(floor["kind"], floor["signer"], floor["hub"])]
             _require(current["seq"] > floor["seq"] or current == floor)
+    _require(seen_bindings == bindings.keys())
     return values
 
 
@@ -717,7 +770,11 @@ def import_statement(*, brigade_home: Path, hub: str, kind: str, raw: bytes) -> 
         # Rejected evidence remains idempotent after heads/floors advance. The
         # active anchor, signature and caller-supplied scope still check first.
         for evidence in state["conflicts"].values():
-            if evidence["digest"] == digest and evidence["rejected"] == obj:
+            if (
+                evidence["reason"] in {"signer_equivocation", "trusted_floor_contradiction"}
+                and evidence["digest"] == digest
+                and evidence["rejected"] == obj
+            ):
                 return _record_conflict(descriptor, state, evidence)
         stream = _stream(kind, signer)
         mark = state["marks"].get(stream)
@@ -750,29 +807,28 @@ def import_statement(*, brigade_home: Path, hub: str, kind: str, raw: bytes) -> 
             _require(value["seq"] >= mark["seq"], "signed_statement_rollback")
             if value["seq"] == mark["seq"]:
                 _flush(descriptor)
-                return ImportResult("replay", digest)
+                return ImportResult("replay", digest, _binding_evidence_for_digest(state, digest))
         state["objects"][digest] = obj
         values = {d: json.loads(o["canonical"]) for d, o in state["objects"].items()}
         state["marks"], state["baselines"], state["barriers"] = _derive(state, values)
+        binding_evidence = _update_binding_conflicts(state)
         _save(descriptor, state)
-        return ImportResult("accepted", digest)
+        return ImportResult("accepted", digest, binding_evidence)
 
 
 def record_hub_revocation(*, brigade_home: Path, hub: str, principal: str, kid: str, cutoff: str) -> TrustSnapshot:
     """Record a typed allegation from an authenticated Hub caller; earliest wins.
 
     This is not a signed baseline and never changes a signed statement mark.
-    A later/equivalent allegation is a durable no-op; a conflicting principal
-    binding is refused even when its alleged cutoff would not tighten state.
+    Same-principal later/equivalent cutoffs are durable no-ops. A different
+    principal adds attributed denial evidence even when its cutoff is later.
     """
     _platform()
     entry = {"hub": hub, "principal": principal, "kid": kid, "cutoff": cutoff}
     _revocation(entry)
-    name = _barrier_key(hub, kid)
+    name = _hub_claim_key(hub, kid, principal)
     with _directory(brigade_home, create=False) as descriptor, _locked(descriptor):
         state = _read(descriptor)
-        barrier = state["barriers"].get(name)
-        _require(barrier is None or barrier["principal"] == principal, "mesh_trust_kid_binding_conflict")
         previous = state["hub_revocations"].get(name)
         if previous is not None and _instant(previous["cutoff"]) <= _instant(cutoff):
             _flush(descriptor)
@@ -780,5 +836,6 @@ def record_hub_revocation(*, brigade_home: Path, hub: str, principal: str, kid: 
             state["hub_revocations"][name] = entry
             values = {d: json.loads(o["canonical"]) for d, o in state["objects"].items()}
             state["marks"], state["baselines"], state["barriers"] = _derive(state, values)
+            _update_binding_conflicts(state)
             _save(descriptor, state)
         return _snapshot(state)
