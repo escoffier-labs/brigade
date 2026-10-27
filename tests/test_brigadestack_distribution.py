@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._posix import requires_process_groups
+
 from brigade import toml_compat
 
 BRIDGE = Path(__file__).resolve().parents[1] / "distribution/brigadestack"
@@ -50,6 +52,7 @@ def test_npm_launcher_contracts():
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@requires_process_groups
 @pytest.mark.skipif(
     os.name != "posix" or shutil.which("bash") is None,
     reason="Requires a POSIX controlling terminal and bash job control",
