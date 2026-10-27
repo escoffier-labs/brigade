@@ -28,6 +28,7 @@ import time
 from typing import Any, Iterator
 
 from . import fleet_mesh_crypto as crypto
+from .dirfd import directory_flags
 
 _MAX_STATE_BYTES = 8 * 1024 * 1024
 
@@ -83,7 +84,7 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
     if ".." in home.parts:
         raise crypto.MeshError("mesh_keys_unsafe")
     home = home.absolute()
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+    flags = directory_flags()
     fd = None
     try:
         fd = os.open(home.anchor, flags)
@@ -308,7 +309,9 @@ def rotate_local_keys(*, brigade_home: Path, principal: str, hub_id: str) -> Loc
         if state is None:
             raise crypto.MeshError("mesh_keys_missing")
         created_at = datetime.now(timezone.utc).isoformat()
-        if datetime.fromisoformat(created_at) <= datetime.fromisoformat(state.active.record["created_at"]):
+        if datetime.fromisoformat(created_at.replace("Z", "+00:00")) <= datetime.fromisoformat(
+            state.active.record["created_at"].replace("Z", "+00:00")
+        ):
             raise crypto.MeshError("mesh_keys_clock_rollback")
         keys = crypto.generate_keys()
         record = crypto.build_key_record(

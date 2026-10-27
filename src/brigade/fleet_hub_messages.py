@@ -748,6 +748,17 @@ def _send(
         now = datetime.now(timezone.utc)
         if not _active_principal(conn, sender):
             raise MessageAuthError("sender is not an active hub principal")
+        plaintext_parent_missing = False
+        if reply_to is not None and envelope is None:
+            if not _sqlite_integer(reply_to):
+                raise MessageError("reply_to must be a positive integer within SQLite's range")
+            original = _fetch(conn, reply_to, storage_policy=storage_policy)
+            plaintext_parent_missing = original is None
+            if original is not None:
+                if original["recipient"] != sender or original["sender"] != recipient:
+                    raise MessageError("reply_to must identify an inbox message from the recipient")
+                if original.get("content_state") in ("sealed", "content_expired"):
+                    raise MessageError("a sealed parent requires a sealed reply", code="message_sealing_required")
         existing = conn.execute(
             "SELECT id,payload_hash FROM fleet_messages WHERE sender=? AND client_id=?", (sender, client_id)
         ).fetchone()
@@ -758,6 +769,10 @@ def _send(
                     code="message_client_id_conflict",
                     message_id=int(existing[0]),
                 )
+            # Retention can delete the parent and detach an accepted reply.
+            # Only its stored hash can still bind this retry to that parent.
+            if plaintext_parent_missing and existing[1] is None:
+                raise MessageError("reply_to must identify an inbox message from the recipient")
             existing_row = _fetch(conn, int(existing[0]), storage_policy=storage_policy) or {}
             if opened:
                 conn.commit()
@@ -771,8 +786,6 @@ def _send(
             original = _fetch(conn, reply_to, storage_policy=storage_policy)
             if original is None or original["recipient"] != sender or original["sender"] != recipient:
                 raise MessageError("reply_to must identify an inbox message from the recipient")
-            if envelope is None and original.get("content_state") in ("sealed", "content_expired"):
-                raise MessageError("a sealed parent requires a sealed reply", code="message_sealing_required")
             if envelope is not None and original["kind"] == "operator_question":
                 raise MessageError(
                     "sealed replies to legacy operator questions are unavailable until sealed question support",

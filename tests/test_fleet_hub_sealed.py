@@ -205,6 +205,132 @@ def test_plaintext_reply_to_sealed_or_tombstoned_parent_refused_when_optional(hu
     assert after == before
 
 
+@pytest.mark.parametrize("parent_kind", ["sealed", "content_expired"])
+@pytest.mark.parametrize("entry", ["reply", "send"])
+def test_legacy_plaintext_reply_retry_to_sealed_parent_refused(hub, parent_kind, entry):
+    from brigade.fleet_hub_sealed import StoragePolicy
+
+    policy = StoragePolicy(require_sealed=False)
+    parent = send(hub, envelope())
+    if parent_kind == "content_expired":
+        messages.ack(hub, parent["id"], recipient="node-b")
+        hub.execute(
+            "UPDATE fleet_messages SET acked_at=? WHERE id=?",
+            ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(), parent["id"]),
+        )
+        hub.commit()
+        parent = lookup(hub)[1]["message"]
+    assert parent["content_state"] == parent_kind
+    marker = f"fixture-legacy-private-reply-{parent_kind}-{entry}"
+    raw = {"subject": "Legacy reply", "body": marker, "client_id": "legacy-plaintext-reply"}
+
+    def retry():
+        if entry == "reply":
+            return messages.reply(hub, {"id": parent["id"], **raw}, sender="node-b", storage_policy=policy)
+        return messages.send(
+            hub, {"to": "node-a", **raw}, sender="node-b", reply_to=parent["id"], storage_policy=policy
+        )
+
+    # Model a reply persisted by an older Hub: use the legacy parent shape to
+    # generate the authentic payload hash, then restore the sealed parent.
+    stored = hub.execute(
+        "SELECT envelope,envelope_bytes,content_state FROM fleet_messages WHERE id=?", (parent["id"],)
+    ).fetchone()
+    hub.execute(
+        "UPDATE fleet_messages SET envelope=NULL,envelope_bytes=NULL,content_state=NULL WHERE id=?", (parent["id"],)
+    )
+    legacy = retry()
+    assert legacy["body"] == marker and legacy["reply_to"] == parent["id"]
+    hub.execute(
+        "UPDATE fleet_messages SET envelope=?,envelope_bytes=?,content_state=? WHERE id=?", (*stored, parent["id"])
+    )
+    hub.commit()
+    before = "\n".join(hub.iterdump())
+    assert marker in before
+
+    with pytest.raises(messages.MessageError) as caught:
+        retry()
+
+    assert caught.value.code == "message_sealing_required"
+    assert marker not in str(caught.value)
+    assert "\n".join(hub.iterdump()) == before
+
+
+@pytest.fixture
+def legacy_hub(tmp_path):
+    path = tmp_path / "legacy.db"
+    conn = sqlite3.connect(path)
+    # The version-26 migration adds a nullable payload_hash column, unlike a
+    # fresh database. An older process can still leave an unbound legacy row.
+    conn.execute(
+        """CREATE TABLE fleet_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            sender TEXT NOT NULL, recipient TEXT NOT NULL,
+            subject TEXT NOT NULL, body TEXT NOT NULL, reference TEXT,
+            priority TEXT NOT NULL, reply_to INTEGER,
+            created_at TEXT NOT NULL, acked_at TEXT, acked_by TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+    conn = fleet_hub.init_db(path)
+    for principal in ("node-a", "node-b"):
+        fleet_hub.add_node(conn, principal)
+    yield conn
+    conn.close()
+
+
+@pytest.mark.parametrize("entry", ["reply", "send"])
+@pytest.mark.parametrize("variation", ["same", "body", "parent", "new", "null_hash"])
+def test_detached_plaintext_reply_retry_requires_original_hash(legacy_hub, entry, variation):
+    hub = legacy_hub
+    parent = messages.send(hub, {"to": "node-b", "subject": "Parent", "body": "Old"}, sender="node-a")
+    raw = {"subject": "Reply", "body": "Recent", "client_id": "detached-reply"}
+
+    def retry(parent_id, payload):
+        if entry == "reply":
+            return messages.reply(hub, {"id": parent_id, **payload}, sender="node-b")
+        return messages.send(hub, {"to": "node-a", **payload}, sender="node-b", reply_to=parent_id)
+
+    accepted = retry(parent["id"], raw)
+    hub.execute(
+        "UPDATE fleet_messages SET created_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(days=91)).isoformat(), parent["id"]),
+    )
+    hub.commit()
+    messages._prune_expired(hub)
+    assert hub.execute("SELECT 1 FROM fleet_messages WHERE id=?", (parent["id"],)).fetchone() is None
+    detached = lookup(hub, raw["client_id"], caller="node-b")[1]["message"]
+    assert detached["id"] == accepted["id"] and detached["reply_to"] is None
+    parent_id = parent["id"]
+    if variation == "body":
+        raw = {**raw, "body": "Changed"}
+    elif variation == "parent":
+        parent_id += 100
+    elif variation == "new":
+        raw = {**raw, "client_id": "never-accepted"}
+    elif variation == "null_hash":
+        hub.execute("UPDATE fleet_messages SET payload_hash=NULL WHERE id=?", (accepted["id"],))
+        hub.commit()
+    before = "\n".join(hub.iterdump())
+    if variation == "same":
+        assert retry(parent_id, raw) == detached
+    elif variation in ("body", "parent"):
+        with pytest.raises(messages.MessageConflict) as caught:
+            retry(parent_id, raw)
+        assert caught.value.code == "message_client_id_conflict"
+        assert caught.value.message_id == accepted["id"]
+    elif variation == "null_hash":
+        with pytest.raises(messages.MessageError, match="reply_to"):
+            retry(parent_id, raw)
+    elif entry == "reply":
+        assert retry(parent_id, raw) is None
+    else:
+        with pytest.raises(messages.MessageError, match="reply_to"):
+            retry(parent_id, raw)
+    assert "\n".join(hub.iterdump()) == before
+
+
 def test_retention_purges_only_content_and_keeps_retry_hash(hub):
     raw = envelope()
     value = send(hub, raw)

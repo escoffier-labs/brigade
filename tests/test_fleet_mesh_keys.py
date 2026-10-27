@@ -1,6 +1,7 @@
 """Local custody contracts; all key material and paths are disposable."""
 
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 import errno
 import json
 import os
@@ -81,6 +82,43 @@ def test_rotation_retains_history_retry_key_and_valid_predecessor_signatures(tmp
     crypto.verify_key_record(second.active.record, previous_record=first.active.record)
     crypto.verify_key_record(third.active.record, previous_record=second.active.record)
     assert _load(tmp_path) == third
+
+
+@POSIX_ONLY
+def test_rotation_accepts_saved_utc_z_timestamp_on_python310(tmp_path, monkeypatch):
+    from brigade import fleet_mesh_keys
+
+    first = _load(tmp_path, create=True)
+    path = _state_path(tmp_path)
+    state = json.loads(path.read_bytes())
+    state["entries"][0]["record"] = crypto.build_key_record(
+        first.active.private_keys,
+        principal="node-a",
+        hub=HUB,
+        created_at=first.active.record["created_at"].replace("+00:00", "Z"),
+    )
+    path.write_bytes(crypto.canonical(state))
+    saved = _load(tmp_path)
+    assert saved.active.record["created_at"].endswith("Z")
+
+    class Python310Datetime(datetime):
+        @classmethod
+        def fromisoformat(cls, value):
+            # Python 3.10 requires the numeric UTC offset. Keep the regression
+            # effective on newer interpreters that also accept a literal Z.
+            if value.endswith("Z"):
+                raise ValueError("Invalid isoformat string")
+            return super().fromisoformat(value)
+
+    monkeypatch.setattr(fleet_mesh_keys, "datetime", Python310Datetime)
+    rotated = _rotate(tmp_path)
+    assert rotated.retry_key == saved.retry_key == first.retry_key
+    assert len(rotated.retired) == 1
+    assert rotated.retired[0].private_keys == saved.active.private_keys == first.active.private_keys
+    assert rotated.retired[0].record == saved.active.record
+    assert rotated.retired[0].retired_at == rotated.active.record["created_at"]
+    crypto.verify_key_record(rotated.active.record, previous_record=saved.active.record)
+    assert _load(tmp_path) == rotated
 
 
 @POSIX_ONLY
@@ -362,6 +400,55 @@ def test_storage_io_failure_is_sanitized_and_preserves_active_keys(tmp_path, mon
     assert path.read_bytes() == original
     assert _load(tmp_path) == saved
     assert list(path.parent.glob(".*.tmp")) == []
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("failure", ["ENOSPC", "EDQUOT", "EIO", "EROFS"])
+def test_directory_fsync_failure_reloads_new_generation_before_later_rotation(tmp_path, monkeypatch, failure):
+    _load(tmp_path, create=True)
+    saved = _rotate(tmp_path)
+    path = _state_path(tmp_path)
+    original = path.read_bytes()
+    real_fsync, real_replace = os.fsync, os.replace
+    replacements = []
+
+    def replace(*args, **kwargs):
+        real_replace(*args, **kwargs)
+        replacements.append(path.read_bytes())
+
+    def fsync(fd):
+        if stat.S_ISDIR(os.fstat(fd).st_mode):
+            assert len(replacements) == 1
+            raise OSError(getattr(errno, failure), "private path and material must not escape", str(path))
+        return real_fsync(fd)
+
+    with monkeypatch.context() as boundary:
+        boundary.setattr(os, "replace", replace)
+        boundary.setattr(os, "fsync", fsync)
+        with pytest.raises(crypto.MeshError) as caught:
+            _rotate(tmp_path)
+    assert caught.value.code == "mesh_keys_io_error"
+    assert str(caught.value) == "mesh_keys_io_error"
+    assert len(replacements) == 1 and path.read_bytes() == replacements[0] != original
+    snapshot = (path.read_bytes(), path.stat().st_mtime_ns)
+    reconciled = _load(tmp_path)
+    assert reconciled.retry_key == saved.retry_key
+    assert reconciled.active.private_keys != saved.active.private_keys
+    assert reconciled.retired[:-1] == saved.retired
+    assert reconciled.retired[-1].private_keys == saved.active.private_keys
+    assert reconciled.retired[-1].record == saved.active.record
+    assert reconciled.retired[-1].retired_at == reconciled.active.record["created_at"]
+    crypto.verify_key_record(reconciled.active.record, previous_record=saved.active.record)
+    assert _load(tmp_path, create=True) == reconciled
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == snapshot
+    assert list(path.parent.glob(".*.tmp")) == []
+    later = _rotate(tmp_path)
+    assert later.retry_key == reconciled.retry_key
+    assert later.retired[:-1] == reconciled.retired
+    assert later.retired[-1].private_keys == reconciled.active.private_keys
+    assert later.retired[-1].record == reconciled.active.record
+    crypto.verify_key_record(later.active.record, previous_record=reconciled.active.record)
+    assert _load(tmp_path) == later
 
 
 @POSIX_ONLY
