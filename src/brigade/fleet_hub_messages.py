@@ -771,6 +771,8 @@ def _send(
             original = _fetch(conn, reply_to, storage_policy=storage_policy)
             if original is None or original["recipient"] != sender or original["sender"] != recipient:
                 raise MessageError("reply_to must identify an inbox message from the recipient")
+            if envelope is None and original.get("content_state") in ("sealed", "content_expired"):
+                raise MessageError("a sealed parent requires a sealed reply", code="message_sealing_required")
             if envelope is not None and original["kind"] == "operator_question":
                 raise MessageError(
                     "sealed replies to legacy operator questions are unavailable until sealed question support",

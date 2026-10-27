@@ -165,6 +165,46 @@ def test_reply_presence_and_sealed_reply(hub):
     assert reply["reply_to"] == original["id"] and reply["subject"] == ""
 
 
+@pytest.mark.parametrize("parent_kind", ["sealed", "content_expired"])
+@pytest.mark.parametrize("entry", ["reply", "send"])
+def test_plaintext_reply_to_sealed_or_tombstoned_parent_refused_when_optional(hub, parent_kind, entry):
+    from brigade.fleet_hub_sealed import StoragePolicy
+
+    policy = StoragePolicy(require_sealed=False)
+    parent = send(hub, envelope())
+    if parent_kind == "content_expired":
+        messages.ack(hub, parent["id"], recipient="node-b")
+        hub.execute(
+            "UPDATE fleet_messages SET acked_at=? WHERE id=?",
+            ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(), parent["id"]),
+        )
+        hub.commit()
+        parent = lookup(hub)[1]["message"]
+        assert "ct" not in json.loads(parent["envelope"])
+    assert parent["content_state"] == parent_kind
+    marker = f"fixture-private-reply-{parent_kind}-{entry}"
+    raw = {"body": marker, "client_id": "refused-plaintext-reply"}
+    before = "\n".join(hub.iterdump())
+
+    with pytest.raises(messages.MessageError) as caught:
+        if entry == "reply":
+            messages.reply(hub, {"id": parent["id"], **raw}, sender="node-b", storage_policy=policy)
+        else:
+            messages.send(
+                hub,
+                {"to": "node-a", "subject": "Legacy reply", **raw},
+                sender="node-b",
+                reply_to=parent["id"],
+                storage_policy=policy,
+            )
+
+    assert caught.value.code == "message_sealing_required"
+    after = "\n".join(hub.iterdump())
+    assert marker not in after
+    assert hub.execute("SELECT COUNT(*) FROM fleet_messages WHERE client_id=?", (raw["client_id"],)).fetchone()[0] == 0
+    assert after == before
+
+
 def test_retention_purges_only_content_and_keeps_retry_hash(hub):
     raw = envelope()
     value = send(hub, raw)
@@ -938,7 +978,19 @@ def test_routing_retention_admission_and_visibility(hub, monkeypatch, days):
     hub.execute("UPDATE fleet_messages SET created_at=?", ((now - timedelta(days=days - 1)).isoformat(),))
     hub.commit()
     assert call({"action": "ack", "id": retained[0]["id"]})[0] == 200
-    status, result = call({"action": "reply", "id": retained[1]["id"], "body": "Retained reply"})
+    original = json.loads(retained[1]["envelope"])
+    status, result = call(
+        {
+            "action": "reply",
+            "id": retained[1]["id"],
+            "envelope": envelope(
+                "node-b",
+                "node-a",
+                "retained-reply",
+                in_reply_to={"hub": original["hub"], "from": original["from"], "client_id": original["client_id"]},
+            ),
+        }
+    )
     assert status == 201 and result["message"]["reply_to"] == retained[1]["id"]
 
 
