@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import importlib
 import json
@@ -406,6 +407,59 @@ def test_unsafe_paths_and_files_refuse_without_repair(trust, home, monkeypatch, 
         monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
     with pytest.raises(crypto.MeshError, match="^mesh_trust_unsafe$"):
         trust.load_trust(brigade_home=home)
+
+
+@pytest.mark.parametrize("point", ["initial-open", "snapshot-open", "snapshot-read", "lock"])
+@pytest.mark.parametrize(
+    "number, expected",
+    [
+        (number, "mesh_trust_storage_failure")
+        for number in (errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS, errno.EMFILE, errno.ENFILE)
+    ]
+    + [(number, "mesh_trust_unsafe") for number in (errno.EACCES, errno.ELOOP)],
+    ids=lambda value: errno.errorcode[value] if isinstance(value, int) else None,
+)
+def test_load_classifies_operational_errors_without_changing_state(trust, home, monkeypatch, point, number, expected):
+    import fcntl
+
+    bootstrap(trust, home)
+    accept(trust, home)
+    before = saved(home).read_bytes()
+    reached = []
+    original_open = dirfd.open_child_file
+    original_fdopen = os.fdopen
+
+    def fail(*args, **kwargs):
+        reached.append(point)
+        raise OSError(number, "private storage/path diagnostic")
+
+    def open_child(parent, name, flags, *args, **kwargs):
+        if name == saved(home).name:
+            fail()
+        return original_open(parent, name, flags, *args, **kwargs)
+
+    def fdopen(descriptor, mode, *args, **kwargs):
+        stream = original_fdopen(descriptor, mode, *args, **kwargs)
+        assert mode == "rb"
+        monkeypatch.setattr(stream, "read", fail)
+        return stream
+
+    with monkeypatch.context() as fault:
+        if point == "initial-open":
+            fault.setattr(dirfd, "open_directory_nofollow", fail)
+        elif point == "snapshot-open":
+            fault.setattr(dirfd, "open_child_file", open_child)
+        elif point == "snapshot-read":
+            fault.setattr(os, "fdopen", fdopen)
+        else:
+            fault.setattr(fcntl, "flock", fail)
+        with pytest.raises(crypto.MeshError) as caught:
+            trust.load_trust(brigade_home=home)
+        assert caught.value.code == expected
+        assert str(caught.value) == expected
+        assert reached == [point]
+    assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
 
 
 def test_raw_bound_precedes_json_allocation(trust, home, monkeypatch):

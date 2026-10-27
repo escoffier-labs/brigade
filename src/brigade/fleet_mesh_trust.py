@@ -27,6 +27,7 @@ from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime
+import errno
 import hashlib
 import json
 import os
@@ -86,8 +87,7 @@ class ImportResult:
     previously accepted object can report signed_statement_conflict when a
     trusted floor contradicts it; accepted history and heads remain unchanged.
     Active-anchor signature and scope authentication precede classification.
-    Accepted
-    attribution disagreements instead remain accepted: ``evidence_recorded``
+    Accepted attribution disagreements remain accepted: ``evidence_recorded``
     confirms their binding evidence was flushed (also on replay). For signer/
     floor conflicts it confirms conflict evidence was flushed; ``storage_error``
     reports fixed evidence-write failures. Accepted-transaction failures raise.
@@ -156,8 +156,9 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
     _require(".." not in home.parts, "mesh_trust_unsafe")
     home = home.absolute()
     _require(home != Path(home.anchor), "mesh_trust_unsafe")
-    descriptor = dirfd.open_directory_nofollow(Path(home.anchor))
+    descriptor = None
     try:
+        descriptor = dirfd.open_directory_nofollow(Path(home.anchor))
         components = (*home.parts[1:], "fleet", "mesh-keys")
         for index, component in enumerate(components):
             private = index >= len(home.parts) - 2
@@ -186,10 +187,15 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
             os.close(descriptor)
             descriptor = child
         yield descriptor
-    except OSError:
+    except OSError as error:
+        # Include initial opens and errors raised through yield. Storage and
+        # descriptor exhaustion are distinct from path/permission violations.
+        if error.errno in {errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS, errno.EMFILE, errno.ENFILE}:
+            raise crypto.MeshError("mesh_trust_storage_failure") from None
         raise crypto.MeshError("mesh_trust_unsafe") from None
     finally:
-        os.close(descriptor)
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 @contextmanager
