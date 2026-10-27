@@ -652,3 +652,308 @@ def test_all_mutators_refuse_missing_state_without_creating_it(trust, home):
         with pytest.raises(crypto.MeshError, match="^mesh_trust_missing$"):
             operation()
         assert not saved(home).exists()
+
+
+@pytest.mark.parametrize("kind", ["membership", "revocation"])
+def test_floor_contradiction_evidence_is_independent_of_arrival_order(trust, home, kind):
+    entries = ["test-node"] if kind == "membership" else [revoked()]
+    raw = signed(kind=kind, seq=5, entries=entries)
+    target = signed(kind=kind, seq=5)
+    conflicts = []
+    for order in ("floor-first", "statement-first"):
+        directory = home / order
+        directory.mkdir(mode=0o700)
+        bootstrap(trust, directory)
+        if order == "floor-first":
+            floor(trust, directory, target, kind=kind)
+        else:
+            accept(trust, directory, raw, kind=kind)
+        before = trust.load_trust(brigade_home=directory).data
+        if order == "floor-first":
+            assert accept(trust, directory, raw, kind=kind).evidence_recorded
+        else:
+            floor(trust, directory, target, kind=kind)
+        after = trust.load_trust(brigade_home=directory)
+        assert after.data["generation"] == before["generation"] + 1
+        for table in ("anchors", "hubs", "objects", "marks", "baselines", "barriers", "hub_revocations"):
+            assert after.data[table] == before[table]
+        assert len(after.unsatisfied_floors) == 1
+        assert len(after.data["conflicts"]) == 1
+        evidence = next(iter(after.data["conflicts"].values()))
+        assert evidence["reason"] == "trusted_floor_contradiction"
+        assert evidence["rejected"]["canonical"] == raw.decode("ascii")
+        assert evidence["digest"] == digest(raw)
+        assert evidence["floor"]["digest"] == digest(target)
+        conflicts.append(after.data["conflicts"])
+    assert conflicts[0] == conflicts[1]
+
+
+@pytest.mark.parametrize("head_hub", [HUB, OTHER])
+def test_floor_second_records_contradicted_history_below_a_higher_head(trust, home, head_hub):
+    bootstrap(trust, home)
+    pin(trust, home, hub=OTHER)
+    raw = signed(seq=5, entries=["test-node"])
+    accept(trust, home, raw)
+    accept(trust, home, hub=head_hub, seq=6)
+    before = trust.load_trust(brigade_home=home).data
+    target = signed(seq=5)
+    after = floor(trust, home, target)
+    assert len(after.data["conflicts"]) == 1
+    evidence = next(iter(after.data["conflicts"].values()))
+    assert evidence["digest"] == digest(raw) and evidence["reason"] == "trusted_floor_contradiction"
+    assert len(after.unsatisfied_floors) == (0 if head_hub == HUB else 1)
+    for table in ("objects", "marks", "baselines", "barriers"):
+        assert before[table] == after.data[table]
+    # Repeating either side reuses evidence, even after a later floor is installed.
+    for operation in (lambda: floor(trust, home, target), lambda: accept(trust, home, raw)):
+        unchanged = saved(home).read_bytes()
+        operation()
+        assert saved(home).read_bytes() == unchanged
+    old_conflicts = after.data["conflicts"]
+    later = floor(trust, home, signed(seq=7))
+    assert later.data["conflicts"] == old_conflicts
+    script = """
+from pathlib import Path
+import sys
+from brigade import fleet_mesh_trust as trust
+snapshot = trust.load_trust(brigade_home=Path(sys.argv[1]))
+assert len(snapshot.data["conflicts"]) == 1
+assert next(iter(snapshot.data["conflicts"].values()))["digest"] == sys.argv[2]
+"""
+    result = subprocess.run([sys.executable, "-c", script, str(home), digest(raw)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("case", ["same-digest", "lower-seq", "other-hub", "other-kind", "other-signer"])
+def test_floor_second_only_records_an_exact_tuple_contradiction(trust, home, case):
+    bootstrap(trust, home)
+    raw = signed(seq=5)
+    accept(trust, home, raw)
+    target = raw if case == "same-digest" else signed(seq=6 if case == "lower-seq" else 5, entries=["test-node"])
+    kwargs = {"hub": OTHER} if case == "other-hub" else {"seed": SEED2} if case == "other-signer" else {}
+    if case == "other-kind":
+        target = signed(kind="revocation", seq=5)
+        kwargs["kind"] = "revocation"
+    before = trust.load_trust(brigade_home=home).data
+    after = floor(trust, home, target, **kwargs)
+    assert after.data["conflicts"] == {}
+    for table in ("objects", "marks", "baselines", "barriers"):
+        assert after.data[table] == before[table]
+
+
+@pytest.mark.parametrize("point", ["capacity", "file-fsync", "replace", "directory-fsync"])
+@pytest.mark.parametrize("existing_floor", [False, True])
+def test_floor_and_contradiction_publish_atomically_and_recover(trust, home, monkeypatch, point, existing_floor):
+    bootstrap(trust, home)
+    accept(trust, home, signed(seq=5, entries=["test-node"]))
+    if existing_floor:
+        floor(trust, home, signed(seq=4))
+    before = saved(home).read_bytes()
+    old = trust.load_trust(brigade_home=home).data
+    target = signed(seq=5)
+    with monkeypatch.context() as fault:
+        original_sync = os.fsync
+        if point == "capacity":
+            fault.setattr(trust, "_MAX_CONFLICTS", 0)
+        elif point == "replace":
+
+            def replace(*args, **kwargs):
+                raise OSError("private injected diagnostic")
+
+            fault.setattr(dirfd, "replace_children", replace)
+        else:
+
+            def sync(descriptor):
+                directory = stat.S_ISDIR(os.fstat(descriptor).st_mode)
+                if directory == (point == "directory-fsync"):
+                    raise OSError("private injected diagnostic")
+                original_sync(descriptor)
+
+            fault.setattr(os, "fsync", sync)
+        code = (
+            "mesh_trust_capacity"
+            if point == "capacity"
+            else "mesh_trust_durability_indeterminate"
+            if point == "directory-fsync"
+            else "mesh_trust_storage_failure"
+        )
+        with pytest.raises(crypto.MeshError, match="^" + code + "$"):
+            floor(trust, home, target)
+        if point == "directory-fsync":
+            complete = trust.load_trust(brigade_home=home).data
+            assert len(complete["floors"]) == len(complete["conflicts"]) == 1
+            assert complete["generation"] == old["generation"] + 1
+            with pytest.raises(crypto.MeshError, match="^mesh_trust_durability_indeterminate$"):
+                floor(trust, home, target)
+            assert saved(home).read_bytes() == crypto.canonical(complete)
+        else:
+            assert saved(home).read_bytes() == before
+    after = floor(trust, home, target)
+    assert len(after.data["floors"]) == len(after.data["conflicts"]) == 1
+    assert next(iter(after.data["floors"].values()))["digest"] == digest(target)
+    assert after.data["generation"] == old["generation"] + 1
+    for table in ("objects", "marks", "baselines", "barriers"):
+        assert after.data[table] == old[table]
+    unchanged = saved(home).read_bytes()
+    floor(trust, home, target)
+    assert saved(home).read_bytes() == unchanged
+
+
+@pytest.mark.parametrize("backend", ["missing", "unsupported"])
+@pytest.mark.parametrize("operation", ["load", "initialize", "pin", "floor", "import", "hub-revocation"])
+def test_saved_signed_snapshot_preserves_backend_diagnostics(trust, home, monkeypatch, backend, operation):
+    bootstrap(trust, home)
+    raw = signed(kind="revocation", entries=[revoked()])
+    accept(trust, home, raw, kind="revocation")
+    before = saved(home).read_bytes()
+    error = crypto.MeshExtraMissing() if backend == "missing" else crypto.MeshError("mesh_backend_unsupported")
+
+    def unavailable():
+        raise error
+
+    operations = {
+        "load": lambda: trust.load_trust(brigade_home=home),
+        "initialize": lambda: trust.initialize_trust(brigade_home=home),
+        "pin": lambda: pin(trust, home, seed=SEED2, previous=signer()),
+        "floor": lambda: floor(trust, home, raw, kind="revocation"),
+        "import": lambda: accept(trust, home, raw, kind="revocation"),
+        "hub-revocation": lambda: trust.record_hub_revocation(
+            brigade_home=home, hub=HUB, principal="test-node", kid=KID2, cutoff=TIME
+        ),
+    }
+    with monkeypatch.context() as missing:
+        missing.setattr(crypto, "probe_backend", unavailable)
+        with pytest.raises(crypto.MeshError) as caught:
+            operations[operation]()
+        assert caught.value.code == error.code
+        assert type(caught.value) is type(error)
+        assert caught.value is error
+        assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
+
+
+@pytest.mark.parametrize("backend", ["missing", "unsupported"])
+def test_empty_and_anchor_only_snapshots_need_no_crypto_backend(trust, home, monkeypatch, backend):
+    def unavailable():
+        if backend == "missing":
+            raise crypto.MeshExtraMissing()
+        raise crypto.MeshError("mesh_backend_unsupported")
+
+    monkeypatch.setattr(crypto, "probe_backend", unavailable)
+    trust.initialize_trust(brigade_home=home)
+    assert trust.load_trust(brigade_home=home).data["anchors"] == {}
+    pin(trust, home)
+    before = saved(home).read_bytes()
+    assert len(trust.load_trust(brigade_home=home).data["anchors"]) == 1
+    trust.initialize_trust(brigade_home=home)
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize("boundary", ["home", "fleet", "mesh-keys"])
+def test_initialization_retry_reflushes_each_private_child_parent(trust, home, monkeypatch, boundary):
+    child = home if boundary == "home" else home / "fleet" if boundary == "fleet" else home / "fleet" / "mesh-keys"
+    if boundary == "home":
+        home.rmdir()
+    parent = child.parent
+    original_sync = dirfd.fsync_directory
+    original_open = dirfd.open_child_directory
+    opened = []
+    flushed = []
+    failed = False
+
+    def open_child(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def sync(descriptor):
+        nonlocal failed
+        info = os.fstat(descriptor)
+        identity = (info.st_dev, info.st_ino)
+        flushed.append(identity)
+        target = parent.stat() if parent.exists() else None
+        if target is not None and identity == (target.st_dev, target.st_ino) and not failed:
+            assert child.is_dir()
+            failed = True
+            raise OSError("private parent-flush fault")
+        original_sync(descriptor)
+
+    monkeypatch.setattr(dirfd, "open_child_directory", open_child)
+    monkeypatch.setattr(dirfd, "fsync_directory", sync)
+    with pytest.raises(crypto.MeshError) as caught:
+        trust.initialize_trust(brigade_home=home)
+    assert child.is_dir() and not saved(home).exists()
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    # The existing child must trigger the parent barrier again on retry.
+    flushed.clear()
+    state = trust.initialize_trust(brigade_home=home)
+    target = parent.stat()
+    assert (target.st_dev, target.st_ino) in flushed
+    assert state.data["generation"] == 1
+    assert caught.value.code == "mesh_trust_storage_failure"
+    assert str(caught.value) == "mesh_trust_storage_failure"
+
+
+@pytest.mark.parametrize("boundary", ["home", "fleet", "mesh-keys"])
+def test_initialization_validates_child_before_flushing_parent_and_closes_fds(trust, home, monkeypatch, boundary):
+    bootstrap(trust, home)
+    child = home if boundary == "home" else home / "fleet" if boundary == "fleet" else saved(home).parent
+    child.chmod(0o750)
+    target = child.parent.stat()
+    original_sync = dirfd.fsync_directory
+    original_open = dirfd.open_child_directory
+    opened = []
+    flushed = []
+
+    def open_child(*args, **kwargs):
+        descriptor = original_open(*args, **kwargs)
+        opened.append(descriptor)
+        return descriptor
+
+    def sync(descriptor):
+        info = os.fstat(descriptor)
+        flushed.append((info.st_dev, info.st_ino))
+        original_sync(descriptor)
+
+    monkeypatch.setattr(dirfd, "open_child_directory", open_child)
+    monkeypatch.setattr(dirfd, "fsync_directory", sync)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_unsafe$"):
+        trust.initialize_trust(brigade_home=home)
+    assert (target.st_dev, target.st_ino) not in flushed
+    for descriptor in opened:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+    assert stat.S_IMODE(child.stat().st_mode) == 0o750
+
+
+def test_initialization_post_replace_fault_targets_snapshot_publication(trust, home, monkeypatch):
+    original_sync = dirfd.fsync_directory
+    original_replace = dirfd.replace_children
+    replacements = []
+
+    def replace(*args, **kwargs):
+        replacements.append(args)
+        original_replace(*args, **kwargs)
+
+    def sync(descriptor):
+        info = os.fstat(descriptor)
+        if saved(home).exists():
+            target = saved(home).parent.stat()
+            if (info.st_dev, info.st_ino) == (target.st_dev, target.st_ino):
+                raise OSError("private post-replace publication fault")
+        original_sync(descriptor)
+
+    monkeypatch.setattr(dirfd, "replace_children", replace)
+    with monkeypatch.context() as fault:
+        fault.setattr(dirfd, "fsync_directory", sync)
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_durability_indeterminate$"):
+            trust.initialize_trust(brigade_home=home)
+        complete = saved(home).read_bytes()
+        assert json.loads(complete)["generation"] == 1
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_durability_indeterminate$"):
+            trust.initialize_trust(brigade_home=home)
+        assert saved(home).read_bytes() == complete
+    assert trust.initialize_trust(brigade_home=home).data["generation"] == 1
+    assert saved(home).read_bytes() == complete and len(replacements) == 1

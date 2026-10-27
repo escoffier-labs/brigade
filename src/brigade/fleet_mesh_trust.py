@@ -155,14 +155,24 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
                 _require(create and private, "mesh_trust_missing")
                 try:
                     dirfd.mkdir_child(descriptor, component, 0o700)
-                    dirfd.fsync_directory(descriptor)
                 except FileExistsError:
                     pass
                 child = dirfd.open_child_directory(descriptor, component)
+            try:
+                if private:
+                    _private(child, directory=True)
+                    if create:
+                        # An earlier mkdir may have succeeded before its parent
+                        # flush failed. Existing children need this barrier too.
+                        try:
+                            dirfd.fsync_directory(descriptor)
+                        except OSError:
+                            raise crypto.MeshError("mesh_trust_storage_failure") from None
+            except BaseException:
+                os.close(child)
+                raise
             os.close(descriptor)
             descriptor = child
-            if private:
-                _private(descriptor, directory=True)
         yield descriptor
     except OSError:
         raise crypto.MeshError("mesh_trust_unsafe") from None
@@ -461,6 +471,12 @@ def _read(descriptor: int) -> dict[str, Any]:
             _validate(state)
             _require(crypto.canonical(state) == raw)
             return state
+        except crypto.MeshExtraMissing:
+            raise
+        except crypto.MeshError as error:
+            if error.code == "mesh_backend_unsupported":
+                raise
+            raise crypto.MeshError("mesh_trust_invalid") from None
         except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
             raise crypto.MeshError("mesh_trust_invalid") from None
     finally:
@@ -599,7 +615,12 @@ def pin_manifest_anchor(
 
 
 def require_floor(*, brigade_home: Path, hub: str, kind: str, signer: str, seq: int, digest: str) -> TrustSnapshot:
-    """Install/tighten independently supplied trusted floor evidence, preserving history."""
+    """Atomically install/tighten a floor and evidence contradicting retained history.
+
+    A matching historical tuple with a different digest is a trusted-floor
+    contradiction even if a higher head already satisfies the new floor. The
+    accepted object stays retained, without labeling the signer an equivocator.
+    """
     _platform()
     value = {"kind": kind, "signer": signer, "hub": hub, "seq": seq, "digest": digest}
     _floor(value)
@@ -607,12 +628,29 @@ def require_floor(*, brigade_home: Path, hub: str, kind: str, signer: str, seq: 
     with _directory(brigade_home, create=False) as descriptor, _locked(descriptor):
         state = _read(descriptor)
         previous = state["floors"].get(name)
-        if previous == value:
-            _flush(descriptor)
-        else:
-            _require(previous is None or seq > previous["seq"], "mesh_trust_floor_not_tightened")
-            state["floors"][name] = value
+        changed = previous != value
+        _require(not changed or previous is None or seq > previous["seq"], "mesh_trust_floor_not_tightened")
+        state["floors"][name] = value
+        for accepted_digest, obj in state["objects"].items():
+            if (
+                (obj["kind"], obj["signer"], obj["hub"]) == (kind, signer, hub)
+                and json.loads(obj["canonical"])["seq"] == seq
+                and accepted_digest != digest
+            ):
+                evidence = {
+                    "reason": "trusted_floor_contradiction",
+                    "rejected": deepcopy(obj),
+                    "digest": accepted_digest,
+                    "floor": deepcopy(value),
+                }
+                identity = _conflict_id(evidence)
+                if identity not in state["conflicts"]:
+                    state["conflicts"][identity] = evidence
+                    changed = True
+        if changed:
             _save(descriptor, state)
+        else:
+            _flush(descriptor)
         return _snapshot(state)
 
 
