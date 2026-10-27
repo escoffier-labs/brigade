@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
 import pytest
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -1954,4 +1955,156 @@ def test_ordinary_source_bounds_preserve_all_evidence_and_heads(trust, home, mon
                 kid=KID2 if bound == "unsigned-claims" else KID,
             )
     assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
+
+
+@pytest.fixture
+def trust_directory_close_fault(monkeypatch):
+    @contextmanager
+    def inject(home, point, number=errno.EIO):
+        original_open, original_close = os.open, os.close
+        seen = {"owned": set(), "root": None, "final": None, "parent": None, "fault": None, "reused": None, "calls": 0}
+
+        original_root = dirfd.open_directory_nofollow
+        original_child = dirfd.open_child_directory
+
+        def open_root(path, *args, **kwargs):
+            descriptor = original_root(path, *args, **kwargs)
+            seen["owned"].add(descriptor)
+            seen["root"] = descriptor
+            return descriptor
+
+        def open_child(parent, name, *args, **kwargs):
+            descriptor = original_child(parent, name, *args, **kwargs)
+            seen["owned"].add(descriptor)
+            if name == "mesh-keys":
+                seen["final"], seen["parent"] = descriptor, parent
+            return descriptor
+
+        def closed(descriptor):
+            if descriptor == seen["fault"]:
+                seen["calls"] += 1
+            target = (
+                seen["root"] if point == "parent" else seen["parent"] if point == "validation-parent" else seen["final"]
+            )
+            fail = seen["fault"] is None and descriptor == target
+            original_close(descriptor)
+            seen["owned"].discard(descriptor)
+            if fail:
+                seen["fault"], seen["calls"] = descriptor, 1
+                replacement = original_open(os.devnull, os.O_RDONLY)
+                if replacement != descriptor:
+                    os.dup2(replacement, descriptor)
+                    original_close(replacement)
+                seen["reused"] = descriptor
+                raise OSError(number, "private directory close diagnostic", str(home))
+
+        try:
+            with monkeypatch.context() as fault:
+                fault.setattr(dirfd, "open_directory_nofollow", open_root)
+                fault.setattr(dirfd, "open_child_directory", open_child)
+                fault.setattr(os, "close", closed)
+                yield seen
+        finally:
+            # The fake owns the replacement and any descriptors leaked by the old walker.
+            for descriptor in seen["owned"] | ({seen["reused"]} if seen["reused"] is not None else set()):
+                try:
+                    original_close(descriptor)
+                except OSError as error:
+                    assert error.errno == errno.EBADF
+
+    return inject
+
+
+def test_consumed_parent_directory_close_preserves_new_owner_and_cleans_child(trust, home, trust_directory_close_fault):
+    bootstrap(trust, home)
+    before = saved(home).read_bytes()
+    with trust_directory_close_fault(home, "parent") as seen:
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_storage_failure$"):
+            trust.load_trust(brigade_home=home)
+        assert seen["calls"] == 1 and seen["reused"] is not None
+        os.fstat(seen["reused"])
+        assert seen["owned"] == set()
+        assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
+
+
+@pytest.mark.parametrize("operation", ["load", "initialize", "import"])
+@pytest.mark.parametrize(
+    "number, code", [(errno.EIO, "mesh_trust_storage_failure"), (errno.EACCES, "mesh_trust_unsafe")]
+)
+def test_final_directory_close_has_fixed_diagnosis_and_idempotent_retry(
+    trust, home, trust_directory_close_fault, operation, number, code
+):
+    if operation != "initialize":
+        bootstrap(trust, home)
+    before = None if operation == "initialize" else saved(home).read_bytes()
+    raw = signed(seq=2)
+    with trust_directory_close_fault(home, "final", number) as seen:
+        with pytest.raises(crypto.MeshError) as caught:
+            if operation == "import":
+                accept(trust, home, raw)
+            elif operation == "initialize":
+                trust.initialize_trust(brigade_home=home)
+            else:
+                trust.load_trust(brigade_home=home)
+        assert caught.value.code == str(caught.value) == code
+        assert seen["calls"] == 1 and seen["owned"] == set()
+        os.fstat(seen["reused"])
+    complete = saved(home).read_bytes()
+    state = trust.load_trust(brigade_home=home).data
+    if operation == "load":
+        assert complete == before
+    elif operation == "import":
+        assert state["generation"] == json.loads(before)["generation"] + 1
+        assert set(state["objects"]) == {digest(raw)}
+        assert state["marks"]["membership:" + signer()]["digest"] == digest(raw)
+        assert accept(trust, home, raw).status == "replay"
+    else:
+        assert state["generation"] == 1
+        assert trust.initialize_trust(brigade_home=home).data == state
+    assert saved(home).read_bytes() == complete
+
+
+@pytest.mark.parametrize("primary", ["backend", "extra", "cancel", "unsafe-child", "unsafe-parent"])
+def test_directory_cleanup_preserves_primary_failure(trust, home, monkeypatch, trust_directory_close_fault, primary):
+    class Cancelled(BaseException):
+        pass
+
+    bootstrap(trust, home)
+    accept(trust, home)
+    before = saved(home).read_bytes()
+    error = (
+        crypto.MeshError("mesh_backend_unsupported")
+        if primary == "backend"
+        else crypto.MeshExtraMissing()
+        if primary == "extra"
+        else Cancelled()
+    )
+    point = "validation-parent" if primary == "unsafe-parent" else "final"
+    try:
+        with monkeypatch.context() as failure:
+            if primary.startswith("unsafe"):
+                saved(home).parent.chmod(0o750)
+            else:
+
+                def unavailable():
+                    raise error
+
+                failure.setattr(crypto, "probe_backend", unavailable)
+            with trust_directory_close_fault(home, point) as seen:
+                with pytest.raises(crypto.MeshError if primary.startswith("unsafe") else type(error)) as caught:
+                    if primary.startswith("unsafe"):
+                        trust.initialize_trust(brigade_home=home)
+                    else:
+                        trust.load_trust(brigade_home=home)
+                if primary.startswith("unsafe"):
+                    assert caught.value.code == str(caught.value) == "mesh_trust_unsafe"
+                else:
+                    assert caught.value is error
+                assert seen["calls"] == 1 and seen["owned"] == set()
+                os.fstat(seen["reused"])
+                assert saved(home).read_bytes() == before
+    finally:
+        saved(home).parent.chmod(0o700)
     assert trust.load_trust(brigade_home=home).data == json.loads(before)

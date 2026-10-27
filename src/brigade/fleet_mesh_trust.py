@@ -28,6 +28,8 @@ There is no arbitrary save API, pruning, migration, network, or private key
 storage. Same-user rollback/deletion is outside this filesystem boundary. A
 post-replace directory-fsync failure has an indeterminate durability outcome;
 identical retries reload under lock and flush before reporting success.
+A final directory-close diagnostic may follow a fully flushed generation.
+Reload state before retrying a mutation after a lost return.
 """
 
 from __future__ import annotations
@@ -177,6 +179,8 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
     home = home.absolute()
     _require(home != Path(home.anchor), "mesh_trust_unsafe")
     descriptor = None
+    child: int | None
+    completed = False
     try:
         descriptor = dirfd.open_directory_nofollow(Path(home.anchor))
         components = (*home.parts[1:], "fleet", "mesh-keys")
@@ -202,11 +206,16 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
                         except OSError:
                             raise crypto.MeshError("mesh_trust_storage_failure") from None
             except BaseException:
-                os.close(child)
+                unadopted, child = child, None
+                try:
+                    os.close(unadopted)
+                except BaseException:
+                    pass  # Preserve validation/cancellation; never retry an ambiguous close.
                 raise
-            os.close(descriptor)
-            descriptor = child
+            previous, descriptor = descriptor, child
+            os.close(previous)
         yield descriptor
+        completed = True
     except OSError as error:
         # Include initial opens and errors raised through yield. Storage and
         # descriptor exhaustion are distinct from path/permission violations.
@@ -214,8 +223,22 @@ def _directory(home: Path, *, create: bool) -> Iterator[int]:
             raise crypto.MeshError("mesh_trust_storage_failure") from None
         raise crypto.MeshError("mesh_trust_unsafe") from None
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        closing, descriptor = descriptor, None
+        if closing is not None:
+            try:
+                os.close(closing)
+            except BaseException as error:
+                if completed:
+                    if isinstance(error, OSError):
+                        code = (
+                            "mesh_trust_storage_failure"
+                            if error.errno
+                            in {errno.ENOSPC, errno.EDQUOT, errno.EIO, errno.EROFS, errno.EMFILE, errno.ENFILE}
+                            else "mesh_trust_unsafe"
+                        )
+                        raise crypto.MeshError(code) from None
+                    raise
+                # A primary exception already owns the diagnosis, including cancellation.
 
 
 @contextmanager
