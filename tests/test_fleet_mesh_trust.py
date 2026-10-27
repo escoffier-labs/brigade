@@ -957,3 +957,202 @@ def test_initialization_post_replace_fault_targets_snapshot_publication(trust, h
         assert saved(home).read_bytes() == complete
     assert trust.initialize_trust(brigade_home=home).data["generation"] == 1
     assert saved(home).read_bytes() == complete and len(replacements) == 1
+
+
+def abandoned_trust_temp(home, *, name=None):
+    path = saved(home).parent / (name or (".trust-" + "a" * 32 + ".tmp"))
+    path.write_bytes(b"abandoned contents are never parsed or promoted")
+    path.chmod(0o600)
+    return path
+
+
+def test_next_actual_write_reaps_safe_orphan_without_opening_it(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    orphan = abandoned_trust_temp(home)
+    raw = signed(seq=2)
+    events = []
+    original_open = dirfd.open_child_file
+    original_sync = dirfd.fsync_directory
+    original_replace = dirfd.replace_children
+
+    def open_child(parent, name, flags, *args, **kwargs):
+        assert name != orphan.name, "orphan contents were opened"
+        if flags & os.O_CREAT:
+            assert not orphan.exists()
+            events.append("create-temp")
+        return original_open(parent, name, flags, *args, **kwargs)
+
+    def sync(descriptor):
+        events.append("directory-flush")
+        original_sync(descriptor)
+
+    def replace(*args, **kwargs):
+        events.append("replace")
+        original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "open_child_file", open_child)
+    monkeypatch.setattr(dirfd, "fsync_directory", sync)
+    monkeypatch.setattr(dirfd, "replace_children", replace)
+    assert accept(trust, home, raw).status == "accepted"
+    assert not orphan.exists()
+    assert events == ["directory-flush", "create-temp", "replace", "directory-flush"]
+    state = trust.load_trust(brigade_home=home).data
+    assert set(state["objects"]) == {digest(raw)}
+    assert state["marks"]["membership:" + signer()]["digest"] == digest(raw)
+
+
+def test_readonly_load_and_replay_leave_safe_orphan_and_snapshot_unchanged(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    raw = signed()
+    accept(trust, home, raw)
+    orphan = abandoned_trust_temp(home)
+    before = saved(home).read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("read-only load inspected, reaped or flushed directory contents")
+
+    with monkeypatch.context() as readonly:
+        for operation in ("child_names", "stat_child", "unlink_child", "fsync_directory"):
+            readonly.setattr(dirfd, operation, forbidden)
+        trust.load_trust(brigade_home=home)
+    assert orphan.read_bytes() == b"abandoned contents are never parsed or promoted"
+    assert saved(home).read_bytes() == before
+    # Replay still performs its normal durability flush, without a cleanup write.
+    assert accept(trust, home, raw).status == "replay"
+    assert orphan.exists() and saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "symlink",
+        "hardlink",
+        "fifo",
+        "directory",
+        "mode",
+        "owner",
+        "unrelated",
+        "custody",
+        "uppercase",
+        "short",
+        "suffix",
+    ],
+)
+def test_orphan_reaper_excludes_unsafe_and_unrelated_entries(trust, home, monkeypatch, case):
+    bootstrap(trust, home)
+    name = ".trust-" + "a" * 32 + ".tmp"
+    if case == "unrelated":
+        name = "unrelated.tmp"
+    elif case == "custody":
+        name = "." + "a" * 32 + ".tmp"
+    elif case == "uppercase":
+        name = ".trust-" + "A" * 32 + ".tmp"
+    elif case == "short":
+        name = ".trust-" + "a" * 31 + ".tmp"
+    elif case == "suffix":
+        name += ".backup"
+    candidate = saved(home).parent / name
+    target = home / "test-target"
+    if case in {"symlink", "hardlink"}:
+        target.write_bytes(b"outside the cleanup namespace")
+        target.chmod(0o600)
+        if case == "symlink":
+            candidate.symlink_to(target)
+        else:
+            os.link(target, candidate)
+    elif case == "fifo":
+        os.mkfifo(candidate, 0o600)
+    elif case == "directory":
+        candidate.mkdir(mode=0o700)
+    else:
+        abandoned_trust_temp(home, name=name)
+        if case == "mode":
+            candidate.chmod(0o640)
+    if case == "owner":
+        original_stat = dirfd.stat_child
+
+        def foreign_owner(parent, child, **kwargs):
+            info = original_stat(parent, child, **kwargs)
+            if child == candidate.name:
+                fields = list(info)
+                fields[4] = info.st_uid + 1
+                return os.stat_result(fields)
+            return info
+
+        monkeypatch.setattr(dirfd, "stat_child", foreign_owner)
+    original_open = dirfd.open_child_file
+
+    def no_orphan_open(parent, child, flags, *args, **kwargs):
+        assert child != candidate.name, "cleanup opened an unsafe/unrelated entry"
+        return original_open(parent, child, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "open_child_file", no_orphan_open)
+    before = candidate.lstat()
+    assert accept(trust, home).status == "accepted"
+    after = candidate.lstat()
+    assert (after.st_ino, after.st_mode, after.st_uid, after.st_nlink) == (
+        before.st_ino,
+        before.st_mode,
+        before.st_uid,
+        before.st_nlink,
+    )
+    if case in {"symlink", "hardlink"}:
+        assert target.read_bytes() == b"outside the cleanup namespace"
+
+
+def test_orphan_deletion_flush_failure_is_sanitized_and_prevents_publication(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    orphan = abandoned_trust_temp(home)
+    before = saved(home).read_bytes()
+    original_open = dirfd.open_child_file
+    created = []
+
+    def open_child(parent, name, flags, *args, **kwargs):
+        if flags & os.O_CREAT:
+            created.append(name)
+        return original_open(parent, name, flags, *args, **kwargs)
+
+    def fail(descriptor):
+        raise OSError("private deletion-flush diagnostic")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(dirfd, "open_child_file", open_child)
+        fault.setattr(dirfd, "fsync_directory", fail)
+        with pytest.raises(crypto.MeshError) as caught:
+            accept(trust, home)
+        assert caught.value.code == "mesh_trust_storage_failure"
+        assert str(caught.value) == "mesh_trust_storage_failure"
+        assert not orphan.exists()
+        assert saved(home).read_bytes() == before
+        assert created == []
+    assert accept(trust, home).status == "accepted"
+    assert trust.load_trust(brigade_home=home).data["generation"] == json.loads(before)["generation"] + 1
+
+
+@pytest.mark.parametrize("case", ["capacity", "bad-input", "corrupt-state", "backend"])
+def test_validation_and_capacity_refusals_do_not_reap_orphans(trust, home, monkeypatch, case):
+    bootstrap(trust, home)
+    accept(trust, home)
+    orphan = abandoned_trust_temp(home)
+    raw = signed(seq=2)
+    if case == "capacity":
+        monkeypatch.setattr(trust, "_MAX_OBJECTS", 1)
+    elif case == "bad-input":
+        raw = b"{}"
+    elif case == "corrupt-state":
+        saved(home).write_bytes(b'{"v":999}')
+    else:
+
+        def missing():
+            raise crypto.MeshExtraMissing()
+
+        monkeypatch.setattr(crypto, "probe_backend", missing)
+    before = saved(home).read_bytes()
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("cleanup ran before validation/capacity refusal")
+
+    monkeypatch.setattr(dirfd, "child_names", forbidden)
+    with pytest.raises(crypto.MeshError):
+        accept(trust, home, raw)
+    assert orphan.exists() and saved(home).read_bytes() == before

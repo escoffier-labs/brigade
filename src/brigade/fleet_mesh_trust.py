@@ -31,6 +31,7 @@ from pathlib import Path
 import re
 import secrets
 import stat
+import sys
 import time
 from typing import Any, Iterator
 
@@ -506,6 +507,30 @@ def _flush(descriptor: int) -> None:
         raise crypto.MeshError("mesh_trust_durability_indeterminate") from None
 
 
+def _reap_trust_temporaries(descriptor: int) -> None:
+    """Remove safe crash leftovers under the directory lock, without opening them."""
+    removed = False
+    try:
+        for name in dirfd.child_names(descriptor, sys.maxsize):
+            if not re.fullmatch(r"\.trust-[0-9a-f]{32}\.tmp", name, re.ASCII):
+                continue
+            try:
+                info = dirfd.stat_child(descriptor, name)
+                if (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_uid == os.geteuid()
+                    and stat.S_IMODE(info.st_mode) == 0o600
+                    and info.st_nlink == 1
+                ):
+                    dirfd.unlink_child(descriptor, name)
+                    removed = True
+            except FileNotFoundError:
+                continue
+    finally:
+        if removed:
+            dirfd.fsync_directory(descriptor)
+
+
 def _save(descriptor: int, state: dict[str, Any]) -> None:
     _require(state["generation"] < _MAX_SEQUENCE, "mesh_trust_capacity")
     state["generation"] += 1
@@ -518,6 +543,10 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
     # Public mutators construct only this bounded schema. Validate before publish
     # as well as on load; no partial marks or derived barriers can be committed.
     _validate(state)
+    try:
+        _reap_trust_temporaries(descriptor)
+    except OSError:
+        raise crypto.MeshError("mesh_trust_storage_failure") from None
     temporary = ".trust-" + secrets.token_hex(16) + ".tmp"
     destination = None
     try:
@@ -538,7 +567,7 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
             try:
                 dirfd.unlink_child(descriptor, temporary)
             except OSError:
-                pass  # Never adopt/reap any other process's orphan or custody temp.
+                pass  # This cleanup is limited to the current attempt's temporary.
     _flush(descriptor)
 
 
