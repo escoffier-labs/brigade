@@ -29,9 +29,13 @@ def verified_card(tmp_path, monkeypatch, request):
     _init_verify_git_repo(tmp_path)
     path = card(tmp_path, "cache")
     role = getattr(request, "param", "effectiveness")
-    if role == "linked":
+    if role in ("linked", "anchored-linked"):
         card(tmp_path, "linked")
         path.write_text(path.read_text() + "[[linked]]\n")
+        if role == "anchored-linked":
+            from brigade import memory_proposal_v2_ops as delta
+
+            path.write_text(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))
         role = "effectiveness"
     verify_manifest.write_workspace_manifest(
         tmp_path,
@@ -533,6 +537,85 @@ def test_successive_approved_consolidations_preserve_historical_receipts(
     assert api._meta(path.read_text())["last_consolidated"] == (
         receipt["completed_at"] if second_support == "verified" else "2026-10-21T12:00:00Z"
     )
+
+
+@pytest.mark.parametrize("verified_card", ["anchored-linked"], indirect=True)
+@pytest.mark.parametrize("drift", ["card", "linked", "receipt"])
+def test_uncited_obsolete_outcome_does_not_block_new_consolidation(tmp_path, verified_card, capsys, drift):
+    from brigade import memory_proposals as api
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    old_rows = log.read_evidence(tmp_path)[0]
+    drift_support(tmp_path, path, receipt, drift)
+    assert api._meta(path.read_text())["evidence"] == []
+    ref = evidence(tmp_path, ".brigade/receipts/new.json")
+    stamp = "2026-10-21T12:00:00Z"
+    write_log(tmp_path, path, (ref, "outcome", stamp))
+    capsys.readouterr()
+    code, result = command(tmp_path, capsys, "run")
+    assert code == 0
+    candidate = next(c for c in result["candidates"] if c["kind"] == "stale-newer-evidence")
+    assert candidate["evidence_ids"] == [ref]
+    code, proposal = command(tmp_path, capsys, "propose", candidate["candidate_id"], "--reason", "Review new support.")
+    assert code == 0, proposal
+    assert candidate["diff"] == proposal["diff"]
+    assert set(proposal["op_evidence"]) == {ref}
+    for action in ("review", "apply"):
+        args = [
+            "memory",
+            "proposal",
+            action,
+            proposal["id"],
+            "--digest",
+            proposal["digest"],
+            "--target",
+            str(tmp_path),
+            "--json",
+        ]
+        if action == "review":
+            args.extend(["--reason", "Inspected the current support."])
+        assert cli.main(args) == 0, capsys.readouterr()
+        assert json.loads(capsys.readouterr().out)["status"] == ("accepted" if action == "review" else "committed")
+    meta = api._meta(path.read_text())
+    assert meta["evidence"] == [ref]
+    assert meta["last_consolidated"] == stamp
+    assert int(meta["proof_count"]) == 1
+    assert log.read_evidence(tmp_path)[0][: len(old_rows)] == old_rows
+
+
+def test_uncited_eligible_outcome_still_blocks_consolidation(tmp_path, verified_card):
+    from brigade import memory_proposals as api
+    from brigade import memory_proposal_v2_ops as delta
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    ref = evidence(tmp_path, ".brigade/receipts/new.json")
+    stamp = "2026-10-21T12:00:00Z"
+    write_log(tmp_path, path, (ref, "outcome", stamp))
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError, match="no valid"):
+        api.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=["memory/cards/cache.md"],
+            ops=[
+                dict(
+                    type="append_evidence",
+                    card_path="memory/cards/cache.md",
+                    block_id=block.block_id,
+                    expected_block_hash=block.sha256,
+                    evidence_ids=[ref],
+                    last_consolidated=stamp,
+                )
+            ],
+            anchor_blocks=True,
+            reason="Try to skip eligible uncited support.",
+        )
+    assert snapshot(tmp_path) == before
 
 
 def test_cited_outcome_explicitly_reused_as_support_still_requires_live_binding(tmp_path, verified_card):

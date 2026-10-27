@@ -154,20 +154,37 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     ledger = _evidence_log(target)
     if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
         raise legacy.ProposalError("evidence log is incomplete or unreadable")
-    rows = [row for key in (source.get("id"), *source.get("aliases", [])) for row in ledger.by_identity.get(key, [])]
-    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and _evidence_id(row["evidence_id"]) in refs]
-    if not stamps:
-        return None
-    stamp = max(stamps, key=_sort_timestamp)
+    rows = [
+        {**row, "evidence_id": _evidence_id(row["evidence_id"])}
+        for key in (source.get("id"), *source.get("aliases", []))
+        for row in ledger.by_identity.get(key, [])
+    ]
     card = Card(
         source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
     )
+    cited = {_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)}
+    if len(cited) > io.MAX_LIST or len(refs) > io.MAX_LIST:
+        raise legacy.ProposalError("consolidation evidence count exceeded")
+    # Match reflection's bounded validation before treating append-only outcomes
+    # as pending proof. Unselected rows remain fenced, not silently accounted for.
+    newest = dict.fromkeys(
+        row["evidence_id"]
+        for row in sorted(rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+    )
+    support = {_evidence_id(ref) for ref in refs}
+    invalid = _invalid_outcome_ids(target, card, set(list(newest)[: io.MAX_LIST]) | cited | support)
+    rows = [row for row in rows if row["evidence_id"] not in invalid]
+    card.rows = rows
+    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in refs]
+    if not stamps:
+        return None
+    stamp = max(stamps, key=_sort_timestamp)
     pending = _pending_rows(card)
     if _timestamp(card.meta.get("last_consolidated")) is None:
         value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
         if not isinstance(value, str) or _timestamp(value) is None:
             pending = rows
-    accounted = set(refs) | {_evidence_id(ref) for ref in memory_cmd._evidence_refs(source["metadata"])}
+    accounted = set(refs) | cited
     if any(
         row["kind"] != "reinforced"
         and _sort_timestamp(row["ts"]) <= _sort_timestamp(stamp)
