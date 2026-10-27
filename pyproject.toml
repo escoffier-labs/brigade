@@ -26,7 +26,8 @@ dependencies = []
 
 [project.optional-dependencies]
 mesh = ["cryptography>=50.0.2,<52"]
-dev = ["cryptography>=50.0.2,<52", "pytest>=7", "pytest-cov>=7.1.0", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
+# Keep pytest below 9.2 until forwarded-module monkeypatch cleanup is compatible (#2091).
+dev = ["cryptography>=50.0.2,<52", "pytest>=7,<9.2", "pytest-cov>=7.1.0", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
 grokbot = ["mcp>=2,<3", "pyjwt[crypto]>=2"]
 research = ["playwright>=1.64.0"]
 
