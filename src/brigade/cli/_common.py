@@ -102,7 +102,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     ),
 ]
 
-_START_HERE = """Brigade: run your agent brigade. Operator-system CLI for agent workspaces.
+_START_HERE = """Brigade Stack: coordinate agents, shared context, and verified work.
 
 Start here:
   brigade operator quickstart --target <repo> --harnesses codex   set up a repo or workspace

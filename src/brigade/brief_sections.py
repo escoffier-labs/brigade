@@ -102,7 +102,7 @@ def render_session_close_section(*, heading: str = "## Session close") -> str:
 def render_identity_section() -> str:
     return (
         "## Brigade\n\n"
-        "Brigade is the local work loop for this workspace: briefs, verification "
+        "Brigade Stack is the local work loop for this workspace: briefs, verification "
         "receipts, outcomes, and Memory Handoffs.\n"
     )
 
@@ -128,8 +128,11 @@ def render_hard_rules_section() -> str:
 def render_work_loop_section() -> str:
     return (
         "### Work loop protocol\n\n"
-        "Invoke the `using-skillet` skill and use each applicable reviewed skill "
-        "before substantive work in a Brigade-wired repository.\n\n"
+        "Consult the active harness's available skills and use applicable installed "
+        "workflow skills before substantive work in a Brigade-wired repository. "
+        "If Superpowers is installed, use its `using-superpowers` entrypoint. "
+        "Retain applicable guidance from existing installed tools; do not require "
+        "an unavailable skill router or auto-install tools.\n\n"
         "Run `brigade work brief --target .` when a `.brigade/` directory exists "
         "or `brigade status --target .` succeeds, and follow the brief before editing.\n\n"
         "Route worker-sized or parallelizable implementation through `brigade run` "

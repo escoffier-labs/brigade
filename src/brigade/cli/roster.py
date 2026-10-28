@@ -8,7 +8,7 @@ from pathlib import Path
 
 def register(sub: argparse._SubParsersAction) -> None:
     # roster
-    p_roster = sub.add_parser("roster", help="Create and check aboyeur rosters.")
+    p_roster = sub.add_parser("roster", help="Create and check agent rosters.")
     roster_sub = p_roster.add_subparsers(dest="roster_command", metavar="<roster-command>")
     roster_sub.required = True
     p_roster_init = roster_sub.add_parser("init", help="Write a starter .brigade/roster.toml.")

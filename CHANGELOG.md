@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
+
 - Add dormant task launch claims with immutable dispatch bindings, strict task-version checks, and retained consumption through checkpoint recovery and redaction (#2046).
 - Fleet preference settings accept `--orchestrator` as the preferred flag, retaining `--chef` as an alias and the existing `chef` storage key.
 - Target durable steer and interrupt requests by task and optional attempt, with selector-aware replay, checkpoint validation, and task redaction.
@@ -40,6 +42,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add database-backed teammate roles, reciprocal send grants, node grant administration, reduced directory reads, and admin-only audit paging. Grant and revocation audit rows commit with their mutations (#2041).
+- Add offline client peer-key acceptance, rotation history, and local trust checks. Bound peer admission, recheck revoked continuity dependencies, and refuse far-future key dates. CLI/MCP encryption remains unfinished.
 
 - Add an internal POSIX Hub identity store with signed history, endpoint bindings, and rollback floors. Preserve primary write failures in identity and trust snapshots. Identity migration and message opening/sealing remain unfinished.
 

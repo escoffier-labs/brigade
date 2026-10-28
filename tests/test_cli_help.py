@@ -44,6 +44,7 @@ def test_bare_invocation_prints_start_here_then_usage_error(capsys):
 def test_top_level_help_has_start_here_block():
     parser = cli._build_parser()
     help_text = parser.format_help()
+    assert "Brigade Stack:" in help_text
     assert "Start here:" in help_text
     assert "operator quickstart" in help_text
 
@@ -127,3 +128,9 @@ def test_guard_routes_publish_check(monkeypatch):
 
     assert cli.main(["guard", "publish-check", "--target", "."]) == 0
     assert calls == [["--target", "."]]
+
+
+def test_roster_help_uses_agent_terminology():
+    parser = cli._build_parser()
+    roster_help = next(action.help for action in _subparsers_action(parser)._choices_actions if action.dest == "roster")
+    assert roster_help == "Create and check agent rosters."

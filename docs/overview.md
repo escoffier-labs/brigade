@@ -1,4 +1,4 @@
-# Brigade Overview
+# Brigade Stack Overview
 
 The full tour: every station, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Agents work within operator-defined scopes and pass receipts and handoffs with evidence. One-shot commands and long-running services share the [execution model](execution-model.md).
 
@@ -13,11 +13,11 @@ The full tour: every station, diagram, and workflow. The [README](../README.md) 
 | Stable release | v0.30.0 |
 | Preview line | 0.31 beta (`0.31.0.devYYYYMMDD` wheels) |
 
-This Brigade is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
+This Brigade Stack is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 
 ## Verified-work loop
 
-A full Brigade work run can follow this circuit:
+A full Brigade Stack work run can follow this circuit:
 
 1. Intent and acceptance criteria go in (`brigade work` tasks / brief).
 2. Prior evidence and code impact attach to the brief when available.
@@ -34,14 +34,14 @@ Ordinary runs have no hard run-budget unless one is declared. When declared, onl
 ## Stack At A Glance
 
 <p align="center">
-  <img src="assets/stack-at-a-glance-workflow.svg" alt="Brigade memory workflow: writer handoffs pass through ingest policy to a memory owner, with local work sessions, scanners, and release evidence" width="900">
+  <img src="assets/stack-at-a-glance-workflow.svg" alt="Brigade Stack memory workflow: writer handoffs pass through ingest policy to a memory owner, with local work sessions, scanners, and release evidence" width="900">
 </p>
 
 <p align="center"><em>Generated from <code>docs/assets/workflows/stack-at-a-glance.json</code> with <code>plating workflow</code>.</em></p>
 
 The memory gate checks handoffs under ingest policy. Safe handoffs auto-file, while ambiguous material enters review. Agent work between configured gates leaves verification receipts and run journals. An agent can pass an [evidence package](evidence-package.md) with its handoff so the next agent can check the result.
 
-> Brigade was extracted from the [**solos-cookbook**](https://github.com/escoffier-labs/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
+> Brigade Stack was extracted from the [**solos-cookbook**](https://github.com/escoffier-labs/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade Stack fits into a real setup, start there, and a star helps other people find it.
 >
 > [![Star the cookbook](https://img.shields.io/github/stars/escoffier-labs/solos-cookbook?style=social&label=Star%20solos-cookbook)](https://github.com/escoffier-labs/solos-cookbook)
 
@@ -49,7 +49,7 @@ The memory gate checks handoffs under ingest policy. Safe handoffs auto-file, wh
 
 Agent tools are getting good enough that people use more than one of them. That creates a practical problem: each tool learns a little bit, but the learning is scattered.
 
-Brigade gives the setup a home base.
+Brigade Stack gives the setup a home base.
 
 - OpenClaw or Hermes can be the main memory owner.
 - Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, and Hermes can write handoff notes.
@@ -62,17 +62,17 @@ The first version came out of an always-on OpenClaw setup beside daily Codex and
 - A "dreaming" job promoted raw session fragments into memory until `MEMORY.md` exceeded the bootstrap budget. New sessions started with truncated context for weeks.
 - An ingester used a hardcoded source allowlist. It left 195 handoff notes unread across 35 repos without raising an error.
 
-Brigade's handoff coverage checks, memory care, review queues, and receipts exist to make those failures visible while there is still time to fix them. The [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) documents the larger setup this project came from.
+Brigade Stack's handoff coverage checks, memory care, review queues, and receipts exist to make those failures visible while there is still time to fix them. The [Solo Cookbook](https://github.com/escoffier-labs/solos-cookbook) documents the larger setup this project came from.
 
 The goal is not to make a giant automation machine. The goal is to make agent memory understandable, reviewable, and portable across harnesses.
 
 **Agents run the system.** Install, setup, verify, and handoffs are designed to be executed by coding agents (often from a paste into Claude Code, Codex, Cursor, or OpenClaw). Humans own policy and review when a gate is ambiguous or risky. You can type every command yourself; production use is agent-driven, not a human day-to-day terminal workflow.
 
-## Mise En Place (brand metaphor)
+<a id="mise-en-place-brand-metaphor"></a>
 
-The product name comes from the kitchen. A *brigade de cuisine* is the staff that runs the line, and *mise en place*, pronounced "meez", means everything is in its place before the work starts. That metaphor lives in brand art and deep docs. The commands you type stay plain: `setup`, `verify`, `sync`, `code`, `evidence`.
+## Agent workspace
 
-In a kitchen, the first job is prep: label ingredients, sharpen tools, and avoid hunting for basics mid-rush. For agents, it is the same job: rules, memory, handoff inboxes, tools, guards, receipts, and verification paths set up before the session gets expensive.
+Brigade Stack connects agent coordination, shared context, tools, skills, and verification. Workspace setup puts rules, memory, handoff inboxes, guards, and receipts in place before agents start work. Use `setup`, `verify`, `sync`, `code`, and `evidence` to inspect and maintain that setup.
 
 Public names for the built-in engines:
 
@@ -109,7 +109,7 @@ brigade operator quickstart --target ~/agent-workspace --depth workspace --harne
 brigade operator doctor --target ~/agent-workspace --profile local-operator
 ```
 
-Use `--dry-run` first if you want to preview the local files Brigade will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush`.
+Use `--dry-run` first if you want to preview the local files Brigade Stack will write. To wire more than one agent surface, pass a comma-separated list such as `--harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush`.
 
 If you already have a homegrown setup with scripts, handoff folders, crons, or process managers, use the adoption loop before changing it:
 
@@ -146,13 +146,13 @@ Put the durable note here."
 
 Then run your memory owner's ingester. Safe targeted notes file themselves into long-term memory automatically; only ambiguous or risky notes stay visible for review.
 
-That is the simplest useful version of Brigade: shared handoffs, automatic filing, durable memory.
+That is the simplest useful version of Brigade Stack: shared handoffs, automatic filing, durable memory.
 
 ## How Memory Handoffs Work
 
 Each writer harness gets its own local inbox. Use `brigade handoff draft --inbox <id>` to write to the matching inbox, or select the harness with `brigade operator quickstart --harnesses ...`.
 
-| Writer | `--inbox` / harness id | Local inbox | Brigade support |
+| Writer | `--inbox` / harness id | Local inbox | Brigade Stack support |
 |---|---|---|---|
 | Codex CLI | `codex` | `.codex/memory-handoffs/` | handoff template, ingest source, dogfood adapter, tools, skills |
 | Claude Code | `claude` | `.claude/memory-handoffs/` | handoff template, ingest source, tools, skills |
@@ -175,7 +175,7 @@ Each writer harness gets its own local inbox. Use `brigade handoff draft --inbox
 
 OpenClaw is usually the canonical memory owner rather than a writer inbox. Add it with `--harnesses openclaw,...` when the workspace should own durable memory.
 
-The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
+The memory owner, usually OpenClaw or Hermes, can ingest handoffs into the permanent memory files. Brigade Stack keeps the handoff format consistent so different tools can contribute without each one inventing its own note style.
 
 ```mermaid
 flowchart LR
@@ -200,7 +200,7 @@ flowchart LR
         H[".hermes/memory-handoffs/"]
     end
 
-    DRAFT["Brigade handoff draft<br/>lint · guard · classify"]
+    DRAFT["Brigade Stack handoff draft<br/>lint · guard · classify"]
     OWNER["OpenClaw / Hermes<br/>memory owner"]
     MEM["durable memory<br/>cards · docs · learnings"]
     INBOX["review inbox<br/>ambiguous · risky"]
@@ -274,7 +274,7 @@ flowchart LR
 
 ## The Local Loop
 
-Brigade is built around a simple daily loop:
+Brigade Stack is built around a simple daily loop:
 
 1. set up the repo or operator workspace
 2. let agents work
@@ -308,7 +308,9 @@ flowchart LR
 
 This loop scales from one person using one repo or OpenClaw/Hermes workspace to a more serious operator setup with scanner inboxes, work receipts, release checks, and repo-fleet summaries. You do not need all of that on day one.
 
-## What Brigade Can Handle
+<a id="what-brigade-can-handle"></a>
+
+## What Brigade Stack Can Handle
 
 For memory:
 
@@ -334,16 +336,16 @@ For safety:
 - import Content Guard findings into the work inbox for review
 - keep generated state ignored by default
 - avoid publishing, pushing, or mutating remotes automatically
-- keep notification sending opt-in; `brigade work brief` may report readiness or suggest the station, but Brigade never sends unless the operator uses an explicit send action
+- keep notification sending opt-in; `brigade work brief` may report readiness or suggest the station, but Brigade Stack never sends unless the operator uses an explicit send action
 - make risky actions visible as operator decisions
 
 ## Ecosystem
 
-Brigade is the local operator layer. It integrates with nearby tools instead of trying to absorb all of them.
+Brigade Stack is the local operator layer. It integrates with nearby tools instead of trying to absorb all of them.
 
 ```mermaid
 flowchart TB
-    BRIGADE["Brigade<br/>local operator layer"]
+    BRIGADE["Brigade Stack<br/>local operator layer"]
 
     subgraph MEMORY [" memory and handoffs "]
         OPENCLAW["OpenClaw"]
@@ -360,7 +362,7 @@ flowchart TB
         SEARCH["code-search"]
     end
 
-    subgraph NATIVE [" native Brigade stations "]
+    subgraph NATIVE [" native Brigade Stack stations "]
         REPOS["repo fleet"]
         TOOLS["tool catalog"]
         SECURITY["security scan"]
@@ -381,22 +383,22 @@ Memory and handoff tools:
 
 - [OpenClaw](https://github.com/solomonneas/openclaw): personal AI assistant and memory owner.
 - Hermes: local memory owner and handoff writer convention.
-- Memory maintenance is embedded in Brigade: `brigade memory status`, `lint`, `compact`, and `init-git` (the retired [memory-doctor](https://github.com/escoffier-labs/memory-doctor) package). Use `brigade ingest` for handoff promotion.
+- Memory maintenance is embedded in Brigade Stack: `brigade memory status`, `lint`, `compact`, and `init-git` (the retired [memory-doctor](https://github.com/escoffier-labs/memory-doctor) package). Use `brigade ingest` for handoff promotion.
 - [bootstrap-doctor](https://github.com/escoffier-labs/bootstrap-doctor): audits and trims the full OpenClaw bootstrap set (SOUL.md, TOOLS.md, AGENTS.md, IDENTITY.md, MEMORY.md, and related session-start files), and the same idea for other harnesses with large bootstrap files.
 
 Safety and operations tools:
 
-- Content Guard is embedded in Brigade and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
+- Content Guard is embedded in Brigade Stack and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
 - [agent-notify](https://github.com/escoffier-labs/brigade/tree/main/stations/notify) (`stations/notify/` in this monorepo): optional notification hooks for long-running agent work. Released installs resolve the pinned managed `agent-notify` binary through `brigade setup` once a stable manifest publishes its assets. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
 - [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
-- Built-in Scout skills: Brigade wires `brigade-work` and `ultra-work-scout` during `brigade init`; use Skillet when you want the full optional skill roster.
+- Built-in Scout skills: Brigade Stack wires `brigade-work` and `ultra-work-scout` during `brigade init`. Install upstream [Superpowers](https://github.com/obra/superpowers) separately for general workflow guidance. Retain Brigade Stack and T3 specialist skills where needed. `brigade init` does not bundle Superpowers. The optional Skillet installer remains a separate integration.
 
 Evidence log and code map (built in):
 
 - **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger) (historically MiseLedger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [miseledger](https://github.com/escoffier-labs/miseledger) is a history mirror only.
 - **Code map** (`brigade code …`): local symbol graph (callers, impact, context). Engine lives under the monorepo engines tree (historically GraphTrail). Archived standalone [graphtrail](https://github.com/escoffier-labs/graphtrail) is a history mirror only.
-- Brigade CLI (process boundary):
+- Brigade Stack CLI (process boundary):
   - `brigade setup` installs the code-map engine, its MCP bridge, the evidence engine, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
   - `brigade add evidence` / `brigade add graphtrail` remain one-release compatibility shims
   - `brigade evidence status` / `doctor` - advisory health + next commands
@@ -408,9 +410,9 @@ Evidence log and code map (built in):
 Search and context tools:
 
 - [code-search-api](https://github.com/escoffier-labs/code-search-api): local semantic code-search service backed by SQLite and Ollama embeddings.
-- The read-only MCP bridge is maintained under [`code-search-api/mcp`](https://github.com/escoffier-labs/code-search-api/tree/main/mcp). Brigade retains the `code-search-mcp` compatibility key and the published package remains `@solomonneas/code-search-mcp`.
+- The read-only MCP bridge is maintained under [`code-search-api/mcp`](https://github.com/escoffier-labs/code-search-api/tree/main/mcp). Brigade Stack retains the `code-search-mcp` compatibility key and the published package remains `@solomonneas/code-search-mcp`.
 
-Brigade also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
+Brigade Stack also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
 
 ## Repo Fleet
 
@@ -444,7 +446,7 @@ Full command list in [Repo fleet](repo-fleet.md).
 
 ## Tool Catalog
 
-`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, and records approved script or local MCP calls through its call queue. This tool-call workflow has an approval gate. It does not place every Brigade action in that queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
+`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, and records approved script or local MCP calls through its call queue. This tool-call workflow has an approval gate. It does not place every Brigade Stack action in that queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
 
 ```mermaid
 flowchart LR
@@ -484,7 +486,7 @@ flowchart LR
     PROMOTE["promote-handoff<br/>write draft"]
     LINT["handoff lint<br/>format · route · guard"]
     DRAFT["memory-handoffs/<br/>reviewed draft"]
-    OWNER["memory owner ingest<br/>outside Brigade"]
+    OWNER["memory owner ingest<br/>outside Brigade Stack"]
 
     IMPORT --> PLAN --> PROMOTE --> LINT --> DRAFT --> OWNER
     LINT -->|blocked| REPAIR["repair import"]
@@ -537,11 +539,11 @@ brigade research handoffs import-issues
 brigade research show <run-id>
 ```
 
-Exports are explicit and receipt-backed. Brigade records the source fingerprint for the handoff artifact, then warns when a completed research run has no export, a missing export path, or a stale export after the run artifact changes. The doctor is read-only; import routing creates reviewable work inbox items instead of exporting or ingesting memory automatically.
+Exports are explicit and receipt-backed. Brigade Stack records the source fingerprint for the handoff artifact, then warns when a completed research run has no export, a missing export path, or a stale export after the run artifact changes. The doctor is read-only; import routing creates reviewable work inbox items instead of exporting or ingesting memory automatically.
 
 ## Agent Pantry
 
-The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. Agent Pantry stays a **separate Go binary** (process boundary). Brigade installs it, plans setup, and health-checks it; it does not mint PSKs, start source/sink, or mutate browser auth files. The pantry is where the chef stores the cookies and the secret recipes.
+The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. Agent Pantry stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not mint PSKs, start source/sink, or mutate browser auth files.
 
 Multi-machine path (sink on the agent host, source on the daily driver):
 
@@ -561,7 +563,7 @@ brigade pantry expiry-alert --send   # optional agent-notify (install notificati
 
 ## Notifications
 
-The `notifications` station wires optional `agent-notify` into the same operator workflow: private Discord, Telegram, or Signal delivery for long-running agent work. Source lives in [`stations/notify/`](../stations/notify/) in this repository. `agent-notify` stays a **separate Go binary** (process boundary). Brigade installs it, plans setup, and health-checks it; it does not send messages from doctor, status, or brief flows.
+The `notifications` station wires optional `agent-notify` into the same operator workflow: private Discord, Telegram, or Signal delivery for long-running agent work. Source lives in [`stations/notify/`](../stations/notify/) in this repository. `agent-notify` stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not send messages from doctor, status, or brief flows.
 
 Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. Source lives in [`stations/notify/`](../stations/notify/); the standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
 
@@ -575,16 +577,16 @@ brigade pantry expiry-alert --send
 
 - `brigade notifications status` / `brigade notifications setup plan` inspect wiring without sending.
 - `brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station.
-- Brigade never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
+- Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
 ## For OpenClaw Users
 
-OpenClaw can be the memory owner. Brigade gives nearby tools a way to contribute checked handoffs back into that owner memory without forcing every tool to know OpenClaw internals.
+OpenClaw can be the memory owner. Brigade Stack gives nearby tools a way to contribute checked handoffs back into that owner memory without forcing every tool to know OpenClaw internals.
 
 ```mermaid
 flowchart LR
     WRITERS["Codex · Claude · OpenCode<br/>Antigravity · Pi · Cursor writer inboxes"]
-    BRIGADE["Brigade<br/>draft · lint · source coverage"]
+    BRIGADE["Brigade Stack<br/>draft · lint · source coverage"]
     OPENCLAW["OpenClaw<br/>memory owner"]
     MEMORY["canonical memory"]
     RECEIPTS["ingest receipts<br/>promoted · skipped · failed"]
@@ -616,11 +618,11 @@ brigade handoff sources init --target ~/agent-workspace
 brigade handoff doctor --target ~/agent-workspace
 ```
 
-Then writer tools leave handoffs in their own inboxes, the memory owner's ingester files the safe targeted notes automatically, and Brigade keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
+Then writer tools leave handoffs in their own inboxes, the memory owner's ingester files the safe targeted notes automatically, and Brigade Stack keeps receipts for promoted, routed, skipped, failed, malformed, and warning outcomes.
 
 ## For Hermes Users
 
-Hermes now has a first-class Brigade handoff inbox:
+Hermes now has a first-class Brigade Stack handoff inbox:
 
 ```mermaid
 flowchart LR
@@ -650,7 +652,7 @@ brigade handoff sources init --target .
 ```bash
 brigade handoff draft --target . --inbox hermes \
   --title "Hermes note" \
-  --summary "Hermes can write a local Brigade handoff." \
+  --summary "Hermes can write a local Brigade Stack handoff." \
   --content "### Hermes note
 
 Durable context goes here."
@@ -669,7 +671,7 @@ See [Hermes handoffs](hermes-handoffs.md) for the current boundaries.
 
 ## Content Guard
 
-Brigade handles the memory and operator workflow. Content Guard checks whether content is safe to publish or save.
+Brigade Stack handles the memory and operator workflow. Content Guard checks whether content is safe to publish or save.
 
 ```mermaid
 flowchart LR
@@ -706,7 +708,7 @@ Policy names are intentionally plain:
 
 `brigade operator doctor` and `brigade operator status` show whether Content Guard is installed, which policy is expected, which pre-push hook is active, and the latest local scan summary when available.
 
-Brigade also ships a read-only local security scanner. `brigade security scan` produces redacted findings you can review, suppress with a reason, or import into the work inbox. See [Security and Content Guard](security.md).
+Brigade Stack also ships a read-only local security scanner. `brigade security scan` produces redacted findings you can review, suppress with a reason, or import into the work inbox. See [Security and Content Guard](security.md).
 
 ## Tiny Glossary
 

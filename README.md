@@ -1,10 +1,10 @@
 <p align="center">
-  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade (by Escoffier Labs)" width="640">
+  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade Stack (by Escoffier Labs)" width="640">
 </p>
 
 <p align="center">
   <strong>Coordinate your agents. Keep the tools you use.</strong><br>
-  Brigade works alongside Codex, Claude Code, Cursor, OpenCode, T3 Code, Grok Bot, OpenClaw, Hermes, Dot, and Duet. It adds coordination, shared context, and checkable work records to your existing setup.
+  Brigade Stack works alongside Codex, Claude Code, Cursor, OpenCode, T3 Code, Grok Bot, OpenClaw, Hermes, Dot, and Duet. It adds coordination, shared context, and checkable work records to your existing setup.
 </p>
 
 <p align="center">
@@ -31,17 +31,19 @@ Keep using your preferred agent tools. Start with one tool in one repository, th
 
 ## Give the next agent more than a conversation
 
-You investigate a bug in Claude Code, implement a fix in Codex, and return to the work through T3 Code. Brigade gives that work continuity:
+You investigate a bug in Claude Code, implement a fix in Codex, and return to the work through T3 Code. Brigade Stack gives that work continuity:
 
 1. **Start with context.** Read the work brief, relevant memory, and existing evidence.
 2. **Make ownership explicit.** Claim tasks and inspect dependencies or conflicting work.
-3. **Run within your rules.** Use configured model access, scopes, budgets, and approval gates for Brigade-managed execution.
+3. **Run within your rules.** Use configured model access, scopes, budgets, and approval gates for Brigade Stack-managed execution.
 4. **Check the result.** Run verification and keep the command, exit code, logs, and Git state.
 5. **Hand off the work.** Leave the result, remaining blockers, and evidence where another agent can inspect them.
 
-Agents can continue within the authority you give them. You choose where approval is required and can inspect or stop Brigade-managed work.
+Agents can continue within the authority you give them. You choose where approval is required and can inspect or stop Brigade Stack-managed work.
 
-## What Brigade adds
+<a id="what-brigade-adds"></a>
+
+## What Brigade Stack adds
 
 ### Work that agents can pick up
 
@@ -51,7 +53,7 @@ Tasks, dependencies, ready-work views, claims, and handoffs make the next action
 
 ### Evidence you can inspect
 
-Run a check through Brigade:
+Run a check through Brigade Stack:
 
 ```bash
 brigade work verify run --target . --command "pytest -q"
@@ -63,13 +65,13 @@ A passing command establishes the result of that check. Completion still depends
 
 ### Context that travels between tools
 
-Keep a designated memory owner, with handoffs from the tools doing the work. Brigade provides handoff linting, ingestion coverage, recall, and memory-care checks. Shared skill and tool catalogs can project reviewed configuration into supported tools.
+Keep a designated memory owner, with handoffs from the tools doing the work. Brigade Stack provides handoff linting, ingestion coverage, recall, and memory-care checks. Shared skill and tool catalogs can project reviewed configuration into supported tools.
 
 **0.31 beta:** Memory reflection derives evidence-backed candidates and can create consolidation proposals for review. It does not automatically rewrite claims.
 
 ### Visibility while agents work
 
-Inspect runs, work ownership, machines, and cloud tasks through Brigade's CLI and operator views. Fleet messaging lets enrolled agents exchange information under explicit grants.
+Inspect runs, work ownership, machines, and cloud tasks through Brigade Stack's CLI and operator views. Fleet messaging lets enrolled agents exchange information under explicit grants.
 
 **0.31 beta:** Run patrol identifies local lane states and offers explicit repair actions. The Command Deck and CI-board integrations continue to expand.
 
@@ -77,7 +79,7 @@ Inspect runs, work ownership, machines, and cloud tasks through Brigade's CLI an
 
 Choose the integrations you need. Each connects a different part of the workflow.
 
-| Your system | Brigade connection |
+| Your system | Brigade Stack connection |
 | --- | --- |
 | **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and supported tool and skill configuration. Execution adapters and hooks vary by tool. |
 | **T3 Code** | Remote execution integration and session visibility. The complete app-owned child-task governance flow is in progress. |
@@ -121,13 +123,13 @@ Select the tools you use. The local setup can be used without a Fleet Hub. Add f
 ## Where the beta is heading
 
 - **Independent work across a fleet.** Shared ownership, dependencies, and evidence help agents recover their next action without reconstructing a conductor's conversation. [Fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121)
-- **Governed delegation through T3 Code.** Explicit batches, independently addressable child results, and isolated workspaces under Brigade's existing controls. [Delegation epic](https://github.com/escoffier-labs/brigade/issues/2046)
+- **Governed delegation through T3 Code.** Explicit batches, independently addressable child results, and isolated workspaces under Brigade Stack's existing controls. [Delegation epic](https://github.com/escoffier-labs/brigade/issues/2046)
 - **Cross-repository campaigns.** Track one assignment across repositories with bounded ownership and evidence-backed completion. Execution and completion wiring remain in progress. [Campaigns](https://github.com/escoffier-labs/brigade/issues/1128)
 - **More ways for agents to connect.** Encrypted messaging, teammate invitations, no-hub delivery, and Hub Lite are being built in stages. [Mesh design](docs/phase-agent-mesh.md)
 
 ## MCP servers
 
-Brigade includes a memory MCP server with bounded recall, work briefs, and handoff drafting, plus a read-only skills MCP server:
+Brigade Stack includes a memory MCP server with bounded recall, work briefs, and handoff drafting, plus a read-only skills MCP server:
 
 ```bash
 brigade memory serve-mcp --stdio

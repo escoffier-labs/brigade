@@ -57,8 +57,8 @@ role = "Open-weight implementation worker on the flat sub; overflow relief for t
 
 Known gap: Composer models return empty text in read-only plan mode (issue #206). Pin a non-composer model for read-only seats. In the August author receipts, Cursor rejected the Gemini 3.7 Flash security canary at the provider boundary before inference. Do not use that harness-model pairing for security review.
 
-Mark direct Cursor Composer and Grok seats as incapable so the chef cannot route
-`--read-only` work to them:
+Mark direct Cursor Composer and Grok seats as incapable so the orchestrator
+cannot route `--read-only` work to them:
 
 ```toml
 [agents.composer]

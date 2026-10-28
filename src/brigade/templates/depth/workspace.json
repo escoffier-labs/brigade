@@ -1,6 +1,6 @@
 {
   "id": "workspace",
-  "description": "Full agent kitchen: extends repo baseline + memory folders + starter cards + safety files.",
+  "description": "Full agent workspace: repo baseline, memory folders, starter cards and safety files.",
   "extends": "repo",
   "files": [
     {"src": "workspace/AGENTS.md", "dst": "AGENTS.md"},

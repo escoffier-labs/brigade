@@ -865,10 +865,10 @@
         "sha256": "b2cf1874706813d40114192884450c374589b2b26fdb819f44aedd5008166970"
       },
       {
-        "byte_size": 7094,
+        "byte_size": 7819,
         "dst": "skills/brigade-work/SKILL.md",
         "rendered": true,
-        "sha256": "822ce10efce89c14964cacba6627728104f167bae0f065465bf5ff49af018261"
+        "sha256": "6fe13ed483fffa4d739ce63a9046103f74d2cae993204cf8f5e434babd6efa86"
       },
       {
         "byte_size": 5347,

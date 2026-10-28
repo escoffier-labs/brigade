@@ -941,8 +941,11 @@ record signed by the old key and keeps the old private key, marked retired, so
 mail sealed to it still opens. A client accepts a successor without the
 operator when every link from the pinned key to the new record has a valid
 `prev_sig` by its predecessor, `created_at` strictly increases along the
-chain, no link is revoked, and the chain has at most 8 links. `keys_get`
-fetches the intermediate records. A longer chain, a gap, or any revoked link
+chain, no link is revoked, and the chain has at most eight successors.
+`keys_get` fetches the intermediate records. The local peer API takes
+successors only. Nine authenticated successors yield `changed`. Malformed
+input, a tuple longer than nine, or a fresh chain starting with the pinned
+head is refused without recording changed evidence. A gap or revoked link
 yields `changed`. Every successor MUST have a different kid from its
 predecessor. Slice 1's `verify_key_record` checks one adjacent link, including
 strict timestamp increase and predecessor identity. Slice 2's pin-store chain
@@ -1002,11 +1005,13 @@ the complete previous generation without dropping claims or evidence.
 Floor, barrier and unsigned-claim table limits are shared across hubs. Filling
 one table for one hub can prevent another hub's admission to that table.
 
-The internal `fleet_mesh_trust` library stores manifest anchors, membership,
+The original trust-foundation slice stored manifest anchors, membership,
 revocations, rollback floors and conflict evidence in one POSIX snapshot.
-It makes no peer-use decision and adds no key-manifest acceptance, identity
-pinning, migration, CLI or message integration. Future peer-use checks must
-consult the `(hub, kid)` revocation barrier without filtering by principal.
+It stopped at evidence storage. The current peer acceptance library below
+adds bounded local acceptance and use decisions. Peer-use checks consult the
+`(hub, kid)` revocation barrier without filtering by principal. Bulk
+key-manifest acceptance, identity migration, CLI and message integration
+remain unfinished.
 
 Which mail from a revoked key stays readable. A thief can sign any
 `created_at`, and the order in which a station learns things proves nothing.
@@ -1092,14 +1097,26 @@ text toward a principal that was never pinned by withholding its key.
 Losing a key loses only the mail sealed to it. The routing row stays and the
 owner can still ack it.
 
+### Current peer acceptance library
+
+The internal POSIX peer APIs now support fingerprint acceptance, bounded continuity, immutable history and locked local key selection for the configured origin's persisted current Hub identity. Explicit initialization extends the trust snapshot from v1 to v2. Manual acceptance requires an independently supplied full fingerprint, the expected head digest and an explicit require-verified setting. CLI/MCP key commands, bulk manifests, identity migration and recovery, inbox opening and send/reply sealing remain unfinished.
+
+Current use rechecks the retained continuity proof through the nearest independent fingerprint confirmation. A revoked dependency blocks use as `changed` while preserving the queried key's original provenance and history. Membership observation does not reset that dependency. Independent confirmation of a nonrevoked current successor can restore its proof boundary. The queried kid's own revocation always wins.
+
+New key admissions and new manual confirmations reject creation dates more than five minutes beyond the local wall clock with `mesh_peer_created_in_future`. A bounded batch uses one cutoff. Stored validation, completed retries and resolution using an already independently confirmed current key remain independent of that clock. Stations need synchronized clocks. An allowed near-future substitute may still require waiting within the skew and having the real principal rotate to a later signed date. This guard does not repair previously admitted future-headed snapshots or arbitrary OS-clock errors.
+
+Peer commits have additional admission limits: 8 MiB across canonical peer tables, at least 8 MiB free under both the ordinary and total byte ceilings after a commit, and eight retained changed candidates per peer. Resolved candidates retain their slots. These limits leave the existing 56/64 MiB evidence ceilings and signed-evidence admission rules intact. Exact retained retries reflush without new admission. Finite headroom cannot guarantee every later evidence import.
+
+When changed evidence cannot be recorded, the top-level disposition and error still refuse that attempt. A future-dated candidate raises the fixed admission error without recording a changed claim. A later inspection can describe the prior persisted pin as eligible. Callers must honor the refusal and re-enter the locked use scope for actual local cryptography. After eight retained candidates, later distinct changes may remain unrecorded even after operator resolution. There is no automatic eviction or pruning.
+
 ## D4. Hub identity
 
 Current foundation status: the offline POSIX identity store persists signed
 identity history, endpoint bindings, signer-global marks, identity floors and
 conflict evidence. First observation is `observed`. Caller-confirmed operator
 or invite provenance is separate from policy freshness, which remains
-`unproven`. Replacement and migration are refused. The cross-store journal,
-peer-use evaluator and live client integration remain unimplemented, so this
+`unproven`. Replacement and migration are refused. The cross-store journal
+and live client integration remain unimplemented, so this
 library does not complete slice 2b or activate message encryption.
 
 The pin store is per hub, so whoever controls the hub id controls which pins

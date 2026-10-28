@@ -1,6 +1,6 @@
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan the work, choose useful workers, and synthesize the final answer."
 purpose = "Single-lane orchestration when only Codex is installed."

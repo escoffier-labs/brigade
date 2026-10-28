@@ -68,8 +68,8 @@ def test_locally_modified_instruction_detail_points_at_sync_help(tmp_path):
 def test_plan_instruction_stale_update_preserves_crlf_neighbors(tmp_path):
     path = tmp_path / "AGENTS.md"
     desired = harness_profiles.managed_instruction_text()
-    old_body = "old instruction body\n"
-    crlf_prefix = "# above\r\nkeep\r\n"
+    old_body = (Path(__file__).parent / "fixtures" / "legacy-full-instruction.md").read_text(encoding="utf-8")
+    crlf_prefix = "# Installed tools\r\nUse the installed using-skillet skill when applicable.\r\n"
     crlf_suffix = "# below\r\nalso keep\r\n"
     crlf_block = harness_profile_cmd._block(old_body).replace("\n", "\r\n")
     path.write_bytes((crlf_prefix + crlf_block + crlf_suffix).encode("utf-8"))
@@ -86,6 +86,10 @@ def test_plan_instruction_stale_update_preserves_crlf_neighbors(tmp_path):
     assert plan.rendered.endswith(crlf_suffix)
     assert "\r\n" in plan.rendered
     assert "\n" not in plan.rendered.replace("\r\n", "")
+    assessment = managed_block.assess_block(plan.rendered, desired=desired, profile="full")
+    assert assessment.status == managed_block.STATUS_CURRENT
+    assert "Invoke the `using-skillet` skill" not in plan.rendered
+    assert "If Superpowers is installed" in plan.rendered
 
 
 def test_plan_instruction_removal_preserves_crlf_neighbors(tmp_path):
