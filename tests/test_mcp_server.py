@@ -151,3 +151,23 @@ def test_stdio_remembers_version_negotiated_by_initialize(monkeypatch, capsys):
     by_id = {r["id"]: r for r in map(json.loads, capsys.readouterr().out.strip().splitlines())}
     assert "resultType" not in by_id[2]["result"]
     assert by_id[3]["result"]["resultType"] == "complete"
+
+
+def test_stdio_stateless_initialize_applies_to_later_requests_without_meta(monkeypatch, capsys):
+    lines = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2026-07-28"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {"jsonrpc": "2.0", "id": 3, "method": "ping"},
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(json.dumps(m) for m in lines) + "\n"))
+    mcp_server.serve_stdio(
+        server_name="t",
+        list_resources=list,
+        read_resource=lambda uri: (None, None),
+        list_tools=lambda: [],
+        call_tool=lambda n, a: ("", False),
+    )
+    by_id = {r["id"]: r for r in map(json.loads, capsys.readouterr().out.strip().splitlines())}
+    assert "resultType" not in by_id[1]["result"]
+    assert by_id[2]["result"]["resultType"] == "complete"
+    assert by_id[3]["result"]["resultType"] == "complete"
