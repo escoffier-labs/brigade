@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet preference settings accept `--orchestrator` as the preferred flag, retaining `--chef` as an alias and the existing `chef` storage key.
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
 - Brigade Stack bridge packages add `brigadestack` install names and commands backed by the existing stable Brigade 0.30.0 packages, preserving current commands and workspace formats.
 
