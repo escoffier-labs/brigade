@@ -1005,11 +1005,13 @@ the complete previous generation without dropping claims or evidence.
 Floor, barrier and unsigned-claim table limits are shared across hubs. Filling
 one table for one hub can prevent another hub's admission to that table.
 
-The internal `fleet_mesh_trust` library stores manifest anchors, membership,
+The original trust-foundation slice stored manifest anchors, membership,
 revocations, rollback floors and conflict evidence in one POSIX snapshot.
-It makes no peer-use decision and adds no key-manifest acceptance, identity
-pinning, migration, CLI or message integration. Future peer-use checks must
-consult the `(hub, kid)` revocation barrier without filtering by principal.
+It stopped at evidence storage. The current peer acceptance library below
+adds bounded local acceptance and use decisions. Peer-use checks consult the
+`(hub, kid)` revocation barrier without filtering by principal. Bulk
+key-manifest acceptance, identity migration, CLI and message integration
+remain unfinished.
 
 Which mail from a revoked key stays readable. A thief can sign any
 `created_at`, and the order in which a station learns things proves nothing.
