@@ -551,6 +551,15 @@ def test_ping_gets_an_empty_result(memory_station: _Station) -> None:
     assert _json(body) == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def test_stateless_header_makes_results_carry_result_type(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/list"},
+        headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"},
+    )
+    assert status == 200
+    assert _json(body)["result"]["resultType"] == "complete"
+
+
 def test_notification_with_a_non_string_method_is_an_invalid_request(memory_station: _Station) -> None:
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "method": 1})
     assert status == 200

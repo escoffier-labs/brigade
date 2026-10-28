@@ -78,6 +78,9 @@ class EventsApp:
                             raise EventError(-32602, "invalid_arguments")
                         params = {k: v for k, v in params.items() if k != "_meta"}
                         result = await self.service.rpc(IDENTITY.get(), method, params)
+                    # Every 2026-07-28 result must declare its type; these methods exist only in that revision.
+                    if isinstance(result, dict):
+                        result = {"resultType": "complete", **result}
                     response = {"result": result}
                 except EventError as error:
                     response = {

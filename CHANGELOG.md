@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- MCP servers include `resultType: "complete"` in every successful result for protocol 2026-07-28 requests (declared via `params._meta`, the `MCP-Protocol-Version` header, or a stdio `initialize`), so current Claude Code can fetch tools from `memory serve-mcp` and `skills serve-mcp`. Older revisions keep their exact result shape.
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
 - Brigade Stack bridge packages add `brigadestack` install names and commands backed by the existing stable Brigade 0.30.0 packages, preserving current commands and workspace formats.
 
