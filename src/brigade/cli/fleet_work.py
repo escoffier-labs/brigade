@@ -13,9 +13,10 @@ def register(
     p_work = fleet_sub.add_parser("work", help="Create, inspect, and schedule Worklore items on the fleet hub.")
     work_sub = p_work.add_subparsers(dest="work_command", metavar="<work-command>")
     work_sub.required = True
-    from . import fleet_work_ownership
+    from . import fleet_work_ownership, fleet_work_prepared_handoff
 
     fleet_work_ownership.register(work_sub)
+    fleet_work_prepared_handoff.register(work_sub)
     p_work_create = work_sub.add_parser("create", help="Create a native Worklore item (operator node token).")
     p_work_create.add_argument("--title", required=True, help="Item title.")
     p_work_create.add_argument("--kind", required=True, help="Item kind (fleet, admin, or other allowed kind).")

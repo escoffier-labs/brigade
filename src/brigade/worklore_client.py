@@ -43,6 +43,7 @@ __all__ = [
     "get_campaign",
     "get_item",
     "get_ownership",
+    "get_prepared_handoff",
     "ownership_action",
     "new_ownership_nonce",
     "import_batch",
@@ -271,6 +272,11 @@ def new_ownership_nonce() -> str:
 def get_ownership(work_id: str) -> dict[str, Any]:
     """Read metadata using the same authentication preference as item reads."""
     return _request("GET", _item_path(work_id, "ownership"), token=_token())
+
+
+def get_prepared_handoff(work_id: str) -> dict[str, Any]:
+    """Read prepared context with the existing node-first credential preference."""
+    return _request("GET", _item_path(work_id, "prepared-handoff"), token=_token())
 
 
 def ownership_action(

@@ -29,7 +29,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 90 command path(s)
+- `brigade fleet`: 91 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -275,6 +275,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet work attempt`
 - `brigade fleet work burn`
 - `brigade fleet work create`
+- `brigade fleet work handoff show`
 - `brigade fleet work link`
 - `brigade fleet work list`
 - `brigade fleet work next`

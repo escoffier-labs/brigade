@@ -5,6 +5,7 @@ import json
 import sqlite3
 import subprocess
 from base64 import urlsafe_b64encode
+from http.client import HTTPConnection
 from urllib.parse import quote
 from pathlib import Path
 
@@ -61,6 +62,56 @@ def test_cookie_caller_cannot_read_or_write(tmp_path):
     conn = _http_conn(tmp_path)
     status, body = http.handle(conn, _req("GET", "/work/items"))
     assert status == 401 and body["code"] == "unauthorized"
+
+
+def test_prepared_handoff_uses_existing_read_auth_and_refuses_mutations(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    with _hub(tmp_path) as hub:
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            _, node_token = fleet_hub.add_node(conn, "node-a", "node-a")
+            item = store.create_item(
+                conn, {"title": "Fixture", "kind": "repo"}, actor_id="admin", actor_type="operator"
+            )
+            before = conn.execute("SELECT COUNT(*) FROM work_events").fetchone()[0]
+        finally:
+            conn.close()
+        path = f"/work/items/{item['work_id']}/prepared-handoff"
+        for token in (node_token, ADMIN_TOKEN):
+            status, payload = _request(hub, "GET", path, token=token)
+            assert status == 200
+            assert set(payload) == {"prepared_handoff"}
+            assert payload["prepared_handoff"]["item"]["work_id"] == item["work_id"]
+        assert _request(hub, "GET", path)[0] == 401
+        assert _request(hub, "GET", path, token="invalid")[0] == 401
+        assert _request(hub, "GET", path, extra_headers={"Cookie": "fixture-session"})[0] == 401
+        status, enrollment = _request(hub, "POST", "/dashboard/enrollment", token=ADMIN_TOKEN, body={})
+        assert status == 201
+        connection = HTTPConnection(hub[0], hub[1], timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/enroll",
+                body=f"code={enrollment['code']}",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+            )
+            response = connection.getresponse()
+            assert response.status == 303
+            cookie = response.getheader("Set-Cookie").split(";")[0]
+            response.read()
+        finally:
+            connection.close()
+        assert _request(hub, "GET", path, extra_headers={"Cookie": cookie})[0] == 401
+        assert _request(hub, "GET", path + "?limit=1", token=node_token)[0] == 400
+        status, refusal = _request(hub, "GET", "/work/items/absent/prepared-handoff", token=node_token)
+        assert (status, refusal["code"]) == (404, "not-found")
+        for method in ("POST", "PATCH", "DELETE"):
+            assert _request(hub, method, path, token=node_token, body={})[0] == 404
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM work_events").fetchone()[0] == before
+        finally:
+            conn.close()
 
 
 def test_node_can_read_and_import_but_cannot_transition(tmp_path):
