@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP servers include `resultType: "complete"` in every successful result for protocol 2026-07-28 requests (declared via `params._meta`, the `MCP-Protocol-Version` header, or a stdio `initialize`), so current Claude Code can fetch tools from `memory serve-mcp` and `skills serve-mcp`. Older revisions keep their exact result shape.
 - Reviewed memory evidence operations accept scalar citations and count equivalent evidence references once, while retaining the original citation spellings and excluding unresolved support (#1959, cases 8 and 15).
 - Fleet actions and bug diagnostics launch the installed Brigade package with isolated Python imports, preventing ambient working directories, Python paths, and user-site startup code from selecting another package (#1950).
+- `brigade run --require-fleet-claim` and `repo_claim(require_claim=True)` refuse work without a confirmed Hub claim and enforce bounded cancellation on claim loss, including credential rejection. Default local fallback remains available.
+
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
 - Brigade Stack bridge packages add `brigadestack` install names and commands backed by the existing stable Brigade 0.30.0 packages, preserving current commands and workspace formats.
 

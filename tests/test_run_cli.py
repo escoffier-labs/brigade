@@ -280,7 +280,8 @@ read_only_capable = false
     assert "read_only_capable is false" in err
 
 
-def test_detached_dispatch_keeps_pin_without_double_prefix(tmp_path, monkeypatch):
+@pytest.mark.parametrize("claim_flag", ["--no-fleet-claim", "--require-fleet-claim"])
+def test_detached_dispatch_keeps_pin_without_double_prefix(tmp_path, monkeypatch, claim_flag):
     from brigade import run_preference
     from brigade.cli import run as run_cli
 
@@ -324,13 +325,14 @@ role = "code"
             "--cwd",
             str(tmp_path),
             "--detach",
-            "--no-fleet-claim",
+            claim_flag,
             "--output-dir",
             str(tmp_path / "runs" / "pref-detach"),
         ]
     )
     assert rc == 0
     argv = captured["argv"]
+    assert claim_flag in argv
     task = argv[argv.index("run") + 1]
     assert task == "fix the flaky test"
     assert task.count("Fleet run preference") == 0
@@ -3792,3 +3794,73 @@ role = "code"
     )
     assert rc == 0
     assert seen["scheduler"] == "waves"
+
+
+def test_run_required_fleet_claim_refuses_without_worker_start(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client
+
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "required-artifacts"
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "", "token": ""})
+    worker_calls = []
+    monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: worker_calls.append(True) or 0)
+    rc = cli.main(["run", "inspect", "--cwd", str(repo), "--output-dir", str(output_dir), "--require-fleet-claim"])
+    assert rc == 2
+    assert worker_calls == []
+    assert not runguard.lock_path(repo).exists()
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["finished_at"].endswith("Z")
+    assert "FleetClaimRequiredError" in receipt["failure"]["detail"]
+    assert "no-hub" in capsys.readouterr().err
+
+
+def test_run_required_fleet_claim_conflicts_with_skip(capsys):
+    with pytest.raises(SystemExit) as refusal:
+        cli.main(["run", "inspect", "--require-fleet-claim", "--no-fleet-claim"])
+    assert refusal.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_run_required_claim_revocation_cancels_once_with_credential_receipt(tmp_path, monkeypatch):
+    import threading
+
+    from brigade import fleet_client
+
+    repo = _git_repo_with_roster(tmp_path)
+    output_dir = tmp_path / "required-revocation"
+    started = threading.Event()
+    interrupted = threading.Event()
+    interrupts = []
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path: "fake-node")
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+    monkeypatch.setattr(fleet_client, "acquire_claim", lambda *a, **kw: fleet_client.ClaimDecision(True, "ok"))
+    monkeypatch.setattr(fleet_client, "release_claim", lambda *a, **kw: fleet_client.ClaimDecision(True, "ok"))
+
+    def revoke(*args, **kwargs):
+        assert started.wait(2)
+        return fleet_client.ClaimDecision(False, "auth-failed", detail="fake-revoked")
+
+    def interrupt():
+        interrupts.append(True)
+        interrupted.set()
+
+    def run(*args, **kwargs):
+        started.set()
+        assert interrupted.wait(2)
+        return 0
+
+    monkeypatch.setattr(fleet_client, "renew_claim", revoke)
+    monkeypatch.setattr(fleet_client._thread, "interrupt_main", interrupt)
+    monkeypatch.setattr(aboyeur, "run", run)
+    assert (
+        cli.main(["run", "inspect", "--cwd", str(repo), "--output-dir", str(output_dir), "--require-fleet-claim"]) == 2
+    )
+    assert started.is_set()
+    assert interrupts == [True]
+    assert not runguard.lock_path(repo).exists()
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["failure"]["kind"] == "fleet-credentials-rejected"
+    assert "fake-revoked" in receipt["failure"]["detail"]

@@ -465,10 +465,27 @@ each resolves its own workspace identity. If they instead resolve the
 per-user `~/.brigade/node.toml` fallback, every such worktree under the home
 directory uses the home directory name and arbitrates on that shared key.
 
-Claims are best-effort protection layered over the local run lock. If the hub
-rejects the configured token with HTTP 401 or 403, the client logs one WARNING
-(carrying the hub's message) and continues under the local lock alone, just as
-it does when the hub is unreachable.
+By default, claims fall back to the local run lock when no Hub is configured,
+the node has no usable identity, the Hub is unavailable, or acquisition twice
+refuses without naming an owner. HTTP 401 or 403 refuses admission with
+`FleetClaimAuthError`, including in default mode. Rejected credentials never
+authorize local fallback.
+
+`brigade run TASK --require-fleet-claim` requires a confirmed Hub grant before
+agent execution. Library callers select the same behavior with
+`repo_claim(target, require_claim=True)`. Missing Hub configuration, configuration
+read errors, unusable identity, unavailable Hub and repeated ownerless refusal
+raise `FleetClaimRequiredError`, a `FleetClaimHeldError` subclass, with a fixed
+refusal reason. Existing auth, held, quota and protocol refusals retain their
+specific error paths. A late initial grant remains `FleetClaimExpiredError`.
+
+The flag is mutually exclusive with `--no-fleet-claim` and is retained by detached
+children. A refused CLI start exits 2, starts no agent, releases its local lock,
+and leaves a failed terminal receipt when artifacts are enabled. Ambiguous
+acquisition still retries once with the same holder and retains existing cleanup
+on its bound connection. Initial auth and held refusals keep their existing
+cleanup decisions, including no background retry of rejected credentials. An
+uncertain remote claim can remain until TTL expiry or operator recovery.
 
 Fleet claims require **machine-local workspaces**. Node identity is a
 per-workspace (or per-home) uuid4 stored in `.brigade/node.toml`, and
@@ -495,7 +512,12 @@ check-and-set, so the abort interrupts exactly once (#1157 round 3).
 `repo_claim` accepts `on_claim_lost` to react differently, and
 `BRIGADE_FLEET_CLAIM_LOSS=continue` (or
 `claim_loss_policy="continue"`) is the documented opt-out for solo machines,
-restoring the old log-and-continue behavior. `brigade run` records a mid-run
+restoring the old log-and-continue behavior. Required claims override both
+continuation settings. They also request cancellation on active credential
+rejection or an unclassified heartbeat refusal. Credential detail is delivered
+once through `on_credential_failure`, without also calling `on_claim_lost` for
+that refusal. The existing bounded abort still applies if the credential callback
+blocks or is absent. `brigade run` records a mid-run
 claim-loss abort as a failed run with failure kind `fleet-claim-lost`, never
 as "canceled by user"; the receipt is classified and written on the main
 thread from the heartbeat's marker (#1157 round 2), so a heartbeat-side
@@ -522,7 +544,8 @@ A delayed initial grant is released with its holder token and refused with
 receives an ungranted `lease-expired` decision. Mid-run continue mode logs
 expiry once, stops renew and re-acquire permanently, and keeps work under
 the local lock without cancellation, callbacks, or interrupts. Credential
-refusal keeps its separate callback and stops deadline watching.
+refusal in default mode keeps its separate callback and stops deadline watching.
+Required mode routes that callback through bounded abort publication.
 
 Local authority loss requests cancellation. It does not prove the worker
 or its process group stopped before hub expiry: callback grace is five

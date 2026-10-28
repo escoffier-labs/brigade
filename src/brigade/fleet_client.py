@@ -1012,6 +1012,10 @@ class FleetClaimExpiredError(FleetClaimHeldError):
     """A granted response arrived after its conservative local deadline."""
 
 
+class FleetClaimRequiredError(FleetClaimHeldError):
+    """Required admission could not confirm a hub claim."""
+
+
 class FleetClaimQuotaError(FleetClaimHeldError):
     """The hub refused another active claim for this node."""
 
@@ -1579,13 +1583,18 @@ def repo_claim(
     on_credential_failure: Callable[[str | None], None] | None = None,
     on_claim_lost: Callable[[str | None], None] | None = None,
     claim_loss_policy: str | None = None,
+    require_claim: bool = False,
 ) -> Iterator[ClaimDecision]:
     """Hold a hub-arbitrated claim on ``target`` for the duration of the block.
 
     The resilience contract from the epic: with no hub configured this is a
     no-op; a node with no usable identity, or an unreachable hub, degrades to
     today's local run.lock behavior with a single log line — never a new
-    failure mode. A target held by another owner raises
+    failure mode. With ``require_claim=True``, these fallback outcomes
+    instead raise ``FleetClaimRequiredError`` before entry, and the loss
+    policy is always abort, overriding explicit or environment continuation.
+    This does not strengthen the cancellation guarantees described below.
+    A target held by another owner raises
     ``FleetClaimHeldError`` naming the owner and its expiry. An auth refusal
     (HTTP 401/403) also raises ``FleetClaimAuthError``, failing closed
     instead of running unprotected on credentials the hub rejected (#1161).
@@ -1608,10 +1617,12 @@ def repo_claim(
     When that heartbeat's renew/re-acquire is refused on credentials (the
     token was revoked mid-run), the heartbeat stops and ``on_credential_failure``
     is called once from the heartbeat thread with the hub's detail when given
-    detail (#1161). The CLI passes a callback that aborts the active dispatch;
-    without one the credential refusal is logged loudly and the guarded block
-    keeps running under the local lock: library callers never get signals or
-    process-global behavior from this context manager.
+    detail (#1161). In default mode the CLI's callback aborts active dispatch;
+    without one the refusal is logged and the guarded block keeps running
+    under the local lock. Required mode uses bounded abort publication even
+    without a callback, while delivering credential detail once through
+    ``on_credential_failure`` rather than ``on_claim_lost``. Unclassified
+    heartbeat refusals also request cancellation in required mode.
 
     Lost ownership (#1152) fails closed by default: when the heartbeat learns
     another owner holds the claim (a renew answered 409 held-by-another, or
@@ -1656,8 +1667,12 @@ def repo_claim(
         config = load_fleet_config()
         hub_configured = bool(config["hub_url"])
     except Exception:
+        if require_claim:
+            raise FleetClaimRequiredError(f"fleet claim on {target!r} required: configuration-error") from None
         hub_configured = False
     if not hub_configured:
+        if require_claim:
+            raise FleetClaimRequiredError(f"fleet claim on {target!r} required: no-hub")
         yield ClaimDecision(granted=False, reason="no-hub")
         return
     connection = _claim_lifecycle._bound_connection(
@@ -1665,11 +1680,13 @@ def repo_claim(
     )
     node_id = resolve_node_id(base_path)
     if not _node_id_is_claimable(node_id):
+        if require_claim:
+            raise FleetClaimRequiredError(f"fleet claim on {target!r} required: no-identity")
         _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
         yield ClaimDecision(granted=False, reason="no-identity", detail=node_id)
         return
     ttl_seconds = int(ttl_seconds)
-    loss_policy = _claim_loss_policy(claim_loss_policy)
+    loss_policy = "abort" if require_claim else _claim_loss_policy(claim_loss_policy)
     holder = uuid4().hex
     acquire_kwargs: dict[str, Any] = {
         "holder": holder,
@@ -1705,17 +1722,18 @@ def repo_claim(
             owner=decision.owner,
         )
     if not decision.granted and decision.reason == "hub-unavailable":
-        _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         _schedule_orphan_release(
             target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
         )
+        if require_claim:
+            raise FleetClaimRequiredError(f"fleet claim on {target!r} required: hub-unavailable")
+        _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         yield decision
         return
     if not decision.granted and decision.reason == "missing":
         # Twice refused with no owner to blame: a hub inconsistency, not a
         # real holder. Fail open on the local lock rather than refusing a
         # target nobody holds.
-        _LOG.warning("fleet hub refused %s twice without naming an owner; relying on the local run lock", target)
         if ambiguous_initial_acquire:
             # A final missing result cannot account for an earlier request
             # still in flight. Preserve degraded admission and fence any
@@ -1723,6 +1741,9 @@ def repo_claim(
             _schedule_orphan_release(
                 target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
+        if require_claim:
+            raise FleetClaimRequiredError(f"fleet claim on {target!r} required: missing")
+        _LOG.warning("fleet hub refused %s twice without naming an owner; relying on the local run lock", target)
         yield decision
         return
     if not decision.granted:
@@ -1812,6 +1833,11 @@ def repo_claim(
     # when repo_claim was entered off the main thread.
     cancel_event = threading.Event()
     owner_thread = threading.current_thread()
+    credential_details: list[str | None] = []
+
+    def _credential_loss(_reason: str | None) -> None:
+        if on_credential_failure is not None:
+            on_credential_failure(credential_details[0])
 
     def _notify_loss(reason: str) -> None:
         if loss_policy == "continue":
@@ -1819,18 +1845,16 @@ def repo_claim(
                 "fleet claim heartbeat for %s lost ownership (%s); continuing on the local run lock", target, reason
             )
             return
+        hint = "" if require_claim else f" (opt out with {CLAIM_LOSS_ENV}=continue)"
         _LOG.warning(
-            "fleet claim heartbeat for %s lost ownership (%s); aborting the guarded run (opt out with %s=continue)",
-            target,
-            reason,
-            CLAIM_LOSS_ENV,
+            "fleet claim heartbeat for %s lost ownership (%s); aborting the guarded run%s", target, reason, hint
         )
         _abort_claim_owner(
             target,
             reason,
             owner_thread=owner_thread,
             cancel_event=cancel_event,
-            on_claim_lost=on_claim_lost,
+            on_claim_lost=_credential_loss if require_claim and reason == "auth-failed" else on_claim_lost,
             stop_event=lease.stopped,
             _interrupt_dispatcher=lease._dispatch_interrupt,
         )
@@ -1877,6 +1901,12 @@ def repo_claim(
                     warned_unavailable = True
                 continue
             if outcome.reason == "auth-failed":
+                if require_claim:
+                    # Keep the credential channel, with the same bounded abort
+                    # that prevents a blocking loss callback from suppressing cancellation.
+                    credential_details.append(outcome.detail)
+                    lease.terminate(outcome.reason, notify=True)
+                    return
                 # Terminal credential failures disarm expiry without adding
                 # library signaling. Preserve the caller's credential channel.
                 if not lease.terminate(outcome.reason):
@@ -1898,7 +1928,7 @@ def repo_claim(
             if outcome.reason in ("held", "quota") or outcome.reason in TERMINAL_CLAIM_REFUSALS:
                 lease.terminate(outcome.reason, notify=True)
                 return
-            if lease.terminate(outcome.reason):
+            if lease.terminate(outcome.reason, notify=require_claim) and not require_claim:
                 _LOG.warning(
                     "fleet claim heartbeat for %s lost the claim (%s); continuing on the local run lock",
                     target,

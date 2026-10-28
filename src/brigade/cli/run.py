@@ -211,7 +211,8 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             ".brigade/config.json sets run_lock_wait_seconds."
         ),
     )
-    parser.add_argument(
+    fleet_claim = parser.add_mutually_exclusive_group()
+    fleet_claim.add_argument(
         "--no-fleet-claim",
         action="store_true",
         help=(
@@ -219,6 +220,11 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
             "Escape hatch when a claim left by a crashed run blocks this repo; "
             "see also `brigade fleet claims --release`."
         ),
+    )
+    fleet_claim.add_argument(
+        "--require-fleet-claim",
+        action="store_true",
+        help="Require a confirmed fleet hub repo claim before starting work, and abort on claim loss.",
     )
     parser.add_argument(
         "--allow-dirty",
@@ -686,7 +692,11 @@ def dispatch(args) -> int:
                 file=sys.stderr,
             )
         finally:
-            _thread.interrupt_main()
+            if getattr(args, "require_fleet_claim", False):
+                # Required claims deliver the interrupt through their bounded abort publisher.
+                claim_cancellation.request()
+            else:
+                _thread.interrupt_main()
 
     try:
         with ExitStack() as lifecycle:
@@ -772,6 +782,7 @@ def dispatch(args) -> int:
                         supersede_dead_owner=dead_owner,
                         on_credential_failure=abort_on_fleet_credential_failure,
                         on_claim_lost=abort_on_fleet_claim_lost,
+                        **({"require_claim": True} if getattr(args, "require_fleet_claim", False) else {}),
                     )
                 )
                 fleet_claim_granted = bool(getattr(claim_decision, "granted", False))
@@ -1281,6 +1292,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--no-evidence")
     if getattr(args, "no_fleet_claim", False):
         argv.append("--no-fleet-claim")
+    if getattr(args, "require_fleet_claim", False):
+        argv.append("--require-fleet-claim")
     if args.sandbox is not None:
         argv.extend(["--sandbox", args.sandbox])
     if args.codex_transport is not None:
