@@ -38,7 +38,7 @@ It is meant for people running real tools, real docs, and real automation across
 
 The cookbook documents the broader setup. This package provides the local workspace wiring.
 
-The preferred `--orchestrator` spelling for Fleet preferences is available on main for the next release. `--chef` remains an alias, and persisted/JSON `chef` fields are unchanged. Published 0.30.0 bridges do not include every main-branch change. Command examples here retain `brigade`, which the documented installation supplies.
+The preferred `--orchestrator` spelling for Fleet preferences is available on main for the next release. `--chef` remains an alias, and persisted/JSON `chef` fields are unchanged. New `roster init` output and the `minimal-single-cli`, `review-heavy` and `budget-open-weight` presets name the planner seat `orchestrator` on main; their 0.30.0 equivalents use `chef`. Existing rosters using either name remain valid. Command examples here retain `brigade`, which the documented installation supplies.
 
 ## Plain-English glossary
 
@@ -334,6 +334,8 @@ Use `brigade work import issue-repairs` when issue-backed local tasks need revie
 `brigade run "<task>"` is the agent orchestration path.
 One orchestrator plans the work, Brigade Stack dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
+
+With a Fleet `impl` preference, naming any roster seat in task prose suppresses the default worker pin and leaves planning to the orchestrator. This includes the new default seat name `orchestrator`, even in a task such as “Fix the orchestrator module”. Use an explicit `--worker SEAT` when you want direct dispatch regardless of the task wording.
 
 Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
 only when a run persists `run_budget` or `verification_contract.budget` (#593).
