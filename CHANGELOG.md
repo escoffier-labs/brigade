@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add an internal POSIX Hub identity store with signed history, endpoint bindings, and rollback floors. Preserve primary write failures in identity and trust snapshots. Identity migration and message opening/sealing remain unfinished.
+
 - Add an internal POSIX trust snapshot for manifest anchors, signed membership and revocations, rollback floors, and attributed conflicts. Separate budgets protect authenticated conflict evidence from unsigned claims. Message opening and sealing remain unfinished.
 
 - Add internal POSIX key custody and signed fleet-statement validation for future encrypted clients. Client opening and sealing remain unimplemented.

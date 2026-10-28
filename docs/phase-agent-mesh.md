@@ -1094,6 +1094,14 @@ owner can still ack it.
 
 ## D4. Hub identity
 
+Current foundation status: the offline POSIX identity store persists signed
+identity history, endpoint bindings, signer-global marks, identity floors and
+conflict evidence. First observation is `observed`. Caller-confirmed operator
+or invite provenance is separate from policy freshness, which remains
+`unproven`. Replacement and migration are refused. The cross-store journal,
+peer-use evaluator and live client integration remain unimplemented, so this
+library does not complete slice 2b or activate message encryption.
+
 The pin store is per hub, so whoever controls the hub id controls which pins
 apply. Round 1 let a hub reset that namespace by serving a new random id. The
 hub identity is now a key the hub process does not hold.
