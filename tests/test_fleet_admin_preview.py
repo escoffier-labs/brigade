@@ -227,15 +227,15 @@ def test_observed_reporting_leads_with_observation_scope_before_details():
         ("owners", ["Projects", "Pull requests", "Repositories", "Run history", "Checks", "Ownership"], "Ownership"),
         (
             "roster",
-            ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"],
+            ["Live routing", "Saved assignments", "Skills", "MCP servers", "PR rules", "Reporting"],
             "Live routing",
         ),
         (
             "policy",
-            ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"],
+            ["Live routing", "Saved assignments", "Skills", "MCP servers", "PR rules", "Reporting"],
             "Saved assignments",
         ),
-        ("stats", ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"], "Reporting"),
+        ("stats", ["Live routing", "Saved assignments", "Skills", "MCP servers", "PR rules", "Reporting"], "Reporting"),
     ],
 )
 def test_section_tabs_have_exact_current_destination_and_feature_gated_discovery(enabled, active, labels, current):
