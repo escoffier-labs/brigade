@@ -53,6 +53,68 @@ def test_fallback_preserves_hash_inside_quoted_values(monkeypatch):
     assert payload["label"] == "value # not comment"
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (r"value = 'C:\tools\runner.exe'", {"value": r"C:\tools\runner.exe"}),
+        (r"value = '\\server\share\'", {"value": "\\\\server\\share\\"}),
+        (r"value = '\n\t\u0041'", {"value": r"\n\t\u0041"}),
+        (r"value = 'C:\temp\' # ignored", {"value": "C:\\temp\\"}),
+        (r"value = 'C:\temp\#data' # ignored", {"value": r"C:\temp\#data"}),
+        (r"value = ['C:\temp\', 'next']", {"value": ["C:\\temp\\", "next"]}),
+        (r"value = {path = 'C:\temp\', label = 'next'}", {"value": {"path": "C:\\temp\\", "label": "next"}}),
+        ("value = [\n  'C:\\temp\\', # ignored\n  'next',\n]", {"value": ["C:\\temp\\", "next"]}),
+        ("value = ''", {"value": ""}),
+        ("value = 'a\u0085b\u2028c\u2029d'", {"value": "a\u0085b\u2028c\u2029d"}),
+        (r'value = "C:\\tools\\runner.exe"', {"value": r"C:\tools\runner.exe"}),
+    ],
+)
+def test_fallback_preserves_literal_string_backslashes(monkeypatch, source, expected):
+    if toml_compat._stdlib_tomllib is not None:
+        assert toml_compat.loads(source) == expected
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    assert toml_compat.loads(source) == expected
+
+
+@pytest.mark.parametrize("value", ["'", "'unfinished", "'one' 'two'", "'one'two'", "'bad\x00'", "'bad\x7f'"])
+def test_fallback_rejects_malformed_literal_strings(monkeypatch, value):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    with pytest.raises(toml_compat.TOMLDecodeError):
+        toml_compat.loads(f"value = {value}")
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "",
+        r"C:\tools\runner.exe",
+        "C:\\temp\\",
+        "both 'single' and \"double\" quotes",
+        "apostrophe's C:\\temp\\",
+        "line\nwith\ttabs\rand\x00controls\x7f",
+        "café \U0001f355",
+        "a\u0085b\u2028c\u2029d",
+        "quoted's a\u0085b\u2028c\u2029d",
+    ],
+)
+def test_formatted_strings_round_trip_with_both_parsers(monkeypatch, value):
+    source = f"value = {toml_compat.format_toml_value(value)}"
+    assert "\n" not in source
+    if toml_compat._stdlib_tomllib is not None:
+        assert toml_compat.loads(source) == {"value": value}
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    assert toml_compat.loads(source) == {"value": value}
+
+
+def test_fallback_preserves_literal_strings_with_crlf_lines(monkeypatch):
+    monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+
+    assert toml_compat.loads("value = 'C:\\temp\\'\r\nnext = 'ok'\r\n") == {"value": "C:\\temp\\", "next": "ok"}
+
+
 def test_fallback_loads_multiline_array_of_inline_tables(monkeypatch):
     monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
 
