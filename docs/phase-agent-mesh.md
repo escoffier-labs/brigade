@@ -46,8 +46,8 @@ URLs. Claims the research could not confirm from a primary source are marked
 UNVERIFIED.
 
 Planned commands appear without the `brigade` prefix, for example "the planned
-`fleet keys accept` subcommand", because none of them exist yet. Commands
-written with the prefix exist on `main` today.
+`fleet keys accept` subcommand", to distinguish them from implemented commands. Commands
+written with the prefix are implemented.
 
 ## Decisions at a glance
 
@@ -1096,6 +1096,16 @@ text toward a principal that was never pinned by withholding its key.
 
 Losing a key loses only the mail sealed to it. The routing row stays and the
 owner can still ack it.
+
+### Offline local custody commands
+
+`brigade fleet keys init`, `brigade fleet keys show` and `brigade fleet keys rotate` prepare and inspect local keys. Each requires explicit `--principal` and `--hub-id` inputs. These inputs assert the operator's intended scope. They do not authenticate an endpoint, enroll a principal or accept trust. The commands do not publish keys or perform network requests, and bypass global error recording and update refresh.
+
+`init` creates custody or flushes an existing generation without rotation. `show` is read-only and fails if custody is missing. `show --record` exports the active self-signed public record as canonical JSON. It is mutually exclusive with `--json`, which prints a public summary including the full fingerprint. `rotate` runs once locally and retains retired keys and retry material. No command exports private keys or retry bytes.
+
+Custody requires POSIX support, physical paths, owner-only directories at exactly 0700 and private files at exactly 0600. The Brigade home must already have the required permissions if it exists. The operator must correct a preexisting 0755 home to 0700. The commands do not repair permissions or resolve symlinks. Native Windows custody is refused. Initialization that fails while loading the crypto backend may leave empty private directories, without a key record.
+
+Do not automatically retry a failed rotation or one whose output was lost. Use read-only `show` for the same scope to inspect the saved kid, then explicitly use `init` to flush the existing generation. A successful `show` alone does not flush directory durability. If custody is unexpectedly missing after rotation, stop and investigate instead of creating replacement custody. A first-time user with no prior rotation can initialize custody normally. Network identity verification, publication, peer acceptance commands, inbox opening and send/reply sealing remain unfinished.
 
 ### Current peer acceptance library
 

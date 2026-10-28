@@ -315,6 +315,8 @@ Files:
   accepted identity still has D4's existing semantics, without claiming current
   policy from an id alone. Never derive a new pin namespace from a fetch.
 
+Current CLI slice: `brigade fleet keys init`, `brigade fleet keys show` (including `--record`) and `brigade fleet keys rotate` expose offline custody only. All require explicit principal and canonical Hub id inputs. `init` separates creation or durability reconciliation from read-only inspection. Rotation never publishes or retries automatically. These commands bypass global diagnostics and update refresh. Acceptance, manifest, signing, pruning and network commands above remain planned. See the offline custody section in `phase-agent-mesh.md` for permissions, output and lost-return recovery.
+
 Current local custody foundation: private files require exactly 0600, and
 `<brigade_home>`, `fleet` and `mesh-keys` require current-user ownership and
 exactly 0700. Every custody-path component, including ancestors, must be
