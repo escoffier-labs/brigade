@@ -432,10 +432,20 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
         )
         created = True
         trust._private(destination)
-        with os.fdopen(destination, "wb", closefd=False) as stream:
+        stream = os.fdopen(destination, "wb", closefd=False)
+        stream_completed = False
+        try:
             stream.write(raw)
             stream.flush()
             os.fsync(destination)
+            stream_completed = True
+        finally:
+            try:
+                stream.close()
+            except BaseException:
+                if stream_completed:
+                    raise
+                # A close-time reflush must preserve the active writer failure.
         # Ownership ends before the one close attempt, including consumed-close
         # errors/cancellation. Never publish a file whose close was ambiguous.
         closing, destination = destination, None
@@ -454,7 +464,7 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
         if created:
             try:
                 dirfd.unlink_child(descriptor, temporary)
-            except OSError:
+            except FileNotFoundError:
                 pass  # Only this attempt's temporary; it may already be gone.
             except BaseException:
                 if completed:
