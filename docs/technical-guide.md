@@ -335,7 +335,7 @@ Use `brigade work import issue-repairs` when issue-backed local tasks need revie
 One orchestrator plans the work, Brigade Stack dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
 
-With a Fleet `impl` preference, naming any roster seat in task prose suppresses the default worker pin and leaves planning to the orchestrator. This includes the new default seat name `orchestrator`, even in a task such as “Fix the orchestrator module”. Use an explicit `--worker SEAT` when you want direct dispatch regardless of the task wording.
+With a Fleet `impl` preference, naming any roster seat in task prose suppresses the default worker pin and leaves planning to the orchestrator. This includes the new default seat name `orchestrator`, even in a task such as "Fix the orchestrator module". Use an explicit `--worker SEAT` when you want direct dispatch regardless of the task wording.
 
 Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
 only when a run persists `run_budget` or `verification_contract.budget` (#593).
