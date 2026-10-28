@@ -9,7 +9,7 @@ The root README is a short landing page. Every topic that left the previous READ
 
 | Old README topic | Durable home |
 | --- | --- |
-| Kitchen scene / social banner / demo SVG | Kept as assets under `docs/assets/`, not linked from README. Brand metaphor: [overview](overview.md#mise-en-place-brand-metaphor) |
+| Kitchen scene / social banner / demo SVG (historical topic labels) | Preserved as assets under `docs/assets/`, not linked from README. Current project identity and description: [overview](overview.md#project-identity) |
 | Badge row (CI, PyPI, Python, Rust, Go, license) | Restored below the README's primary links |
 | "The loop" five-step circuit | [overview](overview.md#verified-work-loop) |
 | Agent paste-ready install prompt | [agents guide](agents-guide.md#paste-ready-install-prompt), [agent-assisted setup](agent-assisted-setup.md#paste-ready-install-prompt) |
@@ -33,7 +33,7 @@ The root README is a short landing page. Every topic that left the previous READ
 | Short "why not something else" bullets | Detailed tables in [comparison](comparison.md), linked from the README |
 | "What Brigade is not" / name collisions | [execution model](execution-model.md) and project identity in the README footer |
 | "Why I built this" origin story | [overview](overview.md#why-this-exists), Cookbook link retained there |
-| Public vs historical names | [overview](overview.md#mise-en-place-brand-metaphor), [technical guide](technical-guide.md) |
+| Public vs historical names | Current project identity: [overview](overview.md#project-identity); historical names: [technical guide](technical-guide.md) |
 | Harness matrix | [technical guide](technical-guide.md) |
 | Brigadeclaw Q&A pointer | [https://brigade.tools/brigadeclaw](https://brigade.tools/brigadeclaw) (site). Not required on README |
 | Docs index and license | README Reference section |

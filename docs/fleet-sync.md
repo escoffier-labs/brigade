@@ -200,8 +200,8 @@ Hub (`src/brigade/fleet_hub.py`):
   prints the same pin (and JSON includes `"preference"`). `brigade run`
   honors `impl` as the default worker when `--worker` is omitted and that
   seat exists locally. `--worker` and a spoken roster seat name still win;
-  two named seats leave worker unset so chef plans, and the planner-visible
-  prefix is only added in that fallback. The hub is the pin, not the
+  two named seats leave worker unset so the orchestrator plans, and the
+  planner-visible prefix is only added in that fallback. The hub is the pin, not the
   source of truth: a down hub keeps the last cache.
 
 Client (`src/brigade/fleet_client.py`, hooked from `run_journal.append_event`
