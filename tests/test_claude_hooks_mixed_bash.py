@@ -20,6 +20,17 @@ from brigade.selection import Selection
 SESSION = "mixed-bash-session"
 
 
+@pytest.mark.parametrize("null_sink", ["/dev/null", "nul"])
+def test_native_null_sink_is_not_a_redirect_file(monkeypatch, null_sink):
+    monkeypatch.setattr(runtime.os, "devnull", null_sink)
+    assert runtime._redirect_file_targets([">", null_sink]) == []
+
+
+def test_posix_nul_filename_is_a_redirect_file(monkeypatch):
+    monkeypatch.setattr(runtime.os, "devnull", "/dev/null")
+    assert runtime._redirect_file_targets([">", "nul"]) == ["nul"]
+
+
 def event(target: Path, name: str, **fields):
     return runtime.handle_payload(name, {"session_id": SESSION, "cwd": str(target), **fields})
 

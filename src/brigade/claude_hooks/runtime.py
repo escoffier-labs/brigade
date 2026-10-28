@@ -1320,7 +1320,8 @@ def _path_targets_brigade_internal_artifact(target: Path, raw: object) -> bool:
 def _redirect_file_targets(tokens: list[str]) -> list[str]:
     """Files that output redirections write.
 
-    Descriptor duplication (``2>&1``, ``>&2``) and ``/dev/null`` write no file.
+    Descriptor duplication (``2>&1``, ``>&2``), ``/dev/null``, and the native
+    null device write no file.
     """
     targets = []
     for index, token in enumerate(tokens):
@@ -1329,7 +1330,7 @@ def _redirect_file_targets(tokens: list[str]) -> list[str]:
         following = tokens[index + 1] if index + 1 < len(tokens) else ""
         if token == ">&" and (following.isdigit() or following == "-"):
             continue
-        if following != "/dev/null":
+        if following != "/dev/null" and os.path.normcase(following) != os.path.normcase(os.devnull):
             targets.append(following)
     return targets
 
