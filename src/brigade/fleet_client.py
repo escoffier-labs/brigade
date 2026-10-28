@@ -230,7 +230,7 @@ def brigade_home() -> Path:
     return Path.home() / ".brigade"
 
 
-def load_fleet_settings() -> dict[str, str]:
+def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
     """Return {"hub_url", "admin_token", "node_token"}; values may be empty.
 
     Precedence: ``BRIGADE_FLEET_HUB_URL`` over ``[fleet] hub_url``;
@@ -240,12 +240,13 @@ def load_fleet_settings() -> dict[str, str]:
     whitespace-only environment value is treated as unset. The file is
     consulted for whichever value the environment did not set. No fallback
     between the two token kinds happens here (see ``load_fleet_config``).
+    Strict callers refuse read or parsing failures when consulting that file.
     """
     hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
     admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
     node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
     if not (hub_url and admin_token and node_token):
-        section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name)
+        section = _read_fleet_section(brigade_home() / FLEET_CONFIG_REL_PATH.name, strict=strict)
         if not hub_url and isinstance(section.get("hub_url"), str):
             hub_url = section["hub_url"].strip()
         if not admin_token:
@@ -259,7 +260,7 @@ def load_fleet_settings() -> dict[str, str]:
     return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
 
 
-def load_fleet_config() -> dict[str, str]:
+def load_fleet_config(*, strict: bool = False) -> dict[str, str]:
     """Return {"hub_url": ..., "token": ...}; values may be absent (empty).
 
     ``token`` is the credential this machine sends as itself: its node token
@@ -269,7 +270,7 @@ def load_fleet_config() -> dict[str, str]:
     one WARNING per process when a hub is configured. See ``load_fleet_settings`` for precedence.
     """
     global _SHARED_TOKEN_WARNED
-    settings = load_fleet_settings()
+    settings = load_fleet_settings(strict=True) if strict else load_fleet_settings()
     token = settings["node_token"]
     if not token and settings["admin_token"]:
         token = settings["admin_token"]
@@ -293,12 +294,14 @@ def _read_token_file(raw_path: str) -> str:
     return ""
 
 
-def _read_fleet_section(config_path: Path) -> dict[str, Any]:
+def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str, Any]:
     if not config_path.is_file():
         return {}
     try:
         payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError):
+        if strict:
+            raise FleetClientError("fleet configuration could not be read") from None
         return {}
     section = payload.get("fleet") if isinstance(payload, dict) else None
     return section if isinstance(section, dict) else {}
@@ -1664,7 +1667,7 @@ def repo_claim(
     supersede once. The heartbeat's re-acquire never supersedes.
     """
     try:
-        config = load_fleet_config()
+        config = load_fleet_config(strict=True) if require_claim else load_fleet_config()
         hub_configured = bool(config["hub_url"])
     except Exception:
         if require_claim:

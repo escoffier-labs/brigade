@@ -3801,7 +3801,7 @@ def test_run_required_fleet_claim_refuses_without_worker_start(tmp_path, monkeyp
 
     repo = _git_repo_with_roster(tmp_path)
     output_dir = tmp_path / "required-artifacts"
-    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "", "token": ""})
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda **kw: {"hub_url": "", "token": ""})
     worker_calls = []
     monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: worker_calls.append(True) or 0)
     rc = cli.main(["run", "inspect", "--cwd", str(repo), "--output-dir", str(output_dir), "--require-fleet-claim"])
@@ -3832,7 +3832,7 @@ def test_run_required_claim_revocation_cancels_once_with_credential_receipt(tmp_
     started = threading.Event()
     interrupted = threading.Event()
     interrupts = []
-    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda **kw: {"hub_url": "https://hub.example.invalid"})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path: "fake-node")
     monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
     monkeypatch.setattr(fleet_client, "acquire_claim", lambda *a, **kw: fleet_client.ClaimDecision(True, "ok"))

@@ -130,7 +130,7 @@ execution, or exit 2 with a fixed claim refusal and a terminal failure receipt.
   `tests/test_fleet_claim_admission.py`, `tests/test_run_cli.py` and
   `tests/test_fleet_claim_loss_cancellation.py`.
 - [x] Parent reviews the complete diff and runs the required full gate before
-  PR delivery, with no full-slot timeout retries or bypasses. Final receipt
+  PR delivery, with no full-slot timeout retries or bypasses. Initial receipt
   `20261028-051555-work-verify-ed2145`: 48127 passed, 0 failed, 269 skipped;
   combined coverage 85%. Earlier failed runs remain recorded. The final run
   used Python 3.12, four shards and a short private temporary root.

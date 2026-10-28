@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from brigade import fleet_client
@@ -49,7 +51,9 @@ def test_required_claim_refuses_real_hub_outage(enrolled_hub, monkeypatch):
 @pytest.fixture()
 def machine(monkeypatch):
     monkeypatch.setattr(
-        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid", "token": "fake-original"}
+        fleet_client,
+        "load_fleet_config",
+        lambda **kw: {"hub_url": "https://hub.example.invalid", "token": "fake-original"},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path: NODE_A)
 
@@ -64,10 +68,10 @@ def test_required_claim_refuses_unconfirmed_admission(machine, monkeypatch, reas
 
     monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
     if reason == "no-hub":
-        monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "", "token": ""})
+        monkeypatch.setattr(fleet_client, "load_fleet_config", lambda **kw: {"hub_url": "", "token": ""})
     elif reason == "configuration-error":
 
-        def unreadable():
+        def unreadable(**kwargs):
             raise OSError("fake-private-config-detail")
 
         monkeypatch.setattr(fleet_client, "load_fleet_config", unreadable)
@@ -84,6 +88,32 @@ def test_required_claim_refuses_unconfirmed_admission(machine, monkeypatch, reas
     assert len(attempts) == (2 if reason == "missing" else 0)
     if attempts:
         assert attempts[0] == attempts[1]
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+def test_required_claim_distinguishes_real_configuration_read_failures(tmp_path, monkeypatch, failure):
+    if failure == "unreadable" and (os.name != "posix" or os.geteuid() == 0):
+        pytest.skip("unreadable file requires POSIX permissions and a non-root user")
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    config = tmp_path / "fleet.toml"
+    config.write_text(
+        "[fleet]\n" if failure == "unreadable" else "[fleet]\ninvalid = [fake-private-config-detail", encoding="utf-8"
+    )
+    if failure == "unreadable":
+        config.chmod(0)
+    try:
+        with pytest.raises(fleet_client.FleetClaimRequiredError, match="configuration-error") as refusal:
+            with fleet_client.repo_claim("fake-repo", require_claim=True):
+                pytest.fail("invalid configuration admitted guarded work")
+        assert str(refusal.value) == "fleet claim on 'fake-repo' required: configuration-error"
+        assert refusal.value.__cause__ is None
+        with fleet_client.repo_claim("fake-repo") as decision:
+            assert not decision.granted
+            assert decision.reason == "no-hub"
+    finally:
+        config.chmod(0o600)
 
 
 def test_required_claim_accepts_real_grant_and_refuses_revoked_token(enrolled_hub):
