@@ -292,14 +292,15 @@ def test_bounded_reader_delegates_read_only_open_and_closes_descriptor(
 
     reads = iter((b"{}", b""))
 
-    monkeypatch.setattr(attestation_input.dirfd, "open_file_nofollow", open_file_nofollow)
-    monkeypatch.setattr(attestation_input.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFREG))
-    monkeypatch.setattr(attestation_input.os, "read", lambda *_: next(reads))
-    monkeypatch.setattr(attestation_input.os, "close", closed.append)
+    with monkeypatch.context() as patch:
+        patch.setattr(attestation_input.dirfd, "open_file_nofollow", open_file_nofollow)
+        patch.setattr(attestation_input.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFREG))
+        patch.setattr(attestation_input.os, "read", lambda *_: next(reads))
+        patch.setattr(attestation_input.os, "close", closed.append)
 
-    assert attestation_input.read_bounded_file(path) == b"{}"
-    assert open_calls == [(path, os.O_RDONLY)]
-    assert closed == [47]
+        assert attestation_input.read_bounded_file(path) == b"{}"
+        assert open_calls == [(path, os.O_RDONLY)]
+        assert closed == [47]
 
 
 def test_bounded_reader_refuses_nonregular_descriptor_and_closes(
@@ -309,14 +310,15 @@ def test_bounded_reader_refuses_nonregular_descriptor_and_closes(
     path = tmp_path / "input.json"
     closed: list[int] = []
 
-    monkeypatch.setattr(attestation_input.dirfd, "open_file_nofollow", lambda *_: 48)
-    monkeypatch.setattr(attestation_input.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFDIR))
-    monkeypatch.setattr(attestation_input.os, "close", closed.append)
+    with monkeypatch.context() as patch:
+        patch.setattr(attestation_input.dirfd, "open_file_nofollow", lambda *_: 48)
+        patch.setattr(attestation_input.os, "fstat", lambda _: SimpleNamespace(st_mode=stat.S_IFDIR))
+        patch.setattr(attestation_input.os, "close", closed.append)
 
-    with pytest.raises(attestation_input.AttestationInputError, match="regular file"):
-        attestation_input.read_bounded_file(path)
+        with pytest.raises(attestation_input.AttestationInputError, match="regular file"):
+            attestation_input.read_bounded_file(path)
 
-    assert closed == [48]
+        assert closed == [48]
 
 
 def test_bounded_reader_accepts_boundary_and_closes_after_overflow(

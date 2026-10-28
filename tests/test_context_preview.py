@@ -656,11 +656,12 @@ def test_runtime_unsupported_filesystem_operations_are_opaque(tree, monkeypatch,
     def unsupported(*args, **kwargs):
         raise error(str(repo / "private"))
 
-    monkeypatch.setattr(os, primitive, unsupported)
-    result = inspect(repo, cwd)
-    assert result["status"] == "not_evaluated"
-    assert "posix_nofollow_required" in result["limitations"]
-    assert str(repo) not in json.dumps(result)
+    with monkeypatch.context() as patch:
+        patch.setattr(os, primitive, unsupported)
+        result = inspect(repo, cwd)
+        assert result["status"] == "not_evaluated"
+        assert "posix_nofollow_required" in result["limitations"]
+        assert str(repo) not in json.dumps(result)
 
 
 @pytest.mark.parametrize("mutation", ["grow", "replace", "remove", "override", "absent_addition", "symlink"])

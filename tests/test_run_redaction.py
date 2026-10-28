@@ -468,45 +468,46 @@ def test_open_directory_handle_closes_fd_once_on_baseexception(
             closed.append(fd)
         return real_close(fd)
 
-    monkeypatch.setattr(run_journal, "_open_nofollow", capture_open)
-    monkeypatch.setattr(run_redaction.os, "close", track_close)
-    if failure_point == "fstat":
-        monkeypatch.setattr(
-            run_redaction.os,
-            "fstat",
-            lambda fd: (_ for _ in ()).throw(exception_type()),
-        )
-    elif failure_point == "identity":
+    with monkeypatch.context() as patch:
+        patch.setattr(run_journal, "_open_nofollow", capture_open)
+        patch.setattr(run_redaction.os, "close", track_close)
+        if failure_point == "fstat":
+            patch.setattr(
+                run_redaction.os,
+                "fstat",
+                lambda fd: (_ for _ in ()).throw(exception_type()),
+            )
+        elif failure_point == "identity":
 
-        class ExplodingIdentity:
-            def __init__(self, fd):
-                info = real_fstat(fd)
-                self.st_mode = info.st_mode
-                self.st_ino = info.st_ino
+            class ExplodingIdentity:
+                def __init__(self, fd):
+                    info = real_fstat(fd)
+                    self.st_mode = info.st_mode
+                    self.st_ino = info.st_ino
 
-            @property
-            def st_dev(self):
-                raise exception_type()
+                @property
+                def st_dev(self):
+                    raise exception_type()
 
-        monkeypatch.setattr(
-            run_redaction.os,
-            "fstat",
-            ExplodingIdentity,
-        )
-    else:
-        monkeypatch.setattr(
-            run_journal,
-            "_chmod_fd_or_path",
-            lambda *args, **kwargs: (_ for _ in ()).throw(exception_type()),
-        )
+            patch.setattr(
+                run_redaction.os,
+                "fstat",
+                ExplodingIdentity,
+            )
+        else:
+            patch.setattr(
+                run_journal,
+                "_chmod_fd_or_path",
+                lambda *args, **kwargs: (_ for _ in ()).throw(exception_type()),
+            )
 
-    with pytest.raises(exception_type):
-        run_redaction._open_directory_handle(directory, category="test directory")
+        with pytest.raises(exception_type):
+            run_redaction._open_directory_handle(directory, category="test directory")
 
-    assert len(opened) == 1
-    assert closed == opened
-    with pytest.raises(OSError):
-        real_fstat(opened[0])
+        assert len(opened) == 1
+        assert closed == opened
+        with pytest.raises(OSError):
+            real_fstat(opened[0])
 
 
 def test_open_directory_handle_preserves_baseexception_when_close_raises(
@@ -530,18 +531,19 @@ def test_open_directory_handle_preserves_baseexception_when_close_raises(
         real_close(fd)
         raise OSError("simulated close failure")
 
-    monkeypatch.setattr(run_journal, "_open_nofollow", capture_open)
-    monkeypatch.setattr(
-        run_redaction.os,
-        "fstat",
-        lambda fd: (_ for _ in ()).throw(KeyboardInterrupt()),
-    )
-    monkeypatch.setattr(run_redaction.os, "close", close_then_raise)
+    with monkeypatch.context() as patch:
+        patch.setattr(run_journal, "_open_nofollow", capture_open)
+        patch.setattr(
+            run_redaction.os,
+            "fstat",
+            lambda fd: (_ for _ in ()).throw(KeyboardInterrupt()),
+        )
+        patch.setattr(run_redaction.os, "close", close_then_raise)
 
-    with pytest.raises(KeyboardInterrupt):
-        run_redaction._open_directory_handle(directory, category="test directory")
+        with pytest.raises(KeyboardInterrupt):
+            run_redaction._open_directory_handle(directory, category="test directory")
 
-    assert closed == opened
+        assert closed == opened
 
 
 def test_redaction_quarantines_rewrites_rechains_and_reprojects(tmp_path):
