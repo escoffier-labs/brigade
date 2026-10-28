@@ -24,6 +24,7 @@ def test_shard_runner_aggregates_real_results_and_preserves_failure_output(tmp_p
             sys.executable,
             str(ROOT / "scripts/verify_parallel.py"),
             str(suite),
+            f"--confcutdir={tmp_path}",
             "--cov-reset",
             f"--cov={tmp_path}",
             "--cov-fail-under=0",
@@ -57,7 +58,14 @@ def test_shard_runner_keeps_subtest_counts_separate(tmp_path):
         "                self.assertGreater(value, 0)\n"
     )
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/verify_parallel.py"), str(suite), "--cov-reset", f"--cov={tmp_path}"],
+        [
+            sys.executable,
+            str(ROOT / "scripts/verify_parallel.py"),
+            str(suite),
+            f"--confcutdir={tmp_path}",
+            "--cov-reset",
+            f"--cov={tmp_path}",
+        ],
         env=dict(os.environ, BRIGADE_VERIFY_SHARDS="2"),
         cwd=ROOT,
         capture_output=True,
@@ -95,7 +103,12 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
         "    time.sleep(30)\n"
     )
     runner = subprocess.Popen(
-        [sys.executable, str(ROOT / "scripts/verify_parallel.py"), str(suite)],
+        [
+            sys.executable,
+            str(ROOT / "scripts/verify_parallel.py"),
+            str(suite),
+            f"--confcutdir={tmp_path}",
+        ],
         env=dict(os.environ, BRIGADE_VERIFY_SHARDS="1"),
         cwd=ROOT,
         stdout=subprocess.PIPE,
@@ -137,7 +150,14 @@ def test_combined_coverage_floor_fails_after_successful_shards(tmp_path):
         + "\n".join(f"def unused_{index}():\n    return {index}\n" for index in range(20))
     )
     result = subprocess.run(
-        [sys.executable, str(ROOT / "scripts/verify_parallel.py"), str(suite), "--cov-reset", f"--cov={tmp_path}"],
+        [
+            sys.executable,
+            str(ROOT / "scripts/verify_parallel.py"),
+            str(suite),
+            f"--confcutdir={tmp_path}",
+            "--cov-reset",
+            f"--cov={tmp_path}",
+        ],
         env=dict(os.environ, BRIGADE_VERIFY_SHARDS="2"),
         cwd=ROOT,
         capture_output=True,
