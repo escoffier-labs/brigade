@@ -227,18 +227,27 @@ def set_grants(conn: sqlite3.Connection, raw: object) -> dict[str, Any] | None:
     conn.execute("BEGIN IMMEDIATE")
     try:
         role = classify_principal(conn, principal_id)
-        if role is None:
+        if node and role is None:
             raise messages.MessageError("principal grant target is not active")
         principal: dict[str, Any] | None = (
             {"principal_id": principal_id, "node_id": target}
             if node
             else messages.get_principal(conn, {"action": "get", "name": target})
         )
+        if principal is None:
+            conn.commit()
+            return None
         replace_grants(conn, principal_id, patterns)
         from . import fleet_hub_audit
 
         fleet_hub_audit.append(
-            conn, actor="admin", action="grants.change", subject=principal_id, detail={"grants": patterns}
+            conn,
+            actor="admin",
+            action="grants.change",
+            subject=principal_id,
+            detail={"grants": patterns},
+            known_public_identifiers=frozenset({principal_id})
+            | frozenset(pattern for pattern in patterns if pattern not in WILDCARDS),
         )
         assert principal is not None
         principal["may_send_to"] = patterns

@@ -658,7 +658,7 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
             return None
         if existing[0] != expected_enrollment_id:
             raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
-        conn.execute(
+        changed = conn.execute(
             "UPDATE fleet_message_principals SET revoked_at=? "
             "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
             (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
@@ -668,9 +668,15 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
         fleet_hub_message_keys.revoke(conn, principal_id)
         from . import fleet_hub_audit
 
-        fleet_hub_audit.append(
-            conn, actor="admin", action="member.remove", subject=principal_id, detail={"principal_id": principal_id}
-        )
+        if changed.rowcount == 1:
+            fleet_hub_audit.append(
+                conn,
+                actor="admin",
+                action="member.remove",
+                subject=principal_id,
+                detail={"principal_id": principal_id},
+                known_public_identifiers=frozenset({principal_id}),
+            )
         conn.commit()
     except BaseException:
         conn.rollback()

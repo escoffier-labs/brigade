@@ -631,7 +631,11 @@ def handle(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tup
             from .fleet_hub_message_grants import classify_principal
 
             role = classify_principal(conn, caller)
-            if role is None or (role == "teammate" and params.get("name") != MESSAGE_CREATED):
+            if role is None:
+                from .fleet_hub_messages import MessageAuthError
+
+                raise MessageAuthError("sender is not an active hub principal")
+            if role == "teammate" and params.get("name") != MESSAGE_CREATED:
                 raise EventsError(403, "principal_role_forbidden", "forbidden")
             return 200, _subscribe(conn, params, caller)
         if action == "events_unsubscribe":

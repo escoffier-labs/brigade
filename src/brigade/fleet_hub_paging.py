@@ -58,9 +58,10 @@ _VISIBLE_SQL = """(
             AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller
                 AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))
     ) AND (
+        kind='claims' OR
         (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p
             WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR
-        (kind IN ('claims','nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n
+        (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n
             WHERE n.node_id=recipient AND n.revoked_at IS NULL))
     )
 )"""

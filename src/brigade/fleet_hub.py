@@ -1816,14 +1816,21 @@ def revoke_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None
     from . import fleet_hub_message_keys
 
     with conn:
-        conn.execute("UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id))
+        changed = conn.execute(
+            "UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id)
+        )
         fleet_hub_message_keys.revoke(conn, node_id)
         conn.execute("DELETE FROM fleet_message_send_grants WHERE principal_id=?", (node_id,))
-        if conn.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone():
+        if changed.rowcount == 1:
             from . import fleet_hub_audit
 
             fleet_hub_audit.append(
-                conn, actor="admin", action="member.remove", subject=node_id, detail={"node_id": node_id}
+                conn,
+                actor="admin",
+                action="member.remove",
+                subject=node_id,
+                detail={"node_id": node_id},
+                known_public_identifiers=frozenset({node_id}),
             )
     row = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
     return _node_payload(row) if row is not None else None

@@ -13,6 +13,79 @@ from brigade import fleet_hub_messages as messages
 pytest_plugins = ["tests._fleet_message_fixtures"]
 
 
+def test_revoked_event_subscriber_retains_authentication_failure(mesh, monkeypatch):
+    from tests.test_fleet_mcp_events import SECRET
+
+    conn, _ = mesh
+    principal = messages.get_principal(conn, {"action": "get", "name": "peer"})
+    messages.revoke_principal(
+        conn, {"action": "revoke", "name": "peer", "expected_enrollment_id": principal["enrollment_id"]}
+    )
+    monkeypatch.setattr(events, "_CONFIG", events.EventsConfig(callback_hosts=frozenset({"callback.invalid"})))
+    with pytest.raises(messages.MessageAuthError):
+        events.handle(
+            conn,
+            {
+                "action": "events_subscribe",
+                "name": events.MESSAGE_CREATED,
+                "delivery": {"mode": "webhook", "url": "https://callback.invalid/events", "secret": SECRET},
+            },
+            caller="agent:peer",
+        )
+
+
+@pytest.mark.parametrize("caller", ["node-a", "agent:peer"])
+@pytest.mark.parametrize("owner", ["node-b", "missing-node"])
+def test_claim_snapshot_visibility_matches_legacy_reader_for_inactive_owners(mesh, caller, owner):
+    from brigade import fleet_hub_paging as paging
+
+    conn, _ = mesh
+    if owner == "node-b":
+        fleet_hub.revoke_node(conn, owner)
+    _grant(conn, "agent:peer", [owner])
+    first = paging.page(
+        conn,
+        {"action": "claims", "limit": 1},
+        {"claims": [{"owner_node": owner, "target": f"fixture-{i}"} for i in range(2)]},
+        caller=caller,
+        limit=1,
+        visible=lambda _kind, row: grants.permits(conn, [owner], caller, row["owner_node"]),
+        snapshot_write=True,
+    )
+    assert first["total"] == 2
+    conn.execute(f"UPDATE fleet_read_snapshot_rows SET visible={paging._VISIBLE_SQL}")
+    continued = messages.handle(conn, {"action": "claims", "cursor": first["next_cursor"], "limit": 1}, caller=caller)[
+        1
+    ]
+    assert continued["total"] == 2
+    assert [row["target"] for row in continued["claims"]] == ["fixture-1"]
+
+
+@pytest.mark.parametrize("principal", ["node-b", "agent:peer"])
+def test_replayed_revocation_does_not_duplicate_removal_audit(mesh, principal):
+    conn, _ = mesh
+    if principal.startswith("agent:"):
+        enrolled = messages.get_principal(conn, {"action": "get", "name": "peer"})
+
+        def remove():
+            return messages.revoke_principal(
+                conn, {"action": "revoke", "name": "peer", "expected_enrollment_id": enrolled["enrollment_id"]}
+            )
+    else:
+
+        def remove():
+            return fleet_hub.revoke_node(conn, principal)
+
+    remove()
+    remove()
+    assert (
+        conn.execute(
+            "SELECT COUNT(*) FROM fleet_audit_log WHERE action='member.remove' AND subject=?", (principal,)
+        ).fetchone()[0]
+        == 1
+    )
+
+
 def test_teammate_directory_exposes_public_key_fingerprint_without_key_material(mesh):
     from brigade.fleet_mesh_crypto import decode_binary, fingerprint
     from tests.test_fleet_hub_message_keys import publish, record
@@ -226,3 +299,109 @@ def test_unsupported_agent_roles_fail_closed(mesh, role):
     assert not grants.permits(conn, ["*"], "agent:guest", "node-a")
     with pytest.raises(messages.MessageAuthError):
         _send(conn, "agent:guest", "node-a")
+
+
+@pytest.mark.parametrize("node_id", ["sk-gpu1", "hf_box", "npm_ci", "token.runner"])
+def test_existing_public_node_identifiers_never_block_grants_or_revocation(mesh, node_id):
+    conn, _ = mesh
+    fleet_hub.add_node(conn, node_id)
+    _grant(conn, node_id, ["agent:token.bot", "sk-future"])
+    assert grants.grants_for(conn, node_id) == ["agent:token.bot", "sk-future"]
+    fleet_hub.revoke_node(conn, node_id)
+    assert grants.classify_principal(conn, node_id) is None
+    assert grants.grants_for(conn, node_id) == []
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log WHERE subject=?", (node_id,)).fetchone()[0] == 2
+
+
+@pytest.mark.parametrize("name", ["token.bot", "secret.helper"])
+def test_existing_public_agent_identifiers_never_block_grants_or_revocation(mesh, name):
+    conn, _ = mesh
+    enrolled = messages.add_principal(conn, {"name": name})
+    _grant(conn, "agent:" + name, ["sk-future"])
+    messages.revoke_principal(
+        conn, {"action": "revoke", "name": name, "expected_enrollment_id": enrolled["enrollment_id"]}
+    )
+    assert grants.classify_principal(conn, "agent:" + name) is None
+
+
+@pytest.mark.parametrize("target", ["missing", "peer"])
+def test_agent_grant_management_preserves_missing_and_revoked_targets(mesh, target):
+    conn, _ = mesh
+    if target == "missing":
+        assert _grant(conn, "agent:missing", []) is None
+    else:
+        enrolled = messages.get_principal(conn, {"action": "get", "name": target})
+        messages.revoke_principal(
+            conn, {"action": "revoke", "name": target, "expected_enrollment_id": enrolled["enrollment_id"]}
+        )
+        assert _grant(conn, "agent:peer", ["sk-future"])["may_send_to"] == ["sk-future"]
+        assert grants.classify_principal(conn, "agent:peer") is None
+
+
+@pytest.mark.parametrize("principal", ["sk-gpu1", "agent:token.bot"])
+def test_known_public_identity_audit_context_does_not_mask_sqlite_failure(mesh, principal):
+    conn, _ = mesh
+    if principal.startswith("agent:"):
+        enrolled = messages.add_principal(conn, {"name": principal[6:]})
+
+        def remove():
+            return messages.revoke_principal(
+                conn, {"action": "revoke", "name": principal[6:], "expected_enrollment_id": enrolled["enrollment_id"]}
+            )
+    else:
+        fleet_hub.add_node(conn, principal)
+
+        def remove():
+            return fleet_hub.revoke_node(conn, principal)
+
+    conn.execute(
+        "CREATE TRIGGER reject_known_audit BEFORE INSERT ON fleet_audit_log BEGIN SELECT RAISE(ABORT,'fixture audit storage failure'); END"
+    )
+    conn.commit()
+    for operation in (lambda: _grant(conn, principal, ["hf_future"]), remove):
+        with pytest.raises(sqlite3.IntegrityError, match="fixture audit storage failure"):
+            operation()
+        assert grants.classify_principal(conn, principal) in ("node", "agent")
+        assert grants.grants_for(conn, principal) == []
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log WHERE subject=?", (principal,)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "principal,state,allowed",
+    [
+        ("node-a", "active", True),
+        ("agent:peer", "agent", True),
+        ("agent:peer", "teammate", True),
+        ("agent:peer", "unsupported", False),
+        ("agent:peer", "revoked", False),
+        ("node-a", "revoked", False),
+        ("missing-node", "unknown", False),
+    ],
+)
+def test_existing_message_event_subscription_rechecks_supported_role(mesh, monkeypatch, principal, state, allowed):
+    from brigade import fleet_hub_events_dispatch as dispatch
+
+    conn, _ = mesh
+    if state == "revoked":
+        if principal.startswith("agent:"):
+            conn.execute("UPDATE fleet_message_principals SET revoked_at=1 WHERE principal_id=?", (principal,))
+        else:
+            conn.execute("UPDATE nodes SET revoked_at=1 WHERE node_id=?", (principal,))
+    elif principal.startswith("agent:"):
+        conn.execute("UPDATE fleet_message_principals SET role=? WHERE principal_id=?", (state, principal))
+    conn.commit()
+    calls = []
+
+    def permits(db, caller, subject):
+        calls.append((db, caller, subject))
+        return False
+
+    monkeypatch.setattr(events, "permits", permits)
+    row = {"principal": principal, "name": events.MESSAGE_CREATED, "subject": principal}
+    assert dispatch._still_allowed(conn, row) is (True if allowed else None)
+    row["subject"] = "another-inbox"
+    assert dispatch._still_allowed(conn, row) is (False if allowed else None)
+    assert calls == []
+    row["name"] = "claim.created"
+    assert dispatch._still_allowed(conn, row) is (False if allowed else None)
+    assert calls == ([(conn, principal, "another-inbox")] if allowed else [])

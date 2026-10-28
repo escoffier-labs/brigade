@@ -213,12 +213,9 @@ def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
 def _still_allowed(conn: sqlite3.Connection, row: dict[str, Any]) -> bool | None:
     """True to deliver, False to skip this event, None when the subscriber is revoked (drop the subscription)."""
     principal = row["principal"]
-    active = conn.execute(
-        "SELECT 1 FROM nodes WHERE node_id=? AND revoked_at IS NULL UNION ALL "
-        "SELECT 1 FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL LIMIT 1",
-        (principal, principal),
-    ).fetchone()
-    if active is None:
+    from .fleet_hub_message_grants import classify_principal
+
+    if classify_principal(conn, principal) is None:
         return None
     if row["name"] == events.MESSAGE_CREATED:
         return row["subject"] == principal
