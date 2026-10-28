@@ -82,11 +82,17 @@ fingerprint. Reusing a request ID with different selectors conflicts. Replaying
 a recorded result restores those requested selectors without another send.
 A task-only request does not acquire an attempt selector from the provider's
 response. Its replay reports the requested task, without a resolved attempt.
-A conflicting provider identity produces a protocol failure rather than an
-acknowledged delivery. Legacy runs forward selectors without durable replay.
+Successful targeted responses must explicitly identify the selected task and,
+when requested, the exact attempt. Missing or conflicting identity produces a
+protocol failure rather than acknowledged delivery. Task-targeted requests use
+distinct wire operations so older servers reject them before provider action.
+Legacy runs forward selectors without durable replay, with the same transport
+response identity checks.
 
 Task redaction remaps control selectors and paired request identities alongside
-task attempts and checkpoints. Selected control facts scrub private digests and
+task attempts and checkpoints. Aliases of recomputed spec, attempt, and result
+identities are remapped in related task/provider and control references, even
+outside the selected range. Selected control facts scrub private digests and
 turn references while preserving closed operation and failure classifications.
 For affected targeted controls, redaction refuses an invalid operation, unmatched
 durable task, or unmatched durable attempt before publishing any changes. Live controls

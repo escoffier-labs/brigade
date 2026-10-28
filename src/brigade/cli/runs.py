@@ -231,7 +231,8 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_runs_steer = runs_sub.add_parser("steer", help="Send steering text to an active app-server worker turn.")
     p_runs_steer.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
-    p_runs_steer.add_argument("text", nargs="+", help="Text to append to the active worker turn.")
+    p_runs_steer.add_argument("worker", help="Worker name, or first text word with an explicit selector.")
+    p_runs_steer.add_argument("text", nargs="*", help="Text to append to the active worker turn.")
     p_runs_steer.add_argument(
         "--cwd",
         type=Path,
@@ -552,8 +553,13 @@ def dispatch(args) -> int:
     if args.runs_command == "steer":
         words = list(args.text)
         worker = args.worker_option
-        if args.task_id is None and worker is None and len(words) > 1:
-            worker = words.pop(0)
+        if args.task_id is None and worker is None:
+            worker = args.worker
+        elif args.worker is not None:
+            words.insert(0, args.worker)
+        if not words:
+            print("error: steer requires text", file=sys.stderr)
+            return 2
         payload = {"op": "steer", "text": " ".join(words)}
         if worker is not None:
             payload["worker"] = worker

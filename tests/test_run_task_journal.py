@@ -30,7 +30,10 @@ def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_r
         sends.append(payload)
         if outcome == "exception":
             raise ConnectionError("simulated lost acknowledgment")
-        return {"ok": outcome == "observed", "interrupted": 1}
+        response = {"ok": outcome == "observed", "interrupted": 1}
+        if outcome == "observed" and "task_id" in payload:
+            response["tasks"] = [{"task_id": payload["task_id"], "attempt_id": None}]
+        return response
 
     result = control.execute_control_request(
         run_dir, op="interrupt", request_id="interrupt-one", send=send, **selectors

@@ -1252,6 +1252,26 @@ def test_invalid_task_control_does_not_mutate_or_send(tmp_path, selectors):
             {"op": "steer", "task_id": "one", "attempt_id": "attempt-one", "text": "keep going"},
         ),
         ("steer", ["coder", "keep going"], {"op": "steer", "worker": "coder", "text": "keep going"}),
+        (
+            "steer",
+            ["coder", "--request-id", "placement", "keep going"],
+            {"op": "steer", "worker": "coder", "text": "keep going"},
+        ),
+        (
+            "steer",
+            ["coder", "--cwd", ".", "keep going"],
+            {"op": "steer", "worker": "coder", "text": "keep going"},
+        ),
+        (
+            "steer",
+            ["coder", "--runs-dir", ".", "keep going"],
+            {"op": "steer", "worker": "coder", "text": "keep going"},
+        ),
+        (
+            "steer",
+            ["--task-id", "one", "keep", "going"],
+            {"op": "steer", "task_id": "one", "text": "keep going"},
+        ),
         ("steer", ["--worker", "coder", "keep going"], {"op": "steer", "worker": "coder", "text": "keep going"}),
         ("interrupt", [], {"op": "interrupt"}),
         ("interrupt", ["--task-id", "one"], {"op": "interrupt", "task_id": "one"}),
@@ -1266,10 +1286,20 @@ def test_cli_task_control_and_legacy_forwarding(tmp_path, monkeypatch, capsys, j
 
     def send(path, transport, payload):
         calls.append(payload)
-        return {"ok": True, "interrupted": 1}
+        response = {"ok": True, "interrupted": 1}
+        if "task_id" in payload:
+            response["task_id"] = payload["task_id"]
+            response["attempt_id"] = payload.get("attempt_id")
+        return response
 
     monkeypatch.setattr(run_control, "send_request_with_retry", send)
-    assert cli.main(["runs", op, str(run_dir), *arguments]) == 0
+    result = cli.main(["runs", op, str(run_dir), *arguments])
+    if not journal_backed and "--request-id" in arguments:
+        assert result == 2
+        assert "legacy-no-journal" in capsys.readouterr().err
+        assert calls == []
+        return
+    assert result == 0
     assert calls == [expected]
 
 
@@ -1440,3 +1470,34 @@ def test_task_only_control_rejects_contradictory_provider_attempts(tmp_path, rep
         assert result.response["task_id"] == "one"
         assert "attempt_id" not in result.response
         assert result.terminal_event.event_type == "control.failed"
+
+
+@pytest.mark.parametrize("op", ["steer", "interrupt"])
+@pytest.mark.parametrize(
+    "reported",
+    [
+        {},
+        {"attempt_id": "attempt-one"},
+        {"task_id": "one"},
+        {"tasks": [{"task_id": "one"}]},
+        {"task_id": "one", "tasks": [{"task_id": "one", "attempt_id": "attempt-one"}]},
+    ],
+)
+def test_targeted_success_requires_explicit_selected_identity(tmp_path, op, reported):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return {"ok": True, **reported}
+
+    kwargs = dict(op=op, request_id="missing-identity", task_id="one", attempt_id="attempt-one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    replay = run_control_journal.execute_control_request(run_dir, **kwargs)
+    for result in (first, replay):
+        assert result.response["ok"] is False
+        assert result.response["error_class"] == "transport_protocol_error"
+        assert result.terminal_event.payload["task_id"] == "one"
+        assert result.terminal_event.payload["attempt_id"] == "attempt-one"
+    assert replay.replayed and len(calls) == 1

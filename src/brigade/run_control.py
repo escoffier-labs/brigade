@@ -12,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Mapping, cast
 
 _CLIENT_TIMEOUT_SECONDS = 5.0
 NO_ACTIVE_TURN = "no-active-turn"
@@ -432,6 +432,12 @@ class ControlServer:
         op = request.get("op")
         worker = request.get("worker")
         task_id, attempt_id = _validate_assignment_ids(request.get("task_id"), request.get("attempt_id"))
+        if op in ("task-steer", "task-interrupt"):
+            if task_id is None:
+                raise ControlError("task control requires task_id", code="invalid-target")
+            if worker is not None:
+                raise ControlError("task control forbids worker", code="invalid-target")
+            op = "steer" if op == "task-steer" else "interrupt"
         if worker is not None and (not isinstance(worker, str) or not worker):
             raise ControlError("worker must be a non-empty string", code="invalid-target")
         if op == "steer":
@@ -475,6 +481,39 @@ def _connect(transport: ControlTransport, *, timeout: float) -> socket.socket:
     raise ControlError(f"unsupported control transport kind: {transport.kind}")
 
 
+def validate_selected_response(response: Mapping[str, Any], *, task_id: str | None, attempt_id: str | None) -> None:
+    """Require explicit successful selection evidence at every transport caller."""
+    if task_id is None:
+        return
+    successful = response.get("ok") is True
+    identities: list[Mapping[str, Any]] = []
+    if "task_id" in response or "attempt_id" in response:
+        identities.append(response)
+    if "tasks" in response:
+        aggregate = response["tasks"]
+        if not isinstance(aggregate, list) or not aggregate:
+            raise ControlError("invalid control response tasks", code="invalid-target")
+        for identity in aggregate:
+            if not isinstance(identity, Mapping) or "task_id" not in identity:
+                raise ControlError("invalid control response task", code="invalid-target")
+            identities.append(identity)
+    if successful and not identities:
+        raise ControlError("missing control response identity", code="invalid-target")
+    reported_attempts = set()
+    for identity in identities:
+        reported_task = identity.get("task_id")
+        reported_attempt = identity.get("attempt_id")
+        _validate_assignment_ids(reported_task, reported_attempt)
+        if reported_task != task_id or (
+            attempt_id is not None and (successful or "attempt_id" in identity) and reported_attempt != attempt_id
+        ):
+            raise ControlError("control response selector mismatch", code="invalid-target")
+        if "attempt_id" in identity:
+            reported_attempts.add(reported_attempt)
+    if len(reported_attempts) > 1:
+        raise ControlError("control response attempt mismatch", code="invalid-target")
+
+
 def send_request(
     transport: ControlTransport,
     payload: dict[str, object],
@@ -482,6 +521,13 @@ def send_request(
     timeout: float = _CLIENT_TIMEOUT_SECONDS,
 ) -> dict[str, Any]:
     request = dict(payload)
+    # Legacy servers ignore assignment selectors on interrupt. A distinct op
+    # makes them refuse before invoking any registry or provider action.
+    if any(request.get(key) is not None for key in ("task_id", "attempt_id")) and request.get("op") in (
+        "steer",
+        "interrupt",
+    ):
+        request["op"] = f"task-{request['op']}"
     if transport.kind == "loopback-tcp":
         if not transport.owner_token:
             raise ControlError("loopback-tcp control transport is missing owner_token")
@@ -502,6 +548,11 @@ def send_request(
         raise ControlError(f"control transport returned invalid JSON: {exc}") from exc
     if not isinstance(response, dict):
         raise ControlError("control transport returned a non-object response")
+    try:
+        task_id, attempt_id = _validate_assignment_ids(payload.get("task_id"), payload.get("attempt_id"))
+        validate_selected_response(response, task_id=task_id, attempt_id=attempt_id)
+    except ControlError:
+        return {"error": "control response selector mismatch"}
     return response
 
 

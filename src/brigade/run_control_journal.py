@@ -593,30 +593,9 @@ def execute_control_request(
     except Exception as exc:
         response = {"_transport_exception": exc}
 
-    if isinstance(response, Mapping) and task_id is not None:
+    if isinstance(response, Mapping):
         try:
-            identities: list[Mapping[str, Any]] = [response]
-            if "tasks" in response:
-                aggregate = response["tasks"]
-                if not isinstance(aggregate, list) or not aggregate:
-                    raise run_control.ControlError("invalid control response tasks", code="invalid-target")
-                for identity in aggregate:
-                    if not isinstance(identity, Mapping) or "task_id" not in identity:
-                        raise run_control.ControlError("invalid control response task", code="invalid-target")
-                    identities.append(identity)
-            reported_attempts = set()
-            for identity in identities:
-                reported_task = identity.get("task_id", task_id)
-                reported_attempt = identity.get("attempt_id")
-                run_control._validate_assignment_ids(reported_task, reported_attempt)
-                if reported_task != task_id or (
-                    attempt_id is not None and "attempt_id" in identity and reported_attempt != attempt_id
-                ):
-                    raise run_control.ControlError("control response selector mismatch", code="invalid-target")
-                if "attempt_id" in identity:
-                    reported_attempts.add(reported_attempt)
-            if len(reported_attempts) > 1:
-                raise run_control.ControlError("control response attempt mismatch", code="invalid-target")
+            run_control.validate_selected_response(response, task_id=task_id, attempt_id=attempt_id)
         except run_control.ControlError:
             response = {"error": "control response selector mismatch"}
 

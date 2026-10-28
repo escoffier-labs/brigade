@@ -116,6 +116,15 @@ def prepare_requests(
             if value is not None and field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS:
                 substitute(task_id, field, value, event.sequence)
 
+    # Control-only selection must seed aliases before task/provider rebuilding.
+    for event in events:
+        if event.sequence in selected_controls:
+            selected_values.setdefault(event.payload["task_id"], set()).update(
+                value
+                for field, value in event.payload.items()
+                if value is not None and field not in CONTROL_STRUCTURAL_FIELDS
+            )
+
     # A private reference can be repeated under another field name (for
     # example the logical task ID can also be the provider task ID). Scrub
     # those aliases throughout the task, including unselected observations.
@@ -127,39 +136,54 @@ def prepare_requests(
             if field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS and value in selected_values.get(task_id, set()):
                 substitute(task_id, field, value, event.sequence)
 
-    states: dict[str, tasks.TaskResult] = {}
-    attempts: dict[tuple[str, str], str] = {}
-    for index, event in enumerate(events):
-        if event.event_type not in run_events._TASK_EVENT_TYPES or event.payload["task_id"] not in selected_values:
-            continue
-        old = event.payload
-        task_id = old["task_id"]
-        payload = {field: substitutions.get((task_id, field, value), value) for field, value in old.items()}
-        if event.event_type == "task.accepted":
-            spec = tasks.TaskSpec(payload["task_id"], payload["seat"], payload["payload_digest"])
-            payload["spec_digest"] = spec.spec_digest
-            states[task_id] = tasks.TaskResult(tasks.TaskHandle(event.run_id, payload["request_id"], spec), "queued")
-        elif event.event_type == "task.attempt-prepared":
-            current = states[task_id]
-            payload["attempt_id"] = tasks._attempt_id(current.handle)
-            attempts[(task_id, old["attempt_id"])] = payload["attempt_id"]
-            states[task_id] = replace(current, handle=replace(current.handle, attempt_id=payload["attempt_id"]))
-        elif event.event_type == "task.observed":
-            current = states[task_id]
-            observation = tasks.TaskObservation(
-                **{
-                    field: value
-                    for field, value in payload.items()
-                    if field not in {"task_id", "attempt_id", "result_id"}
-                }
-            )
-            states[task_id] = tasks._observe(current, observation)
-            payload = tasks._observation_payload(states[task_id])
-        else:
-            current = states[task_id]
-            payload["result_id"] = current.result_id
-            states[task_id] = replace(current, acknowledged=True)
-        requests[index] = (payload, f"redaction:{operation_id}:{event.sequence}")
+    # First build every derived mapping, then rebuild nonstructural aliases.
+    # Provider aliases can alter result identity, so fold again rather than
+    # patching already-derived payloads. Controls still run after both folds.
+    derived: dict[tuple[str, str], str] = {}
+    for _ in range(2):
+        states: dict[str, tasks.TaskResult] = {}
+        attempts: dict[tuple[str, str], str] = {}
+        for index, event in enumerate(events):
+            if event.event_type not in run_events._TASK_EVENT_TYPES or event.payload["task_id"] not in selected_values:
+                continue
+            old = event.payload
+            task_id = old["task_id"]
+            payload = {
+                field: derived.get((task_id, value), substitutions.get((task_id, field, value), value))
+                if field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS
+                else value
+                for field, value in old.items()
+            }
+            if event.event_type == "task.accepted":
+                spec = tasks.TaskSpec(payload["task_id"], payload["seat"], payload["payload_digest"])
+                payload["spec_digest"] = spec.spec_digest
+                states[task_id] = tasks.TaskResult(
+                    tasks.TaskHandle(event.run_id, payload["request_id"], spec), "queued"
+                )
+            elif event.event_type == "task.attempt-prepared":
+                current = states[task_id]
+                payload["attempt_id"] = tasks._attempt_id(current.handle)
+                attempts[(task_id, old["attempt_id"])] = payload["attempt_id"]
+                states[task_id] = replace(current, handle=replace(current.handle, attempt_id=payload["attempt_id"]))
+            elif event.event_type == "task.observed":
+                current = states[task_id]
+                observation = tasks.TaskObservation(
+                    **{
+                        field: value
+                        for field, value in payload.items()
+                        if field not in {"task_id", "attempt_id", "result_id"}
+                    }
+                )
+                states[task_id] = tasks._observe(current, observation)
+                payload = tasks._observation_payload(states[task_id])
+            else:
+                current = states[task_id]
+                payload["result_id"] = current.result_id
+                states[task_id] = replace(current, acknowledged=True)
+            for field in _DERIVED_FIELDS:
+                if old.get(field) is not None:
+                    derived[(task_id, old[field])] = payload[field]
+            requests[index] = (payload, f"redaction:{operation_id}:{event.sequence}")
 
     # Controls are status-neutral facts, but their selectors participate in the
     # same task identity graph. Rewrite both halves even across checkpoints.
@@ -189,7 +213,9 @@ def prepare_requests(
             if field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
                 if value in selected_values[task_id]:
                     substitute(task_id, field, value, event.sequence)
-                payload[field] = substitutions.get((task_id, field, value), payload[field])
+                payload[field] = derived.get(
+                    (task_id, value), substitutions.get((task_id, field, value), payload[field])
+                )
         if old.get("attempt_id") is not None:
             payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
         request_id = old["request_id"]

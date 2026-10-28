@@ -29,7 +29,7 @@ requires_secure_transactions = pytest.mark.skipif(
 
 
 @pytest.fixture
-def closed_tasks(tmp_path, monkeypatch):
+def closed_tasks(tmp_path, monkeypatch, request):
     monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -59,7 +59,13 @@ def closed_tasks(tmp_path, monkeypatch):
                 workspace=workspace,
                 handle=handle,
                 observation=tasks.TaskObservation(
-                    "running", provider_task_id=task_id, original_run_id=f"private-run-{i}"
+                    "running",
+                    provider_task_id=(handle.attempt_id if request.param == "derived" else f"private-provider-turn-{i}")
+                    if getattr(request, "param", None) in {"derived", "control"}
+                    else task_id,
+                    original_run_id=(
+                        handle.spec.spec_digest if getattr(request, "param", None) == "derived" else f"private-run-{i}"
+                    ),
                 ),
             )
             result = tasks.observe_task(
@@ -363,14 +369,14 @@ def test_task_redaction_refuses_unsupported_platform_before_lock_or_mutation(clo
 
 @requires_secure_transactions
 @pytest.mark.parametrize("selected_type", ["task.accepted", "task.attempt-prepared", "control.requested", "whole"])
-@pytest.mark.parametrize("alias_fields", [False, True])
+@pytest.mark.parametrize("alias_fields", [False, True, "derived"])
 def test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, selected_type, alias_fields):
     from brigade import run_control_journal as control
 
     run_dir = closed_tasks
     journal = run_dir / "events/lifecycle.jsonl"
     events = run_journal.read_journal_bounded(journal).events
-    original = tasks.read_tasks(run_dir)[0]
+    original, unrelated = tasks.read_tasks(run_dir)
     # Insert a request before the last checkpoint, then append its delivery
     # observation after it, exercising cross-checkpoint task/control aliases.
     index = next(i for i, event in enumerate(events) if event.event_type == "task.attempt-prepared") + 1
@@ -386,6 +392,11 @@ def test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, sel
     if alias_fields:
         payload["turn_id"] = original.handle.spec.task_id
         payload["text_digest"] = original.handle.spec.payload_digest
+    if alias_fields == "derived":
+        payload["turn_id"] = original.handle.attempt_id
+        payload["text_digest"] = original.result_id
+    if alias_fields == "provider":
+        payload["turn_id"] = original.provider_task_id
     request = run_journal.RunEvent(
         **run_events.build_event(
             **kwargs,
@@ -439,7 +450,16 @@ def test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, sel
         assert b"private-control-turn" not in journal.read_bytes()
     assert original.handle.spec.task_id.encode() not in journal.read_bytes()
     assert original.handle.attempt_id.encode() not in journal.read_bytes()
-    if alias_fields and selected_type in {"task.accepted", "control.requested", "whole"}:
+    if alias_fields == "derived":
+        assert original.result_id.encode() not in journal.read_bytes()
+    if alias_fields == "provider":
+        assert original.provider_task_id.encode() not in journal.read_bytes()
+        assert current.provider_task_id != original.provider_task_id
+        retained = tasks.read_tasks(run_dir)[1]
+        assert {k: v for k, v in asdict(retained).items() if k != "version"} == {
+            k: v for k, v in asdict(unrelated).items() if k != "version"
+        }
+    if alias_fields is True and selected_type in {"task.accepted", "control.requested", "whole"}:
         assert original.handle.spec.payload_digest.encode() not in journal.read_bytes()
     assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
 
@@ -565,3 +585,32 @@ def test_task_redaction_preserves_unrelated_historical_controls(closed_tasks, re
     after = [e for e in run_journal.read_journal_bounded(journal).events if e.event_type.startswith("control.")]
     assert [(e.payload, e.idempotency_key) for e in after] == [(e.payload, e.idempotency_key) for e in before]
     assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_tasks", ["derived"], indirect=True)
+def test_accepted_redaction_remaps_derived_provider_aliases(closed_tasks):
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    original = tasks.read_tasks(run_dir)[0]
+    accepted = next(e for e in run_journal.read_journal_bounded(journal).events if e.event_type == "task.accepted")
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=accepted.sequence,
+        sequence_end=accepted.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    current = tasks.read_tasks(run_dir)[0]
+    assert current.provider_task_id == current.handle.attempt_id
+    assert current.original_run_id == current.handle.spec.spec_digest
+    assert current.result_id != original.result_id and current.acknowledged
+    assert original.handle.attempt_id.encode() not in journal.read_bytes()
+    assert original.handle.spec.spec_digest.encode() not in journal.read_bytes()
+    assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_tasks", ["control"], indirect=True)
+def test_selected_control_scrubs_provider_aliases_in_task_history(closed_tasks):
+    test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, "control.observed", "provider")

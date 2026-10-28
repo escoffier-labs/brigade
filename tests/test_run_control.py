@@ -656,3 +656,93 @@ def test_deep_unix_path_linux_regression_uses_loopback_transport(tmp_path, monke
     finally:
         server.close()
     assert response == {"interrupted": 1, "ok": True, "workers": ["coder"]}
+
+
+@pytest.mark.parametrize("through_cli", [False, True])
+@pytest.mark.parametrize("legacy_peer", [False, True])
+@pytest.mark.parametrize("op", ["steer", "interrupt"])
+def test_task_wire_operation_fails_closed_on_legacy_peer(tmp_path, monkeypatch, legacy_peer, op, through_cli):
+    import io
+    from unittest.mock import MagicMock
+
+    registry = run_control.LiveTurnRegistry()
+    first, second = _FakeTurn(), _FakeTurn()
+    registry.register("coder", first, "turn-one", task_id="one", attempt_id="attempt-one")
+    registry.register("coder", second, "turn-two", task_id="two", attempt_id="attempt-two")
+    server = run_control.ControlServer(tmp_path / "control.sock", registry)
+    sent = []
+
+    class Wire(io.BytesIO):
+        def readline(self):
+            request = json.loads(self.getvalue())
+            sent.append(request)
+            try:
+                if not legacy_peer:
+                    response = server._dispatch(request)
+                # Pre-2059 dispatch ignores assignment selectors entirely.
+                elif request["op"] == "interrupt":
+                    response = registry.interrupt(request.get("worker"))
+                elif request["op"] == "steer":
+                    if not request.get("worker"):
+                        raise run_control.ControlError("steer requires worker")
+                    response = registry.steer(request["worker"], request["text"])
+                else:
+                    raise run_control.ControlError("unknown control op")
+            except run_control.ControlError:
+                response = {"ok": False, "error": "control refused"}
+            return json.dumps(response).encode() + b"\n"
+
+    sock = MagicMock()
+    sock.makefile.return_value = Wire()
+    monkeypatch.setattr(run_control, "_connect", lambda *args, **kwargs: sock)
+    payload = {"op": op, "task_id": "two", "attempt_id": "attempt-two", "text": "focus"}
+    transport = run_control.ControlTransport(kind="unix", path="unused")
+    if through_cli:
+        monkeypatch.setattr(run_control, "control_transport_from_run", lambda path: transport)
+        args = ["runs", op, str(tmp_path), "--task-id", "two", "--attempt-id", "attempt-two"]
+        response = {"ok": cli.main([*args, *(["focus"] if op == "steer" else [])]) == 0}
+    else:
+        response = run_control.send_request(transport, payload)
+    assert sent[0]["op"] == f"task-{op}"
+    assert payload["op"] == op
+    assert first.calls == []
+    if legacy_peer:
+        assert response["ok"] is False
+        assert second.calls == []
+    else:
+        assert response["ok"] is True
+        assert second.calls == [(op, "turn-two", "focus" if op == "steer" else "")]
+
+
+@pytest.mark.parametrize("op", ["task-steer", "task-interrupt"])
+def test_task_wire_operation_requires_task_before_registry_action(tmp_path, op):
+    registry = run_control.LiveTurnRegistry()
+    turn = _FakeTurn()
+    registry.register("coder", turn, "turn-one")
+    server = run_control.ControlServer(tmp_path / "control.sock", registry)
+    with pytest.raises(run_control.ControlError, match="requires task_id"):
+        server._dispatch({"op": op, "worker": "coder", "text": "focus"})
+    assert turn.calls == []
+
+
+@pytest.mark.parametrize("through_cli", [False, True])
+@pytest.mark.parametrize("reported", [{}, {"task_id": "one"}, {"tasks": [{"task_id": "one"}]}])
+def test_transport_refuses_success_without_selected_identity(tmp_path, monkeypatch, through_cli, reported):
+    from unittest.mock import MagicMock
+
+    fh = MagicMock()
+    fh.__enter__.return_value = fh
+    fh.readline.return_value = json.dumps({"ok": True, **reported}).encode() + b"\n"
+    sock = MagicMock()
+    sock.makefile.return_value = fh
+    monkeypatch.setattr(run_control, "_connect", lambda *args, **kwargs: sock)
+    transport = run_control.ControlTransport(kind="unix", path="unused")
+    monkeypatch.setattr(run_control, "control_transport_from_run", lambda path: transport)
+    if through_cli:
+        assert cli.main(["runs", "interrupt", str(tmp_path), "--task-id", "one", "--attempt-id", "attempt-one"]) == 1
+    else:
+        response = run_control.send_request(
+            transport, {"op": "interrupt", "task_id": "one", "attempt_id": "attempt-one"}
+        )
+        assert response.get("ok") is not True
+        assert response["error"] == "control response selector mismatch"
