@@ -1,5 +1,7 @@
 """Standalone audit storage, transaction, secrecy and cursor contracts."""
 
+import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 
@@ -38,6 +40,49 @@ def test_explicit_schema_repeat_reopen_and_transaction_ownership(tmp_path):
             with pytest.raises(sqlite3.IntegrityError, match="append-only"):
                 connection.execute(sql)
         assert len(audit.page(connection)) == 1
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "INSERT OR REPLACE INTO fleet_audit_log VALUES (?, 'now', 'other', 'member.remove', 'fixture', '{}')",
+        "REPLACE INTO fleet_audit_log VALUES (?, 'now', 'other', 'member.remove', 'fixture', '{}')",
+        "INSERT INTO fleet_audit_log VALUES (?, 'now', 'other', 'member.remove', 'fixture', '{}') "
+        "ON CONFLICT(id) DO UPDATE SET actor=excluded.actor",
+    ],
+    ids=["insert-or-replace", "replace", "upsert"],
+)
+def test_duplicate_id_cannot_replace_committed_history_or_finish_caller_work(tmp_path, statement):
+    path = tmp_path / "audit.sqlite"
+    with sqlite3.connect(path) as connection:
+        audit.ensure_schema(connection)
+        connection.execute("CREATE TABLE sibling (id INTEGER)")
+        saved = audit.append(connection, actor="admin", action="invite.create", subject="fixture", detail={})
+    with sqlite3.connect(path) as connection, sqlite3.connect(path) as reader:
+        assert connection.execute("PRAGMA recursive_triggers").fetchone() == (0,)
+        audit.ensure_schema(connection)
+        original = audit.page(reader)
+        connection.execute("INSERT INTO sibling VALUES (1)")
+        audit.ensure_schema(connection)
+        with pytest.raises(sqlite3.IntegrityError, match="append-only"):
+            connection.execute(statement, (saved,))
+        assert connection.in_transaction
+        assert connection.execute("SELECT * FROM sibling").fetchall() == [(1,)]
+        assert reader.execute("SELECT * FROM sibling").fetchall() == []
+        assert audit.page(connection) == audit.page(reader) == original
+        next_id = audit.append(connection, actor="admin", action="member.remove", subject="fixture", detail={})
+        assert next_id > saved
+        assert [row["id"] for row in audit.page(connection)] == [saved, next_id]
+        assert audit.page(reader) == original
+        connection.rollback()
+        assert connection.execute("SELECT * FROM sibling").fetchall() == []
+        assert audit.page(connection) == original
+        final_id = audit.append(connection, actor="admin", action="member.remove", subject="fixture", detail={})
+        connection.commit()
+        assert final_id > saved
+        assert audit.page(reader)[0] == original[0]
+        assert [row["id"] for row in audit.page(reader)] == [saved, final_id]
+        assert connection.execute("PRAGMA recursive_triggers").fetchone() == (0,)
 
 
 ACTIONS = (
@@ -125,6 +170,33 @@ def test_public_node_identities_round_trip(conn, field, value):
     assert {key: row[key] for key in kwargs} == kwargs
 
 
+@pytest.mark.parametrize("value", ["desk-01", "kiosk-2", "content", "token", "binding"])
+@pytest.mark.parametrize("field", ["actor", "subject", "principal_id", "node_id", "grants"])
+def test_ordinary_identity_words_are_not_credential_markers(conn, field, value):
+    kwargs = {"actor": "admin", "action": "grants.change", "subject": "fixture", "detail": {}}
+    if field in ("actor", "subject"):
+        kwargs[field] = value
+    else:
+        kwargs["detail"] = {field: [value] if field == "grants" else value}
+    audit.append(conn, **kwargs)
+    row = audit.page(conn)[0]
+    assert {key: row[key] for key in kwargs} == kwargs
+
+
+@pytest.mark.parametrize("name", ["task-runner", "disk_cleaner", "content-bot", "tokenizer"])
+@pytest.mark.parametrize("field", ["actor", "subject", "principal_id", "grants"])
+def test_ordinary_agent_names_are_not_credential_markers(conn, field, name):
+    value = "agent:" + name
+    kwargs = {"actor": "admin", "action": "grants.change", "subject": "fixture", "detail": {}}
+    if field in ("actor", "subject"):
+        kwargs[field] = value
+    else:
+        kwargs["detail"] = {field: [value] if field == "grants" else value}
+    audit.append(conn, **kwargs)
+    row = audit.page(conn)[0]
+    assert {key: row[key] for key in kwargs} == kwargs
+
+
 @pytest.mark.parametrize("value", PUBLIC_NODE_IDS)
 @pytest.mark.parametrize("field", ["invite_id", "hub_id", "key_id", "statement_id"])
 def test_nonidentity_fields_still_refuse_opaque_runs(conn, field, value):
@@ -168,6 +240,51 @@ def test_credentials_cannot_hide_in_identifiers_or_grants(conn, field, value):
         kwargs[field] = value
     else:
         kwargs["detail"] = {field: ["agent:" + value] if field == "grants" else value}
+    with pytest.raises(ValueError) as error:
+        audit.append(conn, **kwargs)
+    assert value not in str(error.value)
+    assert audit.page(conn) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "AIza" + "synthetic" * 4,
+        "xoxe.synthetic-configuration",
+        "xoxe-synthetic-configuration",
+        "gldt-synthetic-deploy",
+        "npm_synthetic-package",
+        "hf_synthetic-model",
+    ],
+)
+@pytest.mark.parametrize("prefix", ["", "prefix.", "prefix_", "prefix-"])
+@pytest.mark.parametrize(
+    "field", ["actor", "subject", "principal_id", "node_id", "invite_id", "hub_id", "key_id", "statement_id", "grants"]
+)
+def test_additional_provider_markers_are_refused_at_identifier_boundaries(conn, field, prefix, value):
+    value = prefix + value
+    kwargs = {"actor": "admin", "action": "invite.create", "subject": "fixture", "detail": {}}
+    if field in ("actor", "subject"):
+        kwargs[field] = value
+    else:
+        kwargs["detail"] = {field: [value] if field == "grants" else value}
+    with pytest.raises(ValueError) as error:
+        audit.append(conn, **kwargs)
+    assert value not in str(error.value)
+    assert audit.page(conn) == []
+
+
+@pytest.mark.parametrize(
+    "value", ["xoxe.synthetic", "xoxe-synthetic", "gldt-synthetic", "npm_synthetic", "hf_synthetic"]
+)
+@pytest.mark.parametrize("field", ["actor", "subject", "principal_id", "grants"])
+def test_additional_provider_markers_are_refused_in_agent_identities(conn, field, value):
+    value = "agent:" + value
+    kwargs = {"actor": "admin", "action": "grants.change", "subject": "fixture", "detail": {}}
+    if field in ("actor", "subject"):
+        kwargs[field] = value
+    else:
+        kwargs["detail"] = {field: [value] if field == "grants" else value}
     with pytest.raises(ValueError) as error:
         audit.append(conn, **kwargs)
     assert value not in str(error.value)
@@ -251,6 +368,67 @@ def test_paging_is_ordered_strictly_after_id_with_parsed_detail(conn):
     assert [row["detail"]["count"] for row in rows] == list(range(5))
     assert audit.page(conn, after_id=ids[-1]) == []
     assert len(audit.page(conn, limit=500)) == 5
+
+
+def test_history_remains_readable_when_write_admission_markers_tighten(conn, monkeypatch):
+    detail = {
+        "principal_id": "agent:fixture",
+        "node_id": "fixture-node",
+        "invite_id": "fixture-invite",
+        "hub_id": "fixture-hub",
+        "key_id": "fixture-key",
+        "statement_id": "fixture-statement",
+        "role": "teammate",
+        "grants": ["fixture-node", "agent:fixture", "*"],
+        "count": 2,
+    }
+    saved = audit.append(conn, actor="fixture-node", action="grants.change", subject="agent:fixture", detail=detail)
+    next_id = audit.append(conn, actor="admin", action="member.remove", subject="other", detail={})
+    conn.commit()
+    original = audit.page(conn)
+    monkeypatch.setattr(audit, "_CREDENTIAL", re.compile("fixture"))
+    with pytest.raises(ValueError) as error:
+        audit.append(conn, actor="fixture-node", action="grants.change", subject="agent:fixture", detail=detail)
+    assert "fixture" not in str(error.value)
+    assert audit.page(conn) == original
+    assert audit.page(conn, limit=1)[0]["detail"] == detail
+    assert [row["id"] for row in audit.page(conn, after_id=saved)] == [next_id]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "{",
+        "[]",
+        json.dumps({"note": "free text"}),
+        json.dumps({"principal_id": {"nested": "fixture"}}),
+        json.dumps({"node_id": "n" * 129}),
+        json.dumps({"principal_id": "agent:" + "a" * 64}),
+        json.dumps({"principal_id": "agent:Fixture"}),
+        json.dumps({"hub_id": "a" * 32}),
+        json.dumps({"role": "admin"}),
+        json.dumps({"count": True}),
+        json.dumps({"count": -1}),
+        json.dumps({"count": 1_000_001}),
+        json.dumps({"count": 1.5}),
+        json.dumps({"grants": ["fixture"] * 65}),
+        json.dumps({"grants": "*"}),
+        json.dumps({"grants": [["fixture"]]}),
+        json.dumps({"grants": [True]}),
+        json.dumps({"grants": ["agent:fixt*"]}),
+    ],
+)
+def test_paging_refuses_malformed_stored_detail_without_dropping_rows(conn, raw):
+    saved = audit.append(conn, actor="admin", action="invite.create", subject="fixture", detail={})
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        (datetime.now(timezone.utc).isoformat(), "admin", "invite.create", "fixture", raw),
+    )
+    with pytest.raises(ValueError):
+        audit.page(conn)
+    assert [row["id"] for row in audit.page(conn, limit=1)] == [saved]
+    with pytest.raises(ValueError):
+        audit.page(conn, after_id=saved)
 
 
 @pytest.mark.parametrize(

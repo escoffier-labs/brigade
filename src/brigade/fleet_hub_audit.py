@@ -12,7 +12,12 @@ letters/digits and ._- (plus an optional agent: prefix for principals). They are
 Actor, subject, principal_id, node_id and bare node grants accept canonical
 public identities, including opaque node ids up to 128 characters. Agent
 principals and grants retain the lowercase name grammar and 63-character limit.
-Credential markers are refused in every identifier. Nonidentity fields
+Credential markers are refused in every identifier on write. Provider prefixes
+must start the value or follow a separator (., _, -, or :), not a letter/digit.
+Sensitive labels (secret, credential, token, password, bearer, binding,
+keyrecord, content) are explicit markers only at the start or after a dot and
+followed by a dot, such as ``fixture.token.value``. Plain words and substrings
+in ordinary names are not credential markers. Nonidentity fields
 (invite_id, hub_id, key_id, statement_id) also refuse runs of 32 or more
 base64url characters, even inside longer identifiers. Public mesh ids such as
 h_<22 base64url characters>, k1_<22 characters> and 22-character invite ids fit.
@@ -25,6 +30,8 @@ wildcards *, node:*, agent:*. Count is an integer in 0..1,000,000 (not bool).
 Nested/free-text fields, arbitrary keys and recognizable credentials are refused
 with value-free errors. Page cursors are SQLite nonnegative integers and limits
 are 1..500, with defaults 0 and 100. Rows contain decoded detail dictionaries.
+Reads validate stored structure and identifier bounds without reapplying the
+current write-admission credential markers to previously admitted history.
 SQLite triggers prevent row mutation, not access by a database administrator.
 """
 
@@ -97,19 +104,20 @@ _ID_FIELDS = frozenset({"principal_id", "node_id", "invite_id", "hub_id", "key_i
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
 _AGENT = re.compile(r"agent:[a-z][a-z0-9._-]{0,62}")
 _CREDENTIAL = re.compile(
-    r"bfi1|gh[pousr]_|github_pat_|glpat-|sk[-_]|xox[baprs]-|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|"
-    r"ya29\.|eyJ|secret|credential|token|password|bearer|binding|keyrecord|content",
+    r"(?<![A-Za-z0-9])(?:bfi1|gh[pousr]_|github_pat_|glpat-|gldt-|sk[-_]|xox[baprs]-|xoxe[.-]|"
+    r"npm_|hf_|AIza[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ya29\.|eyJ)|"
+    r"(?:^|\.)(?:secret|credential|token|password|bearer|binding|keyrecord|content)(?=\.)",
     re.IGNORECASE,
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{32,}")
 
 
-def _identifier(value: object, *, principal: bool = False, identity: bool = False) -> str:
+def _identifier(value: object, *, principal: bool = False, identity: bool = False, admission: bool = True) -> str:
     if (
         not isinstance(value, str)
         or value == "unknown"
         or len(value) > 128
-        or _CREDENTIAL.search(value)
+        or (admission and _CREDENTIAL.search(value))
         or (not identity and _OPAQUE.search(value))
     ):
         raise ValueError("invalid audit identifier")
@@ -119,13 +127,18 @@ def _identifier(value: object, *, principal: bool = False, identity: bool = Fals
     return value
 
 
-def _detail(raw: object) -> AuditDetail:
+def _detail(raw: object, *, admission: bool = True) -> AuditDetail:
     if not isinstance(raw, dict) or not raw.keys() <= _ID_FIELDS | {"role", "grants", "count"}:
         raise ValueError("invalid audit detail fields")
     result = dict(raw)
     for field, value in raw.items():
         if field in _ID_FIELDS:
-            _identifier(value, principal=field == "principal_id", identity=field in ("principal_id", "node_id"))
+            _identifier(
+                value,
+                principal=field == "principal_id",
+                identity=field in ("principal_id", "node_id"),
+                admission=admission,
+            )
         elif field == "role":
             if not isinstance(value, str) or value not in ("agent", "teammate"):
                 raise ValueError("invalid audit role")
@@ -139,7 +152,7 @@ def _detail(raw: object) -> AuditDetail:
                 if not isinstance(pattern, str):
                     raise ValueError("invalid audit grant pattern")
                 if pattern not in ("*", "node:*", "agent:*"):
-                    _identifier(pattern, principal=True, identity=True)
+                    _identifier(pattern, principal=True, identity=True, admission=admission)
             result[field] = list(value)
     return cast(AuditDetail, result)
 
@@ -159,6 +172,12 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         SELECT RAISE(ABORT, 'audit log is append-only'); END""")
     conn.execute("""CREATE TRIGGER IF NOT EXISTS fleet_audit_log_no_delete
         BEFORE DELETE ON fleet_audit_log BEGIN
+        SELECT RAISE(ABORT, 'audit log is append-only'); END""")
+    # REPLACE's implicit DELETE skips delete triggers unless recursive_triggers
+    # is enabled. Refuse the collision before SQLite can remove the old row.
+    conn.execute("""CREATE TRIGGER IF NOT EXISTS fleet_audit_log_no_replace
+        BEFORE INSERT ON fleet_audit_log
+        WHEN EXISTS (SELECT 1 FROM fleet_audit_log WHERE id=NEW.id) BEGIN
         SELECT RAISE(ABORT, 'audit log is append-only'); END""")
 
 
@@ -198,6 +217,8 @@ def page(conn: sqlite3.Connection, *, after_id: int = 0, limit: int = 100) -> li
 
     The future caller must authenticate before reading. No schema initialization
     or transaction management occurs here. Invalid bounds raise ValueError.
+    Stored detail retains structural validation, independent of later changes
+    to credential markers used to admit new writes.
     """
     if type(after_id) is not int or not 0 <= after_id <= 2**63 - 1:
         raise ValueError("invalid audit cursor")
@@ -208,6 +229,13 @@ def page(conn: sqlite3.Connection, *, after_id: int = 0, limit: int = 100) -> li
         (after_id, limit),
     )
     return [
-        AuditRow(id=row[0], at=row[1], actor=row[2], action=row[3], subject=row[4], detail=_detail(json.loads(row[5])))
+        AuditRow(
+            id=row[0],
+            at=row[1],
+            actor=row[2],
+            action=row[3],
+            subject=row[4],
+            detail=_detail(json.loads(row[5]), admission=False),
+        )
         for row in rows
     ]
