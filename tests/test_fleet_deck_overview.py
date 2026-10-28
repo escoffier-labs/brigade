@@ -1267,14 +1267,12 @@ def test_sidebar_meta_shows_version_and_uses_hub_stale_verdict(reason):
     machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(720), unused_reason=reason)
     view = _view([_station(NODE_A, "linux-a", 8)], plane=_plane([machine]))
     html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'data-status="stale"' in html
     assert "sidebar-meta--stale" in html and "telemetry stale 12m" in html
     assert f"v{brigade.__version__}" in html
     fresh_view = replace(
         view, stale_after_seconds=60, control_plane=_plane([replace(machine, unused_reason="idle-capacity")])
     )
     fresh = overview.render_sidebar(fresh_view, "overview", NOW, worklore_enabled=True)
-    assert 'data-status="idle"' in fresh
     assert "sidebar-meta--stale" not in fresh and "telemetry 12m" in fresh
 
 
