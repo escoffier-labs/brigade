@@ -142,7 +142,14 @@ def test_tick_scheduled_command_runs_installed_cli(ambient_package, tmp_path, mo
         # or consuming the action's irreversible execution fence.
         assert "--user" in argv and "--property=Type=exec" in argv
         child = argv[argv.index("--") + 1 :]
-        result = run([*child, "--help"], cwd=workspace, capture_output=True, text=True, timeout=20)
+        # Observe cwd at CLI dispatch, after the unchanged bootstrap runs.
+        child[3] = (
+            "import runpy,os;_run=runpy.run_module;"
+            "runpy.run_module=lambda *a,**k:(print('bootstrap-cwd:'+os.getcwd(),flush=True),_run(*a,**k))[1];"
+            + child[3]
+        )
+        startup_cwd = next(value.split("=", 1)[1] for value in argv if value.startswith("--working-directory="))
+        result = run([*child, "--help"], cwd=startup_cwd, capture_output=True, text=True, timeout=20)
         launches.append((argv, kwargs, result))
         return SimpleNamespace(returncode=result.returncode)
 
@@ -155,6 +162,7 @@ def test_tick_scheduled_command_runs_installed_cli(ambient_package, tmp_path, mo
         assert result["scheduled"] == 1
         ((argv, kwargs, child),) = launches
         assert child.returncode == 0, child.stderr
+        assert child.stdout.splitlines()[0] == "bootstrap-cwd:" + str(workspace)
         assert "usage: brigade fleet actions execute" in child.stdout
         assert argv[argv.index("--manifest") + 1] == str(manifest.resolve())
         assert action["action_id"] in argv
