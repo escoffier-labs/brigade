@@ -292,6 +292,11 @@ def test_fleet_preference_cli_orchestrator_alias_keeps_chef_payload(flag, tmp_pa
         },
         "source": "hub",
     }
+    assert cli.main(["fleet", "preference", "set", flag, "chef"]) == 0
+    text_output = capsys.readouterr().out
+    assert "chef: chef" in text_output
+    assert "orchestrator:" not in text_output
+    assert submitted == [{"chef": "chef"}, {"chef": "chef"}]
     cached = run_preference.load_cached()
     assert cached.payload() == {"chef": "chef"}
     assert "orchestrator" not in cached.payload()
