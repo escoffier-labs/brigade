@@ -1191,3 +1191,252 @@ def test_fresh_control_claim_sync_failure_is_bounded_before_transport(tmp_path, 
     assert "indeterminate" in captured.err
     assert private_marker not in captured.out + captured.err
     assert calls == []
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_task_control_replays_exact_selectors_and_conflicts(tmp_path, ok):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return {"ok": ok, "task_id": "one", "attempt_id": "attempt-one"}
+
+    kwargs = dict(op="interrupt", request_id="targeted", task_id="one", attempt_id="attempt-one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    replay = run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert replay.replayed and replay.terminal_event == first.terminal_event
+    assert replay.response["task_id"] == "one"
+    assert replay.response["attempt_id"] == "attempt-one"
+    assert calls == [{"op": "interrupt", "task_id": "one", "attempt_id": "attempt-one"}]
+    for change in ({"task_id": "two"}, {"attempt_id": "attempt-two"}):
+        with pytest.raises(ControlJournalError) as error:
+            run_control_journal.execute_control_request(run_dir, **{**kwargs, **change})
+        assert error.value.code == "control_fingerprint_conflict"
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "selectors",
+    [
+        {"task_id": ""},
+        {"task_id": "bad target"},
+        {"task_id": "x" * 129},
+        {"task_id": 1},
+        {"attempt_id": "attempt"},
+        {"task_id": "one", "attempt_id": ""},
+        {"task_id": "one", "worker": "coder"},
+    ],
+)
+def test_invalid_task_control_does_not_mutate_or_send(tmp_path, selectors):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    before = _journal_path(run_dir).read_bytes()
+    calls = []
+    with pytest.raises(ControlJournalError):
+        run_control_journal.execute_control_request(
+            run_dir, op="interrupt", request_id="invalid", send=lambda payload: calls.append(payload), **selectors
+        )
+    assert calls == []
+    assert _journal_path(run_dir).read_bytes() == before
+
+
+@pytest.mark.parametrize("journal_backed", [False, True])
+@pytest.mark.parametrize(
+    "op,arguments,expected",
+    [
+        (
+            "steer",
+            ["--task-id", "one", "--attempt-id", "attempt-one", "keep going"],
+            {"op": "steer", "task_id": "one", "attempt_id": "attempt-one", "text": "keep going"},
+        ),
+        ("steer", ["coder", "keep going"], {"op": "steer", "worker": "coder", "text": "keep going"}),
+        ("steer", ["--worker", "coder", "keep going"], {"op": "steer", "worker": "coder", "text": "keep going"}),
+        ("interrupt", [], {"op": "interrupt"}),
+        ("interrupt", ["--task-id", "one"], {"op": "interrupt", "task_id": "one"}),
+    ],
+)
+def test_cli_task_control_and_legacy_forwarding(tmp_path, monkeypatch, capsys, journal_backed, op, arguments, expected):
+    run_dir = _run_dir(tmp_path)
+    if journal_backed:
+        _seed_lifecycle(run_dir)
+    calls = []
+    monkeypatch.setattr(run_control, "control_transport_from_run", lambda path: None)
+
+    def send(path, transport, payload):
+        calls.append(payload)
+        return {"ok": True, "interrupted": 1}
+
+    monkeypatch.setattr(run_control, "send_request_with_retry", send)
+    assert cli.main(["runs", op, str(run_dir), *arguments]) == 0
+    assert calls == [expected]
+
+
+def test_durable_control_targets_one_of_two_same_seat_turns(tmp_path):
+    from tests.test_run_control import _FakeTurn
+
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    registry = run_control.LiveTurnRegistry()
+    first, second = _FakeTurn(), _FakeTurn()
+    registry.register("coder", first, "turn-one", task_id="one", attempt_id="attempt-one")
+    registry.register("coder", second, "turn-two", task_id="two", attempt_id="attempt-two")
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return registry.steer(None, payload["text"], task_id=payload["task_id"], attempt_id=payload["attempt_id"])
+
+    kwargs = dict(op="steer", request_id="same-seat", task_id="two", attempt_id="attempt-two", text="focus", send=send)
+    run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert run_control_journal.execute_control_request(run_dir, **kwargs).replayed
+    assert first.calls == []
+    assert second.calls == [("steer", "turn-two", "focus")]
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("reported", [{"task_id": "other"}, {"attempt_id": "other"}, {"task_id": None}])
+def test_provider_conflicting_selector_is_not_acknowledged(tmp_path, reported):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return {"ok": True, **reported}
+
+    kwargs = dict(op="interrupt", request_id="mismatch", task_id="one", attempt_id="attempt-one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert first.response["ok"] is False
+    assert first.terminal_event.event_type == "control.failed"
+    assert first.terminal_event.payload["error_class"] == "transport_protocol_error"
+    assert run_control_journal.execute_control_request(run_dir, **kwargs).replayed
+    assert len(calls) == 1
+
+
+def test_task_only_control_does_not_persist_provider_resolved_attempt(tmp_path):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return {"ok": True, "task_id": "one", "attempt_id": "resolved-attempt"}
+
+    kwargs = dict(op="interrupt", request_id="task-only", task_id="one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert "attempt_id" not in first.requested_event.payload
+    assert "attempt_id" not in first.terminal_event.payload
+    replay = run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert replay.response["task_id"] == "one" and "attempt_id" not in replay.response
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        {"tasks": [{"task_id": "sibling", "attempt_id": "attempt-one"}]},
+        {"tasks": [{"task_id": "one", "attempt_id": "sibling"}]},
+        {"tasks": [{"task_id": "one", "attempt_id": "attempt-one"}, {"task_id": "sibling"}]},
+        {"tasks": {"task_id": "one"}},
+        {"tasks": []},
+        {"tasks": [None]},
+        {"tasks": [{}]},
+        {"tasks": [{"task_id": None}]},
+        {"tasks": [{"task_id": "one", "attempt_id": 1}]},
+        {"tasks": [{"task_id": "one", "attempt_id": None}]},
+        {"task_id": "one", "attempt_id": None},
+    ],
+)
+def test_targeted_control_rejects_malformed_aggregate_identity(tmp_path, reported):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    calls = []
+
+    def send(payload):
+        calls.append(payload)
+        return {"ok": True, **reported}
+
+    kwargs = dict(op="interrupt", request_id="aggregate", task_id="one", attempt_id="attempt-one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    replay = run_control_journal.execute_control_request(run_dir, **kwargs)
+    for result in (first, replay):
+        assert result.response["ok"] is False
+        assert result.response["error_class"] == "transport_protocol_error"
+        assert result.response["task_id"] == "one"
+        assert result.response["attempt_id"] == "attempt-one"
+        assert result.terminal_event.event_type == "control.failed"
+    assert replay.replayed and len(calls) == 1
+
+
+@pytest.mark.parametrize("failure", [False, True])
+def test_targeted_control_fresh_failure_retains_selectors(tmp_path, failure):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+
+    def send(payload):
+        if failure:
+            raise RuntimeError("offline")
+        return {"ok": False, "error": "unavailable"}
+
+    kwargs = dict(op="interrupt", request_id="failed-selectors", task_id="one", attempt_id="attempt-one", send=send)
+    first = run_control_journal.execute_control_request(run_dir, **kwargs)
+    replay = run_control_journal.execute_control_request(run_dir, **kwargs)
+    for result in (first, replay):
+        assert result.response["ok"] is False
+        assert result.response["task_id"] == "one"
+        assert result.response["attempt_id"] == "attempt-one"
+
+
+@pytest.mark.parametrize("requested_attempt", [None, "attempt-two"])
+def test_targeted_control_accepts_registry_interrupt_aggregate(tmp_path, requested_attempt):
+    from tests.test_run_control import _FakeTurn
+
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    registry = run_control.LiveTurnRegistry()
+    first, second = _FakeTurn(), _FakeTurn()
+    registry.register("coder", first, "turn-one", task_id="one", attempt_id="attempt-one")
+    registry.register("coder", second, "turn-two", task_id="two", attempt_id="attempt-two")
+    kwargs = dict(
+        op="interrupt",
+        request_id="registry-aggregate",
+        task_id="two",
+        attempt_id=requested_attempt,
+        send=lambda payload: registry.interrupt(task_id=payload["task_id"], attempt_id=payload.get("attempt_id")),
+    )
+    result = run_control_journal.execute_control_request(run_dir, **kwargs)
+    assert result.response["ok"] is True
+    assert first.calls == [] and second.calls == [("interrupt", "turn-two", "")]
+    assert result.terminal_event.payload["task_id"] == "two"
+    if requested_attempt is None:
+        assert "attempt_id" not in result.terminal_event.payload
+    else:
+        assert result.terminal_event.payload["attempt_id"] == requested_attempt
+    assert run_control_journal.execute_control_request(run_dir, **kwargs).replayed
+    assert second.calls == [("interrupt", "turn-two", "")]
+
+
+@pytest.mark.parametrize(
+    "reported",
+    [
+        {"attempt_id": "first", "tasks": [{"task_id": "one", "attempt_id": "second"}]},
+        {"tasks": [{"task_id": "one", "attempt_id": "first"}, {"task_id": "one", "attempt_id": "second"}]},
+    ],
+)
+def test_task_only_control_rejects_contradictory_provider_attempts(tmp_path, reported):
+    run_dir = _run_dir(tmp_path)
+    _seed_lifecycle(run_dir)
+    kwargs = dict(
+        op="interrupt", request_id="task-only-conflict", task_id="one", send=lambda payload: {"ok": True, **reported}
+    )
+    for result in (
+        run_control_journal.execute_control_request(run_dir, **kwargs),
+        run_control_journal.execute_control_request(run_dir, **kwargs),
+    ):
+        assert result.response["ok"] is False
+        assert result.response["error_class"] == "transport_protocol_error"
+        assert result.response["task_id"] == "one"
+        assert "attempt_id" not in result.response
+        assert result.terminal_event.event_type == "control.failed"

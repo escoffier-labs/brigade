@@ -16,7 +16,8 @@ task_run = support.task_run
 
 
 @pytest.mark.parametrize("outcome", ["observed", "rejected", "exception"])
-def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_run, outcome):
+@pytest.mark.parametrize("selectors", [{}, {"task_id": "one"}])
+def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_run, outcome, selectors):
     from brigade import run_control_journal as control
 
     run_dir, workspace = task_run
@@ -31,7 +32,9 @@ def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_r
             raise ConnectionError("simulated lost acknowledgment")
         return {"ok": outcome == "observed", "interrupted": 1}
 
-    result = control.execute_control_request(run_dir, op="interrupt", request_id="interrupt-one", send=send)
+    result = control.execute_control_request(
+        run_dir, op="interrupt", request_id="interrupt-one", send=send, **selectors
+    )
     before = journal.read_bytes()
     current = tasks.read_tasks(run_dir)[0]
     assert current.handle == original
@@ -41,7 +44,9 @@ def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_r
     handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
     assert handle.attempt_id is not None
     assert tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one") == handle
-    replay = control.execute_control_request(run_dir, op="interrupt", request_id="interrupt-one", send=send)
+    replay = control.execute_control_request(
+        run_dir, op="interrupt", request_id="interrupt-one", send=send, **selectors
+    )
     assert replay.replayed and replay.terminal_event == result.terminal_event
     assert len(sends) == 1
     assert tasks.read_tasks(run_dir)[0].result_id is None
@@ -1184,3 +1189,47 @@ def test_rehashed_stored_request_digest_cannot_authorize_next_write(authoritativ
     assert journal.read_bytes() == before_journal
     assert (run_dir / "run.json").read_bytes() == before_snapshot
     assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == before_shadow
+
+
+@pytest.mark.parametrize("terminal", ["control.observed", "control.failed"])
+@pytest.mark.parametrize(
+    "change", [{"task_id": "two"}, {"attempt_id": "other"}, {"attempt_id": None}, {"task_id": None, "attempt_id": None}]
+)
+def test_targeted_control_suffix_refuses_changed_or_missing_selector(task_run, terminal, change):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    prepared(task_run)
+    journal = run_dir / "events/lifecycle.jsonl"
+    payload = control.control_fingerprint_payload(
+        op="interrupt", request_id="targeted", task_id="one", attempt_id="attempt-one"
+    )
+    events = run_journal.read_journal_bounded(journal).events
+    request = run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="control.requested",
+        payload=payload,
+        idempotency_key="control.requested:targeted",
+        expected_previous_sequence=events[-1].sequence,
+        workspace=workspace,
+    )
+    observation = {"op": "interrupt", "request_id": "targeted", "task_id": "one", "attempt_id": "attempt-one"}
+    observation.update(change)
+    observation = {key: value for key, value in observation.items() if value is not None}
+    observation.update(
+        {"detail": "ok"}
+        if terminal.endswith("observed")
+        else {"error_class": "transport_rejected", "detail_digest": "a" * 64}
+    )
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=terminal,
+        payload=observation,
+        idempotency_key=f"{terminal}:targeted",
+        expected_previous_sequence=request.sequence,
+        workspace=workspace,
+    )
+    with pytest.raises(tasks.TaskJournalError, match="control-suffix"):
+        tasks.read_tasks(run_dir)

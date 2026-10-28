@@ -359,3 +359,209 @@ def test_task_redaction_refuses_unsupported_platform_before_lock_or_mutation(clo
     assert tasks.read_tasks(run_dir) == task_results
     assert not (workspace / ".brigade/run.lock").exists()
     assert not (run_dir / "events/redactions").exists()
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("selected_type", ["task.accepted", "task.attempt-prepared", "control.requested", "whole"])
+@pytest.mark.parametrize("alias_fields", [False, True])
+def test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, selected_type, alias_fields):
+    from brigade import run_control_journal as control
+
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    original = tasks.read_tasks(run_dir)[0]
+    # Insert a request before the last checkpoint, then append its delivery
+    # observation after it, exercising cross-checkpoint task/control aliases.
+    index = next(i for i, event in enumerate(events) if event.event_type == "task.attempt-prepared") + 1
+    kwargs = dict(run_id=run_dir.name, recorded_at=events[index - 1].recorded_at)
+    payload = control.control_fingerprint_payload(
+        op="interrupt",
+        request_id="targeted",
+        task_id=original.handle.spec.task_id,
+        attempt_id=original.handle.attempt_id,
+        text="private-steering-text",
+        turn_id="private-control-turn",
+    )
+    if alias_fields:
+        payload["turn_id"] = original.handle.spec.task_id
+        payload["text_digest"] = original.handle.spec.payload_digest
+    request = run_journal.RunEvent(
+        **run_events.build_event(
+            **kwargs,
+            sequence=index + 1,
+            event_type="control.requested",
+            payload=payload,
+            idempotency_key="control.requested:targeted",
+            previous_digest="0" * 64,
+        )
+    )
+    observation = run_journal.RunEvent(
+        **run_events.build_event(
+            **kwargs,
+            sequence=len(events) + 2,
+            event_type="control.observed",
+            payload={key: value for key, value in {**payload, "detail": "ok"}.items() if key != "text_digest"},
+            idempotency_key="control.observed:targeted",
+            previous_digest="0" * 64,
+        )
+    )
+    from dataclasses import replace
+    from brigade import run_redaction_rewrite
+
+    events.insert(index, request)
+    events.append(observation)
+    events = [replace(event, sequence=i + 1) for i, event in enumerate(events)]
+    events, raw = run_redaction_rewrite.rewrite_events(
+        events, [(dict(e.payload), e.idempotency_key) for e in events], error_type=RuntimeError
+    )
+    journal.write_bytes(raw)
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    (run_dir / "run.json").write_bytes(run_redaction._projection(snapshot, events).to_bytes())
+    chosen = next(
+        e for e in events if e.event_type == ("control.requested" if selected_type == "whole" else selected_type)
+    )
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=1 if selected_type == "whole" else chosen.sequence,
+        sequence_end=len(events) if selected_type == "whole" else chosen.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    current = tasks.read_tasks(run_dir)[0]
+    controls = [e for e in run_journal.read_journal_bounded(journal).events if e.event_type.startswith("control.")]
+    assert len(controls) == 2
+    for event in controls:
+        assert event.payload["task_id"] == current.handle.spec.task_id
+        assert event.payload["attempt_id"] == current.handle.attempt_id
+    if selected_type in {"control.requested", "whole"}:
+        assert payload["text_digest"].encode() not in journal.read_bytes()
+        assert b"private-control-turn" not in journal.read_bytes()
+    assert original.handle.spec.task_id.encode() not in journal.read_bytes()
+    assert original.handle.attempt_id.encode() not in journal.read_bytes()
+    if alias_fields and selected_type in {"task.accepted", "control.requested", "whole"}:
+        assert original.handle.spec.payload_digest.encode() not in journal.read_bytes()
+    assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("identity", ["external-attempt", "external-task", "invalid-op"])
+@pytest.mark.parametrize("selected_type", ["task.accepted", "control.requested", "control.observed"])
+def test_targeted_control_redaction_refuses_unverifiable_history_atomically(closed_tasks, identity, selected_type):
+    from brigade import run_control_journal as control, run_redaction_rewrite
+
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = list(run_journal.read_journal_bounded(journal).events)
+    original = tasks.read_tasks(run_dir)[0]
+    payload = control.control_fingerprint_payload(
+        op="interrupt",
+        request_id="unverifiable",
+        task_id=original.handle.spec.task_id,
+        attempt_id=original.handle.attempt_id,
+    )
+    if identity == "external-attempt":
+        payload["attempt_id"] = "private-external-attempt"
+    elif identity == "external-task":
+        payload["task_id"] = "private-external-task"
+    else:
+        payload["op"] = "private-invalid-operation"
+    # Put both control facts before the latest checkpoint. Suffix validation
+    # alone cannot detect malformed historical controls here.
+    index = next(i for i, event in enumerate(events) if event.event_type == "task.attempt-prepared") + 1
+    from dataclasses import replace
+
+    controls = [
+        replace(events[index], event_type=kind, payload=body, idempotency_key=f"{kind}:unverifiable")
+        for kind, body in (
+            ("control.requested", payload),
+            ("control.observed", {k: v for k, v in {**payload, "detail": "ok"}.items() if k != "text_digest"}),
+        )
+    ]
+    events[index:index] = controls
+    events = [replace(event, sequence=i + 1) for i, event in enumerate(events)]
+    events, raw = run_redaction_rewrite.rewrite_events(
+        events,
+        [(dict(e.payload), e.idempotency_key) for e in events],
+        error_type=RuntimeError,
+    )
+    journal.write_bytes(raw)
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    (run_dir / "run.json").write_bytes(run_redaction._projection(snapshot, events).to_bytes())
+    chosen = next(e for e in events if e.event_type == selected_type)
+    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    directories = {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()}
+    if identity == "external-task" and selected_type == "task.accepted":
+        # This control belongs to an unrelated task. Keep its pair unchanged.
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=chosen.sequence,
+            sequence_end=chosen.sequence,
+            reason="credential-exposure",
+            operator_confirmed=True,
+        )
+        current = [e for e in run_journal.read_journal_bounded(journal).events if e.event_type.startswith("control.")]
+        assert [(e.payload, e.idempotency_key) for e in current] == [(e.payload, e.idempotency_key) for e in controls]
+        assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
+        return
+    with pytest.raises(run_redaction.RedactionError, match="control history verification failed"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=chosen.sequence,
+            sequence_end=chosen.sequence,
+            reason="credential-exposure",
+            operator_confirmed=True,
+        )
+    assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("redact_legacy_first", [False, True])
+def test_task_redaction_preserves_unrelated_historical_controls(closed_tasks, redact_legacy_first):
+    from dataclasses import replace
+    from brigade import run_control_journal as control, run_redaction_rewrite
+
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = list(run_journal.read_journal_bounded(journal).events)
+    index = next(i for i, event in enumerate(events) if event.event_type == "task.attempt-prepared") + 1
+    payload = control.control_fingerprint_payload(op="interrupt", request_id="legacy-control")
+    events[index:index] = [
+        replace(events[index], event_type=kind, payload=body, idempotency_key=f"{kind}:legacy-control")
+        for kind, body in (
+            ("control.requested", payload),
+            ("control.observed", {k: v for k, v in {**payload, "detail": "ok"}.items() if k != "text_digest"}),
+        )
+    ]
+    events = [replace(event, sequence=i + 1) for i, event in enumerate(events)]
+    events, raw = run_redaction_rewrite.rewrite_events(
+        events,
+        [(dict(e.payload), e.idempotency_key) for e in events],
+        error_type=RuntimeError,
+    )
+    journal.write_bytes(raw)
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    (run_dir / "run.json").write_bytes(run_redaction._projection(snapshot, events).to_bytes())
+    if redact_legacy_first:
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=index + 1,
+            sequence_end=index + 2,
+            reason="credential-exposure",
+            operator_confirmed=True,
+        )
+    before = [e for e in run_journal.read_journal_bounded(journal).events if e.event_type.startswith("control.")]
+    if redact_legacy_first:
+        assert all(e.payload["op"] == run_redaction.REDACTED_VALUE for e in before)
+    chosen = next(e for e in events if e.event_type == "task.accepted")
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=chosen.sequence,
+        sequence_end=chosen.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    after = [e for e in run_journal.read_journal_bounded(journal).events if e.event_type.startswith("control.")]
+    assert [(e.payload, e.idempotency_key) for e in after] == [(e.payload, e.idempotency_key) for e in before]
+    assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"

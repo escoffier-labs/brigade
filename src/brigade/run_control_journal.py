@@ -25,7 +25,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, TypeVar
 
-from brigade import runguard, run_events, run_journal, run_lifecycle, run_shadow
+from brigade import run_control, runguard, run_events, run_journal, run_lifecycle, run_shadow
 from brigade.run_events import MAX_DIAGNOSTIC_LEN, MAX_PAYLOAD_STR_LEN
 
 _T = TypeVar("_T")
@@ -93,6 +93,8 @@ def control_fingerprint_payload(
     worker: str | None = None,
     text: str | None = None,
     turn_id: str | None = None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> dict[str, Any]:
     """Build the closed ``control.requested`` payload (reference fields only)."""
     if op not in ("steer", "interrupt"):
@@ -101,11 +103,21 @@ def control_fingerprint_payload(
         raise ControlJournalError("request_id must be a non-empty string", code="request_id_invalid")
     if len(request_id) > MAX_PAYLOAD_STR_LEN:
         raise ControlJournalError("request_id exceeds payload string bound", code="request_id_invalid")
+    try:
+        run_control._validate_assignment_ids(task_id, attempt_id)
+        if task_id is not None and worker is not None:
+            raise run_control.ControlError("worker and task_id are mutually exclusive", code="invalid-target")
+    except run_control.ControlError as exc:
+        raise ControlJournalError(str(exc), code=exc.code or "invalid-target") from exc
     payload: dict[str, Any] = {
         "op": op,
         "request_id": request_id,
         "text_digest": text_digest(text) if text is not None else "",
     }
+    if task_id is not None:
+        payload["task_id"] = task_id
+    if attempt_id is not None:
+        payload["attempt_id"] = attempt_id
     if worker is not None:
         payload["worker"] = worker
     if turn_id is not None:
@@ -185,6 +197,7 @@ def _find_control_pair(
 
 def _response_from_terminal(event: run_journal.RunEvent) -> dict[str, Any]:
     payload = event.payload
+    selectors: dict[str, Any] = {key: payload[key] for key in ("task_id", "attempt_id") if key in payload}
     if event.event_type == CONTROL_OBSERVED:
         response: dict[str, Any] = {"ok": True, "op": payload.get("op")}
         if isinstance(payload.get("worker"), str):
@@ -197,6 +210,7 @@ def _response_from_terminal(event: run_journal.RunEvent) -> dict[str, Any]:
                 response["interrupted"] = int(detail.split("=", 1)[1])
             except ValueError:
                 response["detail"] = detail
+        response.update(selectors)
         return response
     response = {"ok": False, "op": payload.get("op"), "error": "control request failed"}
     if isinstance(payload.get("error_class"), str):
@@ -205,6 +219,7 @@ def _response_from_terminal(event: run_journal.RunEvent) -> dict[str, Any]:
         response["detail_digest"] = payload["detail_digest"]
     if isinstance(payload.get("worker"), str):
         response["worker"] = payload["worker"]
+    response.update(selectors)
     return response
 
 
@@ -485,6 +500,12 @@ def _inspect_control_request(
         )
     if terminal is None:
         return "indeterminate", requested, None
+    if any(
+        (key in requested.payload) != (key in terminal.payload)
+        or requested.payload.get(key) != terminal.payload.get(key)
+        for key in ("task_id", "attempt_id")
+    ):
+        raise ControlJournalError("control terminal selector mismatch", code="control_append_failed")
     return "replay", requested, terminal
 
 
@@ -496,6 +517,8 @@ def execute_control_request(
     worker: str | None = None,
     text: str | None = None,
     turn_id: str | None = None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
     send: Callable[[dict[str, object]], dict[str, Any]],
 ) -> ControlResult:
     """Execute an idempotent control request against a journal-backed run.
@@ -515,6 +538,8 @@ def execute_control_request(
         worker=worker,
         text=text,
         turn_id=turn_id,
+        task_id=task_id,
+        attempt_id=attempt_id,
     )
     journal_path = _journal_path(run_dir)
     run_id = _run_id(run_dir)
@@ -558,6 +583,8 @@ def execute_control_request(
     transport_payload: dict[str, object] = {"op": op}
     if worker is not None:
         transport_payload["worker"] = worker
+    selectors: dict[str, Any] = {key: fingerprint[key] for key in ("task_id", "attempt_id") if key in fingerprint}
+    transport_payload.update(selectors)
     if text is not None:
         transport_payload["text"] = text
 
@@ -565,6 +592,33 @@ def execute_control_request(
         response = send(transport_payload)
     except Exception as exc:
         response = {"_transport_exception": exc}
+
+    if isinstance(response, Mapping) and task_id is not None:
+        try:
+            identities: list[Mapping[str, Any]] = [response]
+            if "tasks" in response:
+                aggregate = response["tasks"]
+                if not isinstance(aggregate, list) or not aggregate:
+                    raise run_control.ControlError("invalid control response tasks", code="invalid-target")
+                for identity in aggregate:
+                    if not isinstance(identity, Mapping) or "task_id" not in identity:
+                        raise run_control.ControlError("invalid control response task", code="invalid-target")
+                    identities.append(identity)
+            reported_attempts = set()
+            for identity in identities:
+                reported_task = identity.get("task_id", task_id)
+                reported_attempt = identity.get("attempt_id")
+                run_control._validate_assignment_ids(reported_task, reported_attempt)
+                if reported_task != task_id or (
+                    attempt_id is not None and "attempt_id" in identity and reported_attempt != attempt_id
+                ):
+                    raise run_control.ControlError("control response selector mismatch", code="invalid-target")
+                if "attempt_id" in identity:
+                    reported_attempts.add(reported_attempt)
+            if len(reported_attempts) > 1:
+                raise run_control.ControlError("control response attempt mismatch", code="invalid-target")
+        except run_control.ControlError:
+            response = {"error": "control response selector mismatch"}
 
     if isinstance(response, Mapping) and response.get("ok") is True:
         observed_payload: dict[str, Any] = {
@@ -574,7 +628,7 @@ def execute_control_request(
         }
         if worker is not None:
             observed_payload["worker"] = worker
-        elif isinstance(response.get("worker"), str):
+        elif task_id is None and isinstance(response.get("worker"), str):
             observed_payload["worker"] = response["worker"]
         resp_turn = response.get("turn_id")
         if isinstance(resp_turn, str) and resp_turn:
@@ -584,6 +638,7 @@ def execute_control_request(
         interrupted = response.get("interrupted")
         if isinstance(interrupted, int) and not isinstance(interrupted, bool):
             observed_payload["detail"] = f"interrupted={interrupted}"
+        observed_payload.update(selectors)
         terminal = _append_control_event(
             journal_path,
             run_dir=run_dir,
@@ -595,7 +650,7 @@ def execute_control_request(
         )
         return ControlResult(
             request_id=resolved_id,
-            response=dict(response),
+            response={**response, **selectors},
             replayed=False,
             requested_event=requested_event,
             terminal_event=terminal,
@@ -616,6 +671,7 @@ def execute_control_request(
         "error_class": failure_class.value,
         "detail_digest": hashlib.sha256(detail.encode("utf-8")).hexdigest(),
     }
+    failed_payload.update(selectors)
     if worker is not None:
         failed_payload["worker"] = worker
     terminal = _append_control_event(
@@ -634,6 +690,7 @@ def execute_control_request(
             "error": "control request failed",
             "error_class": failure_class.value,
             "detail_digest": failed_payload["detail_digest"],
+            **selectors,
         },
         replayed=False,
         requested_event=requested_event,

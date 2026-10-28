@@ -6,6 +6,7 @@ import argparse
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import cast
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -230,7 +231,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_runs_steer = runs_sub.add_parser("steer", help="Send steering text to an active app-server worker turn.")
     p_runs_steer.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
-    p_runs_steer.add_argument("worker", help="Worker name to steer.")
     p_runs_steer.add_argument("text", nargs="+", help="Text to append to the active worker turn.")
     p_runs_steer.add_argument(
         "--cwd",
@@ -244,6 +244,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_steer.add_argument("--task-id", default=None, help="Logical task to control.")
+    p_runs_steer.add_argument("--attempt-id", default=None, help="Exact attempt within the selected task.")
+    p_runs_steer.add_argument("--worker", dest="worker_option", default=None, help="Worker name to control.")
     p_runs_steer.add_argument(
         "--request-id",
         default=None,
@@ -264,6 +267,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
+    p_runs_interrupt.add_argument("--task-id", default=None, help="Logical task to control.")
+    p_runs_interrupt.add_argument("--attempt-id", default=None, help="Exact attempt within the selected task.")
+    p_runs_interrupt.add_argument("--worker", dest="worker_option", default=None, help="Worker name to control.")
     p_runs_interrupt.add_argument(
         "--request-id",
         default=None,
@@ -544,17 +550,37 @@ def dispatch(args) -> int:
             interval=args.interval,
         )
     if args.runs_command == "steer":
+        words = list(args.text)
+        worker = args.worker_option
+        if args.task_id is None and worker is None and len(words) > 1:
+            worker = words.pop(0)
+        payload = {"op": "steer", "text": " ".join(words)}
+        if worker is not None:
+            payload["worker"] = worker
+        if args.task_id is not None:
+            payload["task_id"] = args.task_id
+        if args.attempt_id is not None:
+            payload["attempt_id"] = args.attempt_id
         return _control_request(
             args.run,
             cwd=args.cwd,
             runs_dir=args.runs_dir,
-            payload={"op": "steer", "worker": args.worker, "text": " ".join(args.text)},
+            payload=payload,
             request_id=args.request_id,
         )
     if args.runs_command == "interrupt":
         payload = {"op": "interrupt"}
         if args.worker is not None:
             payload["worker"] = args.worker
+        if args.worker_option is not None:
+            if args.worker is not None:
+                print("error: duplicate worker selector", file=sys.stderr)
+                return 2
+            payload["worker"] = args.worker_option
+        if args.task_id is not None:
+            payload["task_id"] = args.task_id
+        if args.attempt_id is not None:
+            payload["attempt_id"] = args.attempt_id
         return _control_request(
             args.run,
             cwd=args.cwd,
@@ -652,6 +678,19 @@ def _control_request(
 
     from .. import run_control, run_control_journal, runs_cmd
 
+    try:
+        run_control_journal.control_fingerprint_payload(
+            op=str(payload["op"]),
+            request_id=request_id or "preflight",
+            worker=cast(str | None, payload.get("worker")),
+            task_id=cast(str | None, payload.get("task_id")),
+            attempt_id=cast(str | None, payload.get("attempt_id")),
+        )
+        if payload["op"] == "steer" and payload.get("worker") is None and payload.get("task_id") is None:
+            raise run_control.ControlError("steer requires worker or task_id", code="invalid-target")
+    except (run_control_journal.ControlJournalError, run_control.ControlError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     run_dir, error = runs_cmd._resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
     if error is not None:
         print(error, file=sys.stderr)
@@ -687,6 +726,8 @@ def _control_request(
             request_id=request_id,
             worker=str(worker) if isinstance(worker, str) else None,
             text=str(text) if isinstance(text, str) else None,
+            task_id=cast(str | None, payload.get("task_id")),
+            attempt_id=cast(str | None, payload.get("attempt_id")),
             send=_send,
         )
     except run_control_journal.ControlJournalError as exc:

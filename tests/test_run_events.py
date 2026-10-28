@@ -454,15 +454,17 @@ def test_validate_event_limits_unknown_key_diagnostics():
     [
         (
             "control.requested",
-            frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
+            frozenset({"task_id", "attempt_id", "op", "worker", "text_digest", "turn_id", "request_id"}),
         ),
         (
             "control.observed",
-            frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
+            frozenset({"task_id", "attempt_id", "op", "worker", "turn_id", "request_id", "detail"}),
         ),
         (
             "control.failed",
-            frozenset({"op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}),
+            frozenset(
+                {"task_id", "attempt_id", "op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}
+            ),
         ),
     ],
 )

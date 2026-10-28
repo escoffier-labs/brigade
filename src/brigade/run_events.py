@@ -155,9 +155,11 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
     # Live-control request/observation pairs (issue #604). Reference-only:
     # digests, op codes, worker names, turn ids, and request ids — never
     # steering text, model output, or provider bodies.
-    "control.requested": frozenset({"op", "worker", "text_digest", "turn_id", "request_id"}),
-    "control.observed": frozenset({"op", "worker", "turn_id", "request_id", "detail"}),
-    "control.failed": frozenset({"op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}),
+    "control.requested": frozenset({"task_id", "attempt_id", "op", "worker", "text_digest", "turn_id", "request_id"}),
+    "control.observed": frozenset({"task_id", "attempt_id", "op", "worker", "turn_id", "request_id", "detail"}),
+    "control.failed": frozenset(
+        {"task_id", "attempt_id", "op", "worker", "turn_id", "request_id", "error_class", "detail_digest"}
+    ),
     # Run budget lifecycle (issue #593). Safe summaries only — never raw
     # diagnostics, prompts, tool args, or provider bodies.
     "run_budget.threshold_reached": frozenset(

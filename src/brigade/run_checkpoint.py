@@ -1294,6 +1294,18 @@ def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["r
         if event.event_type not in _CONTROL_SUFFIX_TYPES or event.payload.get("request_id") not in request_ids:
             continue
         payload = event.payload
+        from brigade import run_control
+
+        try:
+            run_control._validate_assignment_ids(payload.get("task_id"), payload.get("attempt_id"))
+            if ("task_id" in payload and payload["task_id"] is None) or (
+                "attempt_id" in payload and payload["attempt_id"] is None
+            ):
+                raise run_control.ControlError("null selector", code="invalid-target")
+            if payload.get("task_id") is not None and "worker" in payload:
+                raise run_control.ControlError("conflicting selectors", code="invalid-target")
+        except run_control.ControlError as exc:
+            raise CheckpointError("invalid control suffix selector", category="control-suffix") from exc
         request_id = payload.get("request_id")
         op = payload.get("op")
         valid = (
@@ -1326,6 +1338,10 @@ def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["r
                 or request_id in terminal
                 or prior.payload["op"] != op
                 or ("worker" in prior.payload and prior.payload["worker"] != payload.get("worker"))
+                or any(
+                    (key in prior.payload) != (key in payload) or prior.payload.get(key) != payload.get(key)
+                    for key in ("task_id", "attempt_id")
+                )
             ):
                 raise CheckpointError("control suffix terminal has no matching request", category="control-suffix")
             terminal.add(request_id)

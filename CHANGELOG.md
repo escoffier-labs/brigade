@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fleet preference settings accept `--orchestrator` as the preferred flag, retaining `--chef` as an alias and the existing `chef` storage key.
+- Target durable steer and interrupt requests by task and optional attempt, with selector-aware replay, checkpoint validation, and task redaction.
+
 - MCP servers include `resultType: "complete"` in every successful result for protocol 2026-07-28 requests (declared via `params._meta`, the `MCP-Protocol-Version` header, or a stdio `initialize`), so current Claude Code can fetch tools from `memory serve-mcp` and `skills serve-mcp`. Older revisions keep their exact result shape.
 - Reviewed memory evidence operations accept scalar citations and count equivalent evidence references once, while retaining the original citation spellings and excluding unresolved support (#1959, cases 8 and 15).
 - Fleet actions and bug diagnostics launch the installed Brigade package with isolated Python imports, preventing ambient working directories, Python paths, and user-site startup code from selecting another package (#1950).

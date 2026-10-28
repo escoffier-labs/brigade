@@ -464,7 +464,9 @@ def _rewrite_events(
             else event.idempotency_key
         )
         requests.append((payload, idempotency_key))
-    run_redaction_tasks.prepare_requests(events, requests, selected=selected_tasks, operation_id=operation_id)
+    run_redaction_tasks.prepare_requests(
+        events, requests, selected=selected_tasks, operation_id=operation_id, error_type=RedactionError
+    )
     return run_redaction_rewrite.rewrite_events(events, requests, error_type=RedactionError)
 
 
@@ -2000,6 +2002,14 @@ def _assert_affected_values_removed(
                 key == "status"
                 or value is None
                 or (prior.event_type in run_events._TASK_EVENT_TYPES and key in run_redaction_tasks.STRUCTURAL_FIELDS)
+                or (
+                    prior.event_type in {"control.requested", "control.observed", "control.failed"}
+                    and "task_id" in prior.payload
+                    and (
+                        (key == "op" and value in {"steer", "interrupt"})
+                        or (key == "error_class" and value in run_events.CONTROL_FAILURE_CLASSES)
+                    )
+                )
             ):
                 continue
             if value == REDACTED_VALUE or value == 0:
