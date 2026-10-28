@@ -265,7 +265,7 @@ def _item_route(
         _validate_query(query, set())
         try:
             prepared_handoff = get_prepared_handoff(conn, work_id)
-        except WorkloreValidationError:
+        except (WorkloreValidationError, ValueError):
             return _error("internal-error")
         return 200, {"prepared_handoff": prepared_handoff}
     if tail == ["ownership"] and method in {"GET", "POST"}:

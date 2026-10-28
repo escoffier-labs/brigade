@@ -9,10 +9,13 @@ from http.client import HTTPConnection
 from urllib.parse import quote
 from pathlib import Path
 
+import pytest
+
 from brigade import fleet_hub
 from brigade import fleet_hub_http
 from brigade import worklore_github_sync as github_sync
 from brigade import worklore_http
+from brigade import worklore_ownership as ownership
 from brigade import worklore_http as http
 from brigade import worklore_store as store
 
@@ -114,7 +117,8 @@ def test_prepared_handoff_uses_existing_read_auth_and_refuses_mutations(tmp_path
             conn.close()
 
 
-def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, monkeypatch):
+@pytest.mark.parametrize("invalid_field", ["title", "timestamp", "report"])
+def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, monkeypatch, invalid_field):
     monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
     with _hub(tmp_path) as hub:
         conn = fleet_hub.open_db(hub[2])
@@ -122,9 +126,38 @@ def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, mon
             item = store.create_item(
                 conn, {"title": "Fixture", "kind": "repo"}, actor_id="admin", actor_type="operator"
             )
-            conn.execute(
-                "UPDATE work_items SET title=? WHERE work_id=?", ("x" * (store.TITLE_MAX + 1), item["work_id"])
-            )
+            if invalid_field == "title":
+                conn.execute(
+                    "UPDATE work_items SET title=? WHERE work_id=?", ("x" * (store.TITLE_MAX + 1), item["work_id"])
+                )
+            else:
+                fleet_hub.add_node(conn, "node-a", "node-a")
+                ownership.ownership_action(
+                    conn,
+                    item["work_id"],
+                    {
+                        "action": "offer",
+                        "target_node": "node-a",
+                        "exclusions": [],
+                        "authorization_ref": "fixture-grant",
+                        "attempt_budget": {"cap": 1, "source_ref": "fixture-budget"},
+                    },
+                    expected_revision=0,
+                    idempotency_key="fixture-offer",
+                    actor_id="admin",
+                    actor_type="operator",
+                    is_admin=True,
+                )
+                seq, raw = conn.execute(
+                    "SELECT seq, detail_json FROM work_events WHERE work_id=? AND event_type=?",
+                    (item["work_id"], ownership.EVENT_TYPES["offer"]),
+                ).fetchone()
+                detail = json.loads(raw)
+                if invalid_field == "timestamp":
+                    detail["ownership"]["updated_at"] = "not-a-timestamp"
+                else:
+                    detail["ownership"]["last_report"] = {"provider": "invalid"}
+                conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), seq))
             conn.commit()
         finally:
             conn.close()
