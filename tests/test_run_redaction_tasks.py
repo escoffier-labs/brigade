@@ -54,6 +54,17 @@ def closed_tasks(tmp_path, monkeypatch, request):
                 spec=tasks.TaskSpec(task_id, f"private-seat-{i}", str(i + 1) * 64),
             )
             handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id=task_id)
+            if getattr(request, "param", None) == "claim":
+                current = tasks.read_tasks(run_dir)[i]
+                decision = tasks.claim_task_launch(
+                    run_dir,
+                    workspace=workspace,
+                    handle=handle,
+                    expected_version=current.version,
+                    seat=handle.spec.seat,
+                    dispatch_attempt=i + 1,
+                )
+                assert decision.outcome == "granted"
             tasks.observe_task(
                 run_dir,
                 workspace=workspace,
@@ -61,7 +72,7 @@ def closed_tasks(tmp_path, monkeypatch, request):
                 observation=tasks.TaskObservation(
                     "running",
                     provider_task_id=(handle.attempt_id if request.param == "derived" else f"private-provider-turn-{i}")
-                    if getattr(request, "param", None) in {"derived", "control"}
+                    if getattr(request, "param", None) in {"derived", "control", "claim"}
                     else task_id,
                     original_run_id=(
                         handle.spec.spec_digest if getattr(request, "param", None) == "derived" else f"private-run-{i}"
@@ -614,3 +625,75 @@ def test_accepted_redaction_remaps_derived_provider_aliases(closed_tasks):
 @pytest.mark.parametrize("closed_tasks", ["control"], indirect=True)
 def test_selected_control_scrubs_provider_aliases_in_task_history(closed_tasks):
     test_task_redaction_rewrites_interleaved_targeted_controls(closed_tasks, "control.observed", "provider")
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_tasks", ["claim"], indirect=True)
+@pytest.mark.parametrize("selected_type", ["task.launch-claimed", "task.accepted", "control.requested", "whole"])
+def test_claim_redaction_preserves_binding_and_never_regrants(closed_tasks, selected_type):
+    run_dir = closed_tasks
+    original, unrelated = tasks.read_tasks(run_dir)
+    test_task_redaction_rewrites_interleaved_targeted_controls(run_dir, selected_type, "derived")
+    current, retained = tasks.read_tasks(run_dir)
+    assert current.launch_claim == tasks.TaskLaunchBinding(current.handle.spec.seat, 1)
+    assert current.acknowledged and current.status == "completed"
+    if selected_type != "whole":
+        assert {k: v for k, v in asdict(retained).items() if k != "version"} == {
+            k: v for k, v in asdict(unrelated).items() if k != "version"
+        }
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    claim = next(e for e in events if e.event_type == "task.launch-claimed")
+    assert claim.payload == {
+        "task_id": current.handle.spec.task_id,
+        "attempt_id": current.handle.attempt_id,
+        "seat": current.handle.spec.seat,
+        "dispatch_attempt": 1,
+    }
+    assert type(claim.payload["dispatch_attempt"]) is int
+    if selected_type in {"task.launch-claimed", "task.accepted", "control.requested", "whole"}:
+        assert original.handle.spec.seat.encode() not in journal.read_bytes()
+    for event in events:
+        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and "pairing_key" in event.payload:
+            following = events[event.sequence]
+            run_checkpoint._verify_coverage(
+                [event, following], event, json.loads(run_checkpoint.validate_checkpoint(run_dir, event))
+            )
+            if following.event_type.startswith("task."):
+                assert event.payload["pairing_key"] == following.request_digest
+    before = journal.read_bytes()
+    workspace = run_dir.parents[2]
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        try:
+            decision = tasks.claim_task_launch(
+                run_dir,
+                workspace=workspace,
+                handle=current.handle,
+                expected_version=current.version,
+                seat=current.handle.spec.seat,
+                dispatch_attempt=1,
+            )
+        except tasks.TaskJournalError as exc:
+            assert "owner" in str(exc)
+        else:
+            assert decision.outcome == "terminal"
+            assert decision.task.launch_claim == current.launch_claim
+        with pytest.raises(tasks.TaskJournalError):
+            tasks.claim_task_launch(
+                run_dir,
+                workspace=workspace,
+                handle=original.handle,
+                expected_version=original.version,
+                seat=original.handle.spec.seat,
+                dispatch_attempt=1,
+            )
+    assert journal.read_bytes() == before
+    assert tasks.read_tasks(run_dir)[0].launch_claim == current.launch_claim
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_tasks", ["claim"], indirect=True)
+def test_claim_redaction_refuses_corruption_without_publication(closed_tasks):
+    test_task_redaction_refuses_semantic_corruption_without_publication(
+        closed_tasks, "task.launch-claimed", "attempt_id"
+    )

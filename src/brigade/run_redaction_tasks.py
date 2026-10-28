@@ -9,7 +9,7 @@ from typing import Any, Sequence
 from brigade import run_checkpoint, run_events, run_journal, run_tasks as tasks
 
 # Closed classifications describe state, not private correlation references.
-STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind"})
+STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind", "dispatch_attempt"})
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
 
@@ -165,6 +165,14 @@ def prepare_requests(
                 payload["attempt_id"] = tasks._attempt_id(current.handle)
                 attempts[(task_id, old["attempt_id"])] = payload["attempt_id"]
                 states[task_id] = replace(current, handle=replace(current.handle, attempt_id=payload["attempt_id"]))
+            elif event.event_type == "task.launch-claimed":
+                current = states[task_id]
+                payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
+                states[task_id] = replace(
+                    current,
+                    launch_claim=tasks.TaskLaunchBinding(payload["seat"], payload["dispatch_attempt"]),
+                    status="unknown",
+                )
             elif event.event_type == "task.observed":
                 current = states[task_id]
                 observation = tasks.TaskObservation(
