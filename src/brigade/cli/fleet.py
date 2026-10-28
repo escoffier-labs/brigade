@@ -208,6 +208,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_messages import register as register_messages
 
     register_messages(fleet_sub)
+    from .fleet_keys import register as register_keys
+
+    register_keys(fleet_sub)
 
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")

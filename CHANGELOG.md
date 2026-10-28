@@ -43,6 +43,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add offline Fleet key initialization, public inspection and export, and local rotation with explicit scope and fixed diagnostics. These commands perform no publication or trust acceptance.
+
 - Add offline client peer-key acceptance, rotation history, and local trust checks. Bound peer admission, recheck revoked continuity dependencies, and refuse far-future key dates. CLI/MCP encryption remains unfinished.
 
 - Add an internal POSIX Hub identity store with signed history, endpoint bindings, and rollback floors. Preserve primary write failures in identity and trust snapshots. Identity migration and message opening/sealing remain unfinished.
