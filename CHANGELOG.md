@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
+
 - Add dormant task launch claims with immutable dispatch bindings, strict task-version checks, and retained consumption through checkpoint recovery and redaction (#2046).
 - Fleet preference settings accept `--orchestrator` as the preferred flag, retaining `--chef` as an alias and the existing `chef` storage key.
 - Target durable steer and interrupt requests by task and optional attempt, with selector-aware replay, checkpoint validation, and task redaction.

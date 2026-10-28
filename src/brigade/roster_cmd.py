@@ -1,4 +1,4 @@
-"""Commands for creating and checking aboyeur rosters."""
+"""Commands for creating and checking agent rosters."""
 
 from __future__ import annotations
 
@@ -26,12 +26,12 @@ DEFAULT_OLLAMA_MODEL = "llama3.2:3b"
 def default_roster_text(
     *, ollama_model: str = DEFAULT_OLLAMA_MODEL, max_workers: int = 4, review_model: str | None = None
 ) -> str:
-    return f"""# Brigade aboyeur roster.
+    return f"""# Brigade Stack agent roster.
 # Edit agent roles and CLI refs to match the tools installed on this machine.
 
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan the work, choose useful workers, and synthesize the final answer."
 
@@ -39,7 +39,7 @@ role = "Plan the work, choose useful workers, and synthesize the final answer."
 cli = "codex"
 role = "Make precise code changes and report what changed."
 
-# Brigade never auto-pulls ollama models: dispatch fails unless the model is
+# Brigade Stack never auto-pulls ollama models: dispatch fails unless the model is
 # already local. Run `ollama pull {ollama_model}` once before using this seat.
 [agents.local_researcher]
 cli = "ollama:{ollama_model}"
