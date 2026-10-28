@@ -206,7 +206,7 @@ def test_sql_read_failure_rolls_back_only_the_owned_transaction(ledger):
     with pytest.raises(sqlite3.DatabaseError):
         query(conn, work_id)
     assert not conn.in_transaction
-    conn.set_authorizer(None)
+    conn.set_authorizer(lambda *_: sqlite3.SQLITE_OK)
     assert query(conn, work_id)["ownership"]["revision"] == 0
 
 
