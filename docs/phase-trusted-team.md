@@ -1,8 +1,8 @@
 # Trusted-team collaboration
 
-Status: implementation direction authorized on 2026-10-28. The first slice is
-confirmed Hub-claim admission. Human membership and sharing policy remain a
-separate contract before their implementation.
+Status: implementation direction and trusted-team policy approved on 2026-10-28.
+The first slice is confirmed Hub-claim admission. Human membership, sharing and
+recovery authorization remain to be implemented under the approved boundary.
 
 ## Goal
 
@@ -12,9 +12,14 @@ credentials and execution ownership separate.
 
 The initial product boundary is a trusted team using one Hub. This does not
 provide isolation between mutually untrusted tenants or operating-system users.
-Personal knowledge stays local until explicitly shared. Existing Fleet Hub,
-Worklore, journals, receipts and mesh messaging remain the foundation. No new
-runtime dependency, service, storage backend or deployment is part of this work.
+Project access requires explicit membership. Personal knowledge stays private
+and local until its owner explicitly shares it. Recovery and force-release are
+restricted to team administrators. Current claim and read-only handoff features
+do not yet enforce these membership, sharing or recovery permissions.
+
+Existing Fleet Hub, Worklore, journals, receipts and mesh messaging remain the
+foundation. No new runtime dependency, service, storage backend or deployment is
+part of this work.
 
 ## Evidence
 
@@ -47,10 +52,11 @@ suggests a useful future work-item view, not a new automatic-merge authority.
 2. Named people linked to existing principals. Basis: the requested human and
    fleet collaboration goal. A display label is not authentication, and existing
    read-only owner charters are not membership authorization.
-3. Project membership, recovery roles and explicit shared context. The proposed
-   first boundary is explicit membership, private-until-shared knowledge and
-   administrator-only force recovery. This is an agent recommendation pending
-   the operator's policy preference, not an approved authorization matrix.
+3. Project membership, recovery roles and explicit shared context. The operator
+   approved explicit project membership, personal knowledge kept private until
+   shared, and recovery or force-release restricted to team administrators on
+   2026-10-28. Apply this boundary across the existing routes and projections,
+   rather than limiting enforcement to a new view.
 4. Prepared handoffs and a shared work view. Reuse Worklore item revisions,
    ownership generations, checkpoints, run links and receipts. Do not copy
    transcripts or credential-bearing metadata into a second task store.
