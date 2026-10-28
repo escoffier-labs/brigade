@@ -42,7 +42,6 @@ from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
 from . import fleet_hub_policy_api
 from . import fleet_hub_roster_page
-from . import fleet_hub_routing
 from . import fleet_hub_status
 from . import fleet_hub_event_bounds as request_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
@@ -50,6 +49,8 @@ from .fleet_hub_http_reject import RejectedUploadMixin
 from . import fleet_model_inventory
 from . import fleet_owners
 from . import fleet_owners_page
+from . import fleet_deck_pages_http
+from .fleet_deck_pages_http import control_plane_from_hub as control_plane_from_hub
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
@@ -190,19 +191,6 @@ def set_run_preference(*args: Any, **kwargs: Any) -> Any:
 
 def lookup_node_token(*args: Any, **kwargs: Any) -> Any:
     return _hub.lookup_node_token(*args, **kwargs)
-
-
-def control_plane_from_hub(conn: Any) -> Any:
-    """Adapt the live routing snapshot for the Deck.
-
-    Missing or unreadable projection stays unknown. This helper does not
-    recompute routing or quota precedence.
-    """
-    try:
-        raw = fleet_hub_routing.control_plane_status(conn)
-    except (FleetHubError, sqlite3.Error, KeyError, ValueError, TypeError):
-        return None
-    return fleet_command_deck.control_plane_from_snapshot(raw)
 
 
 def make_handler(
@@ -924,20 +912,8 @@ def make_handler(
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
             alerts_page = path == "/deck/alerts"
-            capacity_page = path in ("/deck/capacity", "/deck/capacity/cloud", "/deck/capacity/github")
-            activity_page = path == "/deck/activity"
             projects_page = path == "/deck/projects"
-            pulls_page = path == "/deck/pulls"
-            reporting_page = path == "/deck/reporting"
-            if path not in ("/", "/deck") and not (
-                repos_page
-                or alerts_page
-                or capacity_page
-                or activity_page
-                or projects_page
-                or pulls_page
-                or reporting_page
-            ):
+            if path not in fleet_deck_pages_http.DECK_PATHS:
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
@@ -949,7 +925,7 @@ def make_handler(
                 return
             from . import fleet_admin_pages
 
-            if reporting_page and query:
+            if path == "/deck/reporting" and query:
                 self._send_html(400, "Invalid reporting query.\n", content_type=plain)
                 return
             selected_project = None
@@ -969,41 +945,8 @@ def make_handler(
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
             try:
-                control_plane = None
                 now = datetime.now(timezone.utc)
-                live_runs = fleet_command_deck.fetch_live_runs(
-                    conn, now=now, stale_after_seconds=frozen_deck.stale_after_seconds
-                )
-                claims: list[fleet_command_deck.Claim] = []
-                for row in list_claims(conn):
-                    expires = datetime.fromisoformat(str(row["expires_at"]))
-                    ttl_remaining = max(0, int((expires - now).total_seconds()))
-                    claims.append(
-                        fleet_command_deck.Claim(
-                            target=str(row["target"]),
-                            owner_node=str(row["owner_node"]),
-                            owner_conductor=str(row["owner_conductor"] or ""),
-                            ttl_remaining=ttl_remaining,
-                        )
-                    )
-                outcomes = fleet_command_deck.fetch_outcomes(conn, outcome_window=frozen_deck.outcome_window)
-                failed_outcomes = fleet_command_deck.fetch_failed_outcomes(
-                    conn,
-                    now=now,
-                    lookback_seconds=frozen_deck.failed_lookback_seconds,
-                    stale_after_seconds=frozen_deck.stale_after_seconds,
-                )
-                cloud_workers = fleet_command_deck.cloud_workers_from_snapshot(cloud_snapshot(conn, frozen_deck))
-                # Only unrevoked enrollments feed the label/enrolled mapping.
-                enrolled_labels = {
-                    node["node_id"]: str(node["label"] or "")
-                    for node in list_nodes(conn)
-                    if node.get("revoked_at") is None
-                }
-                station_ids = [station.node_id for station in frozen_deck.stations]
-                last_heard = fleet_command_deck.fetch_last_heard(conn, station_ids)
-                observers = fleet_command_deck.fetch_observers(conn, frozenset(station_ids))
-                interactive_sessions = fleet_command_deck.fetch_interactive_sessions(conn, now=now)
+                view, live_runs, interactive_sessions = fleet_deck_pages_http.build_view(conn, frozen_deck, now)
                 # The repos page joins the policy authority to the coordination
                 # rows. It is read on the same connection, and a failure to read
                 # it is reported as unknown rather than dropping the page.
@@ -1039,53 +982,19 @@ def make_handler(
                         )
                     except (FleetHubError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
                         routing = fleet_live_routing.unavailable(type(exc).__name__)
-                reporting_view = None
-                if reporting_page:
-                    from . import fleet_admin_stats
-
-                    try:
-                        reporting_view = fleet_admin_stats.load_view(conn)
-                    except (sqlite3.Error, ValueError):
-                        reporting_view = {"unavailable": True}
-                project_page = None
-                project_board = None
-                ci_view = None
-                if pulls_page or projects_page:
-                    try:
-                        from . import fleet_ci_board
-
-                        # Same visibility rule as /deck/ci: private repositories only for the admin bearer.
-                        ci_view = fleet_ci_board.load_view(conn, operator=self._roster_auth()[1])
-                    except (sqlite3.Error, ValueError, KeyError, TypeError):
-                        ci_view = None
-                if projects_page:
-                    try:
-                        project_page = fleet_admin_pages.load_projects(
-                            conn, enabled=worklore_http.enabled(), selected=selected_project
-                        )
-                        from . import fleet_project_board
-
-                        project_board = fleet_project_board.load_board(conn)
-                    except ValueError:
-                        self._send_html(400, "Unknown project.\n", content_type=plain)
-                        return
-                control_plane = control_plane_from_hub(conn)
+                try:
+                    extras = fleet_deck_pages_http.load_extras(
+                        conn,
+                        path,
+                        operator=self._roster_auth()[1],
+                        worklore_enabled=worklore_http.enabled(),
+                        selected_project=selected_project,
+                    )
+                except ValueError:
+                    self._send_html(400, "Unknown project.\n", content_type=plain)
+                    return
                 from .fleet_action_targets import linked_subjects
 
-                view = fleet_command_deck.build_view(
-                    frozen_deck,
-                    live_runs=live_runs,
-                    claims=claims,
-                    enrolled_labels=enrolled_labels,
-                    last_heard=last_heard,
-                    outcomes=outcomes,
-                    failed_outcomes=failed_outcomes,
-                    observers=observers,
-                    now=now,
-                    cloud_workers=cloud_workers,
-                    interactive_sessions=interactive_sessions,
-                    control_plane=control_plane,
-                )
                 from .fleet_deck_overview import page_alerts
 
                 try:
@@ -1110,35 +1019,15 @@ def make_handler(
                     nonce=nonce,
                     now=now,
                 )
-            elif capacity_page:
-                tab = {"/deck/capacity/cloud": "cloud-details", "/deck/capacity/github": "github-reads"}.get(
-                    path, "capacity"
-                )
-                page = fleet_admin_pages.render_capacity(
-                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), tab=tab
-                )
-            elif reporting_page:
-                page = fleet_admin_pages.render_reporting(
-                    reporting_view or {}, view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
-                )
-            elif activity_page:
-                page = fleet_admin_pages.render_activity(
-                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
-                )
-            elif projects_page:
-                page = fleet_admin_pages.render_projects(
-                    project_page or {},
+            elif path in fleet_deck_pages_http.ADMIN_PAGES:
+                page = fleet_deck_pages_http.render(
+                    path,
                     view,
                     now,
                     nonce=nonce,
                     worklore_enabled=worklore_http.enabled(),
-                    board=project_board,
+                    extras=extras,
                     board_options=board_options,
-                    ci_view=ci_view,
-                )
-            elif pulls_page:
-                page = fleet_admin_pages.render_pulls(
-                    ci_view, view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
                 )
             elif alerts_page:
                 page = fleet_deck_alerts.render_alerts_page(
