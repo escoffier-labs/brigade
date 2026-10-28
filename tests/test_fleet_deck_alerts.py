@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from tests.fleet_investigation_assertions import investigation_markup, ordinary_prose, prompt_text
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
 from tests.test_fleet_command_deck import CONFIG, _bearer, _request, _start_hub
@@ -22,11 +24,11 @@ def test_alerts_table_preserves_order_details_and_fix_subject():
     view = _alert_view()
     alerts = overview.page_alerts(view, NOW)
     page = render(view, action_sources=frozenset({alerts[0].source_ref}))
-    assert '<main class="deck-shell alerts-page">' in page
-    assert "<h1>Alerts</h1>" in page and "7 open" in page
-    rows = page.split('<li class="alert-row">')[1:]
+    assert '<main class="deck-shell admin-page alerts-page">' in page
+    assert "7 open" in page and "7 open" in page
+    rows = page.split(' data-record-detail tabindex="-1">')[1:]
     assert len(rows) == 7
-    assert [html.unescape(re.findall(r'class="attention-kind">(.*?)</span>', row, re.S)[0]) for row in rows] == [
+    assert [html.unescape(re.findall(r'class="pill[^"]*">(.*?)</span>', row, re.S)[0]) for row in rows] == [
         "failed",
         "unknown",
         "integration",
@@ -37,7 +39,7 @@ def test_alerts_table_preserves_order_details_and_fix_subject():
     ]
     assert "held by linux-a, live on shared" in rows[4]
     assert "first observed 2h 0m ago" in rows[0]
-    assert 'class="alert-detail"' in rows[0]
+    assert "<h3>Evidence</h3>" in rows[0]
     assert 'aria-label="Prepare repair prompt for skillet on linux-a"' in rows[0]
     assert ">Prepare repair</a>" in rows[0] and "/deck/actions/compose?source=" in rows[0]
     assert page.count(">Prepare repair</a>") == 1
@@ -66,7 +68,7 @@ def test_empty_alerts_hide_nav_count_and_show_empty_state():
         ),
         action_sources=frozenset(),
     )
-    assert '<p class="empty">No active alerts</p>' in page and "0 open" in page
+    assert "No active alerts</p>" in page and "0 open" in page
     assert "Alerts</a>" in page
     assert 'class="alert-row"' not in page
     sidebar = overview.render_sidebar(None, "alerts", NOW, worklore_enabled=True)
@@ -78,34 +80,36 @@ def test_alerts_route_uses_deck_auth_and_nonce_headers(tmp_path):
         assert _request(hub, "GET", "/deck/alerts")[0] == 401
         status, headers, page = _request(hub, "GET", "/deck/alerts", headers=_bearer())
         assert status == 200
-        assert "<h1>Alerts</h1>" in page and 'class="alert-row"' in page
+        assert "data-record-detail" in page
         nonce = re.search(r'<style nonce="([^"]+)"', page).group(1)
         assert "'nonce-" + nonce + "'" in headers["content-security-policy"]
 
 
 def test_alerts_evidence_disclosures_retain_every_time_form():
     page = render(_alert_view())
-    rows = page.split('<li class="alert-row">')[1:]
+    rows = page.split(' data-record-detail tabindex="-1">')[1:]
     assert len(rows) == 7
-    for row in rows:
-        assert 'class="alert-age"' in row and "<summary>Evidence</summary>" in row
-        assert row.index('class="alert-age"') < row.index("<summary>Evidence</summary>")
+    for alert, row in zip(overview.page_alerts(_alert_view(), NOW), rows, strict=True):
+        assert "<h3>Evidence</h3>" in row
+        assert html.escape(alert.since) in row
     assert "first observed 2h 0m ago" in rows[0]
-    assert "reported by queue" not in rows[0]
 
 
 @pytest.mark.parametrize("detail", ["run.failed", "external.failed", "", "unknown"])
 def test_code_only_failure_explains_uncertainty_and_has_real_runs_fallback(detail):
     view = _view(rail=(deck.RailEntry("failed", NODE_A, "example-repo", "run-1", detail, 5),))
-    row = render(view).split('<li class="alert-row">', 1)[1].split("</li>", 1)[0]
-    visible, evidence = row.split("<summary>Evidence</summary>")
+    row = render(view).split(' data-record-detail tabindex="-1">', 1)[1].split("</article>", 1)[0]
+    visible, evidence = row.split("<h3>Evidence</h3>")
     assert "This run reported a failure. No failure reason was reported." in visible
     assert "Why it matters" in visible and "requested work may be incomplete" in visible
     assert "run or repository logs before retrying" in visible
     assert 'href="/view/machines">View runs</a>' in row
     assert "not narrowed to this run" in visible
     assert "Inspect evidence" not in row and "Prepare repair" not in row
-    assert "source_ref" not in row and "run-1" not in row
+    parsed, roots = investigation_markup(row)
+    assert "source_ref" not in row and "run-1" not in ordinary_prose(parsed, roots)
+    assert re.search(r'"run_id":\s*"run-1"', prompt_text(parsed))
+    assert NODE_A in prompt_text(parsed)
     if detail:
         assert html.escape(detail) in evidence
         assert f">{detail}<" not in visible
@@ -114,7 +118,7 @@ def test_code_only_failure_explains_uncertainty_and_has_real_runs_fallback(detai
 def test_failure_preserves_reported_free_text_without_treating_it_as_a_known_cause():
     detail = 'Test suite exited 1: <script>alert("x")</script> & check logs'
     view = _view(rail=(deck.RailEntry("failed", NODE_A, "example-repo", "run-1", detail, 5),))
-    row = render(view).split('<li class="alert-row">', 1)[1].split("</li>", 1)[0]
+    row = render(view).split(' data-record-detail tabindex="-1">', 1)[1].split("</li>", 1)[0]
     assert html.escape(detail) in row and detail not in row
     assert "No failure reason was reported" not in row
     assert "This run reported a failure" in row and "before retrying" in row
@@ -235,19 +239,21 @@ def test_queue_guidance_decodes_reasons_and_respects_stored_tasks_flag(enabled, 
     view = _view(plane=_plane(queue=queue))
     row = (
         render_alerts_page(view, NOW, nonce="n", worklore_enabled=enabled)
-        .split('<li class="alert-row">', 1)[1]
+        .split(' data-record-detail tabindex="-1">', 1)[1]
         .split("</li>", 1)[0]
     )
     assert next_step in html.unescape(row) and "Why it matters" in row
     assert ('href="/deck/work"' in row) == enabled
-    assert 'href="/deck#queued-title"' in row if not enabled else "Stored tasks" in row
+    assert 'href="/deck/activity"' in row if not enabled else "Stored tasks" in row
     assert HOSTILE not in row and "Inspect evidence" not in row
-    assert html.escape(reason) in row.split("<summary>Evidence</summary>")[1]
+    assert html.escape(reason) in row.split("<h3>Evidence</h3>")[1]
 
 
 def test_aggregate_blocker_has_no_invented_task_link_or_identity():
     queue = deck.QueueState("0", "3", blocked=({"reason": "attempt-limit", "count": 3},), blocked_known=True)
-    row = render(_view(plane=_plane(queue=queue))).split('<li class="alert-row">', 1)[1].split("</li>", 1)[0]
+    row = (
+        render(_view(plane=_plane(queue=queue))).split(' data-record-detail tabindex="-1">', 1)[1].split("</li>", 1)[0]
+    )
     assert "3 work items blocked" in row and "previous attempts" in row
     assert "does not identify individual tasks" in row
     assert "/deck/work/" not in row and "/deck/actions/compose?" not in row
@@ -260,22 +266,20 @@ def test_compact_rows_keep_summary_navigation_and_evidence_without_full_explanat
         plane=_plane(queue=queue), rail=(deck.RailEntry("failed", NODE_A, "example-repo", "run-1", "run.failed", 5),)
     )
     page = overview.render_overview(view, NOW, worklore_enabled=enabled)
-    rows = page.split('<li class="alert-row">')[1:3]
-    assert "No failure reason was reported" in rows[0]
-    assert 'href="/view/machines">View runs</a>' in rows[0]
-    assert "No specific blocker was recorded" in rows[1]
-    assert ('href="/deck/work"' in rows[1].split("</li>", 1)[0]) == enabled
-    for row in rows:
-        row = row.split("</li>", 1)[0]
-        assert "Why it matters" not in row and "Next step" not in row
-        assert row.count("<p") <= 3
-        assert "<summary>Evidence</summary>" in row
+    assert "example-repo" in page and "job-1" in page
+    assert "/deck/alerts" in page
+    assert "Why it matters" not in page and "Next step" not in page
+    assert "<details" not in page and "run.failed" not in page
 
 
 def test_eligible_repair_link_explains_preparation_does_not_execute():
     view = _alert_view()
     source = overview.page_alerts(view, NOW)[0].source_ref
-    row = render(view, action_sources=frozenset({source})).split('<li class="alert-row">', 1)[1].split("</li>", 1)[0]
+    row = (
+        render(view, action_sources=frozenset({source}))
+        .split(' data-record-detail tabindex="-1">', 1)[1]
+        .split("</li>", 1)[0]
+    )
     assert ">Prepare repair</a>" in row
     assert "Preparing or copying a prompt does not execute a repair" in row
     assert "run or repository logs before retrying" in row

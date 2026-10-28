@@ -55,6 +55,32 @@ def _pages(reader: GitHubReader, suffix: str, *, key: str | None = None, **param
     raise Unavailable("incomplete-pagination")
 
 
+def _pull_extras(pr: dict[str, Any]) -> dict[str, Any]:
+    """Optional display fields taken only from the already-fetched /pulls list object."""
+    user: Any = pr.get("user")
+    user = user if isinstance(user, dict) else {}
+    labels: Any = pr.get("labels")
+    reviewers: Any = pr.get("requested_reviewers")
+    raw: dict[str, Any] = {
+        "title": pr.get("title"),
+        "author": user.get("login"),
+        "author_bot": user.get("type") == "Bot" if isinstance(user.get("type"), str) else None,
+        "draft": pr.get("draft"),
+        "labels": [
+            {"name": item.get("name"), "color": item.get("color")}
+            for item in labels[: board.PR_LABEL_LIMIT * 2]
+            if isinstance(item, dict)
+        ]
+        if isinstance(labels, list)
+        else None,
+        "requested_reviewers": [r.get("login") for r in reviewers[: board.PR_REVIEWER_LIMIT * 2] if isinstance(r, dict)]
+        if isinstance(reviewers, list)
+        else None,
+        "created_at": pr.get("created_at"),
+    }
+    return board.clean_pull_extras(raw)
+
+
 def _required(reader: GitHubReader, branch: str, *, protected: bool | None) -> list[dict[str, Any]]:
     branch_path = quote(branch, safe="")
     rules, headers = _get(reader, f"/rules/branches/{branch_path}", per_page=100)
@@ -226,7 +252,12 @@ def reconcile_repo(
             if _object_id(pr.get("number")) is None or not isinstance(head, dict) or _head(head.get("sha")) is None:
                 raise Unavailable("PR-scope-unknown")
             snapshot["pulls"].append(
-                {"number": pr["number"], "head_sha": _head(head["sha"]), "updated_at": _timestamp(pr.get("updated_at"))}
+                {
+                    "number": pr["number"],
+                    "head_sha": _head(head["sha"]),
+                    "updated_at": _timestamp(pr.get("updated_at")),
+                    **_pull_extras(pr),
+                }
             )
         snapshot["pulls_complete"] = True
     except Unavailable as exc:

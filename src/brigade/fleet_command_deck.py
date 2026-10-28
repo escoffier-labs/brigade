@@ -22,7 +22,7 @@ from brigade.fleet_deck_brands import (
 )
 
 from .fleet_event_freshness import observation_state
-from . import fleet_deck_shell, ui_theme
+from . import fleet_deck_shell, ui_theme, fleet_live_routing
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -1821,12 +1821,13 @@ def render_deck(
     now: datetime,
     worklore_enabled: bool = True,
     action_sources: frozenset[str] = frozenset(),
+    routing: fleet_live_routing.Routing | None = None,
 ) -> str:
     # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview
+    from . import fleet_deck_overview, fleet_admin_explorer
 
     body = fleet_deck_overview.render_overview(
-        view, now, worklore_enabled=worklore_enabled, action_sources=action_sources
+        view, now, worklore_enabled=worklore_enabled, action_sources=action_sources, routing=routing
     )
     return _document(
         body,
@@ -1835,7 +1836,7 @@ def render_deck(
         active="overview",
         view=view,
         worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.OVERVIEW_CSS,
+        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS,
     )
 
 
@@ -1906,21 +1907,39 @@ def _document(
     ``DeckView`` pass ``None`` and get the navigation only.
     """
     # Imported here because the sidebar imports this module for its types.
-    from . import fleet_deck_sidebar
+    from . import fleet_admin_explorer, fleet_deck_sidebar, fleet_investigation
 
     if worklore_enabled is None:
         from . import worklore_http
 
         worklore_enabled = worklore_http.enabled()
     sidebar = fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+    section = fleet_deck_sidebar.section_for(active)
+    heading = {
+        "overview": "Fleet",
+        "work": "Work",
+        "capacity": "Capacity",
+        "repos": "Projects",
+        "roster": "Settings",
+    }.get(section, title)
+    icon = fleet_deck_sidebar.icons.NAV_ICONS.get(section, "")
+    section_head = f'<header class="admin-section-head"><h1>{icon}{_esc(heading)}</h1>{fleet_admin_explorer.audience_toggle()}</header>'
+
     return fleet_deck_shell.deck_page(
         title,
         active,
         sidebar,
-        fleet_deck_sidebar.render_section_tabs(active, worklore_enabled=worklore_enabled) + body,
+        section_head + fleet_deck_sidebar.render_section_tabs(active, worklore_enabled=worklore_enabled) + body,
         nonce,
         as_of=_stamp(now),
         refresh_seconds=refresh_seconds if refresh else None,
-        extra_css=_STYLE + extra_css,
-        script=script,
+        title_text=fleet_deck_sidebar.page_title(active),
+        extra_css=_STYLE + fleet_admin_explorer.SHELL_CSS + extra_css + fleet_investigation.CSS,
+        script=fleet_admin_explorer.SHELL_SCRIPT
+        + script
+        + (
+            fleet_investigation.COPY_SCRIPT
+            if "data-copy-target=" in body and fleet_investigation.COPY_SCRIPT not in script
+            else ""
+        ),
     )

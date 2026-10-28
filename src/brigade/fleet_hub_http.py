@@ -20,7 +20,13 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
-from . import fleet_claim_display, fleet_admin_stats_http
+from . import (
+    fleet_claim_display,
+    fleet_admin_stats_http,
+    fleet_skills_http,
+    fleet_pr_rules_http,
+    fleet_project_board_http,
+)
 from . import (
     fleet_command_deck,
     fleet_dashboard,
@@ -47,6 +53,7 @@ from . import fleet_owners_page
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
+from . import ui_theme
 from .fleet_hub_claims import ClaimFenceError, ClaimTargetError, status as claim_fencing_status
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
@@ -591,9 +598,12 @@ def make_handler(
         ) -> None:
             """Dashboard response with the same security headers as ``center serve``."""
             nonce = nonce or secrets.token_urlsafe(16)
+            # Only a soft-refresh page may fetch (same origin) to update itself in place.
+            soft = content_type.startswith("text/html") and ui_theme.SOFT_REFRESH_BODY_MARKER in body
+            connect = "'self'" if soft else "'none'"
             csp = (
                 f"default-src 'none'; script-src 'nonce-{nonce}'; script-src-attr 'none'; "
-                f"style-src 'nonce-{nonce}'; img-src 'self'; manifest-src 'self'; connect-src 'none'; base-uri 'none'; "
+                f"style-src 'nonce-{nonce}'; img-src 'self'; manifest-src 'self'; connect-src {connect}; base-uri 'none'; "
                 "form-action 'self'; frame-ancestors 'none'"
             )
             data = body.encode("utf-8")
@@ -914,8 +924,20 @@ def make_handler(
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
             alerts_page = path == "/deck/alerts"
-            capacity_page = path == "/deck/capacity"
-            if path not in ("/", "/deck") and not (repos_page or alerts_page or capacity_page):
+            capacity_page = path in ("/deck/capacity", "/deck/capacity/cloud", "/deck/capacity/github")
+            activity_page = path == "/deck/activity"
+            projects_page = path == "/deck/projects"
+            pulls_page = path == "/deck/pulls"
+            reporting_page = path == "/deck/reporting"
+            if path not in ("/", "/deck") and not (
+                repos_page
+                or alerts_page
+                or capacity_page
+                or activity_page
+                or projects_page
+                or pulls_page
+                or reporting_page
+            ):
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
@@ -925,6 +947,19 @@ def make_handler(
                     content_type=plain,
                 )
                 return
+            from . import fleet_admin_pages
+
+            if reporting_page and query:
+                self._send_html(400, "Invalid reporting query.\n", content_type=plain)
+                return
+            selected_project = None
+            board_options = None
+            if projects_page:
+                try:
+                    selected_project, board_options = fleet_admin_pages.parse_projects_query(query)
+                except ValueError:
+                    self._send_html(400, "Invalid project query.\n", content_type=plain)
+                    return
             try:
                 conn = open_db(Path(db_path))
             except FleetHubUnsupportedSchema:
@@ -992,6 +1027,48 @@ def make_handler(
                         )
                     except (FleetHubError, sqlite3.Error, KeyError, ValueError) as exc:
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
+                routing = None
+                if path in ("/", "/deck"):
+                    from . import fleet_live_routing
+
+                    try:
+                        routing = fleet_live_routing.project(
+                            fleet_hub_roster_page.load_view(
+                                conn, frozen_deck, activation=fleet_policy_page.probe_activation(conn)
+                            )
+                        )
+                    except (FleetHubError, sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+                        routing = fleet_live_routing.unavailable(type(exc).__name__)
+                reporting_view = None
+                if reporting_page:
+                    from . import fleet_admin_stats
+
+                    try:
+                        reporting_view = fleet_admin_stats.load_view(conn)
+                    except (sqlite3.Error, ValueError):
+                        reporting_view = {"unavailable": True}
+                project_page = None
+                project_board = None
+                ci_view = None
+                if pulls_page or projects_page:
+                    try:
+                        from . import fleet_ci_board
+
+                        # Same visibility rule as /deck/ci: private repositories only for the admin bearer.
+                        ci_view = fleet_ci_board.load_view(conn, operator=self._roster_auth()[1])
+                    except (sqlite3.Error, ValueError, KeyError, TypeError):
+                        ci_view = None
+                if projects_page:
+                    try:
+                        project_page = fleet_admin_pages.load_projects(
+                            conn, enabled=worklore_http.enabled(), selected=selected_project
+                        )
+                        from . import fleet_project_board
+
+                        project_board = fleet_project_board.load_board(conn)
+                    except ValueError:
+                        self._send_html(400, "Unknown project.\n", content_type=plain)
+                        return
                 control_plane = control_plane_from_hub(conn)
                 from .fleet_action_targets import linked_subjects
 
@@ -1034,16 +1111,47 @@ def make_handler(
                     now=now,
                 )
             elif capacity_page:
-                from .fleet_deck_overview import render_capacity_page
-
-                page = render_capacity_page(view, now, nonce=nonce, worklore_enabled=worklore_http.enabled())
+                tab = {"/deck/capacity/cloud": "cloud-details", "/deck/capacity/github": "github-reads"}.get(
+                    path, "capacity"
+                )
+                page = fleet_admin_pages.render_capacity(
+                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), tab=tab
+                )
+            elif reporting_page:
+                page = fleet_admin_pages.render_reporting(
+                    reporting_view or {}, view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
+                )
+            elif activity_page:
+                page = fleet_admin_pages.render_activity(
+                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
+                )
+            elif projects_page:
+                page = fleet_admin_pages.render_projects(
+                    project_page or {},
+                    view,
+                    now,
+                    nonce=nonce,
+                    worklore_enabled=worklore_http.enabled(),
+                    board=project_board,
+                    board_options=board_options,
+                    ci_view=ci_view,
+                )
+            elif pulls_page:
+                page = fleet_admin_pages.render_pulls(
+                    ci_view, view, now, nonce=nonce, worklore_enabled=worklore_http.enabled()
+                )
             elif alerts_page:
                 page = fleet_deck_alerts.render_alerts_page(
                     view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
                 )
             else:
                 page = fleet_command_deck.render_deck(
-                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
+                    view,
+                    nonce=nonce,
+                    now=now,
+                    worklore_enabled=worklore_http.enabled(),
+                    action_sources=action_sources,
+                    routing=routing,
                 )
             self._send_html(200, page, nonce=nonce)
 
@@ -1529,6 +1637,12 @@ def make_handler(
             if path == "/deck/owners":
                 self._serve_owners_page(query)
                 return
+            if path in ("/deck/skills", "/deck/skills/plan"):
+                fleet_skills_http.serve(self, Path(db_path), token, path, query)
+                return
+            if path == "/deck/pr-rules":
+                fleet_pr_rules_http.serve(self, Path(db_path), token, query)
+                return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)
                 return
@@ -1722,6 +1836,18 @@ def make_handler(
                 return
             if path == "/deck/policy":
                 self._post_policy_page()
+                return
+            if path == "/deck/pr-rules":
+                fleet_pr_rules_http.post_form(self, Path(db_path), token, policy_inventory)
+                return
+            if path == "/deck/skills":
+                fleet_skills_http.post_form(self, Path(db_path), token)
+                return
+            if path == "/skills/report":
+                fleet_skills_http.post_report(self, Path(db_path), query)
+                return
+            if path == "/projects/board":
+                fleet_project_board_http.post_snapshot(self, Path(db_path), query)
                 return
             if path == "/stats":
                 fleet_admin_stats_http.post(self, Path(db_path), query)

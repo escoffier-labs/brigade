@@ -9,7 +9,8 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import fleet_command_deck as deck
-from . import worklore_store
+from . import fleet_investigation as investigation
+from . import worklore_store, fleet_admin_explorer as explorer
 from .fleet_deck_overview import format_age, seconds_since
 from .worklore_validate import WorkloreValidationError, safe_https_url
 
@@ -72,6 +73,8 @@ def _reference_url(value: object) -> str | None:
 
 def _references(item: Mapping[str, Any]) -> str:
     links = item.get("links") or []
+    if not links and not item.get("links_truncated"):
+        return ""
     parts = [
         '<h3>Stored references</h3><p class="station-meta">Source, parent and evidence '
         "references are shown as stored. External keys are opaque identifiers.</p>"
@@ -108,68 +111,121 @@ def _references(item: Mapping[str, Any]) -> str:
 
 def _item(item: Mapping[str, Any], *, now: datetime) -> str:
     fields = (
-        ("Description", "description", DESCRIPTION_LIMIT),
         ("Execution mode", "execution_mode", TEXT_LIMIT),
         ("Version", "version", TEXT_LIMIT),
         ("Updated at (work-record update time)", "updated_at", TEXT_LIMIT),
         ("Work ID", "work_id", TEXT_LIMIT),
     )
     facts = "".join(
-        f'<dt>{label}</dt><dd class="work-text">{_text(item.get(key), limit=limit)}</dd>'
+        f'<div><dt>{label}</dt><dd class="work-text">{_text(item.get(key), limit=limit)}</dd></div>'
         for label, key, limit in fields
         if item.get(key) is not None and item.get(key) != ""
     )
     burn = item.get("burn_eligible")
-    burn_fact = f"<dt>Burn eligible</dt><dd>{'true' if burn else 'false'}</dd>" if isinstance(burn, bool) else ""
-    scope = f"<p>Repository / scope: {_text(item['scope'])}</p>" if item.get("scope") else ""
+    burn_fact = (
+        f"<div><dt>Burn eligible</dt><dd>{'true' if burn else 'false'}</dd></div>" if isinstance(burn, bool) else ""
+    )
+    scope = (
+        f'<dl class="fields"><div><dt>Repository</dt><dd>{_text(item["scope"])}</dd></div></dl>'
+        if item.get("scope")
+        else ""
+    )
     blocker = f"<p>Blocker: {_text(item['blocker'], limit=BLOCKER_LIMIT)}</p>" if item.get("blocker") else ""
     age = format_age(seconds_since(str(item.get("updated_at") or ""), now))
     return (
-        '<article class="work-item panel"><h2>'
+        '<article class="work-item panel"><div class="detail-hero"><h2>'
         + _text(item.get("title") or "Untitled task")
         + "</h2>"
+        + explorer.pill(str(item.get("status") or "unknown")[:TEXT_LIMIT])
+        + "</div>"
         + scope
-        + f"<p>Stored status: {_text(item.get('status') or 'unknown')} · record age: {_text(age)}</p>"
+        + (
+            f'<h3>Description</h3><p class="work-text">{_text(item["description"], limit=DESCRIPTION_LIMIT)}</p>'
+            if item.get("description")
+            else ""
+        )
         + blocker
-        + '<details><summary>Task details</summary><dl class="tile-facts">'
-        + facts
-        + burn_fact
-        + "</dl>"
+        + (
+            "<h3>Acceptance</h3><ul>"
+            + "".join(f"<li>{_text(value, limit=DESCRIPTION_LIMIT)}</li>" for value in item.get("acceptance", []))
+            + "</ul>"
+            if item.get("acceptance")
+            else ""
+        )
         + _references(item)
-        + "</details></article>"
+        + explorer.agent(
+            "<h3>Evidence</h3>"
+            + f'<p>Record age: {_text(age)}</p><dl class="fields">'
+            + facts
+            + burn_fact
+            + "</dl>"
+            + "<p>Recorded task status does not confirm live execution.</p>"
+        )
+        + (
+            investigation.render(
+                str(item.get("title") or "Untitled task")[:TEXT_LIMIT]
+                + (" [truncated]" if len(str(item.get("title") or "")) > TEXT_LIMIT else ""),
+                route="/deck/work",
+                observation=str(item.get("updated_at") or "unknown") + "; record age " + age,
+                facts={
+                    label: (
+                        str(item.get(key))[: BLOCKER_LIMIT if key == "blocker" else TEXT_LIMIT]
+                        + (
+                            " [truncated]"
+                            if len(str(item.get(key))) > (BLOCKER_LIMIT if key == "blocker" else TEXT_LIMIT)
+                            else ""
+                        )
+                    )
+                    if item.get(key) is not None
+                    else None
+                    for label, key in (
+                        ("Work ID", "work_id"),
+                        ("Stored status", "status"),
+                        ("Blocker", "blocker"),
+                        ("Scope", "scope"),
+                        ("Execution mode", "execution_mode"),
+                        ("Version", "version"),
+                    )
+                },
+                limits="Stored task record, not live execution. Work-record update time is separate from snapshot observation time.",
+            )
+            if investigation.needed(str(item.get("status") or "unknown")) or item.get("blocker")
+            else ""
+        )
+        + "</article>"
     )
 
 
 def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
     """Render plain stored fields. No description parsing or execution inference."""
     items = page.get("items") or []
-    blocks = "".join(_item(item, now=now) for item in items[:PAGE_SIZE])
-    if not blocks:
-        blocks = '<section class="panel"><p class="empty">No Worklore tasks on this page.</p></section>'
+    entries = [
+        explorer.Entry(
+            str(item.get("work_id") or index),
+            str(item.get("title") or "Untitled task"),
+            f"Stored {item.get('status') or 'unknown'} · {item.get('scope') or 'scope unspecified'}",
+            _item(item, now=now),
+        )
+        for index, item in enumerate(items[:PAGE_SIZE])
+    ]
+    blocks = explorer.render(entries, label="stored tasks", empty="No Worklore tasks on this page.")
     pagination = '<nav class="pager" aria-label="Worklore pages"><a href="/deck/work">First page</a>'
     cursor = page.get("next_cursor")
     if cursor:
         href = "/deck/work?" + urlencode({"cursor": cursor})
         pagination += f'<a href="{deck._esc(href)}">Next page</a>'
     pagination += "</nav>"
-    body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Worklore</h1></div>"
-        f'<p class="header-meta">{deck._esc(deck._stamp(now))}</p></header>'
-        '<section class="panel"><h2>Stored tasks</h2>'
-        "<p>Read-only view of stored Worklore tasks. captured / manual / burn_eligible=false records describe captured work "
-        "configured for manual execution and excluded from burn selection. Execution state is not inferred "
-        "from these fields or from descriptions.</p>"
-        f'<details><summary>Projection limits</summary><p class="station-meta">At most {PAGE_SIZE} tasks per page; description previews are limited to '
-        f"{DESCRIPTION_LIMIT} characters, blockers to {BLOCKER_LIMIT}, other text to {TEXT_LIMIT}, "
-        f"and reference summaries to {REFERENCE_LIMIT} per task. Truncation is marked.</p></details></section>"
-        + pagination
-        + blocks
-        + pagination
-        + "</main>"
-    )
+    body = '<main class="deck-shell admin-page">' + pagination + blocks + pagination + "</main>"
     return deck._document(
-        body, nonce=nonce, now=now, title="Worklore", refresh=False, active="work", worklore_enabled=True
+        body,
+        nonce=nonce,
+        now=now,
+        title="Stored tasks",
+        refresh=False,
+        active="work",
+        worklore_enabled=True,
+        extra_css=explorer.CSS,
+        script=explorer.SCRIPT,
     )
 
 
@@ -204,7 +260,20 @@ def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime,
         + _text(work_id)
         + "</p><p>Record unavailable: "
         + _text(reason)
-        + "</p></article>"
+        + "</p>"
+        + investigation.render(
+            "Retained work reference",
+            route="/deck/observed/" + group.key,
+            observation=stamp,
+            facts={
+                "Work ID": work_id,
+                "State": reason,
+                "Coverage": group.coverage,
+                "Configured source": group.source_ref,
+            },
+            limits="Configured retained observation; missing or archived task is not evidence of execution failure.",
+        )
+        + "</article>"
         for work_id, reason in page["unavailable"][:PAGE_SIZE]
     )
     body = (

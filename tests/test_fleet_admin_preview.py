@@ -6,6 +6,8 @@ from html.parser import HTMLParser
 
 import pytest
 
+from tests.fleet_investigation_assertions import investigation_markup
+
 from brigade import fleet_command_deck as deck, fleet_deck_overview as overview, fleet_work_page
 from tests.test_fleet_deck_overview import NOW, HOSTILE, _alert_view, _mixed_view
 from tests.test_ui_theme_integration import Markup
@@ -36,42 +38,28 @@ def test_primary_sections_keep_work_discoverable_without_worklore():
         page = deck.render_deck(_mixed_view(), nonce="preview", now=NOW, worklore_enabled=enabled)
         assert [a["href"] for a in Navigation(page).links] == [
             "/deck",
-            "/view/machines",
+            "/deck/activity",
             "/deck/capacity",
-            "/deck/repos",
+            "/deck/projects",
             "/deck/roster",
         ]
         assert 'aria-label="Section tabs"' in page
         assert "More destinations" not in page and "Section destinations" not in page
-        assert 'aria-labelledby="tree-machines"' not in page
-        assert 'aria-labelledby="tree-cloud"' not in page
+        assert "Machines" in page and "Cloud" in page
+        assert "linux-a" in page and "stale" in page
         assert 'href="/deck/alerts"' in page
 
 
 def test_overview_compact_cards_keep_evidence_below_the_default_scan():
     view = replace(_mixed_view(), rail=_alert_view().rail)
-    source = overview.page_alerts(view, NOW)[0].source_ref
-    page = overview.render_overview(view, NOW, worklore_enabled=True, action_sources=frozenset({source}))
-    attention = page.split('aria-labelledby="attention-title"', 1)[1].split("</section>", 1)[0]
-    assert attention.count('class="alert-row"') <= 3
-    assert 'class="alert-line"' not in attention and ">Review</a>" not in attention
-    assert attention.count(">View all alerts</a>") == 1
-    assert page.index('aria-labelledby="attention-title"') < page.index('aria-labelledby="working-title"')
-    assert page.index('aria-labelledby="working-title"') < page.index('id="machines-table"')
-    assert page.index('id="machines-table"') < page.index('aria-labelledby="queued-title"')
-    machines = page.split('id="machines-table"', 1)[1].split("</section>", 1)[0]
-    assert "Usable for selected work: unknown" in machines
-    assert "Reported counts and capacity context" in machines
-    assert 'class="cards"' not in page
-    assert 'class="split"' not in page
-    assert "About activity" not in page
-    assert "Running: 2" in page and "3 ready to run" in page
-    assert "Not ready: unknown" in page
-    assert "first observed 2h 0m ago" in page and "external.failed" in page
-    assert ">Prepare repair</a>" in page
-    assert "Usable for selected work: unknown" in page
-    for summary in ("Reported session presence", "Recent outcomes", "Cloud diagnostics"):
-        assert f"<summary>{summary}" in page
+    page = overview.render_overview(view, NOW, worklore_enabled=True)
+    assert page.count("<section ") == 3
+    assert "<details" not in page and "<table" not in page
+    assert page.index("overview-machines-title") < page.index("attention-title") < page.index("working-title")
+    assert 'id="fleet-title"' not in page
+    assert "external.failed" not in page and "/deck/alerts" in page
+    assert "Ready to run: 3 reported (partial queue)" in page
+    assert "Reported session presence" not in page
 
 
 def test_capacity_shares_deck_authorization_and_browser_read_only_scope(hub):  # noqa: F811
@@ -80,8 +68,8 @@ def test_capacity_shares_deck_authorization_and_browser_read_only_scope(hub):  #
     credential = cookie(hub)
     status, headers, page = request(hub, "GET", "/deck/capacity", headers={"Cookie": credential})
     assert status == 200
-    assert "<h1>Capacity</h1>" in page and "Octopool reporting not connected" in page
-    assert "Usable for selected work: unknown" in page
+    assert "<h1>Capacity</h1>" in page and "Octopool reporting not connected" not in page
+    assert "No stations configured" in page
     assert "No stations configured" in page
     assert "<form" not in page
     nonce = re.search(r'<style nonce="([^"]+)"', page).group(1)
@@ -109,10 +97,10 @@ def test_stored_task_details_preserve_evidence_without_empty_field_noise():
     item = page.split('<article class="work-item panel">', 1)[1]
     assert HOSTILE not in page
     assert "(none stored)" not in item
-    assert item.index("Stored status") < item.index("<summary>Task details")
-    assert item.index("example/tool") < item.index("<summary>Task details")
+    assert item.index('class="pill') < item.index("Description")  # status is a pill, not a labelled line
+    assert item.index("example/tool") < item.index("Description")
     assert "1m" in item and "stored evidence" in item and "w-test" in item
-    assert "Execution state is not inferred" in page
+    assert "Recorded task status does not confirm live execution." in page
 
 
 def test_settings_lead_with_authority_and_read_only_values(tmp_path):
@@ -122,16 +110,16 @@ def test_settings_lead_with_authority_and_read_only_values(tmp_path):
     try:
         view = policy.load_view(conn)
         page = policy.render(view, nonce="p", now=NOW, csrf="secret", editable=False)
-        assert page.index('id="activation"') < page.index('id="identity"')
+        assert page.index('id="activation"') < page.index('id="policy-roles"')
         assert "Activation status unknown" in page and "Effective policy</h2>" not in page
         assert "enroll with the fleet token to edit" not in page
-        assert all(control not in page for control in ("<select", "<input", "<textarea"))
+        investigation_markup(page, only_investigation_details=True)
         assert "secret" not in page
         page = roster.render(
             roster.load_view(conn, deck.DeckConfig()), nonce="p", now=NOW, csrf="secret", editable=False
         )
         assert "Live routing" in page
-        assert "<select" not in page and "<textarea" not in page
+        investigation_markup(page, only_investigation_details=True)
         assert "secret" not in page
     finally:
         conn.close()
@@ -142,7 +130,7 @@ def test_repository_operations_precede_policy_details():
 
     page = repos.render(_mixed_view(), nonce="p", now=NOW)
     assert page.index("Claims and live runs") < page.index('id="repo-policy"')
-    assert "<summary>Repository policy" in page
+    assert page.count("<details") == page.count('<details data-audience="agent"')
 
 
 def test_unobserved_reporting_has_one_explanation_before_snapshot_details():
@@ -150,7 +138,7 @@ def test_unobserved_reporting_has_one_explanation_before_snapshot_details():
 
     page = stats.render({"latest": None, "weeks": []}, nonce="p", now=NOW)
     assert "No adoption observations available" in page
-    assert page.index("No adoption observations available") < page.index("<summary>Snapshot and methodology")
+    assert page.index("No adoption observations available") < page.index("<h2>Methodology</h2>")
 
 
 def test_repo_board_marks_repository_section_and_keeps_advanced_filters():
@@ -167,7 +155,7 @@ def test_repo_board_marks_repository_section_and_keeps_advanced_filters():
         nonce="p",
     )
     primary = Navigation(page).links
-    assert next(a["href"] for a in primary if a.get("aria-current") == "page") == "/deck/repos"
+    assert next(a["href"] for a in primary if a.get("aria-current") == "page") == "/deck/projects"
     controls = page.split('class="fleet-controls"', 1)[1].split("</form>", 1)[0]
     assert controls.index('name="repo"') < controls.index("<summary>Advanced filters</summary>")
     assert controls.index('name="node"') > controls.index("<summary>Advanced filters</summary>")
@@ -217,7 +205,7 @@ def test_observed_reporting_leads_with_observation_scope_before_details():
 
     value = snapshot()
     page = stats.render({"latest": value, "weeks": value["weeks"]}, nonce="p", now=NOW)
-    assert page.index("Weekly observations: 1") < page.index("<summary>Snapshot and methodology")
+    assert page.index("Weekly observations: 1") < page.index("<h2>Methodology</h2>")
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -226,16 +214,28 @@ def test_observed_reporting_leads_with_observation_scope_before_details():
     [
         ("overview", ["Overview", "Alerts"], "Overview"),
         ("alerts", ["Overview", "Alerts"], "Alerts"),
-        ("boards", ["Runs", "Stored tasks", "Ready queue"], "Runs"),
-        ("work", ["Runs", "Stored tasks", "Ready queue"], "Stored tasks"),
-        ("capacity", ["Machines", "GitHub reads", "Cloud details"], "Machines"),
-        ("repos", ["Repositories", "Run history", "Checks", "Ownership"], "Repositories"),
-        ("repo-board", ["Repositories", "Run history", "Checks", "Ownership"], "Run history"),
-        ("ci", ["Repositories", "Run history", "Checks", "Ownership"], "Checks"),
-        ("owners", ["Repositories", "Run history", "Checks", "Ownership"], "Ownership"),
-        ("roster", ["Live routing", "Model assignments", "Reporting"], "Live routing"),
-        ("policy", ["Live routing", "Model assignments", "Reporting"], "Model assignments"),
-        ("stats", ["Live routing", "Model assignments", "Reporting"], "Reporting"),
+        ("boards", ["Activity", "Stored tasks", "Run history"], "Run history"),
+        ("work", ["Activity", "Stored tasks", "Run history"], "Stored tasks"),
+        ("capacity", ["Machines", "Cloud", "GitHub reads"], "Machines"),
+        ("repos", ["Projects", "Pull requests", "Repositories", "Run history", "Checks", "Ownership"], "Repositories"),
+        (
+            "repo-board",
+            ["Projects", "Pull requests", "Repositories", "Run history", "Checks", "Ownership"],
+            "Run history",
+        ),
+        ("ci", ["Projects", "Pull requests", "Repositories", "Run history", "Checks", "Ownership"], "Checks"),
+        ("owners", ["Projects", "Pull requests", "Repositories", "Run history", "Checks", "Ownership"], "Ownership"),
+        (
+            "roster",
+            ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"],
+            "Live routing",
+        ),
+        (
+            "policy",
+            ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"],
+            "Saved assignments",
+        ),
+        ("stats", ["Live routing", "Saved assignments", "Skills", "PR rules", "Reporting"], "Reporting"),
     ],
 )
 def test_section_tabs_have_exact_current_destination_and_feature_gated_discovery(enabled, active, labels, current):
@@ -259,7 +259,7 @@ def test_section_anchor_destinations_have_real_targets_and_http_tabs(hub):  # no
     credential = cookie(hub)
     for route, current in (
         ("/deck", "Overview"),
-        ("/view/machines", "Runs"),
+        ("/view/machines", "Run history"),
         ("/view/repos", "Run history"),
         ("/deck/capacity", "Machines"),
     ):
@@ -274,11 +274,8 @@ def test_section_anchor_destinations_have_real_targets_and_http_tabs(hub):  # no
         assert [markup.text[i] for i in markup.descendants(tab, "a") if markup.tags[i][1].get("aria-current")] == [
             current
         ]
-    page = overview.render_capacity_page(_mixed_view(), NOW, nonce="p", worklore_enabled=True)
-    for anchor in ("machines-table", "octopool-observation", "cloud-details"):
-        assert f'id="{anchor}"' in page
-        assert f'href="/deck/capacity#{anchor}"' in page
-    assert 'id="queued-title"' in overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
+    for route in ("/deck/capacity", "/deck/capacity/cloud", "/deck/capacity/github"):
+        assert request(hub, "GET", route, headers={"Cookie": credential})[0] == 200
 
 
 @pytest.mark.parametrize(
@@ -351,11 +348,11 @@ def test_overview_limits_attention_while_alerts_retain_every_subject_and_evidenc
     compact = overview.render_attention(view, NOW, action_sources=sources)
     full = alerts_page.render_alerts_page(view, NOW, nonce="p", worklore_enabled=True, action_sources=sources)
     assert compact.count('<li class="alert-row">') == 3
-    assert full.count('<li class="alert-row">') == len(alerts)
+    assert full.count("data-record-detail tabindex=") == len(alerts)
     assert f"{len(alerts) - 3} more alerts" in compact
     assert 'href="/deck/alerts"' in compact and "View all alerts" in compact
     assert '<details class="alert-evidence">' not in compact
-    assert full.count('<details class="alert-evidence">') == len(alerts)
+    assert full.count("<h3>Evidence</h3>") == len(alerts)
     assert HOSTILE not in compact and HOSTILE not in full
     for alert in alerts[:3]:
         assert escape(alert.title) in compact

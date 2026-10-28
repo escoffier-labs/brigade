@@ -254,6 +254,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet policy inventory probe`
 - `brigade fleet policy inventory status`
 - `brigade fleet policy observe`
+- `brigade fleet policy pr-rules`
 - `brigade fleet policy preview`
 - `brigade fleet policy quota ingest`
 - `brigade fleet policy reservation release`
@@ -269,10 +270,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet preference get`
 - `brigade fleet preference pull`
 - `brigade fleet preference set`
+- `brigade fleet projects sync`
 - `brigade fleet roster validate`
 - `brigade fleet serve`
 - `brigade fleet sessions`
 - `brigade fleet sink`
+- `brigade fleet skills report`
 - `brigade fleet stats collect`
 - `brigade fleet status`
 - `brigade fleet work attempt`
