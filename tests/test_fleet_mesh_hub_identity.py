@@ -1062,3 +1062,77 @@ def test_cleanup_only_unlink_io_lost_return_reconciles_identity_generation(ident
     assert observe(identity, home, raw).status == "replay"
     assert saved(home).read_bytes() == complete
     assert list(saved(home).parent.glob(".hub-identity-*.tmp")) == []
+
+
+@pytest.mark.parametrize("operation", ["accept", "conflict"])
+@pytest.mark.parametrize("number", ["EIO", "EPERM"])
+def test_postrename_cleanup_maps_inside_identity_writer(identity, home, monkeypatch, operation, number):
+    import errno
+
+    number = getattr(errno, number)
+    identity.initialize_identity_store(brigade_home=home)
+    observe(identity, home)
+    before = load(identity, home).data
+    raw = signed(seq=4) if operation == "accept" else signed(require_sealed=True)
+    original_replace, original_unlink, original_flush = (
+        dirfd.replace_children,
+        dirfd.unlink_child,
+        dirfd.fsync_directory,
+    )
+    seen = {"replaced": False, "unlinks": 0, "flushes": 0}
+
+    def replace(*args, **kwargs):
+        original_replace(*args, **kwargs)
+        seen["replaced"] = True
+
+    def unlink(parent, name, **kwargs):
+        if seen["replaced"] and name.startswith(".hub-identity-"):
+            seen["unlinks"] += 1
+            raise OSError(number, "post-rename temporary cleanup")
+        return original_unlink(parent, name, **kwargs)
+
+    def flush(descriptor):
+        if seen["replaced"]:
+            seen["flushes"] += 1
+        original_flush(descriptor)
+
+    result = caught = None
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "replace_children", replace)
+        patch.setattr(dirfd, "unlink_child", unlink)
+        patch.setattr(dirfd, "fsync_directory", flush)
+        try:
+            result = observe(identity, home, raw)
+        except BaseException as error:
+            caught = error
+    state = load(identity, home).data
+    complete = saved(home).read_bytes()
+    assert state["generation"] == before["generation"] + 1
+    assert seen == {"replaced": True, "unlinks": 1, "flushes": 0}
+    if operation == "conflict":
+        assert state["objects"] == before["objects"] and state["marks"] == before["marks"]
+        assert state["origins"] == before["origins"]
+        assert len(state["conflicts"]) == 1
+        assert next(iter(state["conflicts"].values()))["digest"] == digest(raw)
+        assert caught is None
+        assert result.status == "signed_statement_conflict" and not result.evidence_recorded
+        assert result.storage_error == "mesh_identity_storage_failure"
+    else:
+        assert type(caught) is crypto.MeshError and caught.code == "mesh_identity_storage_failure"
+        assert len(state["objects"]) == len(before["objects"]) + 1
+        assert state["marks"]["hub-identity:" + signer()] == {"seq": 4, "digest": digest(raw)}
+        assert load(identity, home).identity["seq"] == 4
+        assert state["conflicts"] == before["conflicts"]
+    seen["flushes"] = 0
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "fsync_directory", flush)
+        retry = observe(identity, home, raw)
+    assert seen["flushes"] == 1
+    if operation == "conflict":
+        assert retry.status == "signed_statement_conflict" and retry.evidence_recorded
+        assert retry.storage_error is None
+    else:
+        assert retry.status == "replay"
+    assert saved(home).read_bytes() == complete
+    assert load(identity, home).data["generation"] == state["generation"]
+    assert list(saved(home).parent.glob(".hub-identity-*.tmp")) == []

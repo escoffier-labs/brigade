@@ -713,6 +713,9 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
                 dirfd.unlink_child(descriptor, temporary)
             except FileNotFoundError:
                 pass  # Expected after replace, limited to this attempt's temporary.
+            except OSError:
+                if completed:
+                    raise crypto.MeshError("mesh_trust_storage_failure") from None
             except BaseException:
                 if completed:
                     raise

@@ -2533,3 +2533,72 @@ def test_cleanup_only_unlink_io_lost_return_reconciles_trust_generation(trust, h
     assert accept(trust, home, raw).status == "replay"
     assert saved(home).read_bytes() == complete
     assert list(saved(home).parent.glob(".trust-*.tmp")) == []
+
+
+@pytest.mark.parametrize("operation", ["accept", "conflict"])
+@pytest.mark.parametrize("number", [errno.EIO, errno.EPERM])
+def test_postrename_cleanup_maps_inside_trust_writer(trust, home, monkeypatch, operation, number):
+    bootstrap(trust, home)
+    accept(trust, home)
+    before = trust.load_trust(brigade_home=home).data
+    raw = signed(seq=2) if operation == "accept" else signed(entries=["test-peer"])
+    original_replace, original_unlink, original_flush = (
+        dirfd.replace_children,
+        dirfd.unlink_child,
+        dirfd.fsync_directory,
+    )
+    seen = {"replaced": False, "unlinks": 0, "flushes": 0}
+
+    def replace(*args, **kwargs):
+        original_replace(*args, **kwargs)
+        seen["replaced"] = True
+
+    def unlink(parent, name, **kwargs):
+        if seen["replaced"] and name.startswith(".trust-"):
+            seen["unlinks"] += 1
+            raise OSError(number, "post-rename temporary cleanup")
+        return original_unlink(parent, name, **kwargs)
+
+    def flush(descriptor):
+        if seen["replaced"]:
+            seen["flushes"] += 1
+        original_flush(descriptor)
+
+    result = caught = None
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "replace_children", replace)
+        patch.setattr(dirfd, "unlink_child", unlink)
+        patch.setattr(dirfd, "fsync_directory", flush)
+        try:
+            result = accept(trust, home, raw)
+        except BaseException as error:
+            caught = error
+    state = trust.load_trust(brigade_home=home).data
+    complete = saved(home).read_bytes()
+    assert state["generation"] == before["generation"] + 1
+    assert seen == {"replaced": True, "unlinks": 1, "flushes": 0}
+    if operation == "conflict":
+        assert state["objects"] == before["objects"] and state["marks"] == before["marks"]
+        assert len(state["conflicts"]) == 1
+        assert next(iter(state["conflicts"].values()))["digest"] == digest(raw)
+        assert caught is None
+        assert result.status == "signed_statement_conflict" and not result.evidence_recorded
+        assert result.storage_error == "mesh_trust_storage_failure"
+    else:
+        assert type(caught) is crypto.MeshError and caught.code == "mesh_trust_storage_failure"
+        assert len(state["objects"]) == len(before["objects"]) + 1
+        assert state["marks"]["membership:" + signer()] == {"seq": 2, "digest": digest(raw)}
+        assert state["conflicts"] == before["conflicts"]
+    seen["flushes"] = 0
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "fsync_directory", flush)
+        retry = accept(trust, home, raw)
+    assert seen["flushes"] == 1
+    if operation == "conflict":
+        assert retry.status == "signed_statement_conflict" and retry.evidence_recorded
+        assert retry.storage_error is None
+    else:
+        assert retry.status == "replay"
+    assert saved(home).read_bytes() == complete
+    assert trust.load_trust(brigade_home=home).data["generation"] == state["generation"]
+    assert list(saved(home).parent.glob(".trust-*.tmp")) == []
