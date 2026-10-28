@@ -155,7 +155,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "task",
         type=_non_empty_task,
-        help="Task for the aboyeur to plan, dispatch, and synthesize.",
+        help="Task for the orchestrator to plan, dispatch, and synthesize.",
     )
     parser.add_argument(
         "--roster",

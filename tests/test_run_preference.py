@@ -259,3 +259,115 @@ def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsy
     assert "  scout: cursor_scout" in out
     assert cli.main(["fleet", "preference", "get"]) == 0
     assert "  research: researcher" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("flag", ["--orchestrator", "--chef"])
+def test_fleet_preference_cli_orchestrator_alias_keeps_chef_payload(flag, tmp_path, monkeypatch, capsys) -> None:
+    import json
+
+    from brigade import cli
+
+    home = tmp_path / flag.removeprefix("--")
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    submitted = []
+
+    def fake_put(preference, *, hub_url=None):
+        submitted.append(dict(preference))
+        return dict(preference)
+
+    monkeypatch.setattr("brigade.fleet_client.put_run_preference", fake_put)
+    assert cli.main(["fleet", "preference", "set", flag, "chef", "--json"]) == 0
+
+    output = json.loads(capsys.readouterr().out)
+    assert submitted == [{"chef": "chef"}]
+    assert output == {
+        "preference": {
+            "impl": None,
+            "review": None,
+            "chef": "chef",
+            "research": None,
+            "security": None,
+            "scout": None,
+            "notes": None,
+        },
+        "source": "hub",
+    }
+    cached = run_preference.load_cached()
+    assert cached.payload() == {"chef": "chef"}
+    assert "orchestrator" not in cached.payload()
+    cache_text = run_preference.cache_path().read_text(encoding="utf-8")
+    assert "chef =" in cache_text
+    assert "orchestrator" not in cache_text
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected"),
+    [
+        (["--chef", "first", "--orchestrator", "second"], "second"),
+        (["--orchestrator", "first", "--chef", "second"], "second"),
+    ],
+)
+def test_fleet_preference_orchestrator_alias_last_value_wins(arguments, expected, monkeypatch, capsys):
+    from brigade import cli
+
+    submitted = []
+
+    def fake_put(preference, *, hub_url=None):
+        submitted.append(dict(preference))
+        return dict(preference)
+
+    monkeypatch.setattr("brigade.fleet_client.put_run_preference", fake_put)
+    assert cli.main(["fleet", "preference", "set", *arguments]) == 0
+    capsys.readouterr()
+    assert submitted == [{"chef": expected}]
+
+
+@pytest.mark.parametrize("flag", ["--orchestrator", "--chef"])
+def test_fleet_preference_orchestrator_alias_rejects_invalid_or_missing_values(flag, monkeypatch, capsys):
+    from brigade import cli
+
+    submitted = []
+    monkeypatch.setattr("brigade.fleet_client.put_run_preference", lambda *args, **kwargs: submitted.append(args))
+
+    assert cli.main(["fleet", "preference", "set", flag, "bad/seat"]) == 2
+    invalid = capsys.readouterr()
+    assert "must be a roster seat name" in invalid.err
+    assert submitted == []
+
+    with pytest.raises(SystemExit) as missing:
+        cli.main(["fleet", "preference", "set", flag])
+    assert missing.value.code == 2
+    missing_error = capsys.readouterr().err
+    assert "argument --orchestrator/--chef: expected one argument" in missing_error
+    assert submitted == []
+
+
+def test_fleet_preference_set_without_role_names_preferred_orchestrator_flag(capsys):
+    from brigade import cli
+
+    assert cli.main(["fleet", "preference", "set"]) == 2
+    error = capsys.readouterr().err
+    assert "--orchestrator" in error
+    assert "--chef" not in error
+
+
+def test_fleet_preference_set_help_lists_neutral_aliases(capsys):
+    from brigade import cli
+
+    with pytest.raises(SystemExit) as result:
+        cli.main(["fleet", "preference", "set", "--help"])
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "--orchestrator SEAT, --chef SEAT" in help_text
+    assert "Default orchestrator seat name." in help_text
+
+
+def test_run_help_describes_orchestrator(capsys):
+    from brigade import cli
+
+    with pytest.raises(SystemExit) as result:
+        cli.main(["run", "--help"])
+    assert result.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "orchestrator" in help_text
+    assert "aboyeur" not in help_text

@@ -467,7 +467,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pref_set = preference_sub.add_parser("set", help="Replace the hub pin and refresh the local cache (admin token).")
     p_pref_set.add_argument("--impl", default=None, help="Default implementation seat name.")
     p_pref_set.add_argument("--review", default=None, help="Default review seat name.")
-    p_pref_set.add_argument("--chef", default=None, help="Default chef/orchestrator seat name.")
+    p_pref_set.add_argument(
+        "--orchestrator",
+        "--chef",
+        dest="chef",
+        default=None,
+        metavar="SEAT",
+        help="Default orchestrator seat name.",
+    )
     p_pref_set.add_argument("--research", default=None, help="Default read-only research seat name.")
     p_pref_set.add_argument("--security", default=None, help="Default security review seat name.")
     p_pref_set.add_argument("--scout", default=None, help="Default fast repository scout seat name.")
@@ -779,7 +786,8 @@ def _dispatch_preference_set(args: argparse.Namespace) -> int:
 
     raw = {key: getattr(args, key) for key in run_preference.ALLOWED_FIELDS if getattr(args, key, None) is not None}
     if not raw:
-        flags = ", ".join(f"--{key}" for key in run_preference.ALLOWED_FIELDS)
+        flag_names = {"chef": "orchestrator"}
+        flags = ", ".join(f"--{flag_names.get(key, key)}" for key in run_preference.ALLOWED_FIELDS)
         print(f"error: set at least one of {flags}", file=sys.stderr)
         return 2
     try:
