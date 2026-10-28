@@ -8,6 +8,7 @@ import json
 import logging
 from typing import Any, TYPE_CHECKING
 
+from ..mcp_server import STATELESS_PROTOCOL_VERSION, request_protocol_version
 from .contracts import DotError
 
 if TYPE_CHECKING:
@@ -78,6 +79,15 @@ class EventsApp:
                             raise EventError(-32602, "invalid_arguments")
                         params = {k: v for k, v in params.items() if k != "_meta"}
                         result = await self.service.rpc(IDENTITY.get(), method, params)
+                    # Every 2026-07-28 result must declare its type; older or undeclared requests keep the legacy shape.
+                    header_version = (
+                        headers.get(b"mcp-protocol-version", b"").decode("ascii", "replace").strip() or None
+                    )
+                    if (
+                        isinstance(result, dict)
+                        and request_protocol_version(request, header_version) == STATELESS_PROTOCOL_VERSION
+                    ):
+                        result = {"resultType": "complete", **result}
                     response = {"result": result}
                 except EventError as error:
                     response = {

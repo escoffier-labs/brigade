@@ -551,6 +551,45 @@ def test_ping_gets_an_empty_result(memory_station: _Station) -> None:
     assert _json(body) == {"jsonrpc": "2.0", "id": 9, "result": {}}
 
 
+def test_stateless_header_makes_results_carry_result_type(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/list"},
+        headers={"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"},
+    )
+    assert status == 200
+    assert _json(body)["result"]["resultType"] == "complete"
+
+
+_VERSION_META = "io.modelcontextprotocol/protocolVersion"
+
+
+def test_stateless_header_and_meta_version_must_match(memory_station: _Station) -> None:
+    headers = {"MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list"}
+    for body_version in ("2025-06-18", "2099-01-01"):
+        status, _, body = memory_station.rpc(
+            {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {"_meta": {_VERSION_META: body_version}}},
+            headers=headers,
+        )
+        assert status == 400
+        assert _json(body)["error"]["code"] == mcp_server.HEADER_MISMATCH_CODE
+        assert "MCP-Protocol-Version" in _json(body)["error"]["message"]
+    status, _, body = memory_station.rpc(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {"_meta": {_VERSION_META: "2026-07-28"}}},
+        headers=headers,
+    )
+    assert status == 200
+    assert _json(body)["result"]["resultType"] == "complete"
+
+
+def test_older_header_is_not_checked_against_meta(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc(
+        {"jsonrpc": "2.0", "id": 9, "method": "tools/list", "params": {"_meta": {_VERSION_META: "2026-07-28"}}},
+        headers={"MCP-Protocol-Version": "2025-06-18"},
+    )
+    assert status == 200
+    assert _json(body)["result"]["resultType"] == "complete"
+
+
 def test_notification_with_a_non_string_method_is_an_invalid_request(memory_station: _Station) -> None:
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "method": 1})
     assert status == 200

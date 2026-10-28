@@ -46,6 +46,9 @@ SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2026-0
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
 STATELESS_PROTOCOL_VERSION = "2026-07-28"
 HEADER_MISMATCH_CODE = -32020
+# Stateless requests carry their protocol version per request in params._meta.
+PROTOCOL_VERSION_META_KEY = "io.modelcontextprotocol/protocolVersion"
+RESULT_TYPE_COMPLETE = "complete"
 
 HTTP_TOKEN_ENV = "BRIGADE_MCP_HTTP_TOKEN"
 HTTP_DEFAULT_HOST = "127.0.0.1"
@@ -104,6 +107,33 @@ def negotiate_protocol_version(requested: object) -> str:
     return DEFAULT_PROTOCOL_VERSION
 
 
+def request_protocol_version(message: object, transport_version: str | None = None) -> str | None:
+    """Return the protocol version a request declares, or None when it declares none.
+
+    Stateless (2026-07-28) clients put it in ``params._meta`` on every request;
+    over HTTP the ``MCP-Protocol-Version`` header says the same. ``_meta`` wins,
+    then the transport-level version (header, or the version a stdio
+    ``initialize`` negotiated).
+    """
+    params = message.get("params") if isinstance(message, dict) else None
+    meta = params.get("_meta") if isinstance(params, dict) else None
+    declared = meta.get(PROTOCOL_VERSION_META_KEY) if isinstance(meta, dict) else None
+    if isinstance(declared, str) and declared.strip():
+        return declared.strip()
+    return transport_version
+
+
+def _needs_result_type(method: str, version: str | None) -> bool:
+    """2026-07-28 requires resultType on every result; earlier revisions never had it.
+
+    Only a request that declares the stateless revision (per-request ``_meta``,
+    the HTTP version header, or a stdio ``initialize`` that negotiated it) gets
+    the field. Older and undeclared requests keep their exact legacy shape, and
+    ``initialize`` is gone from the stateless protocol.
+    """
+    return method != "initialize" and version == STATELESS_PROTOCOL_VERSION
+
+
 def handle_message(
     message: object,
     *,
@@ -113,14 +143,50 @@ def handle_message(
     list_tools: ToolLister,
     call_tool: ToolCaller,
     extension: McpExtension | None = None,
+    protocol_version: str | None = None,
 ) -> dict[str, Any] | None:
     """Handle one decoded JSON-RPC message and return its response.
 
     Returns None for notifications (no response is sent). read_resource returns
     (text, mime_type) or (None, None) when the uri is not served. call_tool
     returns (payload, is_error); a non-string payload is rendered as indented
-    JSON.
+    JSON. ``protocol_version`` is the transport-level version (HTTP header or
+    stdio ``initialize``); a per-request ``_meta`` version overrides it. Every
+    successful result of a 2026-07-28 request gets ``resultType: "complete"``
+    unless the method already set one (for example ``input_required``).
     """
+    reply = _dispatch_message(
+        message,
+        server_name=server_name,
+        list_resources=list_resources,
+        read_resource=read_resource,
+        list_tools=list_tools,
+        call_tool=call_tool,
+        extension=extension,
+    )
+    if reply is None or not isinstance(message, dict):
+        return reply
+    result = reply.get("result")
+    method = message.get("method")
+    if (
+        isinstance(result, dict)
+        and isinstance(method, str)
+        and _needs_result_type(method, request_protocol_version(message, protocol_version))
+    ):
+        result.setdefault("resultType", RESULT_TYPE_COMPLETE)
+    return reply
+
+
+def _dispatch_message(
+    message: object,
+    *,
+    server_name: str,
+    list_resources: ResourceLister,
+    read_resource: ResourceReader,
+    list_tools: ToolLister,
+    call_tool: ToolCaller,
+    extension: McpExtension | None = None,
+) -> dict[str, Any] | None:
     if not isinstance(message, dict):
         return response(None, error={"code": -32600, "message": "invalid request"})
     request_id = message.get("id")
@@ -193,6 +259,7 @@ def serve_stdio(
     extension: McpExtension | None = None,
 ) -> int:
     """Run a read-only MCP server over stdin/stdout until EOF."""
+    negotiated: str | None = None
     for line in sys.stdin:
         if not line.strip():
             continue
@@ -209,7 +276,11 @@ def serve_stdio(
             list_tools=list_tools,
             call_tool=call_tool,
             extension=extension,
+            protocol_version=negotiated,
         )
+        if isinstance(request, dict) and request.get("method") == "initialize" and reply is not None:
+            version = (reply.get("result") or {}).get("protocolVersion")
+            negotiated = version if isinstance(version, str) else negotiated
         if reply is not None:
             _emit(reply)
     return 0
@@ -420,6 +491,10 @@ def _make_handler(
                 return -32600, f"batch requests are not supported in {STATELESS_PROTOCOL_VERSION}"
             if not isinstance(decoded, dict) or not isinstance(decoded.get("method"), str):
                 return None
+            declared = request_protocol_version(decoded)
+            if declared is not None and declared != protocol_version:
+                # The header must match _meta; otherwise the body could name a version the response is not shaped for.
+                return HEADER_MISMATCH_CODE, "MCP-Protocol-Version header does not match _meta protocolVersion"
             method = self.headers.get("Mcp-Method")
             if method is None:
                 # Notifications carry no id and are not routed.
@@ -476,7 +551,9 @@ def _make_handler(
                     if is_notification or is_response:
                         continue
                 try:
-                    reply = handle_message(message, server_name=server_name, **callbacks)
+                    reply = handle_message(
+                        message, server_name=server_name, protocol_version=protocol_version, **callbacks
+                    )
                 except Exception:  # noqa: BLE001 - never leak internals or kill the handler thread
                     request_id = message.get("id") if isinstance(message, dict) else None
                     reply = response(request_id, error={"code": -32603, "message": "internal error"})

@@ -571,3 +571,43 @@ def test_events_switch_controls_rpc_capabilities_and_workers(dot_private_dir, en
         assert service.rpc.call_count == (3 if enabled else 0)
 
     asyncio.run(scenario())
+
+
+_VERSION_META = "io.modelcontextprotocol/protocolVersion"
+
+
+@requires_local_state
+@pytest.mark.parametrize(
+    ("method", "header", "meta", "expect_result_type"),
+    [
+        ("server/discover", None, None, False),
+        ("server/discover", "2025-06-18", "2025-06-18", False),
+        ("server/discover", "2026-07-28", None, True),
+        ("server/discover", None, "2026-07-28", True),
+        ("events/list", None, None, False),
+        ("events/list", "2025-06-18", None, False),
+        ("events/list", "2026-07-28", "2026-07-28", True),
+    ],
+)
+def test_events_app_result_type_follows_the_declared_protocol_version(
+    dot_private_dir, method, header, meta, expect_result_type
+):
+    from unittest.mock import AsyncMock
+    from brigade.dot.events import EventsApp
+
+    async def scenario():
+        service = AsyncMock()
+        service.rpc.return_value = {"events": []}
+        app = EventsApp(AsyncMock(), service, enabled=True)
+        params = {"_meta": {_VERSION_META: meta}} if meta else {}
+        body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode()
+        headers = [(b"mcp-protocol-version", header.encode())] if header else []
+        send = AsyncMock()
+        receive = AsyncMock(return_value={"type": "http.request", "body": body})
+        await app({"type": "http", "headers": headers}, receive, send)
+        return json.loads(send.call_args_list[-1].args[0]["body"])["result"]
+
+    result = asyncio.run(scenario())
+    assert ("resultType" in result) is expect_result_type
+    if expect_result_type:
+        assert result["resultType"] == "complete"
