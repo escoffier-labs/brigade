@@ -295,11 +295,13 @@ def _read_token_file(raw_path: str) -> str:
 
 
 def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str, Any]:
-    if not config_path.is_file():
-        return {}
     try:
+        if not config_path.is_file():
+            return {}
         payload = tomllib.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except FileNotFoundError:
+        return {}
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         if strict:
             raise FleetClientError("fleet configuration could not be read") from None
         return {}
