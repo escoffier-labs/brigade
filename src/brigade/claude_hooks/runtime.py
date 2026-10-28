@@ -1317,6 +1317,23 @@ def _path_targets_brigade_internal_artifact(target: Path, raw: object) -> bool:
     return relative is not None and _is_brigade_internal_artifact_relative(relative)
 
 
+def _redirect_file_targets(tokens: list[str]) -> list[str]:
+    """Files that output redirections write.
+
+    Descriptor duplication (``2>&1``, ``>&2``) and ``/dev/null`` write no file.
+    """
+    targets = []
+    for index, token in enumerate(tokens):
+        if not token or not set(token) <= set(";&|<>") or ">" not in token:
+            continue
+        following = tokens[index + 1] if index + 1 < len(tokens) else ""
+        if token == ">&" and (following.isdigit() or following == "-"):
+            continue
+        if following != "/dev/null":
+            targets.append(following)
+    return targets
+
+
 def _bash_confident_write_touches_worktree(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
@@ -1324,7 +1341,11 @@ def _bash_confident_write_touches_worktree(target: Path, command: object) -> boo
         tokens = _shell_tokens(command)
     except ValueError:
         return True
-    if any(">" in token for token in tokens if token and set(token) <= set(";&|<>")):
+    if any(
+        not path
+        or (_relative_path_under_target(target, path) and not _path_targets_brigade_internal_artifact(target, path))
+        for path in _redirect_file_targets(tokens)
+    ):
         return True
     segments: list[list[str]] = [[]]
     for token in tokens:
@@ -1547,7 +1568,7 @@ def _is_confident_bash_write(command: object) -> bool:
         tokens = _shell_tokens(command)
     except ValueError:
         return False
-    if any(">" in token for token in tokens if token and set(token) <= set(";&|<>")):
+    if _redirect_file_targets(tokens):
         return True
     segments: list[list[str]] = [[]]
     for token in tokens:

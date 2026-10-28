@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Claude work-loop hooks no longer treat descriptor duplication (`2>&1`, `>&2`), `/dev/null`, or redirects to files outside the repository as repository writes, so read-only commands stop re-arming the closeout verification gate.
+
 - Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
 
 - Add dormant task launch claims with immutable dispatch bindings, strict task-version checks, and retained consumption through checkpoint recovery and redaction (#2046).
