@@ -13,6 +13,7 @@ import sys
 import threading
 import time
 from datetime import datetime
+from io import StringIO
 from queue import Empty
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
@@ -1124,12 +1125,37 @@ def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, dept
     return False
 
 
-def _shell_tokens(command: str) -> list[str]:
+def _shell_lexer(command: str | StringIO) -> shlex.shlex:
     lexer = shlex.shlex(command, posix=os.name != "nt", punctuation_chars=";&|<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
-    return list(lexer)
+    return lexer
+
+
+def _shell_tokens(command: str) -> list[str]:
+    return list(_shell_lexer(command))
+
+
+def _shell_path_tokens(command: str) -> list[str]:
+    """Drop only unquoted IO numbers adjacent to a shell redirection.
+
+    The lexer consumes the first punctuation character when ending a word.
+    Inspect that consumed source so ``2>`` is a descriptor, while ``2 >``
+    and ``'2'>`` keep the numeric file operand.
+    """
+    stream = StringIO(command)
+    lexer = _shell_lexer(stream)
+    tokens: list[str] = []
+    offset = 0
+    for token in lexer:
+        end = stream.tell()
+        consumed = command[offset:end]
+        offset = end
+        if token.isascii() and token.isdecimal() and re.fullmatch(rf"\s*{token}[<>]", consumed):
+            continue
+        tokens.append(token)
+    return tokens
 
 
 def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
@@ -1338,15 +1364,24 @@ def _redirect_file_targets(tokens: list[str]) -> list[str]:
 def _command_path_arguments(tokens: list[str]) -> list[str]:
     redirections = {index for index, token in enumerate(tokens) if token and set(token) <= set("<>&")}
     syntax = redirections | {index + 1 for index in redirections}
-    syntax.update(index - 1 for index in redirections if index > 0 and tokens[index - 1].isdecimal())
-    return [token for index, token in enumerate(tokens) if index not in syntax and not token.startswith("-")]
+    paths: list[str] = []
+    options = True
+    for index, token in enumerate(tokens):
+        if index in syntax:
+            continue
+        if options and token == "--":
+            options = False
+            continue
+        if not options or not token.startswith("-"):
+            paths.append(token)
+    return paths
 
 
 def _bash_confident_write_touches_worktree(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
     try:
-        tokens = _shell_tokens(command)
+        tokens = _shell_path_tokens(command)
     except ValueError:
         return True
     if any(
@@ -1607,7 +1642,7 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
     try:
-        tokens = _shell_tokens(command)
+        tokens = _shell_path_tokens(command)
     except ValueError:
         return False
     segments: list[list[str]] = [[]]
@@ -1623,22 +1658,28 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         if not stripped:
             continue
         metadata_command = _is_brigade_verify(stripped) or _is_brigade_run_tokens(stripped)
-        if not metadata_command and Path(stripped[0]).name not in output_only_commands:
+        command_name = Path(stripped[0]).name
+        if command_name == "tee":
+            # Its stdout is a stream; only its explicit file operands can
+            # write outside the redirections checked below.
+            if any(
+                not _path_targets_brigade_internal_artifact(target, path)
+                for path in _command_path_arguments(stripped[1:])
+            ):
+                return False
+            metadata_command = True
+        if not metadata_command and command_name not in output_only_commands:
             return False
-        targets: list[str] = []
         for destination in _redirect_file_targets(stripped):
+            if _path_targets_brigade_internal_artifact(target, destination):
+                continue
             if metadata_command:
                 relative = _relative_path_under_target(target, destination)
-                if relative is None or _is_brigade_internal_artifact_relative(relative):
+                if relative is None:
                     continue
-            targets.append(destination)
-        if not targets:
-            if metadata_command:
-                continue
-            return False
-        found_target = True
-        if any(not _is_handoff_path(target, path) for path in targets):
-            return False
+            if not _is_handoff_path(target, destination):
+                return False
+            found_target = True
     return found_target
 
 

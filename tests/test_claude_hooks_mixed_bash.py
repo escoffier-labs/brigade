@@ -59,6 +59,8 @@ def target(tmp_path: Path, monkeypatch) -> Path:
         "brigade work verify run --command true --capture taste > src.py",
         "brigade work verify run --command true --capture taste | tee src.py",
         "brigade work verify run --command true --capture taste | tee src.py 2>&1",
+        "brigade work verify run --command true --capture taste | tee .brigade/result.log src.py && printf note >> .claude/memory-handoffs/note.md",
+        "brigade work verify run --command true --capture taste | tee .brigade/result.log > src.py && printf note >> .claude/memory-handoffs/note.md",
         "brigade work verify run --command true --capture taste && printf note >> .claude/memory-handoffs/note.md && touch src.py",
         "brigade run --help && touch src.py",
         "touch src.py && brigade run --help",
@@ -134,7 +136,16 @@ def test_metadata_and_internal_logs_do_not_record_source_writes(target, command)
     assert event(target, "Stop", stop_hook_active=False) is None
 
 
-@pytest.mark.parametrize("redirect", ["", f" > {os.devnull} 2>&1"])
+@pytest.mark.parametrize(
+    "redirect",
+    [
+        "",
+        f" > {os.devnull} 2>&1",
+        " | tee .brigade/result.log",
+        " | tee .brigade/result.log 2>&1",
+        " && printf result >> .brigade/result.log",
+    ],
+)
 def test_verification_followed_by_handoff_keeps_source_verification_boundary(target, redirect):
     (target / "src.py").write_text("changed\n")
     event(target, "PostToolUse", tool_name="Write", tool_input={"file_path": str(target / "src.py")})
@@ -165,3 +176,43 @@ def test_verification_followed_by_handoff_keeps_source_verification_boundary(tar
     assert state["last_verification_write_at"] == before["last_verification_write_at"]
     assert state["last_write_at"] > before["last_write_at"]
     assert event(target, "Stop", stop_hook_active=False) is None
+
+
+@pytest.mark.parametrize(
+    "filename,tee_args",
+    [
+        ("-src.py", "-- -src.py"),
+        ("123", "123 > .brigade/result.log"),
+        ("123", "-- 123 > .brigade/result.log"),
+        ("123", "'123'> .brigade/result.log"),
+    ],
+)
+def test_tee_source_operand_cannot_use_handoff_exemption(target, filename, tee_args):
+    source = target / filename
+    source.write_text("before\n")
+    event(target, "PostToolUse", tool_name="Write", tool_input={"file_path": str(source)})
+    command = (
+        f"brigade work verify run --command true | tee {tee_args} && printf note >> .claude/memory-handoffs/note.md"
+    )
+    assert event(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}) is None
+    assert (
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(target),
+                "--argv-json",
+                json.dumps([sys.executable, "-c", "pass"]),
+                "--capture",
+                "brigade-work",
+            ]
+        )
+        == 0
+    )
+    source.write_text("after\n")
+    (target / ".claude/memory-handoffs/note.md").write_text("note\n")
+    event(target, "PostToolUse", tool_name="Bash", tool_input={"command": command})
+    stopped = event(target, "Stop", stop_hook_active=False)
+    assert stopped is not None and stopped.get("decision") == "block"
