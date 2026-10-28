@@ -179,7 +179,6 @@ def classify_native_snapshot(
         not isinstance(remote, Mapping)
         or not _valid_reference(remote.get("environmentId"))
         or not _valid_reference(remote.get("threadId"))
-        or type(remote.get("label")) is not str
     ):
         return result("awaiting", "malformed-snapshot")
     observed_remote = (
@@ -187,6 +186,8 @@ def classify_native_snapshot(
     )
     if observed_remote != (expected.remote_environment_id, expected.remote_thread_id):
         return result("refused", "remote-mismatch")
+    if isinstance(remote, Mapping) and type(remote.get("label")) is not str:
+        return result("awaiting", "malformed-snapshot")
     if not _well_formed(snapshot):
         return result("awaiting", "malformed-snapshot")
 

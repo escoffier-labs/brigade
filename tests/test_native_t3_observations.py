@@ -132,6 +132,21 @@ def test_known_identity_refusal_precedes_malformed_evidence(reference, snapshot,
     assert result.result_transfer_id is None
 
 
+@pytest.mark.parametrize("change", ["environmentId", "threadId", "unexpected"])
+@pytest.mark.parametrize("label_fields", [{}, {"label": 0}], ids=["missing-label", "non-string-label"])
+def test_remote_identity_refusal_precedes_malformed_label(reference, snapshot, change, label_fields):
+    remote = {"environmentId": "example-remote", "threadId": "example-thread", **label_fields}
+    if change != "unexpected":
+        reference = replace(reference, remote_environment_id="example-remote", remote_thread_id="example-thread")
+        remote[change] = "example-other"
+    snapshot["remoteChild"] = remote
+    result = classify(reference, snapshot)
+    assert observation_diagnostic(result) == {"family": "refused", "reason": "remote-mismatch"}
+    assert result.reference == reference
+    assert result.terminal_run_id is None
+    assert result.result_transfer_id is None
+
+
 @pytest.mark.parametrize("status", ["queued", "running"])
 def test_queued_and_running_work_is_active(reference, snapshot, status):
     snapshot.update(status=status, workState="working", latestTerminalStatus=None, latestTerminalRunId=None)
@@ -220,7 +235,6 @@ def test_each_required_terminal_fact_must_be_present(reference, snapshot, field)
         ("remoteChild", {}),
         ("remoteChild", {"environmentId": True, "threadId": "example-thread", "label": "Example"}),
         ("remoteChild", {"environmentId": "example-remote", "threadId": [], "label": "Example"}),
-        ("remoteChild", {"environmentId": "example-remote", "threadId": "example-thread", "label": 0}),
         ("latestTerminalStatus", "running"),
         ("latestTerminalRunId", []),
         ("latestTerminalResultContextTransferId", ""),
@@ -232,6 +246,17 @@ def test_malformed_recognized_fields_are_bounded_awaiting(reference, snapshot, f
     result = classify(reference, snapshot)
     assert observation_diagnostic(result) == {"family": "awaiting", "reason": "malformed-snapshot"}
     assert result.reference == reference
+
+
+@pytest.mark.parametrize("label_fields", [{}, {"label": 0}], ids=["missing-label", "non-string-label"])
+def test_matching_remote_pair_with_malformed_label_is_awaiting(reference, snapshot, label_fields):
+    reference = replace(reference, remote_environment_id="example-remote", remote_thread_id="example-thread")
+    snapshot["remoteChild"] = {"environmentId": "example-remote", "threadId": "example-thread", **label_fields}
+    result = classify(reference, snapshot)
+    assert observation_diagnostic(result) == {"family": "awaiting", "reason": "malformed-snapshot"}
+    assert result.reference == reference
+    assert result.terminal_run_id is None
+    assert result.result_transfer_id is None
 
 
 @pytest.mark.parametrize(
