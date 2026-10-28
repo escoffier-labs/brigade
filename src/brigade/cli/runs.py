@@ -253,6 +253,22 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Caller request identity for idempotent live control (generated when omitted).",
     )
+    ordinary_steer_parse = p_runs_steer.parse_known_args
+
+    def parse_steer_args(args=None, namespace=None):
+        tokens = list(sys.argv[1:] if args is None else args)
+        parsed, extras = ordinary_steer_parse(tokens, namespace)
+        if not extras:
+            return parsed, extras
+        # Older argparse consumes text's empty match before intervening options.
+        # Keep successful ordinary parses so a leading -- retains its meaning.
+        p_runs_steer.parse_known_args = ordinary_steer_parse  # type: ignore[method-assign]
+        try:
+            return p_runs_steer.parse_known_intermixed_args(tokens, namespace)
+        finally:
+            p_runs_steer.parse_known_args = parse_steer_args  # type: ignore[method-assign]
+
+    p_runs_steer.parse_known_args = parse_steer_args  # type: ignore[method-assign]
     p_runs_interrupt = runs_sub.add_parser("interrupt", help="Interrupt active app-server worker turns.")
     p_runs_interrupt.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
     p_runs_interrupt.add_argument("worker", nargs="?", default=None, help="Optional worker name to interrupt.")

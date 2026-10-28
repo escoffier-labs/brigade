@@ -1273,6 +1273,17 @@ def test_invalid_task_control_does_not_mutate_or_send(tmp_path, selectors):
             {"op": "steer", "task_id": "one", "text": "keep going"},
         ),
         ("steer", ["--worker", "coder", "keep going"], {"op": "steer", "worker": "coder", "text": "keep going"}),
+        (
+            "steer",
+            ["coder", "keep", "--cwd", ".", "going", "--runs-dir", "."],
+            {"op": "steer", "worker": "coder", "text": "keep going"},
+        ),
+        ("steer", ["--", "coder", "--unknown"], {"op": "steer", "worker": "coder", "text": "--unknown"}),
+        (
+            "steer",
+            ["coder", "keep", "--cwd", ".", "--", "going", "--unknown"],
+            {"op": "steer", "worker": "coder", "text": "keep going --unknown"},
+        ),
         ("interrupt", [], {"op": "interrupt"}),
         ("interrupt", ["--task-id", "one"], {"op": "interrupt", "task_id": "one"}),
     ],
@@ -1301,6 +1312,17 @@ def test_cli_task_control_and_legacy_forwarding(tmp_path, monkeypatch, capsys, j
         return
     assert result == 0
     assert calls == [expected]
+
+
+@pytest.mark.parametrize("arguments", [["coder", "--unknown", "keep"], ["coder", "--cwd", ".", "--unknown", "keep"]])
+def test_cli_steer_rejects_unknown_options_before_sending(tmp_path, monkeypatch, arguments):
+    run_dir = _run_dir(tmp_path)
+    calls = []
+    monkeypatch.setattr(run_control, "send_request_with_retry", lambda *args: calls.append(args))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["runs", "steer", str(run_dir), *arguments])
+    assert exc.value.code == 2
+    assert calls == []
 
 
 def test_durable_control_targets_one_of_two_same_seat_turns(tmp_path):
