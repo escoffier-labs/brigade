@@ -81,14 +81,22 @@ def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | No
     return str(executable) if _is_executable(executable) else None
 
 
+def _override_values(names: tuple[str, ...], environment: Mapping[str, str]) -> list[str]:
+    return [
+        environment[key]
+        for alias in names
+        if (key := ENV_OVERRIDES.get(alias)) is not None
+        and key in environment
+        and (len(names) > 1 or bool(environment[key]))
+    ]
+
+
 def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """Resolve ``name`` to an executable path, or None when nowhere to be found."""
     environment = env if env is not None else os.environ
     search_path = environment.get("PATH")
     names = component_manifest.family_names(name)
-    overrides = [
-        environment[key] for alias in names if (key := ENV_OVERRIDES.get(alias)) is not None and key in environment
-    ]
+    overrides = _override_values(names, environment)
     if overrides:
         if len(set(overrides)) != 1 or not overrides[0].strip():
             return None
@@ -126,8 +134,8 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
 def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
     """Return argv with a managed engine name in position 0 resolved to a path.
 
-    Unknown or already-absolute commands pass through unchanged, so this is safe
-    to apply to any surface command before execution.
+    Unknown or already-absolute commands pass through unchanged. Invalid explicit
+    overrides raise ValueError so callers cannot silently fall back to PATH.
     """
     if not argv:
         return list(argv)
@@ -136,6 +144,6 @@ def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
         resolved = resolve(head)
         if resolved:
             return [resolved, *argv[1:]]
-        if any(ENV_OVERRIDES[alias] in os.environ for alias in component_manifest.family_names(head)):
+        if _override_values(component_manifest.family_names(head), os.environ):
             raise ValueError(f"invalid or conflicting explicit executable override for {head!r}")
     return list(argv)

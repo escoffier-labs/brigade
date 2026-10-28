@@ -251,3 +251,15 @@ def test_family_resolution_preserves_path_directory_order_and_requested_name_tie
     colocated = _write_executable(legacy.parent / "brigade-evidence")
     assert component_bins.resolve("miseledger", env=env) == str(legacy)
     assert component_bins.resolve("brigade-evidence", env=env) == str(colocated)
+
+
+def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch):
+    set_home(monkeypatch, str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for name, key in (("agent-notify", "AGENT_NOTIFY_BIN"), ("sessionfind", "SESSIONFIND_BIN")):
+        binary = _write_executable(tmp_path / name / name)
+        env = _env(tmp_path, PATH=str(binary.parent), **{key: ""})
+        assert component_bins.resolve(name, env=env) == str(binary)
+        monkeypatch.setenv("PATH", str(binary.parent))
+        monkeypatch.setenv(key, "")
+        assert component_bins.resolve_argv([name, "version"])[0] == str(binary)
