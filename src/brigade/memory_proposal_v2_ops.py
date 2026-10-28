@@ -8,6 +8,7 @@ from typing import Any
 
 from . import memory_proposal_io as io
 from . import memory_proposals as legacy
+from .memory_reflect_candidates import _evidence_id
 
 ANCHOR = re.compile(r" \^(c-[0-9a-f]{6})$")
 ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
@@ -151,6 +152,10 @@ def _history(text: str, old: str, now: str | None = None) -> str:
 
 def _list(meta: dict[str, Any], key: str) -> list[str]:
     value = meta.get(key, [])
+    # The canonical evidence reader also accepts one scalar citation. Refuse
+    # structured-looking values the frontmatter parser leaves as strings.
+    if key == "evidence" and isinstance(value, str) and not value.startswith(("[", "{")):
+        value = [value]
     if not isinstance(value, list) or len(value) > io.MAX_LIST or not all(isinstance(x, str) for x in value):
         raise legacy.ProposalError("invalid or oversized existing metadata list")
     return value
@@ -211,7 +216,10 @@ def apply_op(
         merged = sorted(set(memory_cmd._evidence_refs(meta)) | set(refs))
         if len(merged) > io.MAX_LIST:
             raise legacy.ProposalError("evidence list limit exceeded")
-        updates: dict[str, Any] = {"evidence": merged, "proof_count": len(set(merged) & resolved)}
+        updates: dict[str, Any] = {
+            "evidence": merged,
+            "proof_count": len({_evidence_id(ref) for ref in set(merged) & resolved}),
+        }
         if "last_consolidated" in op:
             if consolidated_at is None or op["last_consolidated"] != consolidated_at:
                 raise legacy.ProposalError("consolidation timestamp does not match cited evidence")
@@ -256,7 +264,7 @@ def apply_op(
                 {
                     "aliases": aliases,
                     "evidence": refs,
-                    "proof_count": len(set(refs) & resolved),
+                    "proof_count": len({_evidence_id(ref) for ref in set(refs) & resolved}),
                     "claim_anchor_ids": sorted(reservations(text) | reservations(other_text)),
                 },
             )

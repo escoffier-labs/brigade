@@ -907,14 +907,90 @@ def test_exact_duplicate_merge_keeps_citations_from_alternate_evidence_fields(tm
     assert not other.exists()
 
 
-def test_append_evidence_keeps_citations_stored_in_alternate_fields(tmp_path):
+@pytest.mark.parametrize("field", ["sources", "evidence"])
+@pytest.mark.parametrize("scalar", [False, True])
+def test_append_evidence_keeps_citations_stored_in_supported_formats(tmp_path, field, scalar):
     path = setup(tmp_path)
     old = evidence(tmp_path, ".brigade/receipts/old.json")
-    path.write_text(path.read_text().replace("evidence: []", f"sources: {json.dumps([old])}"))
+    value = old if scalar else json.dumps([old])
+    path.write_text(path.read_text().replace("evidence: []", f"{field}: {value}"))
+    before = path.read_bytes()
     new = ".brigade/receipts/support.json"
     proposal = create(tmp_path, [op("append_evidence", evidence_ids=[new])])
+    assert path.read_bytes() == before
+    assert set(proposal["op_evidence"]) == {old, new}
     assert apply(tmp_path, proposal)["status"] == "committed"
-    assert api._meta(path.read_text())["evidence"] == sorted([old, new])
+    meta = api._meta(path.read_text())
+    assert meta["evidence"] == sorted([old, new])
+    assert meta["proof_count"] == "2"
+    assert CLAIM in path.read_text()
+
+
+def test_duplicate_merge_keeps_scalar_evidence_from_both_sources(tmp_path):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    support = ".brigade/receipts/support.json"
+    second = evidence(tmp_path, ".brigade/receipts/other.json")
+    for source, ref in ((path, support), (other, second)):
+        source.write_text(source.read_text().replace("evidence: []", f"evidence: {ref}"))
+    before = {source: source.read_bytes() for source in (path, other)}
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    proposal = create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    assert {source: source.read_bytes() for source in before} == before
+    assert set(proposal["op_evidence"]) == {support, second}
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    meta = api._meta(path.read_text())
+    assert meta["evidence"] == sorted([support, second])
+    assert meta["proof_count"] == "2"
+    assert "other" in meta["aliases"]
+    assert not other.exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+def test_evidence_ops_count_bundle_aliases_once_without_rewriting_citations(tmp_path, monkeypatch, merge):
+    path = setup(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    evidence(tmp_path, "cache/miseledger/evidence/example.json")
+    canonical, alias, missing = "miseledger:example", "miseledger://evidence/example", "miseledger:missing"
+    path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([canonical, missing])}"))
+    support = ".brigade/receipts/support.json"
+    paths = [PATH]
+    operation = op("append_evidence", evidence_ids=[alias, support])
+    if merge:
+        other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+        other.write_text(other.read_text().replace("evidence: []", f"evidence: {json.dumps([alias, support])}"))
+        paths.append("memory/cards/other.md")
+        operation = op("merge_exact_duplicates", other_card=paths[-1])
+    before = {(tmp_path / name): (tmp_path / name).read_bytes() for name in paths}
+    proposal = create(tmp_path, [operation], paths=paths)
+    assert {source: source.read_bytes() for source in before} == before
+    assert set(proposal["op_evidence"]) == {canonical, alias, support}
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    meta = api._meta(path.read_text())
+    assert meta["proof_count"] == "2"
+    assert meta["evidence"] == sorted([canonical, alias, support, missing])
+    if merge:
+        assert "other" in meta["aliases"]
+        assert not other.exists()
+
+
+@pytest.mark.parametrize("value", ["true", "[1]", "[{}]", '[["nested"]]', "{}", "[malformed]"])
+@pytest.mark.parametrize("kind", ["append_evidence", "merge_exact_duplicates"])
+def test_evidence_ops_refuse_malformed_existing_metadata(tmp_path, value, kind):
+    path = setup(tmp_path)
+    paths = [PATH]
+    source = path
+    operation = op("append_evidence", evidence_ids=[".brigade/receipts/support.json"])
+    if kind == "merge_exact_duplicates":
+        source = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+        paths.append("memory/cards/other.md")
+        operation = op(kind, other_card=paths[-1])
+    source.write_text(source.read_text().replace("evidence: []", f"evidence: {value}"))
+    before = {(tmp_path / name): (tmp_path / name).read_bytes() for name in paths}
+    with pytest.raises(api.ProposalError, match="no valid delta ops remain"):
+        create(tmp_path, [operation], paths=paths)
+    assert {source: source.read_bytes() for source in before} == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
 
 
 def test_op_evidence_binds_citations_stored_in_alternate_fields(tmp_path):
