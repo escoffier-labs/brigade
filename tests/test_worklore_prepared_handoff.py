@@ -105,6 +105,19 @@ def append_execution(conn, work_id, node="node-a", run="run-a"):
     )
 
 
+def test_archived_item_retains_prepared_context(ledger):
+    conn, work_id, _ = ledger
+    recorded_context(conn, work_id)
+    for version, status in enumerate(("canceled", "archived"), start=1):
+        store.transition(conn, work_id, to_status=status, expected_version=version, actor_id="admin")
+
+    view = query(conn, work_id)
+
+    assert view["item"]["status"] == "archived"
+    assert view["checkpoint"]["source_revision"] == CHECKPOINT["source_revision"]
+    assert view["last_report"]["data"]["session_id"] == REPORT["session_id"]
+
+
 def test_initial_exact_schema_nulls_and_read_only_transaction(ledger):
     conn, work_id, _ = ledger
     before = conn.total_changes

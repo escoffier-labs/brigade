@@ -98,7 +98,7 @@ def validate_prepared_handoff(raw: object, work_id: str) -> dict[str, Any]:
         "version": ownership._integer(item["version"], minimum=1),
         "title": safe_text(item["title"], "title", max_len=TITLE_MAX),
         "kind": _choice(item["kind"], KINDS),
-        "status": _choice(item["status"], frozenset(TRANSITIONS)),
+        "status": _choice(item["status"], frozenset(TRANSITIONS).union(*TRANSITIONS.values())),
         "acceptance": _acceptance(item["acceptance"]),
         "effective_acceptance": _acceptance(item["effective_acceptance"]),
         "blocker": None

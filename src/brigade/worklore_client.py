@@ -147,8 +147,9 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
         refusal = json.loads(_read_bounded(exc, limit=MAX_ERROR_RESPONSE_BYTES).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, FleetClientError):
         refusal = {}
+    code = {401: "unauthorized", 403: "forbidden"}.get(exc.code)
     if isinstance(refusal, dict):
-        code = _error_code(refusal.get("code"))
+        code = _error_code(refusal.get("code")) or code
         if code == "hub-unavailable":
             return WorkloreClientError("hub-unavailable", code=code)
         detail = refusal.get("error")
@@ -158,7 +159,7 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
                 code=code,
             )
         return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
-    return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}")
+    return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
 
 
 def _new_idempotency_key() -> str:

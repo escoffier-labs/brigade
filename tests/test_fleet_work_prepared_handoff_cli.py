@@ -107,8 +107,10 @@ def show(*extra):
     return cli.main(["fleet", "work", "handoff", "show", WORK_ID, *extra])
 
 
-def test_one_authenticated_get_exact_projection_and_report_provenance(hub, capsys):
+@pytest.mark.parametrize("status", ["running", "archived"])
+def test_one_authenticated_get_exact_projection_and_report_provenance(hub, capsys, status):
     reply, requests = hub
+    reply["prepared_handoff"]["item"]["status"] = status
     before = copy.deepcopy(reply)
     assert show("--json") == 0
     output = capsys.readouterr()
@@ -201,7 +203,9 @@ def test_strict_response_refuses_without_partial_context(hub, capsys, path, valu
     [
         ("not-found", 404, "missing", "Work item was not found."),
         ("unauthorized", 401, "forbidden", "Prepared handoff read is not authorized."),
+        (None, 401, "forbidden", "Prepared handoff read is not authorized."),
         ("forbidden", 403, "forbidden", "Prepared handoff read is not authorized."),
+        (None, 403, "forbidden", "Prepared handoff read is not authorized."),
         ("hub-unavailable", 503, "unavailable", "Prepared handoff read is unavailable."),
         ("unknown-refusal", 400, "unavailable", "Prepared handoff read is unavailable."),
     ],
@@ -211,20 +215,26 @@ def test_fixed_refusals_never_echo_remote_text_or_retry(hub, monkeypatch, capsys
 
     def denied(request, **kwargs):
         requests.append(request)
+        body = {"error": "PRIVATE-MARKER"} if code is None else {"code": code, "error": "PRIVATE-MARKER"}
         raise urllib.error.HTTPError(
             request.full_url,
             status,
             "PRIVATE-MARKER",
             {},
-            io.BytesIO(json.dumps({"code": code, "error": "PRIVATE-MARKER"}).encode()),
+            io.BytesIO(json.dumps(body).encode()),
         )
 
     monkeypatch.setattr(worklore_client, "_hub_open", denied)
     assert show("--json") == 1
     output = capsys.readouterr()
     assert output.out == ""
+    expected_code = code
+    if code is None:
+        expected_code = "unauthorized" if status == 401 else "forbidden"
+    elif code == "unknown-refusal":
+        expected_code = "read-failed"
     assert json.loads(output.err) == {
-        "code": "read-failed" if code == "unknown-refusal" else code,
+        "code": expected_code,
         "state": state,
         "error": message,
     }

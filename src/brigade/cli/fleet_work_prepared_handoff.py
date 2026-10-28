@@ -48,7 +48,8 @@ def _human(view: Mapping[str, Any]) -> None:
     print(
         f"ownership: {current['state']}; owner: {current['owner_node'] or '-'}; offered to: {current['offered_to'] or '-'}"
     )
-    print(f"ownership updated: {current['updated_at']}; event sequence: {current['last_seq']}; liveness: unknown")
+    sequence = "-" if current["last_seq"] is None else str(current["last_seq"])
+    print(f"ownership updated: {current['updated_at'] or '-'}; event sequence: {sequence}; liveness: unknown")
     print("item acceptance: " + json.dumps(item["acceptance"], ensure_ascii=True))
     print("effective acceptance: " + json.dumps(item["effective_acceptance"], ensure_ascii=True))
     print("blocker: " + json.dumps(item["blocker"], ensure_ascii=True))
