@@ -605,10 +605,11 @@ def test_subprocess_reads_clear_inherited_fresh_unless_merge_gating(tmp_path, mo
     # Use a real child without contacting GitHub or reading operator config.
     class EnvironmentRunner(SubprocessRunner):
         def __call__(self, argv, **kwargs):
+            # Binary stdout: Windows text mode would turn each \n into \r\n.
             script = (
                 "import os, sys; "
-                "sys.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n'); "
-                "sys.stdout.write(os.environ.get('OCTOPOOL_FRESH', 'unset'))"
+                "sys.stdout.buffer.write(b'HTTP/2.0 200 OK\\r\\n\\r\\n'); "
+                "sys.stdout.buffer.write(os.environ.get('OCTOPOOL_FRESH', 'unset').encode())"
             )
             return super().__call__([sys.executable, "-c", script], **kwargs)
 
