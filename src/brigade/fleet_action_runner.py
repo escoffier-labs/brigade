@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import math
 import os
@@ -438,8 +439,14 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
 
 
 def _schedule(path: Path, manifest: dict[str, Any], action_id: str, generation: int, *, timeout: float) -> bool:
+    executable = manifest["executables"]["systemd-run"]
+    if not os.path.dirname(executable):
+        resolved = shutil.which(executable)
+        if resolved is None:
+            raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), executable)
+        executable = resolved
     argv = [
-        str(_tool(manifest, "systemd-run").absolute()),
+        str(Path(executable).absolute()),
         "--user",
         "--collect",
         "--unit=brigade-action-" + action_id + "-" + str(generation),

@@ -31,6 +31,43 @@ def test_schedule_resolves_relative_tool_before_entering_trusted_cwd(tmp_path, m
     assert runner._schedule(tmp_path / "manifest.json", manifest, "aa_fixture", 1, timeout=5)
 
 
+@pytest.mark.parametrize(
+    ("configured", "relative_path"), [("systemd-run", False), ("systemd-run", True), ("./systemd-run", False)]
+)
+def test_schedule_preserves_executable_lookup_before_entering_trusted_cwd(
+    tmp_path, monkeypatch, configured, relative_path
+):
+    monkeypatch.chdir(tmp_path)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    local = tmp_path / "systemd-run"
+    on_path = tools / "systemd-run"
+    for executable, code in (
+        (local, 0 if configured.startswith("./") else 7),
+        (on_path, 7 if configured.startswith("./") else 0),
+    ):
+        executable.write_text(f"#!/bin/sh\nexit {code}\n")
+        executable.chmod(0o755)
+    monkeypatch.setenv("PATH", "tools" if relative_path else str(tools))
+    manifest = {"executables": {"systemd-run": configured}}
+
+    assert runner._schedule(tmp_path / "manifest.json", manifest, "aa_fixture", 1, timeout=5)
+
+
+def test_schedule_missing_path_name_does_not_fall_back_to_caller_directory(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    executable = tmp_path / "systemd-run"
+    executable.write_text("#!/bin/sh\nexit 0\n")
+    executable.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path / "absent"))
+    manifest = {"executables": {"systemd-run": "systemd-run"}}
+
+    with pytest.raises(FileNotFoundError) as exc_info:
+        runner._schedule(tmp_path / "manifest.json", manifest, "aa_fixture", 1, timeout=5)
+
+    assert exc_info.value.filename == "systemd-run"
+
+
 def test_inbox_dispatch_preserves_relative_credential_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     set_home(monkeypatch, tmp_path / "home")
