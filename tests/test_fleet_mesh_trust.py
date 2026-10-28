@@ -4750,3 +4750,81 @@ def test_r2_nine_authenticated_links_check_new_changed_admission_times(trust, ho
         with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
             peer_observe(trust, home, chain[-1], chain=tuple(chain))
         assert saved(home).read_bytes() == before and peer_load(trust, home).use.eligible
+
+
+@pytest.mark.parametrize("future_head", [False, True])
+@pytest.mark.parametrize("clock_mode", ["forbidden", "rollback"])
+def test_r3_confirmed_head_resolves_changed_without_time_readmission(
+    trust, home, r2_admission_clock, future_head, clock_mode
+):
+    peer_setup(trust, home)
+    first = peer_record(created_at="9999-12-31T23:59:59Z") if future_head else peer_record()
+    if future_head:
+        r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant("9999-12-31T23:59:59Z"))
+    assert peer_accept(trust, home, first, require_verified=True).peer.use.eligible
+    changed = peer_observe(trust, home, peer_record(2))
+    assert changed.disposition == "changed" and changed.evidence_recorded
+    original = peer_load(trust, home, require_verified=True)
+    before = json.loads(saved(home).read_bytes())
+    assert original.use.error == "recipient_key_changed" and original.history[0]["confirmation"]
+
+    def clock():
+        if clock_mode == "forbidden":
+            raise AssertionError("resolution consulted admission clock")
+        return trust._instant(json.loads(first)["created_at"]) - 3_600_000_000
+
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", clock)
+    result = peer_accept(trust, home, first, expected=digest(first), require_verified=True)
+    assert result.disposition == "accepted" and result.peer.use.eligible
+    assert result.peer.head == first and result.peer.provenance == "verified"
+    assert result.peer.history == original.history
+    complete = saved(home).read_bytes()
+    after = json.loads(complete)
+    assert after["generation"] == before["generation"] + 1
+    assert after["peer_records"] == before["peer_records"]
+    old_peer, new_peer = next(iter(before["peers"].values())), next(iter(after["peers"].values()))
+    assert new_peer["history"] == old_peer["history"]
+    assert new_peer["changes"] == {
+        name: dict(change, resolved_by=digest(first)) for name, change in old_peer["changes"].items()
+    }
+    assert new_peer["acceptance"]["head"] == digest(first)
+    retry = peer_accept(trust, home, first, expected=digest(first), require_verified=True)
+    assert retry.disposition == "replay" and retry.peer.use.eligible
+    assert saved(home).read_bytes() == complete
+
+
+def test_r3_unconfirmed_future_head_still_requires_time_admission(trust, home, r2_admission_clock):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record(created_at="9999-12-31T23:59:59Z")
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant("9999-12-31T23:59:59Z"))
+    observed = peer_observe(trust, home, first)
+    assert observed.peer.provenance == "observed" and observed.peer.use.eligible
+    assert not observed.peer.history[0]["confirmation"]
+    peer_observe(trust, home, peer_record(2))
+    before = saved(home).read_bytes()
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant(TIME))
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_accept(trust, home, first, expected=digest(first), require_verified=True)
+    assert saved(home).read_bytes() == before
+    assert peer_load(trust, home).use.error == "recipient_key_changed"
+
+
+def test_r3_confirmed_resolution_still_checks_serialized_capacity(trust, home, r2_admission_clock):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first, require_verified=True)
+    assert peer_observe(trust, home, peer_record(2)).evidence_recorded
+    before = saved(home).read_bytes()
+    state = json.loads(before)
+    r2_admission_clock.setattr(
+        trust, "_PEER_BYTES", r1_wire_size({name: state[name] for name in ("peers", "peer_records")})
+    )
+
+    def forbidden():
+        raise AssertionError("resolution consulted admission clock")
+
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", forbidden)
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+        peer_accept(trust, home, first, expected=digest(first), require_verified=True)
+    assert saved(home).read_bytes() == before
+    assert peer_load(trust, home).use.error == "recipient_key_changed"

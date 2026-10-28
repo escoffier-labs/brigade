@@ -1603,7 +1603,8 @@ def accept_peer(
                 state, identity, principal, "mesh_peer_history_transition_unsupported", require_verified
             )
         else:
-            _admit_peer_times([parsed])
+            if current != digest or not confirmation:
+                _admit_peer_times([parsed])
             peer = _peer_new(state, identity["hub"], principal)
             now = _peer_now()
             evidence = {"fingerprint": expected_fingerprint, "at": now, "head": expected_head_digest or ""}
