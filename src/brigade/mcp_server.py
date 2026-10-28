@@ -491,6 +491,10 @@ def _make_handler(
                 return -32600, f"batch requests are not supported in {STATELESS_PROTOCOL_VERSION}"
             if not isinstance(decoded, dict) or not isinstance(decoded.get("method"), str):
                 return None
+            declared = request_protocol_version(decoded)
+            if declared is not None and declared != protocol_version:
+                # The header must match _meta; otherwise the body could name a version the response is not shaped for.
+                return HEADER_MISMATCH_CODE, "MCP-Protocol-Version header does not match _meta protocolVersion"
             method = self.headers.get("Mcp-Method")
             if method is None:
                 # Notifications carry no id and are not routed.
