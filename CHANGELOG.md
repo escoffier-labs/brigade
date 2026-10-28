@@ -75,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
+- Preserve backslashes in TOML literal strings on Python 3.10, so Windows paths and trailing separators load correctly in local configuration, including arrays and inline tables. Generated TOML strings now round-trip through both supported parsers.
 
 - Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import json
 from typing import Any
 
 try:  # Python 3.11+
@@ -35,7 +36,7 @@ class _CollectionState:
         if self._quote:
             if self._escaped:
                 self._escaped = False
-            elif character == "\\":
+            elif character == "\\" and self._quote == '"':
                 self._escaped = True
             elif character == self._quote:
                 self._quote = ""
@@ -74,7 +75,9 @@ def _fallback_loads(text: str) -> dict[str, Any]:
     pending_line_number = 0
     pending_state: _CollectionState | None = None
 
-    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+    # TOML lines end at LF (optionally preceded by CR). Unicode separators
+    # accepted within strings must not become statement boundaries.
+    for line_number, raw_line in enumerate(text.split("\n"), start=1):
         line = _strip_comment(raw_line).strip()
         if not line:
             continue
@@ -127,7 +130,7 @@ def _strip_comment(line: str) -> str:
         if in_string:
             if escaped:
                 escaped = False
-            elif char == "\\":
+            elif char == "\\" and quote == '"':
                 escaped = True
             elif char == quote:
                 in_string = False
@@ -220,6 +223,18 @@ def _parse_value(value: str, line_number: int) -> Any:
         return [_parse_value(part.strip(), line_number) for part in _split_top_level(value[1:-1]) if part.strip()]
     if value.startswith("{") and value.endswith("}"):
         return _parse_inline_table(value[1:-1], line_number)
+    if value.startswith("'") and not value.startswith("'''"):
+        # TOML literal strings have no escapes. Python's literal_eval would
+        # turn Windows path separators such as \t and \r into control bytes.
+        literal = value[1:-1]
+        if (
+            len(value) < 2
+            or not value.endswith("'")
+            or "'" in literal
+            or any(ord(char) < 32 and char != "\t" or ord(char) == 127 for char in literal)
+        ):
+            raise TOMLDecodeError(f"invalid TOML literal string on line {line_number}")
+        return literal
     try:
         return ast.literal_eval(value)
     except (SyntaxError, ValueError):
@@ -279,7 +294,7 @@ def _split_top_level(value: str) -> list[str]:
         if in_string:
             if escaped:
                 escaped = False
-            elif char == "\\":
+            elif char == "\\" and quote == '"':
                 escaped = True
             elif char == quote:
                 in_string = False
@@ -309,4 +324,7 @@ def format_toml_value(value: object) -> str:
         return "true" if value else "false"
     if isinstance(value, (int, float)):
         return f"{value:g}"
-    return repr(str(value))
+    rendered = str(value)
+    if "'" not in rendered and not any(ord(char) < 32 or ord(char) == 127 for char in rendered):
+        return f"'{rendered}'"
+    return json.dumps(rendered, ensure_ascii=False).replace("\x7f", "\\u007f")
