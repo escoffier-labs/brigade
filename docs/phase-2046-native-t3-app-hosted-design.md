@@ -41,6 +41,26 @@ Brigade remains a zero-runtime-dependency Python CLI. No MCP client package,
 private app database access, undocumented HTTP endpoint, provider credential
 copying or standalone native-launch bridge is added by this design.
 
+## Native T3 alignment priority
+
+Prefer supported native T3 discovery, delegation, app-owned worktrees, task
+control and completion notifications. Before each implementation slice, compare
+Brigade-owned execution machinery with the current native tool catalog and
+upstream contracts. Record the inspected revision, available capabilities,
+overlap and adoption decision. Reuse native behavior where its verified contract
+meets the requirement. Retain additional Brigade execution machinery only with
+a documented governance, durability or compatibility need.
+
+Brigade retains governance, durable ownership and claims, budgets, verification
+and provenance. Native presence, discovery and lifecycle observations establish
+no admission, reservation or launch authority. Missing native guarantees remain
+explicit unknowns and activation dependencies.
+
+Extend existing update or maintenance checks for any future daily capability,
+overlap and adoption report, subject to the existing research owner's concrete
+recommendation and agreed scope. This decision installs no watcher, service,
+schedule or activation path.
+
 ## Approaches
 
 | Approach | What it enables | Cost and constraint | Decision |
