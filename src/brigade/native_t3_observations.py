@@ -96,7 +96,7 @@ class NativeObservation:
 
 
 def _well_formed(snapshot: Mapping[str, object]) -> bool:
-    """Check only recognized native fields, discarding unrelated payloads."""
+    """Check lifecycle fields after identity validation and correlation."""
     for key, allowed in (("status", _STATUS), ("workState", _WORK_STATE), ("latestTerminalStatus", _TERMINAL)):
         if key in snapshot:
             value = snapshot[key]
@@ -104,10 +104,10 @@ def _well_formed(snapshot: Mapping[str, object]) -> bool:
                 continue
             if type(value) is not str or value not in allowed:
                 return False
-    for key in ("taskId", "latestTerminalRunId", "latestTerminalResultContextTransferId", "resultContextTransferId"):
+    for key in ("latestTerminalRunId", "latestTerminalResultContextTransferId", "resultContextTransferId"):
         if key in snapshot:
             value = snapshot[key]
-            if key != "taskId" and value is None:
+            if value is None:
                 continue
             if not _valid_reference(value):
                 return False
@@ -124,16 +124,6 @@ def _well_formed(snapshot: Mapping[str, object]) -> bool:
             or kind not in ("command", "file-read", "file-change", "mcp-elicitation", "permission")
             or not _valid_reference(approval.get("requestId"))
             or not _valid_reference(approval.get("runId"))
-        ):
-            return False
-    remote = snapshot.get("remoteChild")
-    if remote is not None:
-        if not isinstance(remote, Mapping):
-            return False
-        if (
-            not _valid_reference(remote.get("environmentId"))
-            or not _valid_reference(remote.get("threadId"))
-            or type(remote.get("label")) is not str
         ):
             return False
     return True
@@ -176,18 +166,29 @@ def classify_native_snapshot(
         return result("awaiting", "acceptance-uncertain")
     if snapshot is None:
         return result("awaiting", "snapshot-unavailable")
-    if not isinstance(snapshot, Mapping) or not _well_formed(snapshot):
+    if not isinstance(snapshot, Mapping):
         return result("awaiting", "malformed-snapshot")
     if "taskId" not in snapshot:
         return result("awaiting", "missing-evidence")
+    if not _valid_reference(snapshot["taskId"]):
+        return result("awaiting", "malformed-snapshot")
     if snapshot["taskId"] != expected.task_id:
         return result("refused", "task-mismatch")
     remote = snapshot.get("remoteChild")
+    if remote is not None and (
+        not isinstance(remote, Mapping)
+        or not _valid_reference(remote.get("environmentId"))
+        or not _valid_reference(remote.get("threadId"))
+        or type(remote.get("label")) is not str
+    ):
+        return result("awaiting", "malformed-snapshot")
     observed_remote = (
         (remote.get("environmentId"), remote.get("threadId")) if isinstance(remote, Mapping) else (None, None)
     )
     if observed_remote != (expected.remote_environment_id, expected.remote_thread_id):
         return result("refused", "remote-mismatch")
+    if not _well_formed(snapshot):
+        return result("awaiting", "malformed-snapshot")
 
     required = ("status", "workState", "hasPendingChildRuns", "hasPendingQuestion", "pendingApproval", "waitTimedOut")
     if any(key not in snapshot for key in required):

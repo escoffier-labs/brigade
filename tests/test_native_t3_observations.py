@@ -106,6 +106,32 @@ def test_remote_pair_cannot_be_adopted_or_replaced(reference, snapshot, change):
     assert result.reference == reference
 
 
+@pytest.mark.parametrize(
+    "mismatch,changes",
+    [
+        ("task", {"hasPendingChildRuns": 0}),
+        ("task", {"remoteChild": False}),
+        ("remote", {"hasPendingChildRuns": 0}),
+        ("remote", {"status": True}),
+    ],
+)
+def test_known_identity_refusal_precedes_malformed_evidence(reference, snapshot, mismatch, changes):
+    if mismatch == "task":
+        snapshot["taskId"] = "example-other-task"
+    else:
+        snapshot["remoteChild"] = {
+            "environmentId": "example-other-remote",
+            "threadId": "example-other-thread",
+            "label": "Example",
+        }
+    snapshot.update(changes)
+    result = classify(reference, snapshot)
+    assert observation_diagnostic(result) == {"family": "refused", "reason": f"{mismatch}-mismatch"}
+    assert result.reference == reference
+    assert result.terminal_run_id is None
+    assert result.result_transfer_id is None
+
+
 @pytest.mark.parametrize("status", ["queued", "running"])
 def test_queued_and_running_work_is_active(reference, snapshot, status):
     snapshot.update(status=status, workState="working", latestTerminalStatus=None, latestTerminalRunId=None)
