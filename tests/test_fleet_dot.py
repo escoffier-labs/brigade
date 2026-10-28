@@ -522,6 +522,8 @@ def test_cloud_history_limit_and_text_filter_use_decoded_report_text(monkeypatch
     assert [row["session_id"] for row in found] == ["session-a"]
     # Key names and provider metadata are not report text.
     assert fleet_hub_sessions.list_cloud_reports(conn, now_epoch=later, text_filter="source_scope") == []
+    # The session directory filters on its own projected fields, so report prose never matches there.
+    assert fleet_hub_sessions.list_sessions(conn, include_all=True, now_epoch=later, text_filter="überprüfung") == []
 
 
 @pytest.mark.parametrize(

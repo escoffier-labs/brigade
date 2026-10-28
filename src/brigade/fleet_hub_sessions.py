@@ -175,9 +175,12 @@ def list_sessions(
         # SQLite lower() folds ASCII only; register Python casefold so the SQL
         # filter matches the Unicode-aware filter callers apply afterwards.
         conn.create_function("brigade_casefold", 1, _casefold, deterministic=True)
+        # Only cloud history displays report text. Other callers re-filter on
+        # _FILTER_COLUMNS, so prose matches would just crowd out the LIMIT.
+        columns = (*_FILTER_COLUMNS, *_CLOUD_TEXT) if recent_cloud_reports else _FILTER_COLUMNS
         text_clause = (
             "AND instr(brigade_casefold("
-            + " || char(31) || ".join(f"coalesce({column}, '')" for column in (*_FILTER_COLUMNS, *_CLOUD_TEXT))
+            + " || char(31) || ".join(f"coalesce({column}, '')" for column in columns)
             + "), ?) > 0 "
         )
         params.append(text_filter.casefold())
