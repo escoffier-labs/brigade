@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="assets/brigade-social-preview.jpg" alt="Brigade">
+  <img src="assets/brigade-social-preview.jpg" alt="Brigade Stack">
 </p>
 
-# Brigade Technical Guide
+# Brigade Stack Technical Guide
 
 This guide preserves the detailed command walkthroughs and operational notes that used to live on the project front page. The README stays short. Topic migration map: [readme-coverage](readme-coverage.md). Adjacent products: [comparison](comparison.md). Code map: [code-intelligence](code-intelligence.md). Memory Operations: [memory-operations](memory-operations.md).
 
-<h1 align="center">Brigade</h1>
+<h1 align="center">Brigade Stack</h1>
 
 <p align="center">
-  <strong>Run your agent brigade.</strong>
+  <strong>Coordinate your agents.</strong>
 </p>
 
 <p align="center">
@@ -31,14 +31,14 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 
 ## What this is
 
-Mise en place means "everything in its place before the work starts."
-In a kitchen, that is chopped mirepoix, clean pans, labels, and a station that does not make you hunt for salt mid-service.
-For agents, it is the same idea: rules, memory, tools, handoff inboxes, publish guards, and routine verification already laid out before the session gets expensive.
+Brigade Stack prepares shared instructions, memory, tools, handoff inboxes, guards, and verification paths for agent work.
 
 This package lays down a clean starting point for an agent workspace or a repo that needs durable memory handoffs, local work receipts, scanner inboxes, portable tool review, repo-fleet evidence, and release gates.
 It is meant for people running real tools, real docs, and real automation across OpenClaw, Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, or a similar harness.
 
-The cookbook explains the why. This package gives you the kitchen.
+The cookbook documents the broader setup. This package provides the local workspace wiring.
+
+The preferred `--orchestrator` spelling for Fleet preferences is available on main for the next release. `--chef` remains an alias, and persisted/JSON `chef` fields are unchanged. New `roster init` output and the `minimal-single-cli`, `review-heavy` and `budget-open-weight` presets name the planner seat `orchestrator` on main; their 0.30.0 equivalents use `chef`. Existing rosters using either name remain valid. Command examples here retain `brigade`, which the documented installation supplies.
 
 ## Plain-English glossary
 
@@ -48,7 +48,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 |---|---|
 | **harness** | An AI agent program: Claude Code, Codex, OpenCode, Antigravity, Pi, Cursor, OpenClaw, Hermes. |
 | **operator** | You, the human running the agents. |
-| **dogfood** | Brigade used on itself or another trusted repo. |
+| **dogfood** | Brigade Stack used on itself or another trusted repo. |
 | **handoff** | A memory note an agent writes to be saved long-term. |
 | **ingest / ingester** | Reading those notes and filing them into permanent memory. |
 | **scanner** | An automation that goes looking for useful work (chat, backups, code). |
@@ -58,7 +58,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **closeout** | Marking something reviewed or done so it stops nagging you. |
 | **gate** | A checkpoint the operator places where they want approval before work continues. |
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
-| **station** | A subsystem of Brigade (memory, security, tokens, pantry) with its own commands. |
+| **station** | A subsystem of Brigade Stack (memory, security, tokens, pantry) with its own commands. |
 
 Execution model: the operator sets policy, budgets, scopes, and gates, then agents work within that authority. Receipts with real exit codes and run journals record what happened. Agents pass evidence packages and handoffs so the next agent can check their work. Commands and operator-started services share this model. Details: [`docs/execution-model.md`](execution-model.md).
 
@@ -68,7 +68,7 @@ One memory owner stays canonical.
 That is typically OpenClaw or Hermes when present, otherwise `this-repo`.
 Writer harnesses drop handoffs into their own inboxes, and the ingester scans all of them.
 
-![Brigade keeps agents local and reviewable](assets/technical-guide-design.svg)
+![Brigade Stack keeps agents local and reviewable](assets/technical-guide-design.svg)
 
 The ingester is intentionally conservative.
 Safe card handoffs become cards.
@@ -86,9 +86,9 @@ The Token Glace starter card documents Claude Code's PreToolUse wrapper path, Co
 
 ## What you get
 
-> **In plain terms:** the list below is everything Brigade can do today. Skim the bold labels; each one is a "station" documented in detail later. You do not need most of them on day one.
+> **In plain terms:** the list below is everything Brigade Stack can do today. Skim the bold labels; each one is a "station" documented in detail later. You do not need most of them on day one.
 
-Brigade has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
+Brigade Stack has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
 - Bootstrap and memory layout: sanitized `AGENTS.md`, safety, tool, identity, user, memory, rule, handoff, and harness files with a canonical memory-owner model.
 - Multi-harness handoffs: `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, `.crush/memory-handoffs/`, source coverage checks, linting, reconciliation receipts, issue imports, sync repair, and archive closeouts.
@@ -109,7 +109,7 @@ The operator can inspect or stop work and place gates where approval is needed. 
 
 ### Agent activity
 
-`brigade center activity --json` keeps its existing receipt list and adds a version 2 `agent_activity` section. Brigade run records are local authoritative observations. Codex and Cursor session files are best-effort observations: Center reads only a short head of each session file to derive a truncated task label (dated cwd folder name preferred, otherwise the first user prompt line) and an optional model id. Absolute paths, full transcripts, and environment values stay out of the payload. A missing source is shown as stale, never as completed. Missing task text renders as `Unknown task`.
+`brigade center activity --json` keeps its existing receipt list and adds a version 2 `agent_activity` section. Brigade Stack run records are local authoritative observations. Codex and Cursor session files are best-effort observations: Center reads only a short head of each session file to derive a truncated task label (dated cwd folder name preferred, otherwise the first user prompt line) and an optional model id. Absolute paths, full transcripts, and environment values stay out of the payload. A missing source is shown as stale, never as completed. Missing task text renders as `Unknown task`.
 
 The Agent Activity dashboard is visual-first: machine cards (one per configured host, plus cloud) group agent tiles, with the spreadsheet table retained as a secondary section. Completed items older than `completed_window_seconds` (configurable in the sources file, default 3600) collapse behind a per-card expander. The Cloud card is fed by the local cloud dispatch registry (`brigade run cloud status`); when empty it shows the #890 placeholder, and when the registry has entries it renders real cloud rows.
 
@@ -123,7 +123,7 @@ Jules Cloud uses the alpha `https://jules.googleapis.com/v1alpha` API with `X-Go
 Construct it with a canonical repository, independently confirmed `visibility`,
 an injected `CommandRunner`, and a `BudgetLedger(Path(...))` outside version control.
 Use `SubprocessRunner()` for bounded local execution, or supply your own runner.
-The supplied runner uses Brigade's subprocess capture with no shell, capped
+The supplied runner uses Brigade Stack's subprocess capture with no shell, capped
 stdout, discarded stderr, and a timeout. Put native `gh` and `octopool` executables
 on PATH without a `gh` shim. Construction makes no requests or auth changes.
 Custom runners must remove environment variables whose override is `None`.
@@ -166,7 +166,7 @@ work alongside migration of the three existing GitHub read implementations.
 
 ### Grok Bot local job queue
 
-`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
+`brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade Stack package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade Stack target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
 
 Queue data lives below `.brigade/cloud/grokbot/` with private file permissions. Submit a complete task envelope from a JSON file with `enqueue --spec`; do not put task instructions, verification commands, credentials, headers, environment values, or artifact bodies on the command line. The envelope identifies a bounded role, repository, base ref, owned paths, artifact kind, and timeout. Completion reads a second JSON file with `complete --artifact`; it accepts artifact references only, such as a GitHub draft-PR URL and branch, a branch and commit, or a report path and SHA-256.
 
@@ -215,7 +215,7 @@ See [`ROADMAP.md`](../ROADMAP.md) for the daily-driver, scanner inbox, chat-surf
 The production-hardening queue for the daily operator system is tracked in [`docs/phase-115-164-plan.md`](phase-115-164-plan.md).
 
 Long unattended phase work is audited through the local phase execution ledger described in [`docs/phase-execution-ledger.md`](phase-execution-ledger.md). Future multi-phase work is not complete unless each phase has ledger evidence or an explicit deferral.
-The next simplification review is scoped in [`docs/simplification-audit-plan.md`](simplification-audit-plan.md), with current findings in [`docs/simplification-audit-report.md`](simplification-audit-report.md); use those before applying any automated code simplifier to Brigade.
+The next simplification review is scoped in [`docs/simplification-audit-plan.md`](simplification-audit-plan.md), with current findings in [`docs/simplification-audit-report.md`](simplification-audit-report.md); use those before applying any automated code simplifier to Brigade Stack.
 Phase ledger closeouts let an operator mark completed phase evidence as reviewed, deferred, blocked, or archived, and stale unreviewed completed phases surface in doctor output.
 
 Phase execution sessions group a declared AFK range into one local record with current phase, status, commit and test counts, report references, closeout state, and the next recommended command.
@@ -305,13 +305,13 @@ The workspace config directory is `.brigade` (older `.solo-mise` installs are st
 Run `brigade init` with no flags for the interactive picker:
 
 ```bash
-brigade init --target ~/agent-kitchen
+brigade init --target ~/agent-workspace
 ```
 
 For CI or scripts, pass flags directly:
 
 ```bash
-brigade init --target ~/agent-kitchen --depth workspace --harnesses claude,codex,openclaw
+brigade init --target ~/agent-workspace --depth workspace --harnesses claude,codex,openclaw
 brigade init --target ./repo --depth repo --harnesses codex
 brigade init --target ./repo --harnesses none           # generic install
 ```
@@ -325,13 +325,17 @@ If your ingestor writes a latest-run log, set `ingestor.last_run_log` in that lo
 Use `brigade handoff issues` to group those warnings with repair guidance, then `brigade handoff sync-issues` to import new issues and close stale local handoff tasks/imports once the latest scan no longer reports them. Handoff source coverage issues carry stable source keys and fingerprints, so dismissed uncovered-inbox repairs stay dismissed until the pending coverage state changes.
 Use `brigade work import issue-repairs` when issue-backed local tasks need review because `gh` is unavailable, issue metadata is incomplete, a remote issue is closed, or stored issue context is stale. The command creates local repair imports only and never mutates GitHub.
 
-## Run a brigade
+<a id="run-a-brigade"></a>
 
-> **In plain terms:** you give one plain-language task, a lead agent ("orchestrator") plans it and farms pieces out to worker agents through their own CLIs, then the lead stitches the results into one answer. It is deliberately bounded: two lead calls plus the planned worker calls, so it cannot run away. ("Aboyeur" is the kitchen expediter who calls out orders.)
+## Agent orchestration
 
-`brigade run "<task>"` is the aboyeur path.
-One orchestrator plans the work, Brigade dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
+> **In plain terms:** you give one plain-language task, a lead agent ("orchestrator") plans it and farms pieces out to worker agents through their own CLIs, then the lead stitches the results into one answer. It is deliberately bounded: two lead calls plus the planned worker calls, so it cannot run away.
+
+`brigade run "<task>"` is the agent orchestration path.
+One orchestrator plans the work, Brigade Stack dispatches assigned workers through their own CLIs, then the orchestrator synthesizes the final answer.
 It is intentionally bounded: two orchestrator calls plus the worker calls in the plan.
+
+With a Fleet `impl` preference, naming any roster seat in task prose suppresses the default worker pin and leaves planning to the orchestrator. This includes the new default seat name `orchestrator`, even in a task such as "Fix the orchestrator module". Use an explicit `--worker SEAT` when you want direct dispatch regardless of the task wording.
 
 Hard run-budget ceilings (`wall_clock_seconds`, `worker_dispatch_count`) apply
 only when a run persists `run_budget` or `verification_contract.budget` (#593).
@@ -350,11 +354,11 @@ Plans may include integer `stage` values. Assignments in the same stage run in p
 
 When `--cwd` is a git worktree, write runs refuse to start on a dirty tree
 unless `--allow-dirty` is passed; dry, read-only, and `--worktree` runs are
-exempt, and Brigade's own `.brigade/` state never counts as dirty. Every run
+exempt, and Brigade Stack's own `.brigade/` state never counts as dirty. Every run
 takes a local `.brigade/run.lock` (stale locks from dead processes are
 replaced automatically) so two runs do not mutate the same checkout at once.
 Use `--worktree` to run agents in a detached checkout from `HEAD` under
-`~/.cache/brigade/worktrees/`; Brigade writes the resulting diff to
+`~/.cache/brigade/worktrees/`; Brigade Stack writes the resulting diff to
 `changes.patch` in the run artifacts and leaves the original checkout
 unchanged. Successful runs and clean non-success runs remove the temporary
 checkout; failed, timed-out, canceled, and incomplete runs with uncommitted
@@ -382,9 +386,9 @@ Pass `--review-model <id>` to add a reviewer seat pinned to a different model th
 That writes `.brigade/roster.toml` with a Codex orchestrator, a Codex coder, and an optional Ollama local researcher:
 
 ```toml
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan the work, choose useful workers, and synthesize the final answer."
 
@@ -405,7 +409,7 @@ sandbox = "workspace-write"
 ```
 
 Edit the roles, CLI refs, and timeouts to match the tools on your machine.
-Brigade never auto-pulls Ollama models: dispatch to an `ollama:<model>` seat
+Brigade Stack never auto-pulls Ollama models: dispatch to an `ollama:<model>` seat
 fails with a clear message unless the model is already pulled locally, because
 a bare `ollama run` silently downloads the model first (tens of gigabytes for
 a large one). Pull the model yourself (`ollama pull llama3.2:3b`) or name one
@@ -414,7 +418,7 @@ a large one). Pull the model yourself (`ollama pull llama3.2:3b`) or name one
 `agents.<name>.timeout_seconds` overrides it for one agent.
 `agents.<name>.read_only_capable` is an optional boolean that defaults to `true`.
 Set it to `false` when a seat cannot return usable output under `--read-only`.
-The chef sees the value in its planning prompt, plan validation rejects an incapable
+The orchestrator sees the value in its planning prompt, plan validation rejects an incapable
 assignment during read-only runs, and `--worker` rejects the seat before run artifacts
 are created. The field does not restrict writable runs.
 `limits.sandbox` is optional. When set to `read-only`, `workspace-write`, or
@@ -424,7 +428,7 @@ unless the run also passes `--sandbox`.
 ### Pin a model per agent
 
 `agents.<name>.model` pins the model a CLI agent runs, instead of relying on that CLI's
-global default. Brigade passes it through the adapter (`claude --model <id>`,
+global default. Brigade Stack passes it through the adapter (`claude --model <id>`,
 `codex exec -m <id>`, `grok -m <id>`, and so on); pinning is supported for the `claude`,
 `codex`, `grok`, `opencode`, `pi`, `kimi`, `cursor`, `antigravity`, and `oracle` adapters. Each
 adapter's model flag is placed where that CLI expects it. `ollama:<model>` refs already
@@ -488,7 +492,7 @@ brigade run "make the change" --detach
 brigade run "serialize behind an active run" --wait=120
 ```
 
-The examples above all drive the same `brigade run` command to show its main flags. Brigade's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `BRIGADE_EXTRAS=1 brigade roadmap commands --write`.
+The examples above all drive the same `brigade run` command to show its main flags. Brigade Stack's full surface (work loop, scanners, handoffs, tools, release gates, repo fleet, and more) is documented section by section below. For the complete, auto-generated list of every command, see [`docs/command-inventory.md`](command-inventory.md), and regenerate it with `BRIGADE_EXTRAS=1 brigade roadmap commands --write`.
 
 Common `brigade run` flags:
 
@@ -517,7 +521,7 @@ disables journal authority for a new run.
 
 Existing run directories are classified from their stored artifacts. A run whose
 `run.json` lacks both durable request fields remains snapshot-only, even when a
-newer Brigade release records another start attempt. Do not add the fields or
+newer Brigade Stack release records another start attempt. Do not add the fields or
 create `events/lifecycle.jsonl` by hand. Keep legacy runs on the snapshot path, or
 start a new run after upgrading.
 
@@ -540,7 +544,7 @@ inspection-oriented and does not claim resume support. See
 `schemas/work-run.v1.schema.json`. Use
 `brigade runs recover <run>` when the snapshot is missing, corrupt, or behind a
 verified journal checkpoint. Recovery validates the bounded event chain and
-checkpoint before replacing `run.json`. If rollback leaves an older Brigade
+checkpoint before replacing `run.json`. If rollback leaves an older Brigade Stack
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
@@ -625,7 +629,7 @@ archive builds refuse unstripped cassettes. Evidence packages use their file
 allowlist and fleet reports carry lifecycle metadata only.
 
 Record a final human decision with `brigade run approve <run-id> --decision
-allow|deny|hold`. New decisions use `human-approval/v2`: Brigade signs the final
+allow|deny|hold`. New decisions use `human-approval/v2`: Brigade Stack signs the final
 tree, `changes.patch` digest, and exact Test Result payload set for that tree,
 then appends the decision to the lifecycle journal. `brigade receipts verify`
 checks the signature, signed subjects against current evidence, expiry,
@@ -788,17 +792,17 @@ observations have a two-second deadline and inspect at most `--limit` rows.
 An unavailable Hub adds an unknown observation while retaining local results.
 Hub observation itself never repairs runs or claims; only the explicit `--apply` actions do.
 
-Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
+Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade Stack-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
 than the `--older-than` threshold (default 14 days). The command is a dry run
 by default; pass `--apply` to actually delete them. Worktrees that are dirty,
 have a detached HEAD with unreachable commits, or are too young are reported as
-kept with their reasons. Non-Brigade worktrees under the same directory are
+kept with their reasons. Non-Brigade Stack worktrees under the same directory are
 ignored and never touched.
 
 `brigade runs resume <run>` also handles an app-server run whose owner exited
 after dispatch began but before `worker-results.json` was aggregated. After it
-acquires the normal run lock, Brigade reconstructs only the active-stage worker
+acquires the normal run lock, Brigade Stack reconstructs only the active-stage worker
 thread coordinates from the already-flushed app-server event streams, records
 the missing terminal failure through the lifecycle journal, and resumes those
 threads. If no durable thread coordinates exist, resume fails cleanly without
@@ -818,18 +822,18 @@ failure is not labeled with the earlier phase.
 
 If the approved action completed but the process exited before recording
 `approval.consumed` and `run.resumed`, run `brigade runs resume <run>` again.
-Brigade verifies that the redeemed claim belongs to the same run and still
+Brigade Stack verifies that the redeemed claim belongs to the same run and still
 matches the stored approval fingerprints. For a Daily action, it also requires
 the lock-bound completion reference to match the exact successful receipt under
 `.brigade/daily/runs/`. A missing, failed, or changed receipt fails closed. After
-those checks, Brigade retains the source-store lock while it records only the
+those checks, Brigade Stack retains the source-store lock while it records only the
 missing journal facts and refreshes `run.json`. Review changes wait for that
 transaction and cannot rewrite a consumed Daily approval or completed Tool
 call. Recovery does not consume the approval or run the action again. A
 redeemed claim owned by another run still fails closed.
 
 For `codex` agents, `--read-only` also passes `codex exec --sandbox read-only`.
-Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native Codex sandbox behavior. This override does not weaken adapters whose read-only flag takes precedence, including Cursor plan mode, Antigravity's sandbox, Kimi's plan mode, Aider's dry run, and Codex Cloud's remote isolation. Brigade's warning follows the command each adapter will execute.
+Combine `--sandbox` with `--read-only` to keep prompt-level read-only rules while overriding native Codex sandbox behavior. This override does not weaken adapters whose read-only flag takes precedence, including Cursor plan mode, Antigravity's sandbox, Kimi's plan mode, Aider's dry run, and Codex Cloud's remote isolation. Brigade Stack's warning follows the command each adapter will execute.
 
 Direct worker runs still write normal run artifacts. The synthetic `plan.json`
 contains one assignment with the full task text, `worker-results.json` records
@@ -839,21 +843,21 @@ the selected worker output, `final.txt` is that worker's text, and
 Direct CLI seats may declare per-seat environment overrides in their roster entry. Values
 whose keys end in `_REF` are read from the named parent environment variable and injected
 under the key without `_REF`. To read a systemd-style generated environment file instead,
-use `env-file:/absolute/path#VARIABLE`; Brigade reads only `VARIABLE=VALUE` records, ignores
+use `env-file:/absolute/path#VARIABLE`; Brigade Stack reads only `VARIABLE=VALUE` records, ignores
 blank and comment lines, and never evaluates file contents. An unavailable file or variable
-fails dispatch with `env-ref-missing`. After execution, Brigade replaces every exact nonempty
+fails dispatch with `env-ref-missing`. After execution, Brigade Stack replaces every exact nonempty
 resolved override value in returned text, detail, stdout, and stderr with `[TARGET_NAME]`
 before run logs or receipts are written. This bounded replacement covers only values
 resolved for that seat; it is not a heuristic scan of the parent environment or historical
 logs. Resume revalidates stored environment tables before any synthesis dispatch.
 
 Direct CLI seats may also set `command` to a non-empty list that replaces the adapter executable
-and inserts fixed prefix arguments before Brigade's normal adapter arguments. Brigade resolves
+and inserts fixed prefix arguments before Brigade Stack's normal adapter arguments. Brigade Stack resolves
 only the first list item as the executable and executes the list directly, never through a shell.
 This is useful when a provider supplies a native executable plus a script entry point instead of
 one native CLI binary.
 
-On Windows, Cursor's `cursor-agent.cmd` is a PowerShell shim, not a native executable, so Brigade
+On Windows, Cursor's `cursor-agent.cmd` is a PowerShell shim, not a native executable, so Brigade Stack
 will reject it. Point a direct Cursor seat at the `node.exe` and `index.js` in the installed Cursor
 Agent version directory instead:
 
@@ -894,8 +898,8 @@ Both commands are local Unix socket requests. They refuse exec-transport runs, c
 The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, `aider`, `goose`,
 `continue`, `copilot`, `qwen`, `kimi`, `adal`, `openhands`, `grok`, `amp`, `crush`,
-`oracle`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
-A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. When a fleet hub is configured, Brigade admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
+`oracle`, and `ollama:<model>`. Brigade Stack shells out to those tools and keeps no provider keys.
+A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. When a fleet hub is configured, Brigade Stack admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
 
 ```bash
 export CODEX_CLOUD_ENV='<env-id>'
@@ -906,7 +910,7 @@ brigade run cloud canary --provider codex-cloud --target . --json
 
 `--env-var` stores only the variable name in `.brigade/cloud/codex.json`. `--env-id` stores the id locally (mode 0600) and is the fallback when an env var is not available. Seat the worker as `cli = "codex-cloud:configured"` or `cli = "codex-cloud:$CODEX_CLOUD_ENV"`. Literal `codex-cloud:<env-id>` still works. Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model. `brigade run cloud doctor` and `brigade run cloud canary` accept `--selector` (`configured`, `$VAR`, or a literal id) and fail closed with a safe `reason` when the `codex` CLI is missing, unauthenticated, or returns unsupported list JSON; an empty inventory may pass. When the inventory is non-empty, canary reports `environment_seen` as `true`, `false`, or `unknown` by comparing sanitized task `environment_id` values against the resolved selector; an empty inventory leaves `environment_seen` at `unknown` and does not prove the execution selector is valid. Resolved environments are recorded on tracker rows and worker results as `environment_id` for literal seats or `environment_fingerprint` for configured/`$VAR` selectors. Read-only `brigade run` dispatch blocks `codex-cloud` unless the seat sets `cloud_safe_mode = true` after explicit review. `brigade run cloud canary` lists tasks only; it never calls `codex cloud exec` or `codex cloud apply`. Cloud config discovery stops at the git repo root or the operator home directory, whichever comes first while walking parents.
 
-The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so Brigade rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. Brigade preserves the process stdout, stderr, and exit code, then reports the ACP alternative.
+The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so Brigade Stack rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. Brigade Stack preserves the process stdout, stderr, and exit code, then reports the ACP alternative.
 
 Use the reviewed ACP transport when a Cursor model needs read-only findings on stdout:
 
@@ -919,9 +923,9 @@ transport_version = "0.12.0"
 role = "Inspect the change and report concrete defects."
 ```
 
-This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-only calls use `--approve-reads`, reject interactive permission requests, disable terminal capability, and parse strict ACP protocol 1 NDJSON. Brigade never falls back from ACP to direct Cursor. Writable ACP calls require `brigade run --worktree`, so approval applies only inside a Brigade-created detached worktree.
+This path requires user-installed `acpx 0.12.0` and `cursor-agent acp`. Read-only calls use `--approve-reads`, reject interactive permission requests, disable terminal capability, and parse strict ACP protocol 1 NDJSON. Brigade Stack never falls back from ACP to direct Cursor. Writable ACP calls require `brigade run --worktree`, so approval applies only inside a Brigade Stack-created detached worktree.
 
-ACP model ids follow the ids advertised by `cursor-agent acp`, which can differ from direct Cursor aliases. Authenticated checks with `acpx 0.12.0` passed `composer-2.5` and `grok-4.5`. The direct alias `grok-4.5-xhigh` is rejected by ACP; the ACP server advertises `grok-4.5` with `modelId` `grok-4.5[effort=high,fast=true]`. Acpx has no separate reasoning flag, so Brigade does not translate the direct alias or infer an effort setting. Pin the exact model id for the selected transport.
+ACP model ids follow the ids advertised by `cursor-agent acp`, which can differ from direct Cursor aliases. Authenticated checks with `acpx 0.12.0` passed `composer-2.5` and `grok-4.5`. The direct alias `grok-4.5-xhigh` is rejected by ACP; the ACP server advertises `grok-4.5` with `modelId` `grok-4.5[effort=high,fast=true]`. Acpx has no separate reasoning flag, so Brigade Stack does not translate the direct alias or infer an effort setting. Pin the exact model id for the selected transport.
 Direct Cursor inventory is not applied to ACP seats because the two transports advertise different IDs. ACP version and authentication checks remain separate roster-doctor checks.
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
@@ -987,7 +991,7 @@ If no model seats are found, the table is replaced with `no model seats found` a
 
 ### Dogfood
 
-`brigade dogfood` is the shortcut for using Brigade on itself or another trusted repo.
+`brigade dogfood` is the shortcut for using Brigade Stack on itself or another trusted repo.
 It uses a built-in read-only roster, normal run artifacts, a default Memory Handoff, and an artifact summary.
 
 Set it up once:
@@ -999,7 +1003,7 @@ brigade dogfood init --target /path/to/repo
 That writes local defaults to `.brigade/dogfood.toml`, which is gitignored because it stores machine-local paths and preferences.
 New dogfood configs default to `agent_cli = "codex"` and handoffs under `.codex/memory-handoffs/`.
 Use `--agent-cli claude`, `--agent-cli opencode`, `--agent-cli antigravity`, `--agent-cli pi`, `--agent-cli cursor`, or `--agent-cli ollama:<model>` to run dogfood through another installed CLI. Writer CLIs with known inboxes, such as Claude Code, OpenCode, Antigravity, Pi, and Cursor, default handoffs to their own memory-handoff folders when selected.
-Cursor CLI's print mode can have tool access, so Brigade does not pass `--force`; read-only dogfood adds `--mode plan` for Cursor.
+Cursor CLI's print mode can have tool access, so Brigade Stack does not pass `--force`; read-only dogfood adds `--mode plan` for Cursor.
 Pass `--handoff-inbox` if your memory owner ingests a different path.
 
 Daily commands:
@@ -1045,7 +1049,7 @@ The browser/web tier is opt-in with `--web` and is treated as untrusted: fetched
 The loop resolves planning, extraction, synthesis, and review seats from the selected research profile and roster capabilities. Profile lane lists can pin those phases to different seats.
 Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
 Run manifests record the corpus, source globs, configured CLI routes, web provider, and caps so `brigade research resume` keeps the original route instead of falling back to an empty run unannounced.
-Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
+Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade Stack records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
 
 ```bash
 brigade research run "summarize the key themes" --corpus cs101
@@ -1058,7 +1062,7 @@ brigade research handoffs doctor
 brigade research handoffs import-issues
 ```
 
-CLI source adapters are foreground commands. Brigade substitutes `{query}`, captures stdout and stderr, and labels the extracted findings as configured CLI evidence:
+CLI source adapters are foreground commands. Brigade Stack substitutes `{query}`, captures stdout and stderr, and labels the extracted findings as configured CLI evidence:
 
 ```toml
 [[source]]
@@ -1068,7 +1072,7 @@ command = ["my-search-tool", "--json", "{query}"]
 timeout = 60
 ```
 
-Antigravity is supported as a named CLI lane. The Antigravity CLI binary is `agy`; because it is an interactive TUI by default, configure the exact non-interactive command or local wrapper you want Brigade to call:
+Antigravity is supported as a named CLI lane. The Antigravity CLI binary is `agy`; because it is an interactive TUI by default, configure the exact non-interactive command or local wrapper you want Brigade Stack to call:
 
 ```toml
 [[source]]
@@ -1100,9 +1104,9 @@ Then run:
 brigade research run "latest on X" --web --provider pageforge
 ```
 
-`pageforge_command` is the argv prefix Brigade calls before `search_web`, `ingest_url`, and `get`.
-`pageforge_db_path` is optional. When set, Brigade passes it to PageForge as `--db`.
-If PageForge extracts only very short markdown from a fetched page, Brigade tries the Playwright reader once and keeps the PageForge result if that fallback is unavailable or still thin.
+`pageforge_command` is the argv prefix Brigade Stack calls before `search_web`, `ingest_url`, and `get`.
+`pageforge_db_path` is optional. When set, Brigade Stack passes it to PageForge as `--db`.
+If PageForge extracts only very short markdown from a fetched page, Brigade Stack tries the Playwright reader once and keeps the PageForge result if that fallback is unavailable or still thin.
 
 Local-only runs need no extra dependency. Without the extra, `--web` records a blocker telling you to install it rather than crashing.
 
@@ -1178,7 +1182,7 @@ Start-of-day commands:
 - `brigade handoff draft --title "..." --summary "..." --content "..."` writes and lints a local Memory Handoff draft in the repo's expected section style.
 - `brigade tools doctor` inspects the local portable tool catalog and reports source, projection, schema, MCP, auth-field, and command-shape issues without invoking tools.
 - `brigade skills search "mcp security review"` searches reviewed reusable skill packs.
-- `brigade operator guide` prints the agent-facing Brigade startup sequence, onboarding command, handoff expectations, and boundaries.
+- `brigade operator guide` prints the agent-facing Brigade Stack startup sequence, onboarding command, handoff expectations, and boundaries.
 - `brigade operator plan` shows which gitignored local operator configs are missing before writing anything.
 - `brigade operator adopt plan` builds a read-only adoption plan for an existing homegrown operator workspace. It reports guidance files, harness roots, handoff inboxes, local state directories, shell crontab counts, OpenClaw cron counts, and PM2 process counts without including raw scheduler lines, job names, process names, command paths, or environment values.
 - `brigade operator adopt capture` writes that redacted adoption snapshot under `.brigade/operator/adoption/` as local evidence.
@@ -1187,7 +1191,7 @@ Start-of-day commands:
 - `brigade operator surfaces capture/list/doctor/review/reviews/import-issues` keeps a separate redacted registry for external scheduler and process coverage under `.brigade/operator/surfaces/`. It records count totals, status totals, ordinal labels, review decisions, and fingerprints for shell crontab, OpenClaw cron, and PM2, without storing raw scheduler lines, job names, process names, command paths, host details, or environment values.
 - `brigade operator init --profile internal-dogfood` bootstraps the repo-local production dogfood path, including dogfood config and a read-only security evidence refresh.
 - `brigade operator sync-tools` projects tracked `tools/*.md` sources into local Claude, Codex, OpenCode, Antigravity, Pi, and Cursor harness folders.
-- `brigade operator status --profile internal-dogfood` shows what is wired into the repo versus the source machine: local configs, gitignore state, Brigade/Codex paths, dogfood readiness, daily health, security evidence, notification config, and local readiness.
+- `brigade operator status --profile internal-dogfood` shows what is wired into the repo versus the source machine: local configs, gitignore state, Brigade Stack/Codex paths, dogfood readiness, daily health, security evidence, notification config, and local readiness.
 - `brigade operator doctor --profile internal-dogfood` prints a compact ready/not-ready verdict, blocker count, next command, and local-only tracked-vs-generated notes.
 See [`docs/internal-dogfood.md`](internal-dogfood.md) for the repo onboarding contract, daily agent loop, handoff expectations, and boundaries.
 - `brigade work next` prints only the next task. Add `--json` for wrappers.
@@ -1240,7 +1244,7 @@ Task ledger commands:
 
   Children use branches named `brigade/dispatch/<task-slug>-<intent8>` and directories named `<repo>-task-<task-slug>-<intent8>` under `brigade_worktree_root()`. The repository prefix lets `runs prune-worktrees` discover these directories. Pruning keeps dirty worktrees and requires a branch-backed HEAD and the configured minimum age. Each child gets its own process group, worktree lock, and preallocated run directory under the primary target. The prompt requires uncommitted changes, no pushes, and no edits to other tasks. Foreground dispatch waits for child exit and terminal run evidence. `--no-wait` leaves children running for reconciliation on the next apply invocation. A foreground invocation fills available capacity before supervising earlier and newly launched children together. Patrol reports their lane state but does not finalize dispatch intents. Ctrl-C cancels supervised children. `--deadline` bounds the session wall clock and cancels unfinished work. `--spawn-delay` spaces launches, and `--max-total` caps launches including infrastructure retries. Denials write `run_budget.reservation_denied` receipts using the existing budget payload fields. `--run-budget` passes the existing declaration file to each child. These limits do not measure provider spend. Apply mode is unsupported on Windows. Use `--dry-run` there to inspect a plan.
 
-  `--watch` repeats reconciliation, observation, planning, and apply while holding the same dispatch lease. Each tick reloads readiness and available capacity. The supervisor links separate saved plans so recovery retains each plan digest. Ticks that launch or finalize intents produce `work.dispatch.tick` events, and shutdown produces `work.dispatch.closed`. `--interval` defaults to 5 seconds and must be positive and finite. `--spawn-delay` applies between launches across ticks. SIGTERM and SIGINT stop new launches and detach running children by default. `--drain-wait` waits for those children and finalizes their receipts without launching retries. A second signal stops waiting and leaves unfinished children detached. Unexpected tick errors produce `work.dispatch.tick_error` receipts, preserve running children, and allow later ticks to continue. The close payload counts claimed intents without a child in `claimed_prelaunch_intents`. The next invocation resumes them from their saved plans and worktrees. An installed Brigade version change also closes the loop. `--max-total` and `--deadline` apply to one watch process, including retries. Restarting starts fresh limits. Use `Restart=no` when either ceiling must stop the service. A failed child or tick keeps exit status 1 even when watch closes for a ceiling, version change, or signal. `Restart=on-failure` can restart those closes. `Restart=always` restarts every close. Each restart starts fresh limits. With `Restart=no`, restart the unit explicitly after updating Brigade. Saved tick sessions have no separate ceiling, so a later invocation can reconcile detached children without canceling them for an expired watch deadline. On exit, watch stdout and `--json` report the actual `launched` count, `close_reason`, and `tick_sessions` IDs. The supervisor's `plan.json` remains the initial plan. Watch cannot be combined with `--dry-run` or `--no-wait`. Use a service manager with a stop policy that preserves child process groups, such as systemd `KillMode=process`. See the [long-running modes guide](execution-model.md#long-running-modes) for a unit example and restart behavior.
+  `--watch` repeats reconciliation, observation, planning, and apply while holding the same dispatch lease. Each tick reloads readiness and available capacity. The supervisor links separate saved plans so recovery retains each plan digest. Ticks that launch or finalize intents produce `work.dispatch.tick` events, and shutdown produces `work.dispatch.closed`. `--interval` defaults to 5 seconds and must be positive and finite. `--spawn-delay` applies between launches across ticks. SIGTERM and SIGINT stop new launches and detach running children by default. `--drain-wait` waits for those children and finalizes their receipts without launching retries. A second signal stops waiting and leaves unfinished children detached. Unexpected tick errors produce `work.dispatch.tick_error` receipts, preserve running children, and allow later ticks to continue. The close payload counts claimed intents without a child in `claimed_prelaunch_intents`. The next invocation resumes them from their saved plans and worktrees. An installed Brigade Stack version change also closes the loop. `--max-total` and `--deadline` apply to one watch process, including retries. Restarting starts fresh limits. Use `Restart=no` when either ceiling must stop the service. A failed child or tick keeps exit status 1 even when watch closes for a ceiling, version change, or signal. `Restart=on-failure` can restart those closes. `Restart=always` restarts every close. Each restart starts fresh limits. With `Restart=no`, restart the unit explicitly after updating Brigade Stack. Saved tick sessions have no separate ceiling, so a later invocation can reconcile detached children without canceling them for an expired watch deadline. On exit, watch stdout and `--json` report the actual `launched` count, `close_reason`, and `tick_sessions` IDs. The supervisor's `plan.json` remains the initial plan. Watch cannot be combined with `--dry-run` or `--no-wait`. Use a service manager with a stop policy that preserves child process groups, such as systemd `KillMode=process`. See the [long-running modes guide](execution-model.md#long-running-modes) for a unit example and restart behavior.
 
   Successful children become completed intents with branch and diff summaries. Their claims stay held and tasks stay `in_progress` until the operator lands the changes and marks tasks done. The completed-intent exclusion applies only to the same claim and claimed item revision. Released or reopened work can be dispatched again. `--commit` creates a local commit after successful child exit. HEAD drift is retained for review. Failed, timed-out, or orphaned children release only their own claim generation and preserve their worktree and branch. Workspace errors fail that intent and allow siblings to continue. Git errors while summarizing or committing successful work retain the completed intent and claim with `commit_error` and `needs_review` recorded. They do not relaunch the worker. An unreadable child journal marks its intent `unknown` and keeps its claim for inspection while other lanes continue. Live unknown children remain supervised for cancellation and deadlines. Reconciliation reads the journal again on the next apply invocation. Three consecutive non-infrastructure worker failures trip a task breaker. Deadlines, cancellations, and orphans do not advance it. Infrastructure launch failures allow two additional launches per session without advancing the breaker. Watch keeps exhausted infrastructure tasks excluded across ticks within one process. Restarting watch clears these infrastructure exclusions and permits another initial launch plus two retries per affected task. Non-infrastructure task breakers persist across restarts. Non-race claim refusals use `claim-refused` and do not count as infrastructure. When a lost race promotes a candidate initially skipped for capacity or batch size, a `work.dispatch.backfill` event records the promotion. Hub attempt mirroring and dispatch summary publication are deferred.
 
@@ -1253,7 +1257,7 @@ Task ledger commands:
 - `brigade work task edge list [--task <task-id>] [--json]` lists dependency edges, optionally limited to one task.
 - `brigade work task edge remove --id <edge-id>` removes one edge by id, or pass `--type`, `--source`, and `--target` to match endpoints.
 - Direct and transitive cycles on readiness-affecting edges (`blocks` and `parent-child`) are rejected at edge-add and graph-apply time with machine-readable `dependency_cycle` reason and cycle node lists. Mixed edge-type cycles (for example `parent-child` plus `blocks`) use the same detection. `discovered-from` never participates in cycle detection.
-- `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, optional decision checkpoints, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence. Optional decision checkpoints use `--decision <id> --decision-prompt "..." --option ...` to declare choices and `--resolve-decision <id> --selected ... --rationale ... --evidence-ref ...` to record the selected option, rationale, and receipt/evidence reference. `--evidence-ref` is an opaque receipt path or external evidence id (stored as written; Brigade does not require a local file). Absent `decisions` on legacy receipts remains valid; a present non-list `decisions` value or malformed entry fails closed (exit 2) instead of being dropped. Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`, and `work task done` so dependent work cannot begin without an evidence-backed choice.
+- `brigade work task plan <task-id>` shows the task metadata, acceptance checklist, template guidance, and suggested run command. Add `--write` to persist a plan artifact (plan.md plus a JSON receipt under `.brigade/work/plans/`) capturing assumptions, acceptance, risks, steps, optional decision checkpoints, and the next safe command; `--meta` writes a plan-for-the-plan that stops before the deliverable; `--step` captures steps; and `--from-research <run-id>` attaches a research run report as quarantined untrusted-web evidence. Optional decision checkpoints use `--decision <id> --decision-prompt "..." --option ...` to declare choices and `--resolve-decision <id> --selected ... --rationale ... --evidence-ref ...` to record the selected option, rationale, and receipt/evidence reference. `--evidence-ref` is an opaque receipt path or external evidence id (stored as written; Brigade Stack does not require a local file). Absent `decisions` on legacy receipts remains valid; a present non-list `decisions` value or malformed entry fails closed (exit 2) instead of being dropped. Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`, and `work task done` so dependent work cannot begin without an evidence-backed choice.
 - `brigade work task claim <task-id> [--actor <name>] [--file <path>]` claims a task (`status=in_progress`) and refines `metadata.footprint` from plan-named files (or explicit `--file` paths). Compare-and-set claim guards are a separate slice; this command is the footprint refine seam.
 - `brigade work plans` lists persisted plan artifacts.
 - `brigade work plan-promote <task-id> --as template|rule|skill` writes a local DRAFT proposal under `.brigade/work/plan-proposals/` from an accepted plan, and never installs templates, rules, or skills; `brigade work plan-proposals` lists them.
@@ -1262,12 +1266,12 @@ Task ledger commands:
 
 Available task templates are `vertical-slice`, `bugfix`, `red-green-refactor`, `docs`, and `security-follow-up`.
 Issue-backed tasks keep issue URL, number, title, labels, state, and source metadata in the local gitignored ledger.
-Issue body text is not stored, and Brigade does not poll, sync, mutate, or refresh GitHub issues in the background.
+Issue body text is not stored, and Brigade Stack does not poll, sync, mutate, or refresh GitHub issues in the background.
 
 Import inbox commands:
 
 - `brigade work import add "..."` creates a scanner-ready local import.
-- `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox. Add `--from-miseledger "query"` to fetch Brigade receipt evidence from MiseLedger instead of inboxing pasted text. That mode prints a rendered untrusted evidence brief, or the raw evidence bundle with `--json`, and appends the rendered brief to the active work session notes when a session is open.
+- `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox. Add `--from-miseledger "query"` to fetch Brigade Stack receipt evidence from MiseLedger instead of inboxing pasted text. That mode prints a rendered untrusted evidence brief, or the raw evidence bundle with `--json`, and appends the rendered brief to the active work session notes when a session is open.
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade work import --from-bd-jsonl export.jsonl --bd-version 1.3.1` stages an additive Beads snapshot as pending inbox proposals. It validates the entire file and dependency graph before writing, preserves native edge types as proposals with bd IDs, and writes a versioned digest receipt under `.brigade/work/import-runs/`. Receipt storage requires POSIX descriptor-relative or Windows handle-relative operations. Hosts without either fail closed. Operational row changes alone do not duplicate proposals. Review and map proposed endpoints to native task IDs before applying edges. See [the dated re-check and import contract](research/beads-770-recheck.md).
@@ -1292,8 +1296,8 @@ Import inbox commands:
 
 Imports are stored under `.brigade/work/imports/inbox.jsonl`, stay gitignored, and do not write memory directly.
 Scanner-authored task imports may include `type`, `priority`, `template`, and `acceptance`; promotion preserves those fields so imported tasks can enter the normal TDD work loop.
-Durable non-task imports such as decisions, preferences, links, commands, findings, and incidents can be promoted only into reviewed Memory Handoff drafts. Brigade writes the draft to the configured local handoff inbox, lints it, stores the handoff path and target document on the promoted import, and does not edit `MEMORY.md`, memory cards, or canonical memory.
-Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially. Imports created during scanner runs carry provenance metadata when Brigade can attach it, including scanner id, source, run id, receipt path, output snapshot, import path, and source fingerprint.
+Durable non-task imports such as decisions, preferences, links, commands, findings, and incidents can be promoted only into reviewed Memory Handoff drafts. Brigade Stack writes the draft to the configured local handoff inbox, lints it, stores the handoff path and target document on the promoted import, and does not edit `MEMORY.md`, memory cards, or canonical memory.
+Scanner producer imports use source item keys and fingerprints when available. Repeated ingestion skips equivalent pending or promoted imports, and dismissed imports stay dismissed unless the source item changes materially. Imports created during scanner runs carry provenance metadata when Brigade Stack can attach it, including scanner id, source, run id, receipt path, output snapshot, import path, and source fingerprint.
 `brigade work doctor` warns when scanner queues go stale, task imports lack acceptance criteria, or a source produces many dismissed imports.
 For handoff-ingest issues, prefer `brigade handoff sync-issues` over repeated raw imports. It imports only issue ids that have not already been seen locally and marks stale handoff-ingest imports/tasks resolved when the latest log no longer contains them.
 
@@ -1329,7 +1333,7 @@ Scanner registry commands:
 - `brigade work scanners list` and `show <scanner-id>` inspect configured scanner commands, sources, cadence, timeout, output paths, and conflict windows.
 - `brigade work scanners plan` calculates intended run windows, reports overlaps or clustered jobs, and prints a suggested staggered schedule.
 - `brigade work scanners run <scanner-id>`, `run --all`, and `run --due` execute configured enabled scanner entries explicitly, never through a shell, and refuse disabled, risky, or overlapping runs unless the matching review flag is present.
-- `brigade work scanners run <scanner-id> --ingest-output` validates and ingests the scanner's configured JSONL `import_path` after a successful run. Without the flag, Brigade records the receipt and leaves output ingestion explicit.
+- `brigade work scanners run <scanner-id> --ingest-output` validates and ingests the scanner's configured JSONL `import_path` after a successful run. Without the flag, Brigade Stack records the receipt and leaves output ingestion explicit.
 - `brigade work scanners runs` and `run-show <run-id>` inspect receipts under `.brigade/scanners/runs/`, including exit code, timeout state, stdout/stderr summaries, log paths, output snapshots, and pending import counts after the run.
 - `brigade work sweep` is the daily operator action for scanner review. It runs due scanners by default, or `--all` / `--scanner <id>` when selected, ingests configured JSONL outputs unless `--no-ingest` is present, and writes one report under `.brigade/scanners/sweeps/`.
 - `brigade work sweeps` and `brigade work sweep-show <sweep-id>` review sweep reports, including scanner run receipt paths, import counts, inbox hygiene, and suggested next commands.
@@ -1339,7 +1343,7 @@ Scanner registry commands:
 
 The scanner registry records configured commands and their output paths. `brigade work sweep` runs those commands in the foreground and leaves scanner receipts and a sweep report. `brief` and `doctor` inspect scanner state without launching scanners. `sweep-review` is read-only, and sweep closeout records review state. Schedule recurring sweeps through the operator's host scheduler. See [scheduled care](scheduled-care.md).
 
-Cursor presence hooks (`sessionStart`, `postToolUse`, `sessionEnd`) have two installation scopes that act as alternatives per event. `brigade init --harnesses cursor` writes them to the project's `.cursor/hooks.json` with a project-specific context; `brigade harness sync --target cursor --scope user --workspace <project> --write` manages them in `~/.cursor/hooks.json`. Both preserve foreign entries and write atomically. A project config owns an event only when the whole file is a valid Cursor hooks document (an object under 1 MiB with a positive integer `version`, a `hooks` object, and list-valued events whose entries are command or prompt definitions) that lists the project command for that event; otherwise the user hook keeps publishing. A legacy project entry that uses the user command is not distinguishable from the user hook, so it stays active until `brigade init` rewrites it. Fresh documents are created with `"version": 1`; an existing project document that is invalid, versionless, or oversized is left untouched and init warns. User-scope sync applies the same validation, but repairs a versionless `~/.cursor/hooks.json` (older releases wrote it without `version`) by adding version 1, and reports any other invalid document as a conflict. User-scope callbacks publish only when the nearest Brigade project selects Cursor.
+Cursor presence hooks (`sessionStart`, `postToolUse`, `sessionEnd`) have two installation scopes that act as alternatives per event. `brigade init --harnesses cursor` writes them to the project's `.cursor/hooks.json` with a project-specific context; `brigade harness sync --target cursor --scope user --workspace <project> --write` manages them in `~/.cursor/hooks.json`. Both preserve foreign entries and write atomically. A project config owns an event only when the whole file is a valid Cursor hooks document (an object under 1 MiB with a positive integer `version`, a `hooks` object, and list-valued events whose entries are command or prompt definitions) that lists the project command for that event; otherwise the user hook keeps publishing. A legacy project entry that uses the user command is not distinguishable from the user hook, so it stays active until `brigade init` rewrites it. Fresh documents are created with `"version": 1`; an existing project document that is invalid, versionless, or oversized is left untouched and init warns. User-scope sync applies the same validation, but repairs a versionless `~/.cursor/hooks.json` (older releases wrote it without `version`) by adding version 1, and reports any other invalid document as a conflict. User-scope callbacks publish only when the nearest Brigade Stack project selects Cursor.
 
 Roadmap and repo-fleet commands:
 
@@ -1347,7 +1351,7 @@ Roadmap and repo-fleet commands:
 - `brigade roadmap patterns` shows neutral pattern-family coverage and local source-pattern decisions: `bake-in`, `integrate`, `catalog-only`, `move-candidate`, and `leave-alone`.
 - `brigade roadmap commands` reports the public command documentation contract in text or JSON for wrappers and docs drift checks. Use `--write` to regenerate `docs/command-inventory.md` from the CLI parser and `--check` to fail when the inventory is missing or stale.
 - `brigade repos init` writes gitignored `.brigade/repos.toml`.
-- `brigade repos list`, `show <repo-id>`, and `scan` report safe repo metadata only: repo labels, branch, dirty counts, guidance-file presence, docs presence, test hints, handoff inboxes, publish-guard hook presence, Brigade config presence, and local receipt references.
+- `brigade repos list`, `show <repo-id>`, and `scan` report safe repo metadata only: repo labels, branch, dirty counts, guidance-file presence, docs presence, test hints, handoff inboxes, publish-guard hook presence, Brigade Stack config presence, and local receipt references.
 - `brigade repos doctor` reports setup gaps, and `brigade repos import-issues` creates `source: repo-fleet` task imports with stable source fingerprints.
 - `brigade repos discover plan` dry-runs repo discovery under explicit configured roots only, applies include/exclude rules, reports safe labels, redacts private paths, and never clones or writes config.
 - `brigade repos adoption --harness claude --harness cursor --days 7 --json` reports wiring and observed use separately for each configured repo and selected harness. States are `unwired`, `partial`, `advisory-only`, `enforced-idle`, `active`, `bypassed`, and `stale`. Claude rows correlate repo-scoped write sessions with the injected brief, exact session verification receipts, atomic outcome capture, GraphTrail delta, MiseLedger export, and a handoff. Failed and rejected verification counts only after outcome capture. Cursor's current user-scoped reminder hook is reported as `advisory-only`, because it does not prove repo-scoped write enforcement. JSON includes active-session, active-repository, wired-repository, compliant-session, and bypassed-session denominators plus stable alert row keys and a fleet fingerprint.
@@ -1381,7 +1385,7 @@ Code review producer commands:
 - `brigade work review findings` and `finding-show <finding-id-or-import-id>` inspect imported review findings by reviewer, run, severity, category, path, inbox status, and resolution state.
 - `brigade work review closeout <run-id>` or `closeout latest` writes a local closeout record that connects review findings to pending imports, dismissals, promoted tasks, completed tasks, and source-fingerprint changes requiring re-review.
 
-Code review is explicit and local. Brigade does not auto-run reviewers from `work run`, apply fixes, post review comments, mutate GitHub, store auth, or promote findings automatically.
+Code review is explicit and local. Brigade Stack does not auto-run reviewers from `work run`, apply fixes, post review comments, mutate GitHub, store auth, or promote findings automatically.
 
 Chat surface export commands:
 
@@ -1393,14 +1397,14 @@ Chat surface export commands:
 
 Chat surface exports are local and explicit.
 
-Brigade supports `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl` fixtures plus aliases such as `discord`, `slack-json`, `telegram`, `clickclack`, `generic`, and `jsonl`. It does not call live chat APIs, perform OAuth, send webhooks, run a daemon, or promote imports automatically.
+Brigade Stack supports `discord-export`, `slack-export`, `telegram-export`, `clickclack-export`, and `generic-jsonl` fixtures plus aliases such as `discord`, `slack-json`, `telegram`, `clickclack`, `generic`, and `jsonl`. It does not call live chat APIs, perform OAuth, send webhooks, run a daemon, or promote imports automatically.
 
 Raw message bodies and transcript fields are rejected by default; imports keep safe summaries, labels, message ranges, local evidence paths, confidence, and fingerprints.
 
 Portable tool catalog commands:
 
 - `brigade tools init` writes gitignored `.brigade/tools.toml` with local `simplify`, `superpowers`, `frontend`, and `antislop` examples projected across Claude, Codex, OpenCode, Antigravity, Pi, Cursor, Hermes, OpenClaw, MCP Markdown resources, and script Markdown surfaces.
-- `brigade tools defaults` merges the current Brigade built-in tools into an existing `.brigade/tools.toml`, updating recognized built-ins, adding missing built-ins, preserving custom local tools, and reporting conflicts when a custom entry reuses a built-in id with a different source path.
+- `brigade tools defaults` merges the current Brigade Stack built-in tools into an existing `.brigade/tools.toml`, updating recognized built-ins, adding missing built-ins, preserving custom local tools, and reporting conflicts when a custom entry reuses a built-in id with a different source path.
 - `brigade tools list`, `show <tool-id>`, and `search <query>` inspect logical tool entries across source families such as `skill`, `slash-command`, `superpower`, `mcp`, `openapi`, `graphql`, `script`, and `custom`.
 - `brigade tools describe <tool-id>` and `brigade tools contracts` inspect schema-backed call contracts, permissions, effects, approval mode, env labels, and argument templates.
 - `brigade tools call plan <tool-id> --args ...` validates local JSON args against the configured input schema and returns a redacted wrapper-friendly call plan without executing the tool.
@@ -1419,7 +1423,7 @@ Portable tool catalog commands:
 - `brigade tools import-issues` turns catalog health issues into local `tool-catalog` work imports with stable fingerprints and dismiss-until-changed behavior.
 - `brigade operator bootstrap-portable` imports optional tool and skill packs, merges built-in portable tools, writes missing built-in `tools/*.md` source files, projects managed tool outputs across local harness folders, and reports tool plus skill health. Use `--dry-run` to inspect without writing projections, and `--tool-pack` or `--skill-pack` to seed a new machine from reviewed packs.
 
-For normal multi-machine use, keep reusable personal or team workflows in the repo's own `tools/` directory and `.brigade/tools.toml`. Brigade's built-ins come from the installed Brigade version; run `brigade tools defaults --target .` or `brigade operator sync-tools --target .` after upgrading Brigade to merge new built-ins into an existing workspace without deleting custom entries.
+For normal multi-machine use, keep reusable personal or team workflows in the repo's own `tools/` directory and `.brigade/tools.toml`. Brigade Stack's built-ins come from the installed Brigade Stack version; run `brigade tools defaults --target .` or `brigade operator sync-tools --target .` after upgrading Brigade Stack to merge new built-ins into an existing workspace without deleting custom entries.
 
 Tool catalog inspection, call planning, call approval review, run history inspection, and checkpoint review are non-executing, and projection writes are always explicit through `brigade tools apply`.
 
@@ -1427,7 +1431,7 @@ Tool call execution is explicit through `brigade tools call run`, limited to app
 
 Replay creates a pending call from redacted receipt arguments and never recovers secret values or bypasses approval, runtime, or policy gates. Checkpoint resume is explicit through `brigade tools checkpoint resume` and never runs automatically after approval. Runtime start and stop are explicit through `brigade tools runtime`; `doctor`, `brief`, and `work run` never auto-start runtimes.
 
-Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Outside explicit `brigade mcp verify` runs, Brigade does not connect to remote MCP servers. It does not fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
+Execution policy is host-local and gitignored; environment values come only from the current process and are not stored in calls, checkpoints, receipts, logs, imports, or docs. Outside explicit `brigade mcp verify` runs, Brigade Stack does not connect to remote MCP servers. It does not fetch OpenAPI or GraphQL schemas, store auth, install schedulers, send approval notifications, or auto-sync harness configs from `doctor`, `brief`, or `work run`. Keep tokens, secrets, private URLs, and host-private paths out of public catalog templates.
 
 Runtime MCP server config sync and health verification are explicit, bounded exceptions. `brigade mcp sync` is dry-run by default and merges the canonical catalog (`.brigade/mcp.json`) by server key. It preserves servers the user added, treats an externally edited server as a conflict unless `--force` is present, removes pristine orphans only with `--prune`, and writes environment references instead of values. `brigade mcp verify` and `sync --write --verify` perform bounded `initialize` and `tools/list` handshakes, keep `config_current` separate from `runtime_healthy`, and write redacted receipts under `.brigade/mcp/verify-runs/`. These commands never run automatically from `doctor`, `brief`, or `work run`. See [mcp-sync.md](mcp-sync.md).
 
@@ -1439,7 +1443,7 @@ Operator notification commands:
 - `brigade doctor` includes advisory `agent-notify` health under the notifications station.
 - `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications station; they never send.
 
-Brigade does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
+Brigade Stack does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
 
 Shared skill registry commands:
 
@@ -1450,11 +1454,11 @@ Shared skill registry commands:
 - `brigade skills import-issues` routes skill registry health findings into the reviewed work import inbox as `source: skill-registry`.
 - `brigade skills search "mcp security review"` searches approved local registry metadata.
 - `brigade skills install security-review --target codex`, `--target claude`, `--target opencode`, `--target antigravity`, `--target pi`, `--target cursor`, `--target aider`, `--target goose`, `--target continue`, `--target copilot`, `--target qwen`, `--target kimi`, `--target adal`, `--target openhands`, `--target grok`, `--target amp`, `--target crush`, `--target openclaw`, `--target hermes`, or `--target mcp` materializes one reviewed skill into a specific harness shape.
-- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, Aider `.aider/skills`, Goose `.goose/skills`, Continue `.continue/skills`, GitHub Copilot CLI `.copilot/skills`, Qwen Code `.qwen/skills`, Kimi Code `.kimi/skills`, AdaL `.adal/skills`, OpenHands `.openhands/skills`, Grok `.grok/skills`, Amp `.amp/skills`, Crush `.crush/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Named bundled skills resolve from Brigade's current package. Use `registry:<skill-id>` or an explicit path when a same-named registry source is intentional. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
+- `brigade skills install security-review --target all` installs the same reviewed skill into Codex, Claude, OpenCode, Antigravity `.antigravity/skills`, Pi `.pi/skills`, Cursor `.cursor/skills`, Aider `.aider/skills`, Goose `.goose/skills`, Continue `.continue/skills`, GitHub Copilot CLI `.copilot/skills`, Qwen Code `.qwen/skills`, Kimi Code `.kimi/skills`, AdaL `.adal/skills`, OpenHands `.openhands/skills`, Grok `.grok/skills`, Amp `.amp/skills`, Crush `.crush/skills`, OpenClaw, Hermes, and MCP-resource folders, writing per-harness receipts. Named bundled skills resolve from Brigade Stack's current package. Use `registry:<skill-id>` or an explicit path when a same-named registry source is intentional. Built-in adapters normalize target-specific output, for example adding Codex `SKILL.md` frontmatter when the portable source does not already have it.
 - `brigade skills sync --workspace . --target all --trust workspace` scans the reviewed registry once and reports each selected skill and harness as current, missing, changed, blocked, or excluded. It is a dry run unless `--write` is present. Writes use explicit registry identities and the existing per-target receipt and rollback path, so completed targets survive a later target failure.
 - `brigade skills compatibility security-review` reports supported, installed, planned, and blocked harness targets for a skill, plus independent source, renderer, and local-copy drift, install history counts, trust score, and changelog status.
 - `brigade skills history security-review --harness codex` lists local install receipts for one skill and harness from `.brigade/skills/installs/history.jsonl`.
-- `brigade skills diff security-review --harness codex` compares the installed harness file against the bundled Brigade package template by default, even when a same-named registry entry exists. Pass `--against registry` to diff against the local `.brigade/skills/registry/` copy instead. Bundled skills report source, renderer, and local-edit drift separately. Receipts from older schemas report unknown provenance instead of guessing.
+- `brigade skills diff security-review --harness codex` compares the installed harness file against the bundled Brigade Stack package template by default, even when a same-named registry entry exists. Pass `--against registry` to diff against the local `.brigade/skills/registry/` copy instead. Bundled skills report source, renderer, and local-edit drift separately. Receipts from older schemas report unknown provenance instead of guessing.
 - `brigade skills fleet status` reports installed skill copies across harnesses in stable order and prints one forced reinstall command for each supported stale or missing copy. Copies whose current metadata no longer supports their harness are listed separately as unsupported and get an uninstall command. Unknown legacy copies are listed without an automatic repair command. Copies whose install path is a symlink resolving outside the workspace are reported as `external` and left untouched; the audit continues with the remaining copies, while install and update paths still refuse to write through such a symlink.
 - `brigade skills rollback security-review --target claude` restores the latest rollback snapshot captured before a forced reinstall.
 - `brigade skills inbox add ./some-skill`, `list`, `show`, `diff`, `accept`, and `reject` keep agent-proposed skills in review before they enter the registry.
@@ -1502,7 +1506,7 @@ Rules the transport enforces:
 Skills are treated like code: provenance, linting, compatibility, fingerprints, tests, trust score, changelog, review, history, diff, and rollback come before installation or sharing. Agent-proposed skills should land as proposals or imports for review, not as automatic startup prompt text.
 Harness support is intended to stay adapter-based. The current built-ins cover Codex, Claude, OpenCode, Antigravity, Pi, Cursor, OpenClaw, Hermes, and MCP resources, and future adapters can add similar agent surfaces without changing the skill registry contract.
 
-Portable tool projections and first-class skills are related but separate. Tool projections come from `.brigade/tools.toml` and are best for repo-local commands, slash commands, superpower docs, MCP stubs, and script contracts that Brigade keeps in sync across harness locations. `brigade tools defaults` refreshes Brigade built-ins while preserving custom entries. `brigade tools pack build` and `brigade tools pack import <pack-dir>` move reviewed tool catalog entries and source files between repos without applying projections. First-class skills live in `.brigade/skills/registry/` and are best for reviewed reusable skill packs that need provenance, linting, harness compatibility, install receipts, history, diffs, rollback, publish proposals, packs, and MCP resource exposure. A workflow can start as a portable tool projection and later graduate into a first-class skill when it needs reviewable packaging or sharing beyond the local projection catalog.
+Portable tool projections and first-class skills are related but separate. Tool projections come from `.brigade/tools.toml` and are best for repo-local commands, slash commands, superpower docs, MCP stubs, and script contracts that Brigade Stack keeps in sync across harness locations. `brigade tools defaults` refreshes Brigade Stack built-ins while preserving custom entries. `brigade tools pack build` and `brigade tools pack import <pack-dir>` move reviewed tool catalog entries and source files between repos without applying projections. First-class skills live in `.brigade/skills/registry/` and are best for reviewed reusable skill packs that need provenance, linting, harness compatibility, install receipts, history, diffs, rollback, publish proposals, packs, and MCP resource exposure. A workflow can start as a portable tool projection and later graduate into a first-class skill when it needs reviewable packaging or sharing beyond the local projection catalog.
 
 Explicit runbook commands:
 
@@ -1531,11 +1535,11 @@ Runbooks can also carry optional binary pins:
 }
 ```
 
-`brigade runbook pin` writes `command`, absolute `path`, and `sha256` from the binaries currently resolved for the runbook steps. `version_cmd` holds arguments for the pinned binary (for example `--version`), never a standalone command; Brigade always executes it against the resolved pinned path so the recorded version describes the same file the hash covers. If an existing pin has `version_cmd`, pinning preserves it and refreshes `version` from its output. Pinning never executes the step `run` strings, but it does run the pinned binary with the preserved `version_cmd` arguments because those are part of the pin metadata.
+`brigade runbook pin` writes `command`, absolute `path`, and `sha256` from the binaries currently resolved for the runbook steps. `version_cmd` holds arguments for the pinned binary (for example `--version`), never a standalone command; Brigade Stack always executes it against the resolved pinned path so the recorded version describes the same file the hash covers. If an existing pin has `version_cmd`, pinning preserves it and refreshes `version` from its output. Pinning never executes the step `run` strings, but it does run the pinned binary with the preserved `version_cmd` arguments because those are part of the pin metadata.
 
-During `runbook plan`, pinned steps report `pin.status` as `ok`, `mismatch`, or `missing` with the resolved path and expected or observed hashes. Plan does not execute `version_cmd`. During `runbook run`, Brigade verifies configured pins before any step command runs. Missing or mismatched pins fail the run unless the operator passes `--allow-pin-mismatch`; receipts for pinned runbooks include `pin_checks`, refreshed runtime-only `version_output` when `version_cmd` is configured (executed as arguments to the resolved pinned binary, and only when steps actually execute, never on `--dry-run`), and whether an override was used.
+During `runbook plan`, pinned steps report `pin.status` as `ok`, `mismatch`, or `missing` with the resolved path and expected or observed hashes. Plan does not execute `version_cmd`. During `runbook run`, Brigade Stack verifies configured pins before any step command runs. Missing or mismatched pins fail the run unless the operator passes `--allow-pin-mismatch`; receipts for pinned runbooks include `pin_checks`, refreshed runtime-only `version_output` when `version_cmd` is configured (executed as arguments to the resolved pinned binary, and only when steps actually execute, never on `--dry-run`), and whether an override was used.
 
-Pins are an advisory drift defense, not a security boundary. They only bind the first token that Brigade parses from each step with `shlex.split`, the same parser used by the policy layer. For `bash script.sh`, `python script.py`, or another interpreter invocation, the pin covers the interpreter at `argv[0]`, not the script file or imports it loads. For shell wrappers such as `bash -c "..."`, the allowlist policy still treats the inline script as unconstrained and blocks it when `allowed_commands` is configured. Operators still need to review every command, every referenced file, and any `version_cmd` before approving execution.
+Pins are an advisory drift defense, not a security boundary. They only bind the first token that Brigade Stack parses from each step with `shlex.split`, the same parser used by the policy layer. For `bash script.sh`, `python script.py`, or another interpreter invocation, the pin covers the interpreter at `argv[0]`, not the script file or imports it loads. For shell wrappers such as `bash -c "..."`, the allowlist policy still treats the inline script as unconstrained and blocks it when `allowed_commands` is configured. Operators still need to review every command, every referenced file, and any `version_cmd` before approving execution.
 
 Backup health commands:
 
@@ -1544,7 +1548,7 @@ Backup health commands:
 - `brigade work backup import-issues` turns stale snapshots, failed checks, stale prunes, missing summaries, overdue restore rehearsals, and unsafe summary fields into local `backup-health` work imports.
 - `brigade work backup closeout` writes a local fingerprinted review receipt so unchanged reviewed risks stop making the daily brief noisy while changed fingerprints resurface. Release readiness still includes raw backup risk counts and restore rehearsal evidence for review.
 
-Backup health summaries are local and read-only. Brigade does not run `restic`, mount storage, prune, restore, send webhooks, or mutate remote backup state. Keep real hostnames, remotes, mount paths, repo paths, webhook URLs, channel ids, and backup passwords out of public templates and summary records.
+Backup health summaries are local and read-only. Brigade Stack does not run `restic`, mount storage, prune, restore, send webhooks, or mutate remote backup state. Keep real hostnames, remotes, mount paths, repo paths, webhook URLs, channel ids, and backup passwords out of public templates and summary records.
 
 Run the agent-facing daily loop with `brigade daily`.
 It wraps the existing work, operator center, repo fleet, scanner, handoff, memory, security, tool, context, backup, learning, and release evidence into one bounded daily workflow.
@@ -1583,7 +1587,7 @@ For long AFK phase sessions, `brigade work phases schema --json` includes a `ses
 
 Release candidate compare checks include AFK session drift. If a candidate was built with one checkpoint, checkpoint-compare result, or session completion-gate state and the current local session evidence changes, `brigade release candidate compare` reports the stale session evidence before any manual publish step.
 
-The daily driver executes bounded local actions under its approval state and records each step for resume and closeout. Its action set excludes scanner, reviewer, tool, and fleet-sweep execution, remote writes, publishing, and canonical memory edits. Other Brigade command families own those workflows and their records.
+The daily driver executes bounded local actions under its approval state and records each step for resume and closeout. Its action set excludes scanner, reviewer, tool, and fleet-sweep execution, remote writes, publishing, and canonical memory edits. Other Brigade Stack command families own those workflows and their records.
 
 Run a direct work session with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
@@ -1614,9 +1618,9 @@ Work verification and closeout commands:
 - `brigade work verify runs` and `brigade work verify show <run-id>` inspect local verification receipts, command exit codes, summaries, and log paths.
 - `brigade receipts keygen` creates the optional local HMAC key used to sign new receipt digests. Pass `--force` to rotate the key.
 - `brigade receipts verify` recomputes SHA-256 receipt digests, stdout and stderr log digests, the `memory/outcome/records.jsonl` digest chain, and optional local HMAC signatures. It reports `OK`, `SIGNED-OK`, `MISMATCH`, `SIGNATURE-MISMATCH`, `MISSING`, `LEGACY`, or `UNVERIFIABLE-SIGNATURE` for checked artifacts and exits non-zero only for mismatch, signature mismatch, or missing evidence.
-- `brigade receipts trailer --run <run-id>` prints the two trailer lines `Brigade-Run: <run-id>` and `Brigade-Receipt: sha256:<digest>` for that run's receipt so a conductor can pass them to `git commit --trailer`.
+- `brigade receipts trailer --run <run-id>` prints the two trailer lines `Brigade Stack-Run: <run-id>` and `Brigade Stack-Receipt: sha256:<digest>` for that run's receipt so a conductor can pass them to `git commit --trailer`.
 - `brigade receipts verify --commit <sha>` reads the trailers from that commit's message with `git log -1 --format=%B <sha>`, resolves the run under `.brigade/runs`, recomputes the digest, and prints `ok` or the exact mismatch (`missing trailer`, `unknown run`, or `digest mismatch`), exiting non-zero on any mismatch.
-- `brigade receipts export miseledger` exports local work verification receipts and Brigade run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file, `--limit <n>` to export only the newest receipts, `--new-only` to skip hashes already recorded in the local export cursor, and `--import` to invoke `miseledger import adapter <file> --source brigade --json` after the JSONL file is written. A zero-receipt export without `--json` exits 0 with no output. Pass `--json` with a named `--out` file to print a `brigade.miseledger_export_result.v1` summary to stdout (status `empty`, `nothing-new`, `exported`, or `failed`, plus per-status counts) instead of JSONL; with `--import` and zero new rows, stdout carries only that JSON summary. Pass `--fleet --json` on a target with `.brigade/repos.toml` to export from enabled `[[repo]]` entries only: disabled repos and discovery roots are ignored, per-repo paths stay out of the JSON summary, rows are aggregated into one batch file, each repo keeps its own export cursor, the result schema is `brigade.miseledger_fleet_export_result.v1` with per-repo counts and privacy-safe `errors`, and a partial fleet run can still import valid rows once before returning `failed` when any sibling repo errors; aggregate import failure sets top-level `failed` without incrementing `failed_count`.
+- `brigade receipts export miseledger` exports local work verification receipts and Brigade Stack run receipts as `miseledger.adapter.v1` JSONL for offline import into MiseLedger. Stdout is the default output; pass `--out <path>` to write a file, `--limit <n>` to export only the newest receipts, `--new-only` to skip hashes already recorded in the local export cursor, and `--import` to invoke `miseledger import adapter <file> --source brigade --json` after the JSONL file is written. A zero-receipt export without `--json` exits 0 with no output. Pass `--json` with a named `--out` file to print a `brigade.miseledger_export_result.v1` summary to stdout (status `empty`, `nothing-new`, `exported`, or `failed`, plus per-status counts) instead of JSONL; with `--import` and zero new rows, stdout carries only that JSON summary. Pass `--fleet --json` on a target with `.brigade/repos.toml` to export from enabled `[[repo]]` entries only: disabled repos and discovery roots are ignored, per-repo paths stay out of the JSON summary, rows are aggregated into one batch file, each repo keeps its own export cursor, the result schema is `brigade.miseledger_fleet_export_result.v1` with per-repo counts and privacy-safe `errors`, and a partial fleet run can still import valid rows once before returning `failed` when any sibling repo errors; aggregate import failure sets top-level `failed` without incrementing `failed_count`.
 - `brigade work closeout <session-id-or-latest>` writes a local closeout receipt under `.brigade/work/closeouts/` that collects task acceptance, latest verification, scanner sweep status, code review closeout state, handoff draft status, and session evidence.
 - `brigade work acceptance` reports pending task acceptance coverage, completion metadata gaps, completion-time acceptance evidence, code-review finding outcomes, and latest work closeout state. Release readiness and release candidate evidence include the same rollup.
 
@@ -1630,7 +1634,7 @@ This HMAC tier defends against receipt-plus-digest rewrites by someone who does 
 
 For cross-machine trust and external distribution, `brigade receipts export attestation` supports explicit profile selection via `--profile {sshsig,cosign}`. The default remains `sshsig`, which exports a verify receipt as a detached in-toto Statement v1 inside an SSH-signed DSSE v1 envelope (`brigade.sshsig-dsse.v1`) verified offline via `brigade receipts verify-attestation` against an OpenSSH `allowed_signers` file. Keys for the SSHSIG profile are managed with `brigade receipts attestation-keygen`.
 
-The opt-in `cosign` profile signs the same in-toto Statement using a local cosign key file and produces an unwrapped standardized Sigstore bundle. The default private key is `.brigade/attestation/cosign.key`, overridable with `BRIGADE_COSIGN_KEY_FILE` or `--key`. When using password-encrypted keys (as generated by `cosign generate-key-pair`), provide the password non-interactively via the `COSIGN_PASSWORD` environment variable. Brigade enforces a safe version floor of cosign 2.6.5 or newer within major 2 and 3.1.3 or newer within major 3. External verification uses `cosign verify-blob-attestation` with `--insecure-ignore-tlog=true`:
+The opt-in `cosign` profile signs the same in-toto Statement using a local cosign key file and produces an unwrapped standardized Sigstore bundle. The default private key is `.brigade/attestation/cosign.key`, overridable with `BRIGADE_COSIGN_KEY_FILE` or `--key`. When using password-encrypted keys (as generated by `cosign generate-key-pair`), provide the password non-interactively via the `COSIGN_PASSWORD` environment variable. Brigade Stack enforces a safe version floor of cosign 2.6.5 or newer within major 2 and 3.1.3 or newer within major 3. External verification uses `cosign verify-blob-attestation` with `--insecure-ignore-tlog=true`:
 
 ```bash
 export COSIGN_PASSWORD="<password>"
@@ -1641,7 +1645,7 @@ cosign verify-blob-attestation --bundle <run-dir>/attestation.sigstore.json --ke
 
 Cosign verifies the DSSE signature in `attestation.sigstore.json` and checks the Git tree claim directly. Cosign does not verify `attestation.json`, which is the SSHSIG profile.
 
-The MiseLedger export is a bridge format, not a live sync. It gives another local tool enough stable identity, digest, artifact, actor, and raw receipt data to index Brigade evidence without reading the Brigade tree directly. A typical flow is:
+The MiseLedger export is a bridge format, not a live sync. It gives another local tool enough stable identity, digest, artifact, actor, and raw receipt data to index Brigade Stack evidence without reading the Brigade Stack tree directly. A typical flow is:
 
 ```bash
 brigade receipts export miseledger --target . --out /tmp/brigade-receipts.jsonl
@@ -1656,7 +1660,7 @@ brigade receipts export miseledger --target . --new-only --import
 
 `brigade work verify run --capture <skill>` also runs that new-only export/import automatically after outcome capture, so routine verification closes the receipts-to-MiseLedger loop without a separate command. Indexing is fail-open: a missing `miseledger` binary or import failure prints an explicit status, leaves pending receipts retryable, and does not change the verification exit code. Use the manual export command above for backlog catch-up or fleet targets (`.brigade/repos.toml` with `--fleet --json`).
 
-The export sends new verify-run and Brigade-run receipts to MiseLedger, and the next `brigade run` can fetch them back as a compact evidence brief through the same read-only `miseledger evidence ... --source brigade --json` path. The direct command is:
+The export sends new verify-run and Brigade Stack-run receipts to MiseLedger, and the next `brigade run` can fetch them back as a compact evidence brief through the same read-only `miseledger evidence ... --source brigade --json` path. The direct command is:
 
 ```bash
 brigade work import context --from-miseledger "auth receipts" --target .
@@ -1724,7 +1728,7 @@ They also include `.brigade/chat-memory-sweep.example.json` for nightly chat/ses
 Missing memory-care state is advisory for fresh installs.
 Bootstrap truncation is a hard failure to prevent, not a cosmetic warning.
 
-Memory care is local and explicit. Brigade writes scan reports, no-write fix plans, and work imports, but it does not edit memory cards, run a scheduler, mutate canonical memory, or use LLM inference for contradictions. `brigade memory care status` adds a read-only archive-candidates report from the persisted scan: cards past `2 * stale_after_days` with age, last-reviewed, and evidence pointers, approval-gated and never archived by the command. It also surfaces a label-free `search_recall` follow-up rate from the local search log (second-class; informs retrieval investment, never gates health).
+Memory care is local and explicit. Brigade Stack writes scan reports, no-write fix plans, and work imports, but it does not edit memory cards, run a scheduler, mutate canonical memory, or use LLM inference for contradictions. `brigade memory care status` adds a read-only archive-candidates report from the persisted scan: cards past `2 * stale_after_days` with age, last-reviewed, and evidence pointers, approval-gated and never archived by the command. It also surfaces a label-free `search_recall` follow-up rate from the local search log (second-class; informs retrieval investment, never gates health).
 
 Inspect local work sessions with:
 
@@ -1766,7 +1770,7 @@ When `.graphtrail/graphtrail.db` is present, `brigade run` can attach bounded Gr
 
 ### Code-graph delta receipts
 
-Work verification and non-read-only aboyeur runs can also record a GraphTrail delta receipt. The flow is: run `graphtrail sync`, take a sqlite backup snapshot of `.graphtrail/graphtrail.db`, run the work, run `graphtrail sync` again, diff the live graph against the snapshot, write `graph-delta.json`, and store a compact `code_graph_delta` summary in the receipt or run artifacts.
+Work verification and non-read-only agent runs can also record a GraphTrail delta receipt. The flow is: run `graphtrail sync`, take a sqlite backup snapshot of `.graphtrail/graphtrail.db`, run the work, run `graphtrail sync` again, diff the live graph against the snapshot, write `graph-delta.json`, and store a compact `code_graph_delta` summary in the receipt or run artifacts.
 
 Delta capture is fail-open. Missing GraphTrail, sync failures, malformed diff JSON, and snapshot problems are recorded as status data instead of failing the run. `--no-code-graph`, read-only runs, and dry runs record skip statuses and do not run GraphTrail sync.
 
@@ -1777,7 +1781,7 @@ brigade outcome capture <artifact-id> --run-id <verify-run-id|latest>
 brigade outcome capture <artifact-id> --run-receipt <run-id|latest>
 ```
 
-`--run-id` reads work verification receipts under `.brigade/work/verify-runs/`. `--run-receipt` reads aboyeur run receipts under `.brigade/runs/<run-id>/run.json`. The flags are mutually exclusive. Both sources store the same compact `code_graph_delta` fields in the outcome ledger: `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`.
+`--run-id` reads work verification receipts under `.brigade/work/verify-runs/`. `--run-receipt` reads agent run receipts under `.brigade/runs/<run-id>/run.json`. The flags are mutually exclusive. Both sources store the same compact `code_graph_delta` fields in the outcome ledger: `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`.
 
 Run-receipt signal mapping is fixed and local: `status: ok` records `+1`, `status: error` and `status: failed` record `-1`, and `dry_run: true` or `read_only: true` records neutral `0`. The evidence reference points at the `run.json` file that supplied the signal and delta. Verification receipts keep their existing mapping: completed is positive, failed or timed out is negative, and rejected or unknown statuses are neutral through the same outcome rule table.
 
@@ -1787,9 +1791,9 @@ Run receipts usually carry the useful code delta because a non-read-only `brigad
 
 For those counters, a delta is changing only when `status` is `ok` and `changed_symbol_count` or `edge_churn` is greater than zero. A delta is no-op only when `status` is `ok` and both counts are zero. Zero graph delta does not mean nothing happened: docs-only changes, test-only changes, and pre-v3 body-edit blind spots can still read as no-op.
 
-Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or GraphTrail is writing adjacent sqlite state. After the diff, Brigade deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist.
+Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or GraphTrail is writing adjacent sqlite state. After the diff, Brigade Stack deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist.
 
-GraphTrail raw diff counts are preserved under `raw_counts`. Brigade also computes a line-insensitive edge churn value by stripping line and range fields from added and removed edges before pairing them, so pure line-number movement is less noisy than raw edge add/remove totals.
+GraphTrail raw diff counts are preserved under `raw_counts`. Brigade Stack also computes a line-insensitive edge churn value by stripping line and range fields from added and removed edges before pairing them, so pure line-number movement is less noisy than raw edge add/remove totals.
 
 `brigade receipts verify` includes `graph-delta.json` in the existing log digest map when a verification receipt wrote the sidecar. Editing or deleting that sidecar after the run is treated like editing stdout or stderr logs.
 
@@ -1825,7 +1829,7 @@ Promotion writes `route_policy.policy_version: scorecard.v1` into the status pro
 
 ### Context eval metric
 
-When a non-read-only aboyeur run has both a pre-run code graph brief and a successful GraphTrail delta sidecar with changed file paths, Brigade records `context_eval` in the run artifacts and synthesis ground truth.
+When a non-read-only agent run has both a pre-run code graph brief and a successful GraphTrail delta sidecar with changed file paths, Brigade Stack records `context_eval` in the run artifacts and synthesis ground truth.
 The metric is set arithmetic over repo-relative file paths: it compares the files named by the pre-run context pack with the files the run structurally touched according to the GraphTrail delta.
 For example, `brief hit rate 0.50 (2/4 files, 2 missed)` means two of four structurally touched files were named in the brief, and two touched files were not.
 `brief_hit_rate` is recall over the touched files. `brief_precision` is the share of brief files the run touched, and `brief_f05` is the F-beta score with beta 0.5, which weights precision. When the delta sidecar was capped (`truncated: true`), all three are null.
@@ -1889,7 +1893,7 @@ Handoff behavior:
 - `brigade handoff lint` validates pending handoffs before ingest. Card actions require `Target card` plus `Suggested card content` and must omit document sections; `no-card` actions require document sections and must omit card sections. It also scans `Durable facts` and `Suggested card content` for standalone-readability issues (bare pronouns, deictic references, relative dates) and prints them as warnings; use `--strict` to fail the command when any are present.
 - `brigade handoff lint --strict` keeps structural validity checks unchanged and only promotes readability findings for that invocation.
 - The normal `brigade ingest` route can review or ingest that handoff.
-- If handoff writing fails after synthesis, Brigade still prints the final answer and keeps the final artifacts.
+- If handoff writing fails after synthesis, Brigade Stack still prints the final answer and keeps the final artifacts.
 - Failed handoff writes exit nonzero and mark `run.json` as `handoff-failed`.
 - `--handoff` is not allowed with `--dry-run` because dry runs have no final answer.
 
@@ -1900,15 +1904,15 @@ tmpdir=$(mktemp -d)
 smoke_cwd=$(git rev-parse --show-toplevel 2>/dev/null || pwd)
 mkdir -p "$tmpdir/.brigade"
 cat > "$tmpdir/.brigade/roster.toml" <<'EOF'
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan one small read-only task and synthesize a one-sentence final answer."
 
 [agents.coder]
 cli = "codex"
-role = "Return exactly this sentence, with no shell commands and no extra prose: Brigade full dispatch integration worker succeeded."
+role = "Return exactly this sentence, with no shell commands and no extra prose: Brigade Stack full dispatch integration worker succeeded."
 
 [limits]
 max_workers = 1
@@ -1917,7 +1921,7 @@ EOF
 
 brigade roster doctor --target "$tmpdir"
 timeout 360 brigade run \
-  "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade dispatch path succeeded." \
+  "Integration test: assign the coder worker to return its required success sentence, then synthesize one sentence saying the full Brigade Stack dispatch path succeeded." \
   --roster "$tmpdir/.brigade/roster.toml" \
   --cwd "$smoke_cwd" \
   --output-dir "$tmpdir/run" \
@@ -1934,7 +1938,7 @@ Live runs invoke authenticated model CLIs and may consume whatever quota or subs
 
 ## Two axes: depth + harnesses
 
-Brigade installs material into a target directory on two independent axes. The target can be a code repo, an agent memory workspace, a VPS operator directory, or another operator-controlled workspace. Local-first means local data on that machine first, before any external service.
+Brigade Stack installs material into a target directory on two independent axes. The target can be a code repo, an agent memory workspace, a VPS operator directory, or another operator-controlled workspace. Local-first means local data on that machine first, before any external service.
 
 **Depth, how much shared baseline you want:**
 
@@ -2008,23 +2012,26 @@ See [QUICKSTART.md](../QUICKSTART.md) for setup, verification, and the ingest fl
 
 ## Managed stations
 
-> **In plain terms:** "stations" group built-in capabilities and optional tools Brigade can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade, so `brigade add guard` only offers the optional Plating helper.
+> **In plain terms:** "stations" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
 
 Some stations can install and wire external tools for you.
 Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
-Tools are never imported in process; Brigade shells out to each CLI, so the boundary stays model-neutral and mixed-language.
+Tools are never imported in process; Brigade Stack shells out to each CLI, so the boundary stays model-neutral and mixed-language.
 `brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
 ```bash
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
 brigade add guard    # embedded scrub path + optional plating
 brigade add tokens   # token-glace (+ optional usage-tracker)
-brigade add skills   # built-in skills + optional Skillet roster
+brigade add skills   # built-in skills; optional Skillet installer remains available
 brigade add pantry   # agentpantry (extras surface)
 brigade add notifications   # agent-notify (extras surface)
 brigade stations discover --root ~/repos
 brigade add ../agentpantry   # inspect an external station.json
 ```
+
+For general workflow guidance, install upstream [Superpowers](https://github.com/obra/superpowers) separately alongside the Brigade Stack and T3 specialists you use. `brigade init` does not bundle Superpowers. The optional Skillet installer is retained unchanged.
+
 
 `security` is a built-in station with no external managed tool yet.
 
@@ -2040,38 +2047,38 @@ First-class station CLIs (always registered; not extras-gated):
 
 `pantry` and `notifications` remain extras-gated (`brigade extras on` or `BRIGADE_EXTRAS=1`).
 
-`pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade never imports it.
+`pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
-Before invoking any installed agentpantry surface, Brigade probes `agentpantry version --json` and accepts only released ASCII semver triples (optional leading `v`, no prerelease or build suffix). Dev builds, prerelease tags, and other non-triple strings are rejected by version policy, not because parsing failed. Brigade never echoes the raw rejected version string in `work brief`, doctor output, logs, or receipts; it surfaces a fixed policy message instead.
+Before invoking any installed agentpantry surface, Brigade Stack probes `agentpantry version --json` and accepts only released ASCII semver triples (optional leading `v`, no prerelease or build suffix). Dev builds, prerelease tags, and other non-triple strings are rejected by version policy, not because parsing failed. Brigade Stack never echoes the raw rejected version string in `work brief`, doctor output, logs, or receipts; it surfaces a fixed policy message instead.
 `brigade doctor` health-checks it with `agentpantry doctor --json --no-net` and keeps a compatibility fallback to `agentpantry status --json` for older binaries.
 Like the memory satellites, agentpantry inspects host-global state, so its checks are advisory and never FAIL a workspace run: an unwired install (exit 2, no config) is a `WARN`, and setup problems are surfaced as advisory pantry health.
 Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific health with explicit `next` commands, `brigade pantry setup plan --role source|sink` to preview or write a reviewed setup plan, and `brigade pantry service plan --role source|sink` to preview or write service setup steps.
-Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade would send. Add `--send` only after `brigade add notifications` if you want delivery.
+Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade Stack would send. Add `--send` only after `brigade add notifications` if you want delivery.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
 
-`notifications` is the operator notification station. `agent-notify` remains a process-boundary Go binary; Brigade never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
+`notifications` is the operator notification station. `agent-notify` remains a process-boundary Go binary; Brigade Stack never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
 `brigade add notifications` installs `agent-notify` when missing and prints manual wiring steps.
 Use `brigade notifications status` and `brigade notifications setup plan` for advisory health and reviewed hook snippets without sending.
-`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station; Brigade never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
+`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station; Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `--code-reference <brigade.code-reference.v1 JSON>` is passed to MiseLedger unchanged, so its exact code-reference lookup runs before lexical fallback.
 
-For supported sources (e.g., Discord), Brigade owns crawler runtime selection and the read-only compatibility gate: it resolves the crawler via `DISCRAWL_BIN`, `<SOURCE>_CRAWLER_BIN`, or PATH, probes `version` and `doctor --json`, and refuses the crawl when the archive is unreadable or required capabilities are missing. MiseLedger still performs the actual crawl and archive mutation; Discrawl owns the Discord archive. Because MiseLedger has no `--crawler` pass-through flag today, Brigade prepends the resolved crawler's directory to PATH when spawning `miseledger crawl`, so MiseLedger's own discovery lands on the same binary. A true MiseLedger-side `--crawler` option remains a follow-up limitation. After each crawl attempt, Brigade writes `.brigade/evidence/<source>-last-run.json` and propagates a non-zero exit through the receipt; a failed last-run makes later status/doctor reports unhealthy even when the queue reads `NO_PENDING`.
+For supported sources (e.g., Discord), Brigade Stack owns crawler runtime selection and the read-only compatibility gate: it resolves the crawler via `DISCRAWL_BIN`, `<SOURCE>_CRAWLER_BIN`, or PATH, probes `version` and `doctor --json`, and refuses the crawl when the archive is unreadable or required capabilities are missing. MiseLedger still performs the actual crawl and archive mutation; Discrawl owns the Discord archive. Because MiseLedger has no `--crawler` pass-through flag today, Brigade Stack prepends the resolved crawler's directory to PATH when spawning `miseledger crawl`, so MiseLedger's own discovery lands on the same binary. A true MiseLedger-side `--crawler` option remains a follow-up limitation. After each crawl attempt, Brigade Stack writes `.brigade/evidence/<source>-last-run.json` and propagates a non-zero exit through the receipt; a failed last-run makes later status/doctor reports unhealthy even when the queue reads `NO_PENDING`.
 
 Crawl defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS`; search remains at 30 seconds. An invalid crawl timeout reports a diagnostic and exits 2 before starting MiseLedger. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --target . --new-only --import`. Product page: https://brigade.tools/miseledger.
 
-`code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code <verb> <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. The full verb set is `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, and `diff` (`init` stays behind `sync`; `watch` needs a streaming relay and is not exposed yet). Every verb accepts Brigade's standard `--target <dir>`, which runs the engine from that directory so its default `.graphtrail/graphtrail.db` and repo-relative file arguments resolve against that repo; all other arguments pass through unchanged. Engine `Usage: graphtrail ...` lines are rewritten to `Usage: brigade code ...` before display so errors point at the command the user typed. Sync and evaluate default to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS` and `BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS`; the query verbs remain at 30 seconds. An invalid timeout value reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
+`code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code <verb> <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. The full verb set is `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, and `diff` (`init` stays behind `sync`; `watch` needs a streaming relay and is not exposed yet). Every verb accepts Brigade Stack's standard `--target <dir>`, which runs the engine from that directory so its default `.graphtrail/graphtrail.db` and repo-relative file arguments resolve against that repo; all other arguments pass through unchanged. Engine `Usage: graphtrail ...` lines are rewritten to `Usage: brigade code ...` before display so errors point at the command the user typed. Sync and evaluate default to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS` and `BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS`; the query verbs remain at 30 seconds. An invalid timeout value reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
 
 `plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
-Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. Brigade selects and health-checks the crawler runtime for supported sources before delegating; MiseLedger still performs the crawl and import. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
+Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. Brigade Stack selects and health-checks the crawler runtime for supported sources before delegating; MiseLedger still performs the crawl and import. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
 Security commands:
 
@@ -2088,7 +2095,7 @@ Security commands:
 - `brigade security findings` lists the latest reviewable findings, and `brigade security show <finding-id>` inspects one finding.
 - Security guardrails distinguish repo guidance, skills, slash commands, subagents, and tool wrappers, with template confidence for public examples and runtime confidence for active workspace files.
 - Session and chat transcript paths are reported as `surface: session-chat` when exposed API keys, tokens, passwords, or private keys are found.
-- Harness wiring checks cover repo-local agent JSON across `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.antigravity/`, `.pi/`, `.cursor/`, `.aider/`, `.goose/`, `.continue/`, `.copilot/`, `.qwen/`, `.kimi/`, `.adal/`, `.openhands/`, `.grok/`, `.openclaw/`, `.hermes/`, and Brigade templates, including path escapes, host-private paths, insecure or private URLs, and shell-like command fields.
+- Harness wiring checks cover repo-local agent JSON across `.brigade/`, `.claude/`, `.codex/`, `.opencode/`, `.antigravity/`, `.pi/`, `.cursor/`, `.aider/`, `.goose/`, `.continue/`, `.copilot/`, `.qwen/`, `.kimi/`, `.adal/`, `.openhands/`, `.grok/`, `.openclaw/`, `.hermes/`, and Brigade Stack templates, including path escapes, host-private paths, insecure or private URLs, and shell-like command fields.
 - `brigade security doctor` reports config, evidence, public template privacy, harness wiring, suppression, and open-finding health in text or JSON.
 - `brigade security closeout --accept-risk` records reviewed accepted risk with policy-pack blocker and warning counts for release evidence.
 - `brigade security enrich --target .` enriches an existing report and writes enrichment artifacts.
@@ -2141,7 +2148,7 @@ The current managed tools:
 | `search` | `code-search-api` | optional local semantic search service |
 | `search` | `code-search-mcp` compatibility key | optional MCP bridge maintained under `code-search-api/mcp` |
 | `evidence` | `miseledger` | local evidence ledger, crawls, FTS, receipt import |
-| `skills` | `brigade-work`, `ultra-work-scout`; optional Skillet roster | default work-loop skills and broad Scout scoping for agent harnesses |
+| `skills` | `brigade-work`, `ultra-work-scout`; separate optional workflow skills | default work-loop skills and broad Scout scoping for agent harnesses |
 | `pantry` | `agentpantry` | browser session and secret sync for agent hosts |
 | `notifications` | `agent-notify` | private operator notifications for agent events |
 
@@ -2154,19 +2161,19 @@ It shows up as a non-failing `[todo]` hint telling you to run `brigade add <stat
 ### What a green doctor looks like
 
 ```text
-brigade doctor: target ~/agent-kitchen (generic)
-  [ok]   bootstrap: AGENTS.md              ~/agent-kitchen/AGENTS.md
-  [ok]   bootstrap: CLAUDE.md              ~/agent-kitchen/CLAUDE.md
-  [ok]   bootstrap: MEMORY.md              ~/agent-kitchen/MEMORY.md
-  [ok]   bootstrap: TOOLS.md               ~/agent-kitchen/TOOLS.md
-  [ok]   bootstrap: USER.md                ~/agent-kitchen/USER.md
-  [ok]   bootstrap: SAFETY_RULES.md        ~/agent-kitchen/SAFETY_RULES.md
-  [ok]   bootstrap: INSTALL_FOR_AGENTS.md  ~/agent-kitchen/INSTALL_FOR_AGENTS.md
-  [ok]   handoff: inbox                    ~/agent-kitchen/.claude/memory-handoffs
-  [ok]   handoff: TEMPLATE.md              ~/agent-kitchen/.claude/memory-handoffs/TEMPLATE.md
-  [ok]   handoff: processed/               ~/agent-kitchen/.claude/memory-handoffs/processed
-  [ok]   memory: cards/                    ~/agent-kitchen/memory/cards
-  [ok]   publish: hooks/pre-push           ~/agent-kitchen/hooks/pre-push
+brigade doctor: target ~/agent-workspace (generic)
+  [ok]   bootstrap: AGENTS.md              ~/agent-workspace/AGENTS.md
+  [ok]   bootstrap: CLAUDE.md              ~/agent-workspace/CLAUDE.md
+  [ok]   bootstrap: MEMORY.md              ~/agent-workspace/MEMORY.md
+  [ok]   bootstrap: TOOLS.md               ~/agent-workspace/TOOLS.md
+  [ok]   bootstrap: USER.md                ~/agent-workspace/USER.md
+  [ok]   bootstrap: SAFETY_RULES.md        ~/agent-workspace/SAFETY_RULES.md
+  [ok]   bootstrap: INSTALL_FOR_AGENTS.md  ~/agent-workspace/INSTALL_FOR_AGENTS.md
+  [ok]   handoff: inbox                    ~/agent-workspace/.claude/memory-handoffs
+  [ok]   handoff: TEMPLATE.md              ~/agent-workspace/.claude/memory-handoffs/TEMPLATE.md
+  [ok]   handoff: processed/               ~/agent-workspace/.claude/memory-handoffs/processed
+  [ok]   memory: cards/                    ~/agent-workspace/memory/cards
+  [ok]   publish: hooks/pre-push           ~/agent-workspace/hooks/pre-push
   [ok]   guard: embedded content guard     brigade.guard
 
 summary: 14 checks, 0 failed, 0 manual
@@ -2184,7 +2191,7 @@ brigade bug report --target . --summary "What happened and what you expected" --
 
 The command prints the complete `brigade.bug-report.v1` bundle and saves
 `bundle.json`, `bundle.md`, and `receipt.json` under the user data directory at
-`brigade/bug-reports/<report_id>/`. It includes the Brigade version and channel,
+`brigade/bug-reports/<report_id>/`. It includes the Brigade Stack version and channel,
 Python and OS versions, bounded local health probes, up to five failed run
 identifiers, the latest failing verification receipt identifier and digest,
 and the last local CLI error. The `bug_diagnostics` section contains names,
@@ -2233,7 +2240,7 @@ through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. Fingerprints use the recorded command, exception type,
-exit code, failing probe names, and Brigade minor version when failure facts
+exit code, failing probe names, and Brigade Stack minor version when failure facts
 exist. The normalized summary hash is used only when those facts are absent.
 Reports with the same failure facts share a fingerprint even when their
 summaries differ.
@@ -2262,7 +2269,7 @@ For an ordinary bug that triggers the vulnerability keyword classifier, pass
 This override works with an interactive terminal too. Explicit `--kind security`
 reports are always refused. Redaction and the second scan still apply.
 An interactive submission asks the security question even with `--yes`.
-Brigade verifies the stored JSON and Markdown digests and scans both again,
+Brigade Stack verifies the stored JSON and Markdown digests and scans both again,
 including every nonempty secret-named environment value mounted since preparation,
 before any network call. New summaries, titles,
 and output files cannot be combined with `--report-id`.
@@ -2275,7 +2282,7 @@ the fingerprint and, if needed, the exception type and command path. It does not
 `--comment-on N --via gh` comments only on a duplicate returned by the search.
 `--via url` prints a prefilled `bug.yml` URL bounded to 6,000 encoded bytes.
 `--via email` prints a `mailto:` link to the maintainer, bounded to 1,800 encoded
-bytes. These links hand off to your browser or mail client. Brigade does not
+bytes. These links hand off to your browser or mail client. Brigade Stack does not
 send email. Attach the printed full bundle path when using a shortened link.
 `--via file` always keeps the report local. This command never creates a gist.
 
@@ -2290,7 +2297,7 @@ minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
 records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission blocks retries
-for five minutes. After that window, Brigade searches for its fingerprint
+for five minutes. After that window, Brigade Stack searches for its fingerprint
 before another attempt. The loaded receipt is checked even when its attempt
 log is older than yesterday. If a fingerprint match exists or the search fails,
 it blocks creation of another issue. A match from the broader command and
@@ -2308,7 +2315,7 @@ handler validation errors, do not replace the last recorded CLI failure.
 Failures from `bug report` preserve the previous diagnostic. Other CLI failures
 overwrite the local `brigade/last-error.json` with the resolved
 command names, exit code, exception type, redacted message head, frames
-inside Brigade, and a UTC `recorded_at` timestamp. Reports omit timestamped
+inside Brigade Stack, and a UTC `recorded_at` timestamp. Reports omit timestamped
 errors older than 24 hours or dated in the future. Legacy records without a
 timestamp have unknown age. If the payload fails its clean check, the writer
 clears the message and frames and scans again. If that scan fails, it removes
@@ -2388,7 +2395,7 @@ Each subsystem has a companion doc under [`docs/`](.) with the full local contra
 ## Related
 
 - [Cookbook](https://github.com/escoffier-labs/solos-cookbook): the long-form companion guide and reference docs
-- Content Guard is embedded in Brigade and used by the publish gate and pre-push hook.
+- Content Guard is embedded in Brigade Stack and used by the publish gate and pre-push hook.
 - [OpenClaw](https://github.com/openclaw/openclaw): the reference memory owner
 
 ## License
@@ -2443,7 +2450,7 @@ date is not a purge timestamp.
 
 An operator-triggered mutating path is a separate follow-up, out of scope here.
 It would require an admin bearer, an exact argv preview before each action, a
-Brigade receipt for every action, and no unattended execution. Deploy, rollback,
+Brigade Stack receipt for every action, and no unattended execution. Deploy, rollback,
 secret changes, migration application, and deletion remain denied.
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable

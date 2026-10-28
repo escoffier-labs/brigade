@@ -1,6 +1,6 @@
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan the work and synthesize reviewed output."
 purpose = "Orchestrator for review-heavy workflows."

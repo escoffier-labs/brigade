@@ -19,6 +19,44 @@ running after a handoff has fenced its Hub authority.
 
 ## Authority and lifecycle
 
+### Prepared handoff context
+
+`brigade fleet work handoff show <work-id> [--json]` makes one authenticated
+`GET /work/items/<id>/prepared-handoff`. The HTTP envelope is
+`{"prepared_handoff": VIEW}`, with schema `brigade.prepared_handoff.v1`.
+The command prints the validated view. It reads existing context and grants no
+claim, acceptance, dispatch, or execution authority.
+
+The view uses one deferred database read transaction and reports
+`consistency: "single-db-snapshot"`. `observed_at` follows the first read.
+Item `version` remains separate from ownership `revision`, `generation`, and
+`last_seq`. Own acceptance criteria and effective source criteria remain distinct.
+Absent checkpoint and report data remain null.
+
+Existing node or Hub-admin credentials provide fleet-wide read access
+(`visibility: "fleet-trust"`). Dashboard cookies cannot read this route.
+Person attribution and historical human attribution are `unrecorded`.
+This route adds no project isolation or person identity records.
+
+Checkpoint conflict admission is historical. Evidence stays reported and
+unverified, liveness is unknown, and report freshness is unassessed.
+Checkpoint binding to the current item version and execution binding to the
+ownership generation are unavailable. Item edits and accepted handoffs may
+retain older checkpoint/report data. Report timestamps and session sequences
+are preserved as reported metadata, separate from Hub ownership counters.
+
+`run_refs` covers recorded execution events only. It reads the newest 51
+execution-linked rows, deduplicates composite node/run identities within the
+first 50, and reports truncation when a 51st row exists, even for duplicates.
+It does not establish a complete execution inventory. Generic links,
+descriptions, raw event detail, credential fields, and transcript bodies are
+omitted. Existing text validation does not classify every secret or instruction.
+Included prose remains untrusted reported context.
+
+The existing `fleet work ownership show` command retains its separate reads.
+
+### Existing ownership reads and writes
+
 `GET /work/items/{id}/ownership` returns an `ownership` object for an existing
 item. With no ownership events, the state is `unowned`, revision 0, generation 0.
 The read uses the existing fleet authentication policy. An absent item returns

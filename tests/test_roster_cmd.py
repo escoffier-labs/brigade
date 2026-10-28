@@ -31,7 +31,10 @@ def test_roster_init_writes_default_roster(tmp_target, capsys):
     assert rc == 0
     assert path.is_file()
     text = path.read_text()
-    assert 'orchestrator = "chef"' in text
+    assert 'orchestrator = "orchestrator"' in text
+    loaded = roster.load_roster(path)
+    assert loaded.orchestrator == "orchestrator"
+    assert loaded.agents[loaded.orchestrator].cli == "codex"
     assert 'cli = "codex"' in text
     assert 'cli = "ollama:llama3.2:3b"' in text
     assert "timeout_seconds = 600" in text
@@ -101,6 +104,13 @@ def test_packaged_presets_parse(preset_name):
     raw = toml_compat.loads(path.read_text())
     loaded = roster.load_roster(path)
     assert loaded.orchestrator in loaded.agents
+    if preset_name != "full-multi-lane.toml":
+        assert loaded.orchestrator == "orchestrator"
+    for agent in loaded.agents.values():
+        assert all(name in loaded.agents for name in agent.fallback)
+    if preset_name == "budget-open-weight.toml":
+        assert loaded.agents["orchestrator"].fallback == ("orchestrator_local",)
+        assert loaded.agents["orchestrator_local"].cli == "ollama:llama3.2:3b"
     for name, agent in loaded.agents.items():
         assert agent.purpose
         assert agent.requires is not None
@@ -222,7 +232,7 @@ def test_roster_doctor_validates_agents(monkeypatch, tmp_target, capsys):
     assert rc == 0
     assert "roster: orchestrator" in out
     assert "roster: timeout_seconds" in out
-    assert "agent: chef" in out
+    assert "agent: orchestrator" in out
     assert "timeout=600s" in out
     assert "agent: local_researcher" in out
     assert "ollama" in out
@@ -822,7 +832,7 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
     out = capsys.readouterr().out
 
-    for seat in ("chef", "reviewer", "reviewer_flash", "daybreak"):
+    for seat in ("orchestrator", "reviewer", "reviewer_flash", "daybreak"):
         _seat_resolution_fields_present(out, seat)
         assert f"resolved={seat}" in out
     assert out.count("outcome=self") == 4
@@ -833,7 +843,7 @@ def test_roster_suggest_prints_every_seat_resolution_when_roots_satisfiable(tmp_
     resolved_path.parent.mkdir(parents=True, exist_ok=True)
     resolved_path.write_text(emitted)
     resolved = roster.load_roster(resolved_path)
-    assert resolved.orchestrator == "chef"
+    assert resolved.orchestrator == "orchestrator"
     flash = resolved.agents["reviewer_flash"]
     assert flash.model == "Gemini 3.8 Flash (Low)"
     assert flash.role == (
@@ -872,9 +882,9 @@ def test_roster_suggest_reports_first_satisfiable_fallback_when_primary_cli_miss
     assert roster_cmd.suggest(tmp_target, preset=preset, probe=probe) == 0
     out = capsys.readouterr().out
 
-    _seat_resolution_fields_present(out, "chef")
+    _seat_resolution_fields_present(out, "orchestrator")
     assert "outcome=fallback" in out
-    assert "resolved=chef_oss" in out
+    assert "resolved=orchestrator_local" in out
     assert "codex missing" in out
     _seat_resolution_fields_present(out, "coder")
     assert "resolved=coder" in out
@@ -893,7 +903,7 @@ def test_roster_suggest_reports_dropped_seat_when_no_fallback_satisfies(tmp_targ
     rc = roster_cmd.suggest(tmp_target, preset=preset, probe=probe)
     out = capsys.readouterr().out
 
-    _seat_resolution_fields_present(out, "chef")
+    _seat_resolution_fields_present(out, "orchestrator")
     assert "outcome=dropped" in out
     assert "resolved=-" in out or "resolved=none" in out.lower()
     assert "codex missing" in out
@@ -909,7 +919,7 @@ def test_roster_suggest_refuses_adoptable_roster_when_orchestrator_dropped(tmp_t
     out = capsys.readouterr().out
 
     assert "not adoptable" in out.lower()
-    assert "[agents.chef]" not in out
+    assert "[agents.orchestrator]" not in out
     assert rc != 0
 
 
@@ -1103,7 +1113,7 @@ def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_targ
 def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsys):
     assert roster_cmd.init(tmp_target) == 0
     capsys.readouterr()
-    assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "chef", "--json"]) == 2
+    assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "orchestrator", "--json"]) == 2
     report = json.loads(capsys.readouterr().out)
     assert report["status"] == "blocked"
     assert report["selected_seats"][0]["selection_role"] == "orchestrator"

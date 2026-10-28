@@ -1,15 +1,15 @@
-orchestrator = "chef"
+orchestrator = "orchestrator"
 
-[agents.chef]
+[agents.orchestrator]
 cli = "codex"
 role = "Plan the work and route to affordable workers."
 purpose = "Subscription-backed planner with an open-weight fallback."
 requires = { cli = "codex" }
-fallback = ["chef_oss"]
+fallback = ["orchestrator_local"]
 stats = { speed = "medium", source = "author-receipts-2026-07" }
 caveats = ["Codex seat drops when the subscription is unavailable."]
 
-[agents.chef_oss]
+[agents.orchestrator_local]
 cli = "ollama:llama3.2:3b"
 role = "Plan locally with open-weight models."
 purpose = "Local planner when Codex is unavailable."

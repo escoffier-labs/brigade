@@ -29,7 +29,7 @@ GUARD = Station(
 )
 SKILLS = Station(
     name="skills",
-    summary="portable skillet-style agent skills, Scout workflows, and runbooks",
+    summary="portable agent skills, Scout workflows, and runbooks",
     aliases=("skillet",),
     doctor=_doctor.skills_station_checks,
 )

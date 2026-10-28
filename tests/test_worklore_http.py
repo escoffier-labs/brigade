@@ -5,13 +5,17 @@ import json
 import sqlite3
 import subprocess
 from base64 import urlsafe_b64encode
+from http.client import HTTPConnection
 from urllib.parse import quote
 from pathlib import Path
+
+import pytest
 
 from brigade import fleet_hub
 from brigade import fleet_hub_http
 from brigade import worklore_github_sync as github_sync
 from brigade import worklore_http
+from brigade import worklore_ownership as ownership
 from brigade import worklore_http as http
 from brigade import worklore_store as store
 
@@ -61,6 +65,139 @@ def test_cookie_caller_cannot_read_or_write(tmp_path):
     conn = _http_conn(tmp_path)
     status, body = http.handle(conn, _req("GET", "/work/items"))
     assert status == 401 and body["code"] == "unauthorized"
+
+
+def test_prepared_handoff_uses_existing_read_auth_and_refuses_mutations(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    with _hub(tmp_path) as hub:
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            _, node_token = fleet_hub.add_node(conn, "node-a", "node-a")
+            item = store.create_item(
+                conn, {"title": "Fixture", "kind": "repo"}, actor_id="admin", actor_type="operator"
+            )
+            before = conn.execute("SELECT COUNT(*) FROM work_events").fetchone()[0]
+        finally:
+            conn.close()
+        path = f"/work/items/{item['work_id']}/prepared-handoff"
+        for token in (node_token, ADMIN_TOKEN):
+            status, payload = _request(hub, "GET", path, token=token)
+            assert status == 200
+            assert set(payload) == {"prepared_handoff"}
+            assert payload["prepared_handoff"]["item"]["work_id"] == item["work_id"]
+        assert _request(hub, "GET", path)[0] == 401
+        assert _request(hub, "GET", path, token="invalid")[0] == 401
+        assert _request(hub, "GET", path, extra_headers={"Cookie": "fixture-session"})[0] == 401
+        status, enrollment = _request(hub, "POST", "/dashboard/enrollment", token=ADMIN_TOKEN, body={})
+        assert status == 201
+        connection = HTTPConnection(hub[0], hub[1], timeout=5)
+        try:
+            connection.request(
+                "POST",
+                "/enroll",
+                body=f"code={enrollment['code']}",
+                headers={"Content-Type": "application/x-www-form-urlencoded", "Sec-Fetch-Site": "same-origin"},
+            )
+            response = connection.getresponse()
+            assert response.status == 303
+            cookie = response.getheader("Set-Cookie").split(";")[0]
+            response.read()
+        finally:
+            connection.close()
+        assert _request(hub, "GET", path, extra_headers={"Cookie": cookie})[0] == 401
+        assert _request(hub, "GET", path + "?limit=1", token=node_token)[0] == 400
+        status, refusal = _request(hub, "GET", "/work/items/absent/prepared-handoff", token=node_token)
+        assert (status, refusal["code"]) == (404, "not-found")
+        for method in ("POST", "PATCH", "DELETE"):
+            assert _request(hub, method, path, token=node_token, body={})[0] == 404
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            assert conn.execute("SELECT COUNT(*) FROM work_events").fetchone()[0] == before
+        finally:
+            conn.close()
+
+
+@pytest.mark.parametrize(
+    "invalid_field",
+    [
+        "title",
+        "timestamp",
+        "report",
+        "event-empty",
+        "event-array",
+        "ownership-empty",
+        "ownership-null",
+        "report-array",
+        "reporter-missing",
+    ],
+)
+def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, monkeypatch, invalid_field):
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    with _hub(tmp_path) as hub:
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            item = store.create_item(
+                conn, {"title": "Fixture", "kind": "repo"}, actor_id="admin", actor_type="operator"
+            )
+            if invalid_field == "title":
+                conn.execute(
+                    "UPDATE work_items SET title=? WHERE work_id=?", ("x" * (store.TITLE_MAX + 1), item["work_id"])
+                )
+            else:
+                fleet_hub.add_node(conn, "node-a", "node-a")
+                ownership.ownership_action(
+                    conn,
+                    item["work_id"],
+                    {
+                        "action": "offer",
+                        "target_node": "node-a",
+                        "exclusions": [],
+                        "authorization_ref": "fixture-grant",
+                        "attempt_budget": {"cap": 1, "source_ref": "fixture-budget"},
+                    },
+                    expected_revision=0,
+                    idempotency_key="fixture-offer",
+                    actor_id="admin",
+                    actor_type="operator",
+                    is_admin=True,
+                )
+                seq, raw = conn.execute(
+                    "SELECT seq, detail_json FROM work_events WHERE work_id=? AND event_type=?",
+                    (item["work_id"], ownership.EVENT_TYPES["offer"]),
+                ).fetchone()
+                detail = json.loads(raw)
+                if invalid_field == "timestamp":
+                    detail["ownership"]["updated_at"] = "not-a-timestamp"
+                elif invalid_field == "report":
+                    detail["ownership"]["last_report"] = {"provider": "invalid"}
+                elif invalid_field == "event-empty":
+                    detail = {}
+                elif invalid_field == "event-array":
+                    detail = []
+                elif invalid_field == "ownership-empty":
+                    detail["ownership"] = {}
+                elif invalid_field == "ownership-null":
+                    detail["ownership"] = None
+                elif invalid_field == "report-array":
+                    detail["ownership"]["last_report"] = []
+                else:
+                    detail["ownership"]["last_report"] = {
+                        "version": 1,
+                        "provider": "dot",
+                        "session_id": "session-a",
+                        "agent_label": "worker-a",
+                        "observed_at": "2026-01-01T00:00:00+00:00",
+                        "sequence": 1,
+                        "progress": "Fixture",
+                        "evidence_refs": [],
+                    }
+                conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), seq))
+            conn.commit()
+        finally:
+            conn.close()
+        status, response = _request(hub, "GET", f"/work/items/{item['work_id']}/prepared-handoff", token=ADMIN_TOKEN)
+        assert status == 500
+        assert response == {"error": "internal error", "code": "internal-error"}
 
 
 def test_node_can_read_and_import_but_cannot_transition(tmp_path):

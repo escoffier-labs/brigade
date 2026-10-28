@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
+
 - Add dormant task launch claims with immutable dispatch bindings, strict task-version checks, and retained consumption through checkpoint recovery and redaction (#2046).
 - Fleet preference settings accept `--orchestrator` as the preferred flag, retaining `--chef` as an alias and the existing `chef` storage key.
 - Target durable steer and interrupt requests by task and optional attempt, with selector-aware replay, checkpoint validation, and task redaction.
@@ -14,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP servers include `resultType: "complete"` in every successful result for protocol 2026-07-28 requests (declared via `params._meta`, the `MCP-Protocol-Version` header, or a stdio `initialize`), so current Claude Code can fetch tools from `memory serve-mcp` and `skills serve-mcp`. Older revisions keep their exact result shape.
 - Reviewed memory evidence operations accept scalar citations and count equivalent evidence references once, while retaining the original citation spellings and excluding unresolved support (#1959, cases 8 and 15).
 - Fleet actions and bug diagnostics launch the installed Brigade package with isolated Python imports, preventing ambient working directories, Python paths, and user-site startup code from selecting another package (#1950).
+- `brigade fleet work handoff show <work-id> [--json]` reads bounded item, ownership, checkpoint, report, and recorded run references from one database snapshot. It exposes context under existing fleet read trust, with attribution and freshness limits, and performs no ownership or execution action.
+
 - `brigade run --require-fleet-claim` and `repo_claim(require_claim=True)` refuse work without a confirmed Hub claim and enforce bounded cancellation on claim loss, including credential rejection. Default local fallback remains available.
 
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
