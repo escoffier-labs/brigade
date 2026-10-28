@@ -545,19 +545,23 @@ def parse_projects_query(query: str) -> tuple[str | None, board_page.Options]:
     """The goals selection (``project``) plus the board's own ``view`` and ``epic`` links."""
     if not query:
         return None, board_page.Options()
-    params = parse_qs(query, strict_parsing=True, keep_blank_values=True, max_num_fields=3)
-    if not set(params) <= {"project", "view", "epic"} or any(len(v) != 1 for v in params.values()):
+    params = parse_qs(query, strict_parsing=True, keep_blank_values=True, max_num_fields=4)
+    if not set(params) <= {"project", "view", "epic", "repo"} or any(len(v) != 1 for v in params.values()):
         raise ValueError("invalid project query")
     project = params.get("project", [None])[0]
     if project is not None and not campaigns.valid_key(project):
         raise ValueError("invalid project query")
     view = params.get("view", ["board"])[0]
     epic = params.get("epic", [None])[0]
-    if view not in board_page.VIEWS or (
-        epic is not None and not (epic.isdigit() and epic.isascii() and len(epic) <= 9 and int(epic) > 0)
+    repo = params.get("repo", [None])[0]
+    if (
+        view not in board_page.VIEWS
+        or (epic is None) != (repo is None)
+        or (epic is not None and not (epic.isdigit() and epic.isascii() and len(epic) <= 9 and int(epic) > 0))
+        or (repo is not None and not project_board_store._REPO.fullmatch(repo))
     ):
         raise ValueError("invalid project query")
-    return project, board_page.Options(view=view, epic=int(epic) if epic is not None else None)
+    return project, board_page.Options(view=view, epic=int(epic) if epic is not None else None, epic_repo=repo)
 
 
 def load_projects(conn: sqlite3.Connection, *, enabled: bool, selected: str | None = None) -> dict[str, Any]:

@@ -358,9 +358,19 @@ def test_route_serves_the_board_to_authenticated_identities_only_with_hostile_te
         status, _, body = _request(hub, "/deck/projects", headers=_cookie(hub))
         assert status == 200 and "data-bd-root" in body
         assert "<img" not in body and "&lt;img" in body
-        status, _, filtered = _request(hub, "/deck/projects?epic=101", headers=_bearer())
+        status, _, filtered = _request(hub, "/deck/projects?epic=101&repo=example-org%2Fwidgets", headers=_bearer())
         assert status == 200 and "Showing epic #101" in filtered
-        for query in ("view=bogus", "epic=abc", "epic=1&epic=2", "epic=-1", "view=list&other=1", "epic=1234567890"):
+        for query in (
+            "view=bogus",
+            "epic=abc",
+            "epic=1&epic=2",
+            "epic=-1",
+            "view=list&other=1",
+            "epic=1234567890",
+            "epic=101",
+            "repo=example-org%2Fwidgets",
+            "epic=101&repo=not%20a%20repo",
+        ):
             assert _request(hub, "/deck/projects?" + query, headers=_bearer())[0] == 400, query
 
 
@@ -414,7 +424,9 @@ def test_card_chips_epic_chip_and_linked_pull_requests():
     )
     assert 'class="pr-label lc-1d76db"' in section and ".pr-label.lc-1d76db{--lc:#1d76db}" in css
     assert 'class="pr-label">no-color' in section
-    assert '<a class="bd-epic-chip" href="/deck/projects?epic=101">epic #101</a>' in section
+    assert (
+        '<a class="bd-epic-chip" href="/deck/projects?epic=101&amp;repo=example-org%2Fwidgets">epic #101</a>' in section
+    )
     pr = re.search(r'<a class="bd-pr" href="([^"]+)"[^>]*>.*?<span class="bd-pr-count">(\d+)</span>', section)
     assert pr.group(1) == "https://github.com/example-org/widgets/pull/301" and pr.group(2) == "2"
     assert "pr-check" not in section  # no pulls snapshot, no invented check state
@@ -433,12 +445,34 @@ def test_card_chips_epic_chip_and_linked_pull_requests():
 
 
 def test_epic_filter_shows_epic_and_children_with_a_clear_chip():
-    section, _, _ = render(options=page.Options(epic=101))
+    section, _, _ = render(options=page.Options(epic=101, epic_repo=fixture.REPO))
     numbers = re.findall(r'class="bd-card" data-bd-item data-number="(\d+)"', section)
     assert sorted(numbers, key=int) == ["101", "103", "104", "105", "106"]
     assert "Showing epic #101 · " in section and '<a href="/deck/projects">Clear</a>' in section
-    unknown, _, _ = render(options=page.Options(epic=999))
+    unknown, _, _ = render(options=page.Options(epic=999, epic_repo=fixture.REPO))
     assert "Epic not found #999" in unknown and 'class="bd-card"' not in unknown
+
+
+def test_epic_filter_keeps_repositories_apart():
+    # Issue numbers repeat across repositories: other-org/gadgets#101 is not widgets#101.
+    board = fixture.snapshot(NOW)
+    other = "other-org/gadgets"
+    board["items"] += [
+        {**board["items"][0], "repo": other, "url": f"https://github.com/{other}/issues/101"},
+        {
+            **board["items"][2],
+            "number": 201,
+            "repo": other,
+            "url": f"https://github.com/{other}/issues/201",
+            "parent_repo": other,
+        },
+    ]
+    board = store.validate_snapshot(board)
+    widgets, _, _ = render(board, page.Options(epic=101, epic_repo=fixture.REPO))
+    assert "201" not in re.findall(r'data-number="(\d+)"', widgets)
+    gadgets, _, _ = render(board, page.Options(epic=101, epic_repo=other))
+    assert sorted(re.findall(r'class="bd-card" data-bd-item data-number="(\d+)"', gadgets), key=int) == ["101", "201"]
+    assert gadgets.count("epic=101&amp;repo=other-org%2Fgadgets") >= 1
 
 
 def test_views_epics_only_and_list_grouped_by_status():
@@ -531,7 +565,10 @@ def section_of(markup):
 
 def test_query_parsing_keeps_the_goals_selection_and_adds_view_and_epic():
     assert pages.parse_projects_query("") == (None, page.Options())
-    assert pages.parse_projects_query("view=list&epic=12") == (None, page.Options("list", 12))
+    assert pages.parse_projects_query("view=list&epic=12&repo=example-org/widgets") == (
+        None,
+        page.Options("list", 12, "example-org/widgets"),
+    )
     assert pages.parse_projects_query("project=goal-a")[0] == "goal-a"
     for bad in (
         "project=",
@@ -541,6 +578,9 @@ def test_query_parsing_keeps_the_goals_selection_and_adds_view_and_epic():
         "x=1",
         "view=list&view=board",
         "project=a&view=board&epic=1&x=1",
+        "epic=12",
+        "repo=example-org/widgets",
+        "epic=12&repo=not a repo",
     ):
         with pytest.raises(ValueError):
             pages.parse_projects_query(bad)

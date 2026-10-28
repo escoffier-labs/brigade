@@ -22,12 +22,15 @@ def _item(number: int, title: str, status: str | None, now: datetime, **extra: A
         "labels": [],
         "assignees": [],
         "parent": None,
+        "parent_repo": None,
         "sub_total": 0,
         "sub_done": 0,
         "linked_prs": [],
         "updated_at": (now - timedelta(minutes=number)).replace(microsecond=0).isoformat(),
     }
     item.update(extra)
+    if item["parent"] is not None and "parent_repo" not in extra:
+        item["parent_repo"] = REPO
     return item
 
 

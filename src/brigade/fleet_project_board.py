@@ -60,6 +60,7 @@ _ITEM = {
     "labels",
     "assignees",
     "parent",
+    "parent_repo",
     "sub_total",
     "sub_done",
     "linked_prs",
@@ -174,7 +175,7 @@ def validate_snapshot(raw: Any) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, int]] = set()
     for row in _list(top["items"], "items", MAX_ITEMS):
-        row = _closed(row, _ITEM, "item")
+        row = _closed(row, _ITEM, "item", optional={"parent_repo"})
         repo = row["repo"]
         if not isinstance(repo, str) or not _REPO.fullmatch(repo):
             raise BoardError("repo must be owner/name")
@@ -199,8 +200,15 @@ def validate_snapshot(raw: Any) -> dict[str, Any]:
                 raise BoardError("assignee must be a GitHub login")
             assignees.append(login)
         parent = row["parent"]
+        parent_repo = None
         if parent is not None:
             parent = _int(parent, "parent", low=1)
+            # Older snapshots carry only the number; sub-issues then belong to the item's repository.
+            parent_repo = row.get("parent_repo") or repo
+            if not isinstance(parent_repo, str) or not _REPO.fullmatch(parent_repo):
+                raise BoardError("parent_repo must be owner/name")
+        elif row.get("parent_repo") is not None:
+            raise BoardError("parent_repo needs a parent")
         sub_total = _int(row["sub_total"], "sub_total", high=10000)
         sub_done = _int(row["sub_done"], "sub_done", high=10000)
         if sub_done > sub_total:
@@ -221,6 +229,7 @@ def validate_snapshot(raw: Any) -> dict[str, Any]:
                 "labels": labels,
                 "assignees": assignees,
                 "parent": parent,
+                "parent_repo": parent_repo,
                 "sub_total": sub_total,
                 "sub_done": sub_done,
                 "linked_prs": prs,

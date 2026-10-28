@@ -63,7 +63,7 @@ def _fake_status(copies):
             {
                 "skill_id": c["skill_id"],
                 "harness": c["harness"],
-                "installed_path": "/home/someone/ws/.claude/skills/" + c["skill_id"],
+                "installed_path": "/home/someone/ws/.claude/skills/" + c["skill_id"],  # content-guard: allow home-path
                 "status": c.get("status", "current"),
                 "source": {"kind": "registry", "identity": "registry:" + c["skill_id"], "fingerprint": "a" * 64},
             }
@@ -82,7 +82,10 @@ def test_report_has_no_paths_contents_or_source_identities(monkeypatch, tmp_path
         "_fleet_receipts",
         lambda target: {
             ("sample-review", h): {
-                "source": {"kind": "path", "identity": "path:/home/someone/private/sample-review"},
+                "source": {
+                    "kind": "path",
+                    "identity": "path:/home/someone/private/sample-review",  # content-guard: allow home-path
+                },
                 "installed": {"skill_fingerprint": "b" * 64},
                 "rollback_snapshot": str(tmp_path),
             }
@@ -161,9 +164,13 @@ def test_conflict_scan_finds_duplicate_sources_and_divergent_copies():
         }
 
     divergent = fleet_skills_report.find_conflicts(
-        [row("claude", "s" * 64, "a" * 64), row("codex", "s" * 64, "b" * 64)]
+        [row("claude", "s" * 64, "a" * 64), row("codex", "s" * 64, "b" * 64, "stale")]
     )
     assert [(c["kind"], c["locations"]) for c in divergent] == [("divergent-copies", ["claude", "codex"])]
+    # Current copies differ only by harness rendering, so they are not divergent.
+    assert (
+        fleet_skills_report.find_conflicts([row("claude", "s" * 64, "a" * 64), row("codex", "s" * 64, "b" * 64)]) == []
+    )
     duplicate = fleet_skills_report.find_conflicts(
         [row("claude", "s" * 64, "a" * 64), row("codex", "t" * 64, "a" * 64)]
     )
@@ -190,8 +197,8 @@ def _valid():
     [
         lambda r: r.update(extra=1),
         lambda r: r.update(schema_version=2),
-        lambda r: r["copies"][0].update(skill_id="/home/someone/skill"),
-        lambda r: r["copies"][0].update(harness="C:\\Users\\someone"),
+        lambda r: r["copies"][0].update(skill_id="/home/someone/skill"),  # content-guard: allow home-path
+        lambda r: r["copies"][0].update(harness="C:\\Users\\someone"),  # content-guard: allow windows-home-path
         lambda r: r["copies"][0].update(status="exploded"),
         lambda r: r["copies"][0].update(installed_sha256="not-a-hash"),
         lambda r: r["copies"][0].update(skill_id="x" * 121),
@@ -436,6 +443,17 @@ def test_shell_metacharacters_in_a_skill_id_are_quoted_in_commands():
     assert shlex.split(command) == ["brigade", "skills", "uninstall", "a; rm -rf x", "--target", "claude"]
 
 
+def test_update_needs_a_verified_source_selector():
+    # A path-installed copy has no selector; a bare id could resolve to a bundled skill of the same name.
+    unresolved = review.Copy(LINUX1, "m", "claude", "stale", None, None, False, None, False)
+    assert not unresolved.updatable
+    with pytest.raises(review.DecisionError):
+        review.command_for("update", unresolved, "note")
+    bundled = review.Copy(LINUX1, "m", "claude", "stale", None, None, False, "bundled:note", False)
+    assert bundled.updatable
+    assert shlex.split(review.command_for("update", bundled, "note"))[3] == "bundled:note"
+
+
 def test_plan_page_empty_states(tmp_path):
     conn, _path, _tokens = seeded(tmp_path)
     page = fleet_skills_page.render_plan(view_for(conn), {}, nonce="n", now=NOW, csrf="c", editable=True)
@@ -515,7 +533,7 @@ def test_report_endpoint_requires_a_node_token_and_validates(tmp_path):
         status, _h, text = hub.report(tokens[LINUX1], body)
         assert status == 200 and json.loads(text)["copies"] == len(body["copies"])
         bad = copy.deepcopy(body)
-        bad["copies"][0]["skill_id"] = "/home/someone/private"
+        bad["copies"][0]["skill_id"] = "/home/someone/private"  # content-guard: allow home-path
         status, _h, text = hub.report(tokens[LINUX1], bad)
         assert status == 400 and "filesystem path" in text
         bad = copy.deepcopy(body)

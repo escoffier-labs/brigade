@@ -30,15 +30,24 @@ _esc = html.escape
 class Options:
     view: str = "board"
     epic: int | None = None
+    # Issue numbers repeat across repositories, so an epic is (repo, number).
+    epic_repo: str | None = None
 
 
-def href(view: str = "board", epic: int | None = None) -> str:
+def href(view: str = "board", epic: int | None = None, repo: str | None = None) -> str:
     params: dict[str, str] = {}
     if view != "board":
         params["view"] = view
-    if epic is not None:
+    if epic is not None and repo is not None:
         params["epic"] = str(epic)
+        params["repo"] = repo
     return ROUTE + ("?" + urlencode(params) if params else "")
+
+
+def _parent_repo(item: Mapping[str, Any]) -> str | None:
+    if item["parent"] is None:
+        return None
+    return item.get("parent_repo") or item["repo"]
 
 
 def epic_title(title: str) -> str:
@@ -112,7 +121,8 @@ def _pr_link(item: Mapping[str, Any], checks: Mapping[tuple[str, int], str]) -> 
 
 def _card(item: Mapping[str, Any], checks: Mapping[tuple[str, int], str]) -> str:
     epic = (
-        f'<a class="bd-epic-chip" href="{href(epic=item["parent"])}">epic #{item["parent"]}</a>'
+        f'<a class="bd-epic-chip" href="{_esc(href(epic=item["parent"], repo=_parent_repo(item)), quote=True)}">'
+        f"epic #{item['parent']}</a>"
         if item["parent"] is not None
         else ""
     )
@@ -131,7 +141,7 @@ def _epic_card(item: Mapping[str, Any]) -> str:
     total, done = item["sub_total"], item["sub_done"]
     title = epic_title(item["title"])
     return (
-        f'<a class="bd-epic-card" {_attrs(item)} href="{href(epic=item["number"])}">'
+        f'<a class="bd-epic-card" {_attrs(item)} href="{_esc(href(epic=item["number"], repo=item["repo"]), quote=True)}">'
         f'<span class="bd-epic-top"><span class="pr-num">#{item["number"]}</span>'
         f'<span class="bd-epic-title" title="{_esc(title, quote=True)}">{_esc(title)}</span>'
         f"{_status_pill(item['status'])}</span>"
@@ -204,14 +214,19 @@ def render(
 ) -> tuple[str, str, str]:
     """Return (section html, css, script)."""
     all_items = list(board["items"])
-    epic = options.epic
-    items = [i for i in all_items if epic is None or i["parent"] == epic or i["number"] == epic]
+    epic, epic_repo = options.epic, options.epic_repo
+    selected = (epic_repo, epic)
+    items = [
+        i
+        for i in all_items
+        if epic is None or (i["repo"], i["number"]) == selected or (_parent_repo(i), i["parent"]) == selected
+    ]
     checks: dict[tuple[str, int], str] = {}
     if any(i["linked_prs"] for i in items) and ci_view:
         checks = {(r["repo"], r["number"]): r["check"] for r in prs.collect(ci_view, now)["rows"]}
     view = options.view if options.view in VIEWS else "board"
     segments = "".join(
-        f'<a href="{href(name, epic if name != "epics" else None)}"'
+        f'<a href="{_esc(href(name, epic if name != "epics" else None, epic_repo), quote=True)}"'
         + (' aria-current="page"' if name == view else "")
         + f">{label}</a>"
         for name, label in (("board", "Board"), ("epics", "Epics"), ("list", "List"))
@@ -233,7 +248,7 @@ def render(
     strip = '<div class="bd-epics" data-bd-group>' + "".join(_epic_card(e) for e in epics) + "</div>" if epics else ""
     chip = ""
     if epic is not None:
-        known = any(e["number"] == epic for e in epics)
+        known = any((e["repo"], e["number"]) == selected for e in epics)
         chip = (
             f'<p class="bd-filter">{"Showing epic" if known else "Epic not found"} #{epic} · '
             f'<a href="{href(view)}">Clear</a></p>'

@@ -301,7 +301,9 @@ class Copy:
 
     @property
     def updatable(self) -> bool:
-        return self.status in {"stale", "missing", "unknown"}
+        # Without a verified source selector, a bare skill id could resolve to a different
+        # (bundled) skill and overwrite this one.
+        return self.update_selector is not None and self.status in {"stale", "missing", "unknown"}
 
 
 @dataclass(frozen=True)
@@ -655,8 +657,9 @@ class Plan:
 def command_for(action: str, copy: Copy, skill_id: str) -> str:
     """The exact CLI form. Verified against ``brigade skills <verb> --help``; run from the workspace directory."""
     if action == "update":
-        selector = copy.update_selector or skill_id
-        argv = ["brigade", "skills", "install", selector, "--target", copy.harness, "--force"]
+        if copy.update_selector is None:
+            raise DecisionError("update needs a verified source selector")
+        argv = ["brigade", "skills", "install", copy.update_selector, "--target", copy.harness, "--force"]
     elif action == "remove":
         argv = ["brigade", "skills", "uninstall", skill_id, "--target", copy.harness]
     elif action == "rollback":

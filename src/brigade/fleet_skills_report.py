@@ -100,7 +100,10 @@ def find_conflicts(copies: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 {"skill_id": skill_id, "kind": "duplicate-source", "locations": sorted({r["harness"] for r in rows})}
             )
         present = [row for row in rows if row["status"] != "missing" and row["installed_sha256"]]
-        if len({row["installed_sha256"] for row in present}) > 1:
+        # Each harness renders the same source differently (Codex adds frontmatter), so
+        # differing hashes only mean divergence when some copy is not current for its harness.
+        all_current = all(row["status"] == "current" for row in present)
+        if len({row["installed_sha256"] for row in present}) > 1 and not all_current:
             conflicts.append(
                 {
                     "skill_id": skill_id,

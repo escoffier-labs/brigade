@@ -45,7 +45,7 @@ query($owner: String!, $number: Int!, $after: String) {
               repository { nameWithOwner }
               labels(first: 8) { nodes { name color } }
               assignees(first: 5) { nodes { login } }
-              parent { number }
+              parent { number repository { nameWithOwner } }
               subIssuesSummary { total completed percentCompleted }
               closedByPullRequestsReferences(first: 5) { nodes { number repository { nameWithOwner } } }
             }
@@ -150,6 +150,8 @@ def _item(node: Mapping[str, Any], options: Sequence[str]) -> dict[str, Any] | N
     ]
     parent = content.get("parent")
     parent_number = parent.get("number") if isinstance(parent, Mapping) else None
+    parent_origin = (parent.get("repository") or {}).get("nameWithOwner") if isinstance(parent, Mapping) else None
+    has_parent = type(parent_number) is int and parent_number > 0
     summary = _map(content.get("subIssuesSummary"))
     total, done = summary.get("total"), summary.get("completed")
     total = total if type(total) is int and 0 <= total <= 10000 else 0
@@ -171,7 +173,12 @@ def _item(node: Mapping[str, Any], options: Sequence[str]) -> dict[str, Any] | N
         "status": status if status in options else None,
         "labels": labels,
         "assignees": assignees,
-        "parent": parent_number if type(parent_number) is int and parent_number > 0 else None,
+        "parent": parent_number if has_parent else None,
+        "parent_repo": (
+            parent_origin
+            if has_parent and isinstance(parent_origin, str) and board._REPO.fullmatch(parent_origin)
+            else None
+        ),
         "sub_total": total,
         "sub_done": done,
         "linked_prs": linked,
