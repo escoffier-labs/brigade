@@ -1063,7 +1063,7 @@ def fetch_interactive_sessions(conn: sqlite3.Connection, *, now: datetime) -> li
     active = fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp(), exclude_terminal_cloud_reports=True)[
         :SESSION_LIMIT
     ]
-    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=now.timestamp())[:CLOUD_REPORT_HISTORY_LIMIT]
+    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=now.timestamp(), limit=CLOUD_REPORT_HISTORY_LIMIT)
     return active + history
 
 

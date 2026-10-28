@@ -506,6 +506,24 @@ def test_cloud_history_filters_before_limit(monkeypatch):
     assert fleet_hub_sessions.list_cloud_reports(conn, now_epoch=NOW + 901, text_filter="Check build") == history
 
 
+def test_cloud_history_limit_and_text_filter_use_decoded_report_text(monkeypatch):
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW)
+    from brigade import fleet_dot
+
+    for session_id, task in (("session-a", "Überprüfung der Stufe"), ("session-b", "Check build")):
+        body = fleet_dot.report_session(v2_report(session_id=session_id, task=task))["presence_payload"]
+        fleet_hub_sessions.handle_session(conn, body, caller_node=NODE)
+    later = NOW + 901
+    assert len(fleet_hub_sessions.list_cloud_reports(conn, now_epoch=later)) == 2
+    assert len(fleet_hub_sessions.list_cloud_reports(conn, now_epoch=later, limit=1)) == 1
+    found = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=later, text_filter="überprüfung")
+    assert [row["session_id"] for row in found] == ["session-a"]
+    # Key names and provider metadata are not report text.
+    assert fleet_hub_sessions.list_cloud_reports(conn, now_epoch=later, text_filter="source_scope") == []
+
+
 @pytest.mark.parametrize(
     "reply", [{}, {"session": None}, {"session": {"node_id": NODE}}, "invalid", "timeout", "old-hub"]
 )

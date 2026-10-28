@@ -278,7 +278,7 @@ def render_octopool_observation(view: deck.DeckView) -> str:
         "cache_served_responses": ("cache-served response", "cache-served responses"),
         "uncached_outcomes": ("uncached outcome", "uncached outcomes"),
         "fallbacks": ("fallback", "fallbacks"),
-        "service_errors": ("service errors", "service errors"),
+        "service_errors": ("service error", "service errors"),
     }
     metrics = " · ".join(
         f"{value} {words[value != 1]}"

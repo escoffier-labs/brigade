@@ -111,6 +111,10 @@ def handle_session(
 
 # Columns fleet_who returns, so the SQL filter matches what the caller sees.
 _FILTER_COLUMNS = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
+# Decoded report text only: raw JSON stores non-ASCII as escapes and includes key names.
+_CLOUD_TEXT = tuple(
+    f"json_extract(cloud_context_json, '$.{key}')" for key in ("agent_label", "task", "progress", "blocker", "result")
+)
 
 
 def _casefold(value: object) -> str:
@@ -127,14 +131,17 @@ def list_sessions(
     active_nodes_only: bool = False,
     recent_cloud_reports: bool = False,
     exclude_terminal_cloud_reports: bool = False,
+    limit: int | None = None,
 ) -> list[dict[str, object]]:
     """Active unexpired sessions, or history when ``include_all`` is set.
 
     ``node_ids`` and ``text_filter`` apply before the row limit, so a narrow
-    grant or filter still finds older matching sessions.
+    grant or filter still finds older matching sessions. ``limit`` can only
+    lower the built-in cap.
     """
     now = fleet_hub._now_epoch() if now_epoch is None else now_epoch
-    limit = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
+    cap = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
+    limit = cap if limit is None else max(0, min(limit, cap))
     node_filter = ""
     params: list[Any] = [int(include_all), now]
     if node_ids is not None:
@@ -170,7 +177,7 @@ def list_sessions(
         conn.create_function("brigade_casefold", 1, _casefold, deterministic=True)
         text_clause = (
             "AND instr(brigade_casefold("
-            + " || char(31) || ".join(f"coalesce({column}, '')" for column in (*_FILTER_COLUMNS, "cloud_context_json"))
+            + " || char(31) || ".join(f"coalesce({column}, '')" for column in (*_FILTER_COLUMNS, *_CLOUD_TEXT))
             + "), ?) > 0 "
         )
         params.append(text_filter.casefold())
@@ -193,6 +200,7 @@ def list_cloud_reports(
     now_epoch: float | None = None,
     node_ids: set[str] | None = None,
     text_filter: str | None = None,
+    limit: int | None = None,
 ) -> list[dict[str, object]]:
     """Bounded stale/terminal reported tasks, separate from active presence."""
     return list_sessions(
@@ -202,6 +210,7 @@ def list_cloud_reports(
         node_ids=node_ids,
         text_filter=text_filter,
         recent_cloud_reports=True,
+        limit=limit,
     )
 
 

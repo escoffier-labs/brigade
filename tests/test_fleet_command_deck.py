@@ -384,7 +384,7 @@ def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_head
     assert "2026-08-25T12:00:00+00:00" in panel and "2026-08-25T12:00:00+00:00" not in visible
     assert "24h" in visible and "Pool-wide" in visible and "includes clients outside this fleet" in visible
     assert "41 requests" in visible and "7 cache-served responses" in visible
-    assert "2 fallbacks" in visible and "1 service errors" in visible
+    assert "2 fallbacks" in visible and "1 service error" in visible
     assert "GitHub reads saved" not in panel and "avoided GitHub" not in panel
     assert "cache hits and stale responses" in panel
     assert "expected local fallbacks" in panel
