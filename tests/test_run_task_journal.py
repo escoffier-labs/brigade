@@ -15,6 +15,282 @@ prepared = support.prepared
 task_run = support.task_run
 
 
+@pytest.mark.parametrize("phase", ["checkpoint-only", "partial-claim"])
+def test_incomplete_launch_claim_preserves_damage_and_refuses_retry(task_run, monkeypatch, phase):
+    """A claim gap cannot be repaired into a fresh ephemeral grant."""
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    path = run_dir / "events/lifecycle.jsonl"
+    before = path.read_bytes()
+    real_append = run_lifecycle._append_owner_event
+    real_write = run_journal.os.write
+    partial = []
+
+    def write(fd, line):
+        if b'"event_type":"task.launch-claimed"' in line:
+            fragment = line[: len(line) // 2]
+            written = real_write(fd, fragment)
+            partial.append(fragment[:written])
+            return written
+        return real_write(fd, line)
+
+    def append(path, **kwargs):
+        if kwargs["event_type"] == "task.launch-claimed":
+            if phase == "checkpoint-only":
+                raise OSError("simulated claim checkpoint-only crash")
+            with monkeypatch.context() as patch:
+                patch.setattr(run_journal.os, "write", write)
+                return real_append(path, **kwargs)
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", append)
+        with pytest.raises(tasks.TaskJournalError, match="operation refused or durability indeterminate"):
+            tasks.claim_task_launch(
+                run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+            )
+    damaged = path.read_bytes()
+    assert damaged.startswith(before) and damaged != before
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors
+    assert report.events[-1].payload["paired_event_type"] == "task.launch-claimed"
+    assert not any(e.event_type == "task.launch-claimed" for e in report.events)
+    if phase == "partial-claim":
+        assert len(partial) == 1 and report.partial_tail == partial[0]
+        assert damaged.endswith(partial[0])
+    else:
+        assert report.partial_tail is None and not partial
+    reason = "partial tail" if partial else "incomplete-pair"
+    with pytest.raises(tasks.TaskJournalError, match=reason):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match=reason):
+        tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        )
+    assert path.read_bytes() == damaged
+
+
+def test_later_real_pair_cannot_conceal_orphaned_launch_claim(task_run, monkeypatch):
+    """Scan old claim checkpoints even when a later checkpoint covers the tail."""
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    real_append = run_lifecycle._append_owner_event
+
+    def append(path, **kwargs):
+        if kwargs["event_type"] == "task.launch-claimed":
+            raise OSError("simulated orphaned claim")
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", append)
+        with pytest.raises(tasks.TaskJournalError):
+            tasks.claim_task_launch(
+                run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+            )
+    path = run_dir / "events/lifecycle.jsonl"
+    orphaned = path.read_bytes()
+    # Write actual unrelated checkpoint/fact bytes under the real owner. This
+    # constructs a hostile history without bypassing a public admission gate.
+    key = "after-orphan"
+    event_type = "run.redaction.recorded"
+    checkpoint = run_checkpoint.write_checkpoint(
+        run_dir,
+        (run_dir / "run.json").read_bytes(),
+        workspace=workspace,
+        paired_event_type=event_type,
+        pairing_key=run_events.request_digest(event_type=event_type, payload={}, idempotency_key=key),
+    )
+    assert checkpoint is not None
+    run_journal.append_event(
+        path,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload={},
+        idempotency_key=key,
+        expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
+    )
+    damaged = path.read_bytes()
+    assert damaged.startswith(orphaned) and damaged != orphaned
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors and report.partial_tail is None
+    body = json.loads(run_checkpoint.validate_checkpoint(run_dir, checkpoint))
+    run_checkpoint._verify_coverage(list(report.events), checkpoint, body)
+    for operation in (
+        lambda: tasks.read_tasks(run_dir),
+        lambda: tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        ),
+    ):
+        with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
+            operation()
+    assert path.read_bytes() == damaged
+
+
+@pytest.mark.parametrize(
+    "history,reason",
+    [
+        ("duplicate", "pristine prepared history"),
+        ("reassigned", "dispatch binding already used"),
+        ("unprepared", "attempt mismatch"),
+        ("unaccepted", "identity not accepted"),
+        ("wrong-seat", "pristine prepared history"),
+        ("wrong-attempt", "attempt mismatch"),
+        ("prior-dispatch", "dispatch binding already used"),
+    ],
+)
+def test_public_read_refuses_chain_valid_paired_hostile_claim(task_run, history, reason):
+    """Real pairs pass checkpoint coverage before public semantic rejection."""
+    run_dir, workspace = task_run
+    if history == "unprepared":
+        handle = accepted(task_run)
+    else:
+        handle = prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    if history in {"duplicate", "reassigned"}:
+        tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        )
+    if history == "reassigned":
+        accepted(task_run, "two", "request-two")
+        handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="two")
+    if history == "prior-dispatch":
+        run_lifecycle.record_dispatch_fact(
+            run_dir, workspace=workspace, event_type="run.dispatch.requested", seat="worker"
+        )
+    payload = {
+        "task_id": "absent" if history == "unaccepted" else handle.spec.task_id,
+        "attempt_id": "f" * 64 if history in {"unprepared", "wrong-attempt"} else handle.attempt_id,
+        "seat": "other" if history == "wrong-seat" else "worker",
+        "dispatch_attempt": 1,
+    }
+    fact = run_lifecycle.record_lifecycle_event(
+        run_dir,
+        workspace=workspace,
+        event_type="task.launch-claimed",
+        payload=payload,
+        idempotency_key="hostile-claim",
+    )
+    path = run_dir / "events/lifecycle.jsonl"
+    before = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors and report.partial_tail is None
+    checkpoint = report.events[-2]
+    assert report.events[-1] == fact
+    assert checkpoint.payload["pairing_key"] == fact.request_digest
+    body = json.loads(run_checkpoint.validate_checkpoint(run_dir, checkpoint))
+    run_checkpoint._verify_coverage(list(report.events), checkpoint, body)
+    with pytest.raises(tasks.TaskJournalError, match=reason):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match=reason):
+        tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        )
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("pairing", ["missing", "wrong"])
+def test_public_read_refuses_claim_with_invalid_pairing_identity(task_run, pairing):
+    """A canonical claim envelope cannot substitute for a matching pair."""
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    path = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(path).events
+    payload = dict(events[-2].payload)
+    payload["paired_event_type"] = "task.launch-claimed"
+    payload.pop("pairing_key", None)
+    if pairing == "wrong":
+        payload["pairing_key"] = "f" * 64
+    checkpoint = run_journal.append_event(
+        path,
+        run_id=run_dir.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=payload,
+        idempotency_key="invalid-claim-pair",
+        expected_previous_sequence=events[-1].sequence,
+        workspace=workspace,
+    )
+    fact = run_journal.append_event(
+        path,
+        run_id=run_dir.name,
+        event_type="task.launch-claimed",
+        payload={"task_id": "one", "attempt_id": handle.attempt_id, "seat": "worker", "dispatch_attempt": 1},
+        idempotency_key="claim-with-invalid-pair",
+        expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
+    )
+    before = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors and report.partial_tail is None
+    assert report.events[-1] == fact
+    run_checkpoint.validate_checkpoint(run_dir, checkpoint)
+    assert checkpoint.payload.get("pairing_key") != fact.request_digest
+    with pytest.raises(tasks.TaskJournalError, match="pairing|incomplete-pair"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="pairing|incomplete-pair"):
+        tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        )
+    assert path.read_bytes() == before
+
+
+def test_claim_keeps_authoritative_prior_gate_and_checkpoint_recovery_compatible(authoritative_task_run):
+    """Claim cursor advancement must permit subsequent real owner writes."""
+    from brigade import run_projector
+
+    run_dir, workspace = authoritative_task_run
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    handle = prepared(authoritative_task_run)
+    path = run_dir / "events/lifecycle.jsonl"
+    before = run_journal.read_journal_bounded(path).events
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    old = run_projector.project_run_snapshot(snapshot, before, journal_present=True)
+    current = tasks.read_tasks(run_dir)[0]
+    claim = tasks.claim_task_launch(
+        run_dir, workspace=workspace, handle=handle, expected_version=current.version, seat="worker", dispatch_attempt=1
+    )
+    assert claim.outcome == "granted"
+    events = run_journal.read_journal_bounded(path).events
+    projected = run_projector.project_run_snapshot(snapshot, events, journal_present=True)
+    assert projected.last_sequence == old.last_sequence + 2 == events[-1].sequence
+    assert projected.snapshot["status"] == old.snapshot["status"] == "planning"
+    observed = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        expected_version=claim.task.version,
+        observation=tasks.TaskObservation("running", containment="active"),
+    )
+    dispatch = run_lifecycle.record_dispatch_fact(
+        run_dir, workspace=workspace, event_type="run.dispatch.requested", seat="worker"
+    )
+    assert dispatch is not None and dispatch.payload == {"seat": "worker", "attempt": 1, "detail": "requested"}
+    journal_before_recovery = path.read_bytes()
+    (run_dir / "run.json").unlink()
+    repaired = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert repaired["status"] == "planning"
+    assert json.loads((run_dir / "run.json").read_bytes()) == repaired
+    assert path.read_bytes() == journal_before_recovery
+    current = tasks.read_tasks(run_dir)[0]
+    assert current == observed and current.launch_claim == tasks.TaskLaunchBinding("worker", 1)
+    assert (
+        tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=current.version,
+            seat="worker",
+            dispatch_attempt=1,
+        ).outcome
+        == "already-claimed"
+    )
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    assert run_shadow.check_projection_readiness(run_dir).ready
+
+
 @pytest.mark.parametrize("outcome", ["observed", "rejected", "exception"])
 @pytest.mark.parametrize("selectors", [{}, {"task_id": "one"}])
 def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_run, outcome, selectors):

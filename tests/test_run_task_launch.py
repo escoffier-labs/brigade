@@ -5,15 +5,151 @@ from __future__ import annotations
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from brigade import run_control_journal, run_events, run_journal, run_lifecycle, run_projector
+from brigade import (
+    run_checkpoint,
+    run_control_journal,
+    run_events,
+    run_journal,
+    run_lifecycle,
+    run_projector,
+    run_shadow,
+)
 from brigade import run_tasks as tasks
 from tests import test_run_tasks as support
 
 task_run = support.task_run
+
+
+@pytest.mark.parametrize("phase", ["preflight-sync", "checkpoint-publication"])
+def test_claim_failure_before_new_bytes_leaves_candidate_grantable(task_run, monkeypatch, phase):
+    """Unlike replay sync, a pristine failed claim must remain eligible."""
+    run_dir, workspace = task_run
+    handle = support.prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    path = run_dir / "events/lifecycle.jsonl"
+    before = path.read_bytes()
+    checkpoints = {p.name: p.read_bytes() for p in run_checkpoint.checkpoint_dir(run_dir).iterdir()}
+
+    def fail(*args, **kwargs):
+        raise OSError("simulated pre-claim barrier failure")
+
+    with monkeypatch.context() as patch:
+        if phase == "preflight-sync":
+            patch.setattr(run_journal, "_sync_journal_fd", fail)
+        else:
+            patch.setattr(run_checkpoint, "publish_checkpoint_file", fail)
+        with pytest.raises(tasks.TaskJournalError, match="operation refused or durability indeterminate"):
+            tasks.claim_task_launch(
+                run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+            )
+    assert path.read_bytes() == before
+    assert {p.name: p.read_bytes() for p in run_checkpoint.checkpoint_dir(run_dir).iterdir()} == checkpoints
+    current = tasks.read_tasks(run_dir)[0]
+    assert current.version == version and current.launch_claim is None
+    assert (
+        tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=current.version,
+            seat="worker",
+            dispatch_attempt=1,
+        ).outcome
+        == "granted"
+    )
+
+
+@pytest.mark.parametrize("phase", ["fsync", "close", "shadow-exit", "append-return", "pair-exit"])
+def test_complete_claim_failure_consumes_permission_without_returning_grant(task_run, monkeypatch, phase):
+    """Post-claim faults must reach real claim bytes, never preflight sync."""
+    run_dir, workspace = task_run
+    handle = support.prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    path = run_dir / "events/lifecycle.jsonl"
+    before = path.read_bytes()
+    real_append = run_lifecycle._append_owner_event
+    real_sync = run_journal._sync_journal_fd
+    real_close = run_journal.os.close
+    real_pair = run_lifecycle.checkpoint_event_pair
+    target_fd = None
+
+    def fail(*args, **kwargs):
+        assert run_journal.read_journal_bounded(path).events[-1].event_type == "task.launch-claimed"
+        raise OSError("simulated post-claim failure")
+
+    def sync(fd, journal_path):
+        nonlocal target_fd
+        if phase == "fsync":
+            fail()
+        real_sync(fd, journal_path)
+        target_fd = fd
+
+    def close(fd):
+        nonlocal target_fd
+        real_close(fd)
+        if fd == target_fd:
+            target_fd = None
+            raise OSError("simulated claim descriptor close failure")
+
+    def append(path, **kwargs):
+        if kwargs["event_type"] != "task.launch-claimed":
+            return real_append(path, **kwargs)
+        with monkeypatch.context() as patch:
+            if phase in {"fsync", "close"}:
+                patch.setattr(run_journal, "_sync_journal_fd", sync)
+            if phase == "close":
+                patch.setattr(run_journal.os, "close", close)
+            event = real_append(path, **kwargs)
+        if phase == "append-return":
+            fail()
+        return event
+
+    @contextmanager
+    def pair():
+        with real_pair():
+            yield
+        fail()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", append)
+        if phase == "shadow-exit":
+            patch.setattr(run_shadow, "record_shadow_comparison", fail)
+        if phase == "pair-exit":
+            patch.setattr(run_lifecycle, "checkpoint_event_pair", pair)
+        with pytest.raises(tasks.TaskJournalError, match="operation refused or durability indeterminate"):
+            tasks.claim_task_launch(
+                run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+            )
+    damaged = path.read_bytes()
+    assert damaged.startswith(before) and damaged != before
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors and report.partial_tail is None
+    checkpoint, claim = report.events[-2:]
+    assert checkpoint.payload["paired_event_type"] == claim.event_type == "task.launch-claimed"
+    assert checkpoint.payload["pairing_key"] == claim.request_digest
+    current = tasks.read_tasks(run_dir)[0]
+    assert current.launch_claim == tasks.TaskLaunchBinding("worker", 1)
+    with pytest.raises(tasks.TaskJournalError, match="stale"):
+        tasks.claim_task_launch(
+            run_dir, workspace=workspace, handle=handle, expected_version=version, seat="worker", dispatch_attempt=1
+        )
+    assert (
+        tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=current.version,
+            seat="worker",
+            dispatch_attempt=1,
+        ).outcome
+        == "already-claimed"
+    )
+    assert path.read_bytes() == damaged
 
 
 def test_concurrent_first_claim_grants_once(task_run):
