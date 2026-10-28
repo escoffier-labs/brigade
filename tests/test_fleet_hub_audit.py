@@ -197,6 +197,34 @@ def test_ordinary_agent_names_are_not_credential_markers(conn, field, name):
     assert {key: row[key] for key in kwargs} == kwargs
 
 
+@pytest.mark.parametrize("value", ["agent:token.synthetic", "agent:secret.synthetic"])
+@pytest.mark.parametrize("field", ["actor", "subject", "principal_id", "grants"])
+def test_agent_sensitive_labels_are_refused_without_writes_or_finishing_caller_work(conn, field, value):
+    conn.execute("CREATE TABLE sibling (id INTEGER)")
+    conn.execute("INSERT INTO sibling VALUES (1)")
+    audit.append(conn, actor="admin", action="invite.create", subject="fixture", detail={})
+    original = audit.page(conn)
+    changes = conn.total_changes
+    kwargs = {"actor": "admin", "action": "grants.change", "subject": "fixture", "detail": {}}
+    if field in ("actor", "subject"):
+        kwargs[field] = value
+    else:
+        kwargs["detail"] = {field: [value] if field == "grants" else value}
+
+    with pytest.raises(ValueError) as error:
+        audit.append(conn, **kwargs)
+
+    assert value not in str(error.value)
+    assert value.removeprefix("agent:") not in str(error.value)
+    assert conn.total_changes == changes
+    assert conn.in_transaction
+    assert conn.execute("SELECT * FROM sibling").fetchall() == [(1,)]
+    assert audit.page(conn) == original
+    conn.rollback()
+    assert conn.execute("SELECT * FROM sibling").fetchall() == []
+    assert audit.page(conn) == []
+
+
 @pytest.mark.parametrize("value", PUBLIC_NODE_IDS)
 @pytest.mark.parametrize("field", ["invite_id", "hub_id", "key_id", "statement_id"])
 def test_nonidentity_fields_still_refuse_opaque_runs(conn, field, value):

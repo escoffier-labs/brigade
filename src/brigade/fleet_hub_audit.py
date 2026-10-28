@@ -15,8 +15,9 @@ principals and grants retain the lowercase name grammar and 63-character limit.
 Credential markers are refused in every identifier on write. Provider prefixes
 must start the value or follow a separator (., _, -, or :), not a letter/digit.
 Sensitive labels (secret, credential, token, password, bearer, binding,
-keyrecord, content) are explicit markers only at the start or after a dot and
-followed by a dot, such as ``fixture.token.value``. Plain words and substrings
+keyrecord, content) are explicit markers only at the start, after a dot, or
+after the optional agent: prefix, and followed by a dot, such as
+``fixture.token.value`` or ``agent:token.value``. Plain words and substrings
 in ordinary names are not credential markers. Nonidentity fields
 (invite_id, hub_id, key_id, statement_id) also refuse runs of 32 or more
 base64url characters, even inside longer identifiers. Public mesh ids such as
@@ -106,7 +107,7 @@ _AGENT = re.compile(r"agent:[a-z][a-z0-9._-]{0,62}")
 _CREDENTIAL = re.compile(
     r"(?<![A-Za-z0-9])(?:bfi1|gh[pousr]_|github_pat_|glpat-|gldt-|sk[-_]|xox[baprs]-|xoxe[.-]|"
     r"npm_|hf_|AIza[A-Za-z0-9_-]{30,}|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|ya29\.|eyJ)|"
-    r"(?:^|\.)(?:secret|credential|token|password|bearer|binding|keyrecord|content)(?=\.)",
+    r"(?:^|[.:])(?:secret|credential|token|password|bearer|binding|keyrecord|content)(?=\.)",
     re.IGNORECASE,
 )
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{32,}")
