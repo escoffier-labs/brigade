@@ -297,3 +297,41 @@ def test_continuation_seeks_past_revoked_prefix_with_stale_statistics(store):
         assert page["total"] == 3 and page["next_cursor"]
         measurements.append(len(steps))
     assert measurements[1] <= measurements[0] * 2, measurements
+
+
+def test_role_and_revocation_changes_restrict_cached_visibility(store):
+    messages.add_principal(store, {"name": "guest", "may_send_to": ["*"]})
+    raw = {"action": "who", "limit": 1}
+    data = {
+        "nodes": [{"node_id": "reader"}, {"node_id": "reader"}],
+        "principals": [],
+        "sessions": [{"node_id": "reader", "repo_label": "private"}],
+    }
+    paging.page(store, raw, data, caller="agent:guest", limit=1, visible=lambda *_: True, snapshot_write=True)
+    store.commit()
+    store.execute("UPDATE fleet_message_principals SET role='teammate' WHERE name='guest'")
+    assert store.execute("SELECT visible FROM fleet_read_snapshot_rows WHERE kind='sessions'").fetchone() == (0,)
+    store.execute("UPDATE nodes SET revoked_at='removed' WHERE node_id='reader'")
+    assert store.execute("SELECT visible FROM fleet_read_snapshot_rows WHERE kind='nodes'").fetchone() == (0,)
+    store.commit()
+
+
+def test_teammate_continuation_keeps_indexed_work_and_byte_bounds(store):
+    from brigade import fleet_hub_message_grants as grants
+
+    messages.add_principal(store, {"name": "guest", "may_send_to": ["*"]})
+    store.execute("UPDATE fleet_message_principals SET role='teammate' WHERE name='guest'")
+    store.commit()
+    for i in range(64):
+        fleet_hub.add_node(store, f"node-{i:04d}")
+    first = messages.handle(store, {"action": "who", "limit": 1}, caller="agent:guest")[1]
+    grants.set_grants(store, {"action": "grants", "name": "guest", "may_send_to": ["node-0063"]})
+    traced = []
+    store.set_trace_callback(traced.append)
+    second = messages.handle(
+        store, {"action": "who", "limit": 1, "cursor": first["next_cursor"]}, caller="agent:guest"
+    )[1]
+    store.set_trace_callback(None)
+    assert second["nodes"] == [{"node_id": "node-0063"}]
+    assert len(json.dumps(second).encode()) <= paging.PAGE_MAX_BYTES
+    assert any("INDEXED BY fleet_read_snapshot_visible" in sql for sql in traced)

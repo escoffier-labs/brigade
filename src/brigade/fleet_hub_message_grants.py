@@ -86,10 +86,34 @@ def grants_for(conn: sqlite3.Connection, principal_id: str) -> list[str]:
     ]
 
 
-def permits(patterns: Iterable[str], sender: str, recipient: str) -> bool:
-    """Pure grant check, so callers filtering many rows can load patterns once."""
-    if not sender.startswith("agent:"):
+def classify_principal(conn: sqlite3.Connection, principal_id: str) -> str | None:
+    """Classify only active enrolled identities; unsupported shapes fail closed."""
+    if principal_id.startswith("agent:"):
+        if messages._PRINCIPAL_NAME_RE.fullmatch(principal_id[6:]) is None:
+            return None
+        row = conn.execute(
+            "SELECT role FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL",
+            (principal_id,),
+        ).fetchone()
+        return str(row[0]) if row and row[0] in ("agent", "teammate") else None
+    if principal_id == "unknown" or _NODE_ID_RE.fullmatch(principal_id) is None:
+        return None
+    return (
+        "node"
+        if conn.execute("SELECT 1 FROM nodes WHERE node_id=? AND revoked_at IS NULL", (principal_id,)).fetchone()
+        else None
+    )
+
+
+def permits(conn: sqlite3.Connection, patterns: Iterable[str], sender: str, recipient: str) -> bool:
+    """One-way read visibility. Reciprocity belongs only to message insertion."""
+    role = classify_principal(conn, sender)
+    if role is None:
+        return False
+    if role == "node":
         return True
+    # Public key history remains readable after recipient revocation. Directory
+    # readers separately filter active rows; only the caller confers privilege.
     allowed = {recipient, "*", "agent:*" if recipient.startswith("agent:") else "node:*"}
     return recipient != sender and bool(allowed.intersection(patterns))
 
@@ -130,8 +154,8 @@ def authorization_identity(
         peer_epochs = epochs(peer)
         authorized = (
             peer_epochs is not None
-            and permits(caller_grants, caller, peer)
-            and permits(grants_for(conn, peer), peer, caller)
+            and permits(conn, caller_grants, caller, peer)
+            and permits(conn, grants_for(conn, peer), peer, caller)
         )
         records.append(
             {
@@ -151,16 +175,27 @@ def authorization_identity(
 
 
 def require_granted(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
-    if not sender.startswith("agent:"):
-        return
-    if not permits(grants_for(conn, sender), sender, recipient):
+    sender_role = classify_principal(conn, sender)
+    recipient_role = classify_principal(conn, recipient)
+    if sender_role is None:
+        raise messages.MessageAuthError("sender is not an active hub principal")
+    symmetric = "teammate" in (sender_role, recipient_role)
+
+    def named(source: str, target: str) -> bool:
+        target_role = classify_principal(conn, target)
+        allowed = {target, "*", "node:*" if target_role == "node" else "agent:*"}
+        return source != target and bool(allowed.intersection(grants_for(conn, source)))
+
+    if (symmetric and (not named(sender, recipient) or not named(recipient, sender))) or (
+        not symmetric and sender_role != "node" and not permits(conn, grants_for(conn, sender), sender, recipient)
+    ):
         raise messages.MessageForbidden(
             "recipient is not permitted by send grants", code="message_recipient_not_permitted"
         )
 
 
 def require_recipient_cap(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
-    if not sender.startswith("agent:"):
+    if classify_principal(conn, sender) == "node":
         return
     count = conn.execute(
         "SELECT COUNT(*) FROM fleet_messages WHERE sender=? AND recipient=? AND acked_at IS NULL",
@@ -173,18 +208,40 @@ def require_recipient_cap(conn: sqlite3.Connection, sender: str, recipient: str)
 
 
 def set_grants(conn: sqlite3.Connection, raw: object) -> dict[str, Any] | None:
-    if not isinstance(raw, dict) or set(raw) != {"action", "name", "may_send_to"} or raw["action"] != "grants":
-        raise messages.MessageError("principal grants requires action='grants', name, and may_send_to")
-    name = messages._text(raw["name"], "name", 63)
-    if name is None or messages._PRINCIPAL_NAME_RE.fullmatch(name) is None:
-        raise messages.MessageError("invalid principal name")
+    if (
+        not isinstance(raw, dict)
+        or raw.get("action") != "grants"
+        or set(raw) not in ({"action", "name", "may_send_to"}, {"action", "node_id", "may_send_to"})
+    ):
+        raise messages.MessageError("principal grants requires action='grants', one target, and may_send_to")
+    node = "node_id" in raw
+    target = raw.get("node_id" if node else "name")
+    if (
+        not isinstance(target, str)
+        or (node and (target == "unknown" or _NODE_ID_RE.fullmatch(target) is None))
+        or (not node and messages._PRINCIPAL_NAME_RE.fullmatch(target) is None)
+    ):
+        raise messages.MessageError("invalid principal grant target")
+    principal_id = target if node else f"agent:{target}"
     patterns = normalize_patterns(raw["may_send_to"])
     conn.execute("BEGIN IMMEDIATE")
     try:
-        principal = messages.get_principal(conn, {"action": "get", "name": name})
-        if principal is not None:
-            replace_grants(conn, f"agent:{name}", patterns)
-            principal["may_send_to"] = patterns
+        role = classify_principal(conn, principal_id)
+        if role is None:
+            raise messages.MessageError("principal grant target is not active")
+        principal: dict[str, Any] | None = (
+            {"principal_id": principal_id, "node_id": target}
+            if node
+            else messages.get_principal(conn, {"action": "get", "name": target})
+        )
+        replace_grants(conn, principal_id, patterns)
+        from . import fleet_hub_audit
+
+        fleet_hub_audit.append(
+            conn, actor="admin", action="grants.change", subject=principal_id, detail={"grants": patterns}
+        )
+        assert principal is not None
+        principal["may_send_to"] = patterns
         conn.commit()
         return principal
     except BaseException:

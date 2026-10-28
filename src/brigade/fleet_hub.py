@@ -122,7 +122,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 46
+SCHEMA_VERSION = 47
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -271,6 +271,12 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 # Independently developed migrations can reserve the same schema version.
 # Register nullable additions here so current-version databases self-heal too.
 _ADDITIVE_COLUMNS = (
+    (
+        "fleet_message_principals",
+        "role",
+        "ALTER TABLE fleet_message_principals ADD COLUMN role TEXT NOT NULL DEFAULT 'agent'",
+    ),
+    ("fleet_message_principals", "person", "ALTER TABLE fleet_message_principals ADD COLUMN person TEXT"),
     ("fleet_messages", "sealed_reply_to", "ALTER TABLE fleet_messages ADD COLUMN sealed_reply_to INTEGER"),
     ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
     ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
@@ -700,6 +706,9 @@ def _apply_schema(
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn, storage_policy=storage_policy, prune_messages=prune_messages)
+    from . import fleet_hub_audit
+
+    fleet_hub_audit.ensure_schema(conn)
     from . import fleet_hub_questions
 
     # v42 -> v43: audited operator questions and terminal-answer trigger.
@@ -1809,6 +1818,13 @@ def revoke_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None
     with conn:
         conn.execute("UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id))
         fleet_hub_message_keys.revoke(conn, node_id)
+        conn.execute("DELETE FROM fleet_message_send_grants WHERE principal_id=?", (node_id,))
+        if conn.execute("SELECT 1 FROM nodes WHERE node_id=?", (node_id,)).fetchone():
+            from . import fleet_hub_audit
+
+            fleet_hub_audit.append(
+                conn, actor="admin", action="member.remove", subject=node_id, detail={"node_id": node_id}
+            )
     row = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
     return _node_payload(row) if row is not None else None
 

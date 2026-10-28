@@ -39,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add database-backed teammate roles, reciprocal send grants, node grant administration, reduced directory reads, and admin-only audit paging. Grant and revocation audit rows commit with their mutations (#2041).
+
 - Add an internal POSIX Hub identity store with signed history, endpoint bindings, and rollback floors. Preserve primary write failures in identity and trust snapshots. Identity migration and message opening/sealing remain unfinished.
 
 - Add an internal POSIX trust snapshot for manifest anchors, signed membership and revocations, rollback floors, and attributed conflicts. Separate budgets protect authenticated conflict evidence from unsigned claims. Message opening and sealing remain unfinished.

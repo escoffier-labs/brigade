@@ -1470,6 +1470,29 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path == "/audit":
+                if not self._authorized():
+                    self._send_json(401 if self._bearer() is None else 403, {"error": "admin token required"})
+                    return
+                from . import fleet_hub_audit
+
+                try:
+                    params = parse_qs(query, keep_blank_values=True)
+                    if set(params) - {"after_id", "limit"} or any(len(v) != 1 for v in params.values()):
+                        raise ValueError("invalid audit query")
+                    after_id = int(params.get("after_id", ["0"])[0])
+                    limit = int(params.get("limit", ["100"])[0])
+                    conn = open_db(Path(db_path))
+                    try:
+                        rows = fleet_hub_audit.page(conn, after_id=after_id, limit=limit)
+                    finally:
+                        conn.close()
+                    self._send_json(200, {"audit": rows})
+                except ValueError as exc:
+                    self._send_json(400, {"error": str(exc)})
+                except (FleetHubError, sqlite3.Error):
+                    self._send_json(500, {"error": "hub database error"})
+                return
             if path in ("/deck/ci", "/ci", "/ci/work"):
                 from .fleet_ci_http import route
 

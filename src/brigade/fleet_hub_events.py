@@ -281,11 +281,10 @@ def iso(epoch: float) -> str:
 
 def permits(conn: sqlite3.Connection, principal: str, subject: str) -> bool:
     """Same visibility the claims and sessions station reads apply: agents see only what their grants name."""
-    if not principal.startswith("agent:"):
-        return True
     from . import fleet_hub_message_grants as grants
 
-    return grants.permits(grants.grants_for(conn, principal), principal, subject)
+    role = grants.classify_principal(conn, principal)
+    return role in ("node", "agent") and grants.permits(conn, grants.grants_for(conn, principal), principal, subject)
 
 
 # --------------------------------------------------------------------------------------
@@ -629,6 +628,11 @@ def handle(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tup
                 raise EventsError(400, "events_invalid_arguments", "invalid_arguments")
             return 200, {"events": definitions()}
         if action == "events_subscribe":
+            from .fleet_hub_message_grants import classify_principal
+
+            role = classify_principal(conn, caller)
+            if role is None or (role == "teammate" and params.get("name") != MESSAGE_CREATED):
+                raise EventsError(403, "principal_role_forbidden", "forbidden")
             return 200, _subscribe(conn, params, caller)
         if action == "events_unsubscribe":
             return 200, _unsubscribe(conn, params, caller)

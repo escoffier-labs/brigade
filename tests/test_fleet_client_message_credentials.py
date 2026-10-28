@@ -767,3 +767,43 @@ def test_unconfigured_message_cli_keeps_local_error_contract(configured, monkeyp
     assert cli.main(["fleet", "msg", "list", "--json"]) == 1
     result = json.loads(capsys.readouterr().out)
     assert result["status"] is None and result["code"] == "invalid_argument"
+
+
+def test_client_node_grants_use_admin_only_and_exact_target_body(configured, monkeypatch):
+    calls = []
+
+    def transport(url, token, body):
+        calls.append((url, token == "fixture-admin", body))
+        return 200, {"principal": {"principal_id": "node-a"}}
+
+    monkeypatch.setattr(client, "_principal_admin_request", transport)
+    assert client.set_principal_grants(None, ["agent:peer"], node_id="node-a")["principal"]["principal_id"] == "node-a"
+    assert calls == [
+        ("https://hub.invalid", True, {"action": "grants", "node_id": "node-a", "may_send_to": ["agent:peer"]})
+    ]
+
+
+def test_client_node_grants_reject_ambiguous_or_missing_target_before_transport(configured, monkeypatch):
+    def transport(*args):
+        pytest.fail("invalid target reached transport")
+
+    monkeypatch.setattr(client, "_principal_admin_request", transport)
+    for name, node in ((None, None), ("peer", "node-a"), (None, ""), ("", None)):
+        with pytest.raises(fleet_client.FleetClientError):
+            client.set_principal_grants(name, [], node_id=node)
+
+
+def test_client_node_grants_preserve_endpoint_guard_and_hub_error(configured, monkeypatch):
+    monkeypatch.setattr(
+        client,
+        "_principal_admin_request",
+        lambda *args: (403, {"error": "refused", "code": "message_recipient_not_permitted"}),
+    )
+    with pytest.raises(client.FleetMessageHubError) as exc:
+        client.set_principal_grants(None, [], node_id="node-a")
+    assert exc.value.status == 403 and exc.value.code == "message_recipient_not_permitted"
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "http://hub.invalid", "admin_token": "fixture-admin"}
+    )
+    with pytest.raises(fleet_client.FleetClientError):
+        client.set_principal_grants(None, [], node_id="node-a")
