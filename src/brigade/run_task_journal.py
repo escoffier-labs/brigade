@@ -77,6 +77,8 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
             continue
         if key in _DIGEST_FIELDS:
             valid = digest(value)
+        elif key == "dispatch_attempt":
+            valid = type(value) is int and value > 0
         elif key == "task_id":
             valid = task_id(value)
         elif key in _PROVIDER_FIELDS:

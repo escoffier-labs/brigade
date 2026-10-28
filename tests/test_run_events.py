@@ -542,3 +542,57 @@ def test_build_event_rejects_inconsistent_cached_request_digest():
             previous_digest=None,
             request_digest_value="b" * 64,
         )
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"dispatch_attempt": None},
+        {"dispatch_attempt": True},
+        {"dispatch_attempt": False},
+        {"dispatch_attempt": 0},
+        {"dispatch_attempt": -1},
+        {"dispatch_attempt": 1.0},
+        {"dispatch_attempt": "1"},
+        {"task_id": "t" * 129},
+        {"task_id": None},
+        {"seat": None},
+        {"attempt_id": None},
+        {"attempt_id": "bad"},
+        {"seat": "bad seat"},
+        {"provider_task_id": "forbidden"},
+    ],
+)
+def test_launch_claim_closed_payload_rejects_invalid_values(change):
+    payload = {"task_id": "one", "attempt_id": "a" * 64, "seat": "worker", "dispatch_attempt": 1}
+    # The valid control makes a missing event registration fail this test too.
+    run_events.build_event(
+        run_id=RUN_ID,
+        sequence=1,
+        event_type="task.launch-claimed",
+        payload=payload,
+        idempotency_key="claim",
+        recorded_at=RECORDED_AT,
+        previous_digest=None,
+    )
+    with pytest.raises(run_events.CanonicalizationError):
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="task.launch-claimed",
+            payload={**payload, **change},
+            idempotency_key="claim",
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+        )
+    for missing in payload:
+        with pytest.raises(run_events.CanonicalizationError):
+            run_events.build_event(
+                run_id=RUN_ID,
+                sequence=1,
+                event_type="task.launch-claimed",
+                payload={k: v for k, v in payload.items() if k != missing},
+                idempotency_key="claim",
+                recorded_at=RECORDED_AT,
+                previous_digest=None,
+            )

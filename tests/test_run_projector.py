@@ -885,3 +885,18 @@ def test_run_recovery_started_derives_running():
         journal_present=True,
     )
     assert projection.status == "running"
+
+
+def test_launch_claim_is_status_neutral_and_advances_cursor():
+    created = _build_event(1, "run.created", {"status": "started"}, "create", RECORDED_AT, None)
+    claim = _build_event(
+        2,
+        "task.launch-claimed",
+        {"task_id": "one", "attempt_id": "a" * 64, "seat": "worker", "dispatch_attempt": 1},
+        "claim",
+        RECORDED_AT,
+        created["event_digest"],
+    )
+    projection = project_run_snapshot(_minimal_base_snapshot(), [created, claim], journal_present=True)
+    assert projection.status == "started"
+    assert projection.last_sequence == 2 and projection.last_event_digest == claim["event_digest"]

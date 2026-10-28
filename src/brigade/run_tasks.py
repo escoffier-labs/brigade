@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from brigade import run_events, run_journal
 from brigade import run_task_journal as journal
@@ -71,6 +71,18 @@ class TaskObservation:
 
 
 @dataclass(frozen=True)
+class TaskLaunchBinding:
+    """Durable consumption of launch permission, never a replayable grant."""
+
+    seat: str
+    dispatch_attempt: int
+
+    def __post_init__(self) -> None:
+        if not journal.token(self.seat) or type(self.dispatch_attempt) is not int or self.dispatch_attempt <= 0:
+            raise TaskJournalError("invalid task launch binding")
+
+
+@dataclass(frozen=True)
 class TaskResult:
     handle: TaskHandle
     status: str
@@ -83,6 +95,13 @@ class TaskResult:
     containment: str = "unknown"
     acknowledged: bool = False
     version: str | None = None
+    launch_claim: TaskLaunchBinding | None = None
+
+
+@dataclass(frozen=True)
+class TaskLaunchDecision:
+    outcome: Literal["granted", "already-claimed", "terminal"]
+    task: TaskResult
 
 
 def _attempt_id(handle: TaskHandle) -> str:
@@ -109,7 +128,19 @@ def _observation_payload(result: TaskResult) -> dict[str, Any]:
     return {
         "task_id": result.handle.spec.task_id,
         "attempt_id": result.handle.attempt_id,
-        **{k: v for k, v in asdict(result).items() if k not in {"handle", "acknowledged", "version"}},
+        **{
+            field: getattr(result, field)
+            for field in (
+                "status",
+                "provider_task_id",
+                "original_run_id",
+                "provider_result_id",
+                "result_id",
+                "artifact_kind",
+                "artifact_digest",
+                "containment",
+            )
+        },
     }
 
 
@@ -148,10 +179,48 @@ def _observe(current: TaskResult, observation: TaskObservation) -> TaskResult:
     return result
 
 
+def _dispatch_binding(event: run_journal.RunEvent) -> tuple[str, int] | None:
+    p = event.payload
+    if (
+        event.event_type.startswith("run.dispatch.")
+        and isinstance(p.get("seat"), str)
+        and bool(p["seat"])
+        and type(p.get("attempt")) is int
+        and p["attempt"] > 0
+    ):
+        return p["seat"], p["attempt"]
+    return None
+
+
+def _validate_launch_candidate(
+    current: TaskResult,
+    binding: TaskLaunchBinding,
+    *,
+    prior_event_type: str | None,
+    used_bindings: set[tuple[str, int]],
+) -> None:
+    """Apply the same ordered-history eligibility rule online and on replay."""
+    if (
+        current.handle.attempt_id is None
+        or current.launch_claim is not None
+        or current.status in journal.TERMINAL
+        or prior_event_type != "task.attempt-prepared"
+        or binding.seat != current.handle.spec.seat
+    ):
+        raise TaskJournalError("task launch requires pristine prepared history")
+    if (binding.seat, binding.dispatch_attempt) in used_bindings:
+        raise TaskJournalError("task launch dispatch binding already used")
+
+
 def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResult]:
     results: dict[str, TaskResult] = {}
     requests: set[str] = set()
+    prior_types: dict[str, str] = {}
+    used_bindings: set[tuple[str, int]] = set()
     for event in events:
+        dispatch_binding = _dispatch_binding(event)
+        if dispatch_binding is not None:
+            used_bindings.add(dispatch_binding)
         if event.event_type not in journal.TASK_FIELDS:
             continue
         p = event.payload
@@ -161,6 +230,7 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             if p["spec_digest"] != spec.spec_digest or task_id in results or p["request_id"] in requests:
                 raise TaskJournalError("conflicting task acceptance history")
             requests.add(p["request_id"])
+            prior_types[task_id] = event.event_type
             results[task_id] = TaskResult(
                 TaskHandle(run_id, p["request_id"], spec), "queued", version=event.event_digest
             )
@@ -170,6 +240,15 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             if current.handle.attempt_id is not None or p["attempt_id"] != _attempt_id(current.handle):
                 raise TaskJournalError("invalid task attempt history")
             results[task_id] = replace(current, handle=replace(current.handle, attempt_id=p["attempt_id"]))
+        elif event.event_type == "task.launch-claimed":
+            binding = TaskLaunchBinding(p["seat"], p["dispatch_attempt"])
+            if p["attempt_id"] != current.handle.attempt_id:
+                raise TaskJournalError("task launch attempt mismatch")
+            _validate_launch_candidate(
+                current, binding, prior_event_type=prior_types.get(task_id), used_bindings=used_bindings
+            )
+            used_bindings.add((binding.seat, binding.dispatch_attempt))
+            results[task_id] = replace(current, launch_claim=binding, status="unknown")
         elif event.event_type == "task.observed":
             if current.handle.attempt_id is None or p["attempt_id"] != current.handle.attempt_id:
                 raise TaskJournalError("task observation attempt mismatch")
@@ -180,10 +259,11 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             if updated.result_id != p["result_id"]:
                 raise TaskJournalError("invalid terminal result identity")
             results[task_id] = updated
-        else:
+        elif event.event_type == "task.acknowledged":
             if current.result_id is None or p["result_id"] != current.result_id:
                 raise TaskJournalError("task acknowledgement result mismatch")
             results[task_id] = replace(current, acknowledged=True)
+        prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
     return results
 
@@ -228,6 +308,72 @@ def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHand
             payload={"task_id": task_id, "attempt_id": handle.attempt_id},
         )
         return handle
+
+
+def claim_task_launch(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    handle: TaskHandle,
+    expected_version: str,
+    seat: str,
+    dispatch_attempt: int,
+) -> TaskLaunchDecision:
+    """Consume launch permission once without reserving budget or launching.
+
+    A future execution caller must first reserve budget for this exact candidate
+    under the coordinator lock. A bare claim proves neither budget nor admission.
+    A lost reply never reconstructs a grant. Durability ambiguity retains history
+    and raises TaskJournalError; callers must retain recovery ownership.
+    """
+    with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+        results = _fold(run_dir.name, events)
+        current = _find(results, handle.spec.task_id)
+        if handle != current.handle or handle.attempt_id is None:
+            raise TaskJournalError("task launch handle mismatch")
+        binding = TaskLaunchBinding(seat, dispatch_attempt)
+        if seat != handle.spec.seat or (current.launch_claim is not None and current.launch_claim != binding):
+            raise TaskJournalError("task launch binding identity conflict")
+        if not journal.digest(expected_version) or expected_version != current.version:
+            raise TaskJournalError("stale task launch: expected version does not match")
+        used = {
+            (r.launch_claim.seat, r.launch_claim.dispatch_attempt)
+            for r in results.values()
+            if r.launch_claim is not None
+        }
+        used.update(b for e in events if (b := _dispatch_binding(e)) is not None)
+        if current.launch_claim is None and (seat, dispatch_attempt) in used:
+            raise TaskJournalError("task launch dispatch binding already used")
+        if current.status in journal.TERMINAL:
+            decision = TaskLaunchDecision("terminal", current)
+        elif current.launch_claim is not None:
+            decision = TaskLaunchDecision("already-claimed", current)
+        else:
+            prior_type = next(
+                (
+                    e.event_type
+                    for e in reversed(events)
+                    if e.event_type in journal.TASK_FIELDS and e.payload["task_id"] == handle.spec.task_id
+                ),
+                None,
+            )
+            _validate_launch_candidate(current, binding, prior_event_type=prior_type, used_bindings=used)
+            event = journal.append(
+                run_dir,
+                workspace=workspace,
+                event_type="task.launch-claimed",
+                payload={
+                    "task_id": handle.spec.task_id,
+                    "attempt_id": handle.attempt_id,
+                    "seat": seat,
+                    "dispatch_attempt": dispatch_attempt,
+                },
+            )
+            decision = TaskLaunchDecision(
+                "granted", replace(current, launch_claim=binding, status="unknown", version=event.event_digest)
+            )
+    # A grant is returned only after all mutation/barrier contexts have exited.
+    return decision
 
 
 def observe_task(

@@ -197,11 +197,14 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
 }
 # Durable assignment facts use closed reference-only shapes, without changing
 # existing envelope bounds or the schema version.
-_TASK_EVENT_TYPES = frozenset({"task.accepted", "task.attempt-prepared", "task.observed", "task.acknowledged"})
+_TASK_EVENT_TYPES = frozenset(
+    {"task.accepted", "task.attempt-prepared", "task.launch-claimed", "task.observed", "task.acknowledged"}
+)
 EVENT_TYPES.update(
     {
         "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
         "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
+        "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),
         "task.observed": frozenset(
             {
                 "task_id",
