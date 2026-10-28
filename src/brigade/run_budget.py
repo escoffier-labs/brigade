@@ -1668,9 +1668,9 @@ class BudgetCoordinator:
     def _ensure_wall_clock_allows_unlocked(self, *, request_id: str) -> None:
         """Deny authorization when the wall-clock ceiling is already exhausted.
 
-        Used by restart reclaim before handing a durable pending identity back
-        to the caller for external launch. Dispatch-count is not re-checked:
-        the durable ``run.dispatch.requested`` already owns that unit.
+        Used before reauthorizing a durable or retained pending identity.
+        Dispatch-count is not re-checked: the existing reservation already
+        owns that unit.
         """
         if self.declaration.wall_clock_seconds is None:
             return
@@ -1749,6 +1749,8 @@ class BudgetCoordinator:
 
             request_id = dispatch_reservation_request_id(seat, attempt)
             decision = self._reserve_unlocked(request_id=request_id, units=1)
+            if not reclaim_pending and decision.replayed:
+                self._ensure_wall_clock_allows_unlocked(request_id=request_id)
             try:
                 recorded_attempt = record_requested(attempt)
             except Exception:

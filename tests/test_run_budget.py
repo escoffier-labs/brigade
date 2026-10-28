@@ -1630,3 +1630,47 @@ def test_exact_dispatch_binding_reload_allocates_fresh_candidate():
     )
     assert supplied == [2]
     assert coordinator.projection.used["worker_dispatch_count"] == 2
+
+
+@pytest.mark.parametrize("failure", ["exception", "substitution"])
+@pytest.mark.parametrize("elapsed", [0, 2], ids=["within-wall", "expired-wall"])
+def test_exact_dispatch_binding_rechecks_wall_after_retained_reservation(failure, elapsed):
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    now = [started]
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=1, wall_clock_seconds=1),
+        append_event=lambda *args: None,
+        clock=lambda: now[0],
+    )
+    coordinator.set_started_at(started)
+    supplied = []
+
+    def first(attempt):
+        supplied.append(attempt)
+        if failure == "exception":
+            raise RuntimeError("recorder failed before claim")
+        return attempt + 1
+
+    def reserve(recorder):
+        return coordinator.reserve_and_record_dispatch(
+            seat="worker", allocate_attempt=lambda: 1, record_requested=recorder, reclaim_pending=False
+        )
+
+    with pytest.raises(RuntimeError if failure == "exception" else run_budget.BudgetError, match="recorder"):
+        reserve(first)
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+    now[0] = started + timedelta(seconds=elapsed)
+
+    def retry(attempt):
+        supplied.append(attempt)
+        return attempt
+
+    if elapsed:
+        with pytest.raises(run_budget.BudgetPolicyError) as exc:
+            reserve(retry)
+        assert exc.value.dimension == "wall_clock_seconds"
+        assert supplied == [1]
+    else:
+        assert reserve(retry) == 1
+        assert supplied == [1, 1]
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
