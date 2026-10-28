@@ -406,3 +406,189 @@ def test_backend_unsupported_is_fixed_without_secret(private_home, monkeypatch, 
     payload = json.loads(capsys.readouterr().out)
     assert payload == dict(error="mesh_backend_unsupported", status=None, code="mesh_backend_unsupported")
     assert snapshot(private_home) == {}
+
+
+@pytest.fixture
+def global_hook_guard(private_home, tmp_path, monkeypatch):
+    from brigade import bug_last_error, update_notify
+
+    calls = []
+
+    def forbidden(name):
+        def called(*args, **kwargs):
+            calls.append(name)
+            raise RuntimeError("GLOBAL_HOOK_SECRET /PRIVATE_PATH")
+
+        return called
+
+    with monkeypatch.context() as boundary:
+        boundary.delenv("CI", raising=False)
+        boundary.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
+        boundary.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+        boundary.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        boundary.setattr(bug_last_error, "record", forbidden("record"))
+        boundary.setattr(update_notify, "maybe_notify", forbidden("notify"))
+        boundary.setattr(update_notify, "_spawn_refresh", forbidden("refresh"))
+        boundary.setattr(update_notify, "run_refresh", forbidden("fetch"))
+        yield calls
+
+
+@pytest.mark.parametrize("verb", ["init", "show", "rotate"])
+@pytest.mark.parametrize("outcome", ["success", "runtime", "scope", "output"])
+def test_offline_leaves_bypass_global_hooks(
+    private_home, tmp_path, monkeypatch, capsys, global_hook_guard, verb, outcome
+):
+    if verb != "init":
+        custody.load_local_keys(brigade_home=private_home, principal="node-a", hub_id=HUB, create=True)
+    before = snapshot(tmp_path)
+    operations = []
+    original_load, original_rotate = custody.load_local_keys, custody.rotate_local_keys
+
+    def observed(operation):
+        def called(**kwargs):
+            operations.append(operation.__name__)
+            if outcome == "runtime":
+                raise OSError(errno.EIO, "PRIVATE_EXCEPTION", "/PRIVATE_PATH")
+            return operation(**kwargs)
+
+        return called
+
+    class Broken(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError("PRIVATE_EXCEPTION /PRIVATE_PATH")
+
+    environment = dict(os.environ)
+    with monkeypatch.context() as boundary:
+        boundary.setattr(custody, "load_local_keys", observed(original_load))
+        boundary.setattr(custody, "rotate_local_keys", observed(original_rotate))
+        if outcome == "output":
+            boundary.setattr(sys, "stdout", Broken())
+        result = run(verb, "--json", principal="bad\x1bscope" if outcome == "scope" else "node-a")
+    output = capsys.readouterr()
+    assert result == (0 if outcome == "success" else 1)
+    assert global_hook_guard == []
+    assert dict(os.environ) == environment
+    assert len(operations) == (0 if outcome == "scope" else 1)
+    assert not any(secret in output.out + output.err for secret in ("PRIVATE_EXCEPTION", "/PRIVATE_PATH", "\x1b"))
+    after = snapshot(tmp_path)
+    if outcome in ("scope", "runtime") or verb == "show":
+        assert after == before
+    else:
+        changed = {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
+        assert changed and all(path.startswith("private-home/fleet/mesh-keys/") for path in changed)
+    if verb == "rotate" and outcome in ("success", "output"):
+        assert len(load(private_home).retired) == 1
+
+
+@pytest.mark.parametrize("behavior", ["success", "nonzero", "exception"])
+def test_ordinary_command_retains_global_hooks(private_home, monkeypatch, capsys, behavior):
+    from brigade import bug_last_error, update_notify
+    from brigade.cli import version
+
+    events = []
+
+    def dispatch(args):
+        if behavior == "exception":
+            raise ValueError("ordinary controlled failure")
+        return 0 if behavior == "success" else 1
+
+    with monkeypatch.context() as boundary:
+        boundary.delenv("CI", raising=False)
+        boundary.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
+        boundary.setattr(version, "dispatch", dispatch)
+        boundary.setattr(bug_last_error, "record", lambda *a, **kw: events.append("record"))
+        boundary.setattr(update_notify, "maybe_notify", lambda *a, **kw: events.append("notify"))
+        if behavior == "exception":
+            with pytest.raises(ValueError, match="ordinary controlled failure"):
+                cli.main(["version"])
+            assert events == ["record"]
+        else:
+            assert cli.main(["version"]) == (0 if behavior == "success" else 1)
+            assert events == (["notify"] if behavior == "success" else ["record", "notify"])
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("entry", ["module", "console"])
+@pytest.mark.parametrize("verb", ["init", "show", "rotate"])
+@pytest.mark.parametrize("outcome", ["success", "runtime", "scope", "output"])
+def test_real_offline_entry_without_update_optouts(private_home, tmp_path, entry, verb, outcome):
+    # Instrument only the known global hooks and fault boundary in the real
+    # installed process. Hooks stop immediately if reached, so RED cannot fetch.
+    from pathlib import Path
+
+    if verb != "init":
+        custody.load_local_keys(brigade_home=private_home, principal="node-a", hub_id=HUB, create=True)
+    startup = tmp_path / "startup"
+    startup.mkdir()
+    marker = tmp_path / "forbidden-hook"
+    (startup / "sitecustomize.py").write_text(
+        """
+import io, os, sys
+from pathlib import Path
+from brigade import bug_last_error, update_notify
+
+def forbidden(*args, **kwargs):
+    Path(os.environ['TEST_HOOK_MARKER']).write_text('global hook reached')
+    raise SystemExit(91)
+
+bug_last_error.record = forbidden
+update_notify.maybe_notify = forbidden
+update_notify._spawn_refresh = forbidden
+update_notify.run_refresh = forbidden
+if os.environ['TEST_KEY_OUTCOME'] == 'runtime':
+    from brigade import fleet_mesh_keys
+    def failed(**kwargs):
+        raise OSError('PRIVATE_EXCEPTION /PRIVATE_PATH')
+    fleet_mesh_keys.load_local_keys = failed
+    fleet_mesh_keys.rotate_local_keys = failed
+if os.environ['TEST_KEY_OUTCOME'] == 'output':
+    class Broken(io.StringIO):
+        def write(self, text):
+            raise BrokenPipeError('PRIVATE_EXCEPTION /PRIVATE_PATH')
+    sys.stdout = Broken()
+""",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    for name in ("CI", "BRIGADE_NO_UPDATE_CHECK"):
+        environment.pop(name, None)
+    environment.update(
+        PYTHONPATH=os.pathsep.join([str(startup), str(Path(cli.__file__).resolve().parents[2])]),
+        XDG_DATA_HOME=str(tmp_path / "data"),
+        XDG_CACHE_HOME=str(tmp_path / "cache"),
+        PYTHONDONTWRITEBYTECODE="1",
+        TEST_HOOK_MARKER=str(marker),
+        TEST_KEY_OUTCOME=outcome,
+    )
+    executable = Path(sys.executable).parent / ("brigade.exe" if os.name == "nt" else "brigade")
+    prefix = [sys.executable, "-m", "brigade"] if entry == "module" else [str(executable)]
+    before = snapshot(tmp_path)
+    result = subprocess.run(
+        [
+            *prefix,
+            "fleet",
+            "keys",
+            verb,
+            "--principal",
+            "bad\x1bscope" if outcome == "scope" else "node-a",
+            "--hub-id",
+            HUB,
+            "--json",
+        ],
+        env=environment,
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == (0 if outcome == "success" else 1), result.stderr
+    assert not marker.exists()
+    assert not any(secret in result.stdout + result.stderr for secret in ("PRIVATE_EXCEPTION", "/PRIVATE_PATH", "\x1b"))
+    after = snapshot(tmp_path)
+    if outcome in ("scope", "runtime") or verb == "show":
+        assert after == before
+    else:
+        changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
+        assert changed and all(p.startswith("private-home/fleet/mesh-keys/") for p in changed)
+    if verb == "rotate" and outcome in ("success", "output"):
+        assert len(load(private_home).retired) == 1
