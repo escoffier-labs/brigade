@@ -964,24 +964,7 @@ def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str,
 
 
 def _read_export_receipt(path: Path, target: Path) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        payload = receipt_json.read(path)
-    except OSError as exc:
-        print(f"warning: skipped unreadable receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None, "unreadable"
-    except json.JSONDecodeError as exc:
-        print(f"warning: skipped malformed receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None, "malformed"
-    except (ValueError, RecursionError):
-        print(
-            f"warning: skipped malformed receipt {_rel(path, target)}: invalid JSON encoding, number, or nesting",
-            file=sys.stderr,
-        )
-        return None, "malformed"
-    if not isinstance(payload, dict):
-        print(f"warning: skipped malformed receipt {_rel(path, target)}: JSON is not an object", file=sys.stderr)
-        return None, "malformed"
-    return payload, None
+    return receipt_json.read_for_export(path, label=_rel(path, target))
 
 
 def _timestamp_for_sort(payload: dict[str, Any], path: Path) -> str:
