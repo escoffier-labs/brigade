@@ -1039,7 +1039,7 @@ def test_supported_transport_contracts(tmp_path, monkeypatch, family, payload, e
         if family != "t3":
             assert tool == Path(sys.executable)
             assert argv[:2] == ["-I", "-c"]
-            assert argv[4:6] == ["brigade.fleet_action_adapters", "--inbox-send"]
+            assert argv[4:7] == ["brigade.fleet_action_adapters", str(Path.cwd()), "--inbox-send"]
         return normal(executable, argv, **kw)
 
     monkeypatch.setattr(adapters, "invoke", invoke)
@@ -1189,9 +1189,9 @@ def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path
             )
         assert executable == Path(sys.executable)
         assert argv[:2] == ["-I", "-c"]
-        assert argv[4:6] == ["brigade.fleet_action_adapters", "--inbox-send"]
+        assert argv[4:7] == ["brigade.fleet_action_adapters", str(Path.cwd()), "--inbox-send"]
         assert kw == {"timeout": 15, "cwd": Path(adapters.__file__).resolve().parent}
-        assert adapters._inbox_main(argv[5:]) == 0
+        assert adapters._inbox_main(argv[6:]) == 0
         return json.loads(capsys.readouterr().out)
 
     monkeypatch.setattr(adapters, "invoke", invoke)

@@ -18,7 +18,7 @@ from typing import Any, Iterator
 from . import fleet_action_adapters as adapters, fleet_client, fleet_client_actions as client
 from .fleet_action_auth import ActionError, canonical, digest, opaque, selector
 from .fleet_hub_messages import MAX_SQLITE_INTEGER
-from .isolated_exec import module_argv, trusted_cwd
+from .isolated_exec import package_argv, trusted_cwd
 
 MANIFEST_SCHEMA = "brigade.fleet_action_manifest.v1"
 AUTOMATIC_RECOVERY_LIFETIME = 24 * 60 * 60
@@ -439,7 +439,7 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
 
 def _schedule(path: Path, manifest: dict[str, Any], action_id: str, generation: int, *, timeout: float) -> bool:
     argv = [
-        str(_tool(manifest, "systemd-run")),
+        str(_tool(manifest, "systemd-run").absolute()),
         "--user",
         "--collect",
         "--unit=brigade-action-" + action_id + "-" + str(generation),
@@ -448,7 +448,8 @@ def _schedule(path: Path, manifest: dict[str, Any], action_id: str, generation: 
         "--property=RuntimeMaxSec=3900",
         "--working-directory=" + str(trusted_cwd()),
         "--",
-        *module_argv(
+        *package_argv(
+            trusted_cwd() / "__init__.py",
             "brigade",
             "fleet",
             "actions",
@@ -458,6 +459,7 @@ def _schedule(path: Path, manifest: dict[str, Any], action_id: str, generation: 
             str(generation),
             "--manifest",
             str(path.resolve()),
+            cwd_after_load=Path.cwd(),
         ),
     ]
     result = subprocess.run(

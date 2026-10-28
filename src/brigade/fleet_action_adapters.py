@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .fleet_action_auth import ActionError, destination_reference, opaque
-from .isolated_exec import module_argv, trusted_cwd
+from .isolated_exec import package_argv, trusted_cwd
 
 MAX_OUTPUT = 262144
 T3_RUNTIME_MODES = frozenset({"approval-required", "auto-accept-edits", "auto", "full-access"})
@@ -232,7 +232,9 @@ def dispatch(action: dict[str, Any], binding: dict[str, Any], executable: Path, 
             "status": "finished" if payload.get("status") in {"ok", "completed"} else "failed",
             "destination_ref": opaque(payload["runId"]),
         }
-    command = module_argv(
+    # Pin imports before restoring the caller's credential/path context.
+    command = package_argv(
+        trusted_cwd() / "__init__.py",
         "brigade.fleet_action_adapters",
         "--inbox-send",
         "--to",
@@ -241,6 +243,7 @@ def dispatch(action: dict[str, Any], binding: dict[str, Any], executable: Path, 
         action_id,
         "--body-file",
         str(prompt.absolute()),
+        cwd_after_load=Path.cwd(),
     )
     payload = invoke(Path(command[0]), command[1:], timeout=15, cwd=trusted_cwd())
     message = payload.get("message")

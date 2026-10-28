@@ -647,10 +647,10 @@
         "sha256": "bf8d53179230c0229f4311e1fe0a8a41e0f25c3653f03be27ade03f7f426a4d5"
       },
       {
-        "byte_size": 10467,
+        "byte_size": 10529,
         "dst": "hooks/pre-push",
         "rendered": false,
-        "sha256": "c3e14db1c06208f02324d7ca342b1622dc6ad54b593df71f296f1d6c5325e89c"
+        "sha256": "f66323ebc717b590046b18b36b7be6d366c4acac2f17edf2d287ea0d208faa3e"
       },
       {
         "byte_size": 1121,
@@ -769,10 +769,10 @@
         "sha256": "76d5b8da982a7907d78967456ce2ad6c86069e8e55578c861ed3d7aab8d1a9ae"
       },
       {
-        "byte_size": 10467,
+        "byte_size": 10529,
         "dst": "hooks/pre-push",
         "rendered": false,
-        "sha256": "c3e14db1c06208f02324d7ca342b1622dc6ad54b593df71f296f1d6c5325e89c"
+        "sha256": "f66323ebc717b590046b18b36b7be6d366c4acac2f17edf2d287ea0d208faa3e"
       },
       {
         "byte_size": 5259,
