@@ -672,21 +672,33 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
     temporary = ".trust-" + secrets.token_hex(16) + ".tmp"
     destination = None
     created = False
+    completed = False
     try:
         destination = dirfd.open_child_file(
             descriptor, temporary, dirfd.file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
         )
         created = True
         _private(destination)
-        with os.fdopen(destination, "wb", closefd=False) as stream:
+        stream = os.fdopen(destination, "wb", closefd=False)
+        stream_completed = False
+        try:
             stream.write(raw)
             stream.flush()
             os.fsync(destination)
+            stream_completed = True
+        finally:
+            try:
+                stream.close()
+            except BaseException:
+                if stream_completed:
+                    raise
+                # A close-time reflush must preserve the active writer failure.
         # close may consume the fd even when it raises. Relinquish ownership
         # before attempting it, and never publish after an ambiguous close.
         closing, destination = destination, None
         os.close(closing)
         dirfd.replace_children(descriptor, temporary, _NAME)
+        completed = True
     except OSError:
         raise crypto.MeshError("mesh_trust_storage_failure") from None
     finally:
@@ -694,13 +706,17 @@ def _save(descriptor: int, state: dict[str, Any]) -> None:
             closing, destination = destination, None
             try:
                 os.close(closing)
-            except OSError:
+            except BaseException:
                 pass  # Preserve the primary failure; an ambiguous close is not retried.
         if created:
             try:
                 dirfd.unlink_child(descriptor, temporary)
-            except OSError:
-                pass  # This cleanup is limited to the current attempt's temporary.
+            except FileNotFoundError:
+                pass  # Expected after replace, limited to this attempt's temporary.
+            except BaseException:
+                if completed:
+                    raise
+                # Both cleanup attempts preserve an active writer error/cancellation.
     _flush(descriptor)
 
 

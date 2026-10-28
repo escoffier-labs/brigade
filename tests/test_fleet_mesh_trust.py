@@ -2322,3 +2322,214 @@ def test_failed_lock_acquisition_never_unlocks_and_directory_is_closed(trust, ho
     assert seen["acquires"] == seen["faults"] == seen["directory_closes"] == 1
     assert seen["unlocks"] == seen["source_attempts"] == 0
     assert saved(home).read_bytes() == before
+
+
+@pytest.fixture
+def buffered_snapshot_fault(monkeypatch):
+    """Real buffered writes, including close-time reflush and consumed FD faults."""
+    import io
+    from contextlib import contextmanager
+
+    @contextmanager
+    def inject(primary, secondary, *, partial=False, extra_cleanup=False):
+        original_fdopen, original_close, original_unlink = os.fdopen, os.close, dirfd.unlink_child
+        seen = {
+            "descriptor": None,
+            "closes": 0,
+            "stream_closes": 0,
+            "writes": [],
+            "streams": [],
+            "unlinks": 0,
+            "replacement": None,
+            "replacement_live": None,
+        }
+
+        class ScriptedRaw(io.FileIO):
+            def write(self, data):
+                seen["writes"].append(len(data))
+                if primary is None:
+                    return super().write(data)
+                if partial and len(seen["writes"]) == 1:
+                    # Leave a tail buffered after a genuine partial write.
+                    return super().write(data[:-64])
+                raise primary if len(seen["writes"]) == (2 if partial else 1) else secondary
+
+            def close(self):
+                super().close()  # closefd=False: the snapshot writer still owns the FD.
+                if primary is None:
+                    raise secondary
+
+        class TrackedBuffer(io.BufferedWriter):
+            def close(self):
+                seen["stream_closes"] += 1
+                super().close()
+
+        def fdopen(fd, mode="r", *args, **kwargs):
+            if mode != "wb":
+                return original_fdopen(fd, mode, *args, **kwargs)
+            seen["descriptor"] = fd
+            stream = TrackedBuffer(
+                ScriptedRaw(fd, "wb", closefd=False), buffer_size=128 if partial else io.DEFAULT_BUFFER_SIZE
+            )
+            seen["streams"].append(stream)
+            return stream
+
+        def close(fd):
+            original_close(fd)
+            if fd == seen["descriptor"]:
+                seen["closes"] += 1
+                if extra_cleanup:
+                    replacement = os.open(os.devnull, os.O_RDONLY)
+                    if replacement != fd:
+                        os.dup2(replacement, fd)
+                        original_close(replacement)
+                    seen["replacement"] = fd
+                    raise BaseException("secondary consumed destination close")
+
+        def unlink(parent, name, **kwargs):
+            if name.startswith((".trust-", ".hub-identity-")):
+                seen["unlinks"] += 1
+                original_unlink(parent, name, **kwargs)
+                if extra_cleanup:
+                    raise BaseException("secondary temporary unlink lost return")
+                return None
+            return original_unlink(parent, name, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(os, "fdopen", fdopen)
+                patch.setattr(os, "close", close)
+                patch.setattr(dirfd, "unlink_child", unlink)
+                yield seen
+        finally:
+            # Fault patches have ended before assertions and pytest capture.
+            if seen["replacement"] is not None:
+                try:
+                    os.fstat(seen["replacement"])
+                except OSError:
+                    seen["replacement_live"] = False
+                else:
+                    seen["replacement_live"] = True
+                    original_close(seen["replacement"])
+
+    return inject
+
+
+@pytest.mark.parametrize(
+    "operation, secondary, partial, extra_cleanup, primary_error",
+    [
+        ("initialize", "io", False, False, False),
+        ("initialize", "cancel", False, False, False),
+        ("conflict", "io", False, False, False),
+        ("conflict", "cancel", False, False, False),
+        ("accept", "io", True, False, False),
+        ("accept", "io", False, True, False),
+        ("conflict", "io", False, True, True),
+    ],
+)
+def test_buffered_snapshot_preserves_primary_before_publish(
+    trust, home, buffered_snapshot_fault, operation, secondary, partial, extra_cleanup, primary_error
+):
+    class Cancelled(BaseException):
+        pass
+
+    if operation != "initialize":
+        bootstrap(trust, home)
+        accept(trust, home)
+    before = saved(home).read_bytes() if saved(home).exists() else None
+    primary = RuntimeError("primary body error") if primary_error else Cancelled("primary buffered write")
+    cleanup = (
+        OSError(errno.EIO, "secondary stream reflush") if secondary == "io" else Cancelled("secondary stream reflush")
+    )
+    raw = signed(seq=1, entries=["test-peer"]) if operation == "conflict" else signed(seq=2)
+    caught = None
+    with buffered_snapshot_fault(primary, cleanup, partial=partial, extra_cleanup=extra_cleanup) as seen:
+        try:
+            if operation == "initialize":
+                trust.initialize_trust(brigade_home=home)
+            else:
+                accept(trust, home, raw)
+        except BaseException as error:
+            caught = error
+    assert caught is primary
+    assert seen["closes"] == seen["stream_closes"] == seen["unlinks"] == 1
+    assert len(seen["streams"]) == 1 and seen["streams"][0].closed
+    assert len(seen["writes"]) == (3 if partial else 2)
+    if partial:
+        assert seen["writes"][0] > 128 and seen["writes"][1:] == [64, 64]
+    if extra_cleanup:
+        assert seen["replacement_live"] is True
+    else:
+        with pytest.raises(OSError) as closed:
+            os.fstat(seen["descriptor"])
+        assert closed.value.errno == errno.EBADF
+    assert (saved(home).read_bytes() if saved(home).exists() else None) == before
+    assert list(saved(home).parent.glob(".trust-*.tmp")) == []
+    if operation != "initialize":
+        state = trust.load_trust(brigade_home=home).data
+        assert state["generation"] == json.loads(before)["generation"]
+        assert state["conflicts"] == {} and len(state["objects"]) == 1
+    else:
+        assert trust.initialize_trust(brigade_home=home).data["generation"] == 1
+
+
+@pytest.mark.parametrize("secondary", ["io", "cancel"])
+def test_buffered_snapshot_close_only_failure_prevents_publish(trust, home, buffered_snapshot_fault, secondary):
+    class Cancelled(BaseException):
+        pass
+
+    bootstrap(trust, home)
+    accept(trust, home)
+    before = saved(home).read_bytes()
+    cleanup = OSError(errno.EIO, "stream close only") if secondary == "io" else Cancelled()
+    caught = None
+    with buffered_snapshot_fault(None, cleanup) as seen:
+        try:
+            accept(trust, home, seq=2)
+        except BaseException as error:
+            caught = error
+    if secondary == "io":
+        assert type(caught) is crypto.MeshError and caught.code == "mesh_trust_storage_failure"
+    else:
+        assert caught is cleanup
+    assert seen["closes"] == seen["stream_closes"] == seen["unlinks"] == 1
+    assert seen["streams"][0].closed
+    assert saved(home).read_bytes() == before
+    assert list(saved(home).parent.glob(".trust-*.tmp")) == []
+
+
+def test_cleanup_only_unlink_io_lost_return_reconciles_trust_generation(trust, home, monkeypatch):
+    bootstrap(trust, home)
+    accept(trust, home)
+    previous = trust.load_trust(brigade_home=home).data
+    original_replace, original_unlink = dirfd.replace_children, dirfd.unlink_child
+    seen = {"replaced": False, "unlinks": 0}
+
+    def replace(*args, **kwargs):
+        original_replace(*args, **kwargs)
+        seen["replaced"] = True
+
+    def unlink(parent, name, **kwargs):
+        if seen["replaced"] and name.startswith(".trust-"):
+            seen["unlinks"] += 1
+            raise OSError(errno.EIO, "post-replace cleanup")
+        return original_unlink(parent, name, **kwargs)
+
+    caught = None
+    raw = signed(seq=2)
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "replace_children", replace)
+        patch.setattr(dirfd, "unlink_child", unlink)
+        try:
+            accept(trust, home, raw)
+        except BaseException as error:
+            caught = error
+    assert type(caught) is crypto.MeshError and caught.code == "mesh_trust_storage_failure"
+    assert seen == {"replaced": True, "unlinks": 1}
+    state = trust.load_trust(brigade_home=home).data
+    assert state["generation"] == previous["generation"] + 1
+    assert state["marks"]["membership:" + signer()] == {"seq": 2, "digest": digest(raw)}
+    complete = saved(home).read_bytes()
+    assert accept(trust, home, raw).status == "replay"
+    assert saved(home).read_bytes() == complete
+    assert list(saved(home).parent.glob(".trust-*.tmp")) == []
