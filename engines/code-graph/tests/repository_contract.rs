@@ -480,19 +480,32 @@ fn release_publication_is_preflighted_protected_and_recoverable() {
 }
 
 #[test]
-fn agent_startup_requires_skill_selection_before_brigade_commands() {
+fn agent_startup_uses_portable_installed_workflows_before_brigade_commands() {
     let agents = repository_file("AGENTS.md");
     let first_raw_command = agents
         .find("brigade work brief --target .")
         .expect("AGENTS.md must preserve the Brigade brief command");
 
-    for skill in ["`using-skillet`", "`brigade-work`"] {
-        let skill_position = agents.find(skill).unwrap_or_else(|| {
-            panic!("AGENTS.md must require agents to invoke {skill} at session start")
-        });
+    let selection = agents
+        .find("discover workflow skills in the active harness's installed skill catalog")
+        .expect("AGENTS.md must route skill discovery through the active harness");
+    let conditional_superpowers = agents
+        .find("If Superpowers is installed, use its `using-superpowers` entrypoint")
+        .expect("AGENTS.md must make Superpowers conditional on installation");
+    let brigade_work = agents
+        .find("Use `brigade-work` before running raw Brigade commands")
+        .expect("AGENTS.md must require the Brigade workflow before raw commands");
+    for (requirement, position) in [
+        ("portable skill discovery", selection),
+        (
+            "conditional Superpowers entrypoint",
+            conditional_superpowers,
+        ),
+        ("Brigade workflow", brigade_work),
+    ] {
         assert!(
-            skill_position < first_raw_command,
-            "AGENTS.md must require {skill} before the first raw Brigade command"
+            position < first_raw_command,
+            "AGENTS.md must state {requirement} before the first raw Brigade command"
         );
     }
 }
