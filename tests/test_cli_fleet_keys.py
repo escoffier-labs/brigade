@@ -15,6 +15,7 @@ from brigade import cli, fleet_mesh_crypto as crypto, fleet_mesh_keys as custody
 
 HUB = "h_" + crypto.encode_binary(b"h" * 16)
 OTHER = "h_" + crypto.encode_binary(b"j" * 16)
+POSIX_ONLY = pytest.mark.skipif(os.name != "posix", reason="custody requires POSIX dirfd/no-follow and flock")
 PUBLIC = {"v", "principal", "hub", "kid", "sig_pub", "enc_pub", "suites", "created_at", "self_sig"}
 
 
@@ -36,10 +37,15 @@ def load(home, principal="node-a", hub=HUB):
     return custody.load_local_keys(brigade_home=home, principal=principal, hub_id=hub)
 
 
+def tree_snapshot(home):
+    return {str(p.relative_to(home)): p.read_bytes() if p.is_file() else None for p in home.rglob("*")}
+
+
 def snapshot(home):
     return {str(p.relative_to(home)): p.read_bytes() for p in home.rglob("*") if p.is_file()}
 
 
+@POSIX_ONLY
 def test_public_workflow(private_home, capsys):
     assert run("init", "--json") == 0
     summary = json.loads(capsys.readouterr().out)
@@ -84,6 +90,7 @@ def test_public_workflow(private_home, capsys):
 
 
 @pytest.mark.parametrize("verb", ["show", "rotate"])
+@POSIX_ONLY
 def test_missing_never_initializes(private_home, capsys, verb):
     assert run(verb, "--json") == 1
     assert json.loads(capsys.readouterr().out)["code"] == "mesh_keys_missing"
@@ -116,6 +123,7 @@ def test_invalid_scope_before_api(private_home, monkeypatch, capsys, principal, 
     assert snapshot(private_home) == {}
 
 
+@POSIX_ONLY
 def test_namespace_and_no_network(private_home, monkeypatch, capsys):
     from brigade import fleet_client, fleet_client_messages
     import urllib.request
@@ -144,6 +152,7 @@ def test_namespace_and_no_network(private_home, monkeypatch, capsys):
     capsys.readouterr()
 
 
+@POSIX_ONLY
 def test_corrupt_never_overwrites(private_home, capsys):
     assert run("init") == 0
     path = next((private_home / "fleet" / "mesh-keys").glob("*.json"))
@@ -158,6 +167,7 @@ def test_corrupt_never_overwrites(private_home, capsys):
 
 
 @pytest.mark.parametrize("stage", ["before", "after", "cleanup", "cancel"])
+@POSIX_ONLY
 def test_rotation_fault_one_commit_reconcile(private_home, monkeypatch, capsys, stage):
     assert run("init") == 0
     capsys.readouterr()
@@ -203,6 +213,7 @@ def test_rotation_fault_one_commit_reconcile(private_home, monkeypatch, capsys, 
 
 
 @pytest.mark.parametrize("point", ["write", "flush", "stderr"])
+@POSIX_ONLY
 def test_output_failure_no_retry(private_home, monkeypatch, capsys, point):
     assert run("init") == 0
     capsys.readouterr()
@@ -237,6 +248,7 @@ def test_output_failure_no_retry(private_home, monkeypatch, capsys, point):
     assert load(private_home) == second
 
 
+@POSIX_ONLY
 def test_secret_projection(private_home, monkeypatch, capsys):
     monkeypatch.setattr(crypto, "generate_keys", lambda: crypto.PrivateKeys(b"S" * 32, b"K" * 32))
     monkeypatch.setattr(custody.secrets, "token_bytes", lambda size: b"R" * size)
@@ -291,11 +303,9 @@ try:
     cli.main(['fleet', 'keys', '--help'])
 except SystemExit as error:
     assert error.code == 0
-assert cli.main(['fleet', 'keys', 'init', '--principal', 'node-a', '--hub-id', sys.argv[1], '--json']) == 1
 """
     result = subprocess.run([sys.executable, "-c", code, HUB], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
-    assert "mesh_extra_missing" in result.stdout
     assert "init" in result.stdout and "rotate" in result.stdout and "show" in result.stdout
     assert "accept" not in result.stdout and "prune" not in result.stdout
 
@@ -308,6 +318,7 @@ def test_syntax(private_home, flags):
 
 
 @pytest.mark.parametrize("verb,create", [("init", True), ("show", False), ("rotate", None)])
+@POSIX_ONLY
 def test_exact_api_call(private_home, monkeypatch, capsys, verb, create):
     assert run("init") == 0
     capsys.readouterr()
@@ -331,6 +342,7 @@ def test_exact_api_call(private_home, monkeypatch, capsys, verb, create):
     assert calls == [("rotate" if create is None else "load", expected)]
 
 
+@POSIX_ONLY
 def test_post_replace_directory_flush_and_explicit_reconciliation(private_home, monkeypatch, capsys):
     assert run("init") == 0
     capsys.readouterr()
@@ -375,6 +387,7 @@ def test_post_replace_directory_flush_and_explicit_reconciliation(private_home, 
 
 
 @pytest.mark.parametrize("unsafe", ["mode", "hardlink", "symlink"])
+@POSIX_ONLY
 def test_unsafe_custody_refused_without_repair(private_home, monkeypatch, capsys, unsafe):
     assert run("init") == 0
     capsys.readouterr()
@@ -397,6 +410,7 @@ def test_unsafe_custody_refused_without_repair(private_home, monkeypatch, capsys
     assert path.stat().st_mode & 0o777 == (0o644 if unsafe == "mode" else 0o600)
 
 
+@POSIX_ONLY
 def test_backend_unsupported_is_fixed_without_secret(private_home, monkeypatch, capsys):
     def unsupported():
         raise crypto.MeshError("mesh_backend_unsupported")
@@ -433,14 +447,20 @@ def global_hook_guard(private_home, tmp_path, monkeypatch):
         yield calls
 
 
-@pytest.mark.parametrize("verb", ["init", "show", "rotate"])
-@pytest.mark.parametrize("outcome", ["success", "runtime", "scope", "output"])
+@pytest.mark.parametrize(
+    "verb,outcome",
+    [
+        pytest.param(verb, outcome, marks=POSIX_ONLY if verb != "init" or outcome in ("success", "output") else ())
+        for verb in ("init", "show", "rotate")
+        for outcome in ("success", "runtime", "scope", "output")
+    ],
+)
 def test_offline_leaves_bypass_global_hooks(
     private_home, tmp_path, monkeypatch, capsys, global_hook_guard, verb, outcome
 ):
     if verb != "init":
         custody.load_local_keys(brigade_home=private_home, principal="node-a", hub_id=HUB, create=True)
-    before = snapshot(tmp_path)
+    before = tree_snapshot(tmp_path)
     operations = []
     original_load, original_rotate = custody.load_local_keys, custody.rotate_local_keys
 
@@ -470,7 +490,7 @@ def test_offline_leaves_bypass_global_hooks(
     assert dict(os.environ) == environment
     assert len(operations) == (0 if outcome == "scope" else 1)
     assert not any(secret in output.out + output.err for secret in ("PRIVATE_EXCEPTION", "/PRIVATE_PATH", "\x1b"))
-    after = snapshot(tmp_path)
+    after = tree_snapshot(tmp_path)
     if outcome in ("scope", "runtime") or verb == "show":
         assert after == before
     else:
@@ -509,8 +529,14 @@ def test_ordinary_command_retains_global_hooks(private_home, monkeypatch, capsys
 
 
 @pytest.mark.parametrize("entry", ["module", "console"])
-@pytest.mark.parametrize("verb", ["init", "show", "rotate"])
-@pytest.mark.parametrize("outcome", ["success", "runtime", "scope", "output"])
+@pytest.mark.parametrize(
+    "verb,outcome",
+    [
+        pytest.param(verb, outcome, marks=POSIX_ONLY if verb != "init" or outcome in ("success", "output") else ())
+        for verb in ("init", "show", "rotate")
+        for outcome in ("success", "runtime", "scope", "output")
+    ],
+)
 def test_real_offline_entry_without_update_optouts(private_home, tmp_path, entry, verb, outcome):
     # Instrument only the known global hooks and fault boundary in the real
     # installed process. Hooks stop immediately if reached, so RED cannot fetch.
@@ -592,3 +618,94 @@ if os.environ['TEST_KEY_OUTCOME'] == 'output':
         assert changed and all(p.startswith("private-home/fleet/mesh-keys/") for p in changed)
     if verb == "rotate" and outcome in ("success", "output"):
         assert len(load(private_home).retired) == 1
+
+
+@POSIX_ONLY
+def test_missing_extra_operation_is_posix_only(private_home):
+    code = """
+import sys
+sys.modules['cryptography'] = None
+from brigade import cli
+assert cli.main(['fleet', 'keys', 'init', '--principal', 'node-a', '--hub-id', sys.argv[1], '--json']) == 1
+"""
+    result = subprocess.run([sys.executable, "-c", code, HUB], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["code"] == "mesh_extra_missing"
+    assert not list(private_home.rglob("*.json"))
+
+
+@pytest.mark.parametrize("verb", ["init", "show", "rotate"])
+def test_native_unsupported_cli_creates_no_entries(private_home, monkeypatch, capsys, global_hook_guard, verb):
+    with monkeypatch.context() as boundary:
+        if os.name == "posix":
+            from types import SimpleNamespace
+
+            boundary.setattr(custody, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+        assert run(verb, "--json") == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out) == dict(
+        error="mesh_keys_platform_unsupported", status=None, code="mesh_keys_platform_unsupported"
+    )
+    assert str(private_home) not in output.out + output.err
+    assert global_hook_guard == []
+    assert list(private_home.iterdir()) == []
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("verb,flags", [("show", ["--record"]), ("rotate", ["--json"])])
+@pytest.mark.parametrize(
+    "sink",
+    [
+        "pipe",
+        pytest.param("full", marks=pytest.mark.skipif(not os.path.exists("/dev/full"), reason="requires /dev/full")),
+    ],
+)
+def test_real_failed_output_exits_one_without_shutdown_trace(private_home, verb, flags, sink):
+    custody.load_local_keys(brigade_home=private_home, principal="node-a", hub_id=HUB, create=True)
+    before = load(private_home)
+    if sink == "pipe":
+        reader, writer = os.pipe()
+        os.close(reader)
+        destination = os.fdopen(writer, "wb")
+    else:
+        destination = open("/dev/full", "wb")
+    with destination:
+        result = subprocess.run(
+            [sys.executable, "-m", "brigade", "fleet", "keys", verb, "--principal", "node-a", "--hub-id", HUB, *flags],
+            stdout=destination,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+        )
+    assert result.returncode == 1, result.stderr
+    assert "mesh_keys_output_failed" in result.stderr
+    assert "Exception ignored" not in result.stderr and "Traceback" not in result.stderr
+    after = load(private_home)
+    assert len(after.retired) == (1 if verb == "rotate" else 0)
+    assert after.retry_key == before.retry_key
+    if verb == "show":
+        assert after == before
+
+
+def test_show_failure_does_not_give_rotation_recovery(private_home, capsys, monkeypatch):
+    def missing(**kwargs):
+        raise crypto.MeshError("mesh_keys_missing")
+
+    monkeypatch.setattr(custody, "load_local_keys", missing)
+    assert run("show", "--json") == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out)["code"] == "mesh_keys_missing"
+    assert "rotation" not in output.err and "do not initialize" not in output.err
+
+
+@POSIX_ONLY
+def test_backend_failure_may_leave_only_empty_private_directories(private_home, capsys, monkeypatch):
+    def unsupported():
+        raise crypto.MeshError("mesh_backend_unsupported")
+
+    monkeypatch.setattr(crypto, "probe_backend", unsupported)
+    assert run("init", "--json") == 1
+    assert json.loads(capsys.readouterr().out)["code"] == "mesh_backend_unsupported"
+    entries = list(private_home.rglob("*"))
+    assert {str(p.relative_to(private_home)) for p in entries} == {"fleet", "fleet/mesh-keys"}
+    assert all(p.is_dir() and stat.S_IMODE(p.stat().st_mode) == 0o700 for p in entries)

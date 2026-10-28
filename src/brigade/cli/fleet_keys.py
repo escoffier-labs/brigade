@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 
@@ -69,6 +70,17 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
         command.set_defaults(func=_dispatch)
 
 
+def _silence_failed_stream(stream) -> None:
+    # Buffered output can fail again during interpreter shutdown, overriding
+    # the handled failure with exit 120. Discard only an already failed FD.
+    try:
+        descriptor = stream.fileno()
+        with open(os.devnull, "wb") as sink:
+            os.dup2(sink.fileno(), descriptor)
+    except (Exception, KeyboardInterrupt):
+        pass
+
+
 def _failure(args: argparse.Namespace, code: str) -> int:
     # Both streams may already be broken after a committed rotation. Reporting
     # must never re-enter custody or let an exception reach the global logger.
@@ -77,12 +89,13 @@ def _failure(args: argparse.Namespace, code: str) -> int:
             print(json.dumps({"error": code, "status": None, "code": code}, sort_keys=True))
             sys.stdout.flush()
     except (Exception, KeyboardInterrupt):
-        pass
+        _silence_failed_stream(sys.stdout)
     try:
-        print(f"error: {code}. {_RECOVERY}", file=sys.stderr)
+        recovery = f" {_RECOVERY}" if args.keys_command == "rotate" else ""
+        print(f"error: {code}.{recovery}", file=sys.stderr)
         sys.stderr.flush()
     except (Exception, KeyboardInterrupt):
-        pass
+        _silence_failed_stream(sys.stderr)
     return 1
 
 
@@ -138,5 +151,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         print(text)
         sys.stdout.flush()
     except (Exception, KeyboardInterrupt):
+        _silence_failed_stream(sys.stdout)
         return _failure(args, "mesh_keys_output_failed")
     return 0
