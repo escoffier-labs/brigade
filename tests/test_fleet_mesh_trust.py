@@ -2602,3 +2602,1072 @@ def test_postrename_cleanup_maps_inside_trust_writer(trust, home, monkeypatch, o
     assert saved(home).read_bytes() == complete
     assert trust.load_trust(brigade_home=home).data["generation"] == state["generation"]
     assert list(saved(home).parent.glob(".trust-*.tmp")) == []
+
+
+# Public peer operations guard against substitution, stale evidence and lost returns.
+PEER_ORIGIN = "https://peer-hub.example"
+PEER_HUB = "h_" + crypto.encode_binary(hashlib.sha256(crypto.LABELS["hub-id"] + key()).digest()[:16])
+PEER_PRINCIPAL = "test-peer"
+
+
+def peer_identity(*, origin=PEER_ORIGIN, seq=1):
+    value = {
+        "v": 1,
+        "hub_id": PEER_HUB,
+        "hub_sig_pub": crypto.encode_binary(key()),
+        "endpoint": origin,
+        "require_sealed": False,
+        "max_envelope_bytes": 98304,
+        "envelope_versions": [1],
+        "suites": ["bm1"],
+        "backend": "full",
+        "capabilities": ["messages"],
+        "created_at": TIME,
+        "seq": seq,
+    }
+    return crypto.canonical(statements.sign_statement(value, SEED, expected_kind="hub-identity"))
+
+
+def peer_record(number=1, *, previous=None, created_at=None, hub=PEER_HUB, principal=PEER_PRINCIPAL, **extra):
+    # Independent public fake KEM bytes suffice for record authentication tests.
+    seed = hashlib.sha256(b"public peer fixture" + bytes([number])).digest()
+    enc = bytes([number]) * crypto.PUBLIC_KEY_BYTES
+    value = {
+        "v": 1,
+        "hub": hub,
+        "principal": principal,
+        "kid": crypto.key_id(key(seed), enc),
+        "sig_pub": crypto.encode_binary(key(seed)),
+        "enc_pub": crypto.encode_binary(enc),
+        "suites": ["bm1"],
+        "created_at": created_at or f"2026-01-02T00:{number:02}:00Z",
+        **extra,
+    }
+    if previous is not None:
+        old = json.loads(previous)
+        value["prev_kid"] = old["kid"]
+    value["self_sig"] = crypto.sign(value, seed, label="key")
+    if previous is not None:
+        old_number = crypto.decode_binary(old["enc_pub"], crypto.PUBLIC_KEY_BYTES)[0]
+        old_seed = hashlib.sha256(b"public peer fixture" + bytes([old_number])).digest()
+        unsigned = {k: v for k, v in value.items() if k != "self_sig"}
+        value["prev_sig"] = crypto.sign(unsigned, old_seed, label="key")
+    return crypto.canonical(value)
+
+
+def peer_setup(trust, home, *, members=(), initialize=True):
+    identity = importlib.import_module("brigade.fleet_mesh_hub_identity")
+    trust.initialize_trust(brigade_home=home)
+    identity.initialize_identity_store(brigade_home=home)
+    identity.observe_identity(brigade_home=home, origin=PEER_ORIGIN, raw=peer_identity())
+    pin(trust, home, hub=PEER_HUB)
+    accept(trust, home, hub=PEER_HUB, seq=7, entries=list(members))
+    if initialize:
+        trust.initialize_peers(brigade_home=home, origin=PEER_ORIGIN)
+    return identity
+
+
+def peer_observe(trust, home, raw, *, chain=(), require_verified=False, **kwargs):
+    return trust.observe_peer(
+        brigade_home=home,
+        origin=PEER_ORIGIN,
+        principal=PEER_PRINCIPAL,
+        raw=raw,
+        chain=chain,
+        require_verified=require_verified,
+        **kwargs,
+    )
+
+
+def peer_accept(trust, home, raw, *, expected=None, fingerprint=None):
+    return trust.accept_peer(
+        brigade_home=home,
+        origin=PEER_ORIGIN,
+        principal=PEER_PRINCIPAL,
+        raw=raw,
+        expected_fingerprint=fingerprint or crypto.fingerprint(crypto.decode_binary(json.loads(raw)["sig_pub"], 32)),
+        expected_head_digest=expected,
+    )
+
+
+def peer_load(trust, home, *, require_verified=False):
+    return trust.load_peer(
+        brigade_home=home,
+        origin=PEER_ORIGIN,
+        principal=PEER_PRINCIPAL,
+        require_verified=require_verified,
+    )
+
+
+def peer_history(trust, home, raw, instant, *, require_verified=False):
+    value = json.loads(raw)
+    return trust.record_for(
+        brigade_home=home,
+        origin=PEER_ORIGIN,
+        hub=value["hub"],
+        principal=value["principal"],
+        kid=value["kid"],
+        signed_created_at=instant,
+        require_verified=require_verified,
+    )
+
+
+def test_peers_explicit_v2_extension_preserves_v1_and_read_only(trust, home, monkeypatch):
+    peer_setup(trust, home, initialize=False)
+    before = saved(home).read_bytes()
+    old = json.loads(before)
+    assert old["v"] == 1 and "peers" not in old and "peer_records" not in old
+    with pytest.raises(crypto.MeshError, match="^mesh_peers_missing$"):
+        peer_load(trust, home)
+    assert saved(home).read_bytes() == before
+    extended = trust.initialize_peers(brigade_home=home, origin=PEER_ORIGIN)
+    assert extended.data == dict(old, v=2, generation=old["generation"] + 1, peers={}, peer_records={})
+    complete = saved(home).read_bytes()
+    trust.initialize_peers(brigade_home=home, origin=PEER_ORIGIN)
+    assert saved(home).read_bytes() == complete
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("read attempted mutation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "fsync_directory", forbidden)
+        patch.setattr(dirfd, "unlink_child", forbidden)
+        view = peer_load(trust, home)
+        assert view.head is None and view.use.error == "recipient_key_missing"
+        assert view.policy_freshness == "unproven"
+    accept(trust, home, hub=PEER_HUB, seq=8)
+    assert trust.load_trust(brigade_home=home).data["peers"] == {}
+
+
+@pytest.mark.parametrize("mutation", ["v", "missing", "extra", "record", "provenance", "interval"])
+def test_peers_v2_validates_complete_schema_and_retained_evidence(trust, home, mutation):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    raw = peer_record()
+    peer_observe(trust, home, raw)
+    state = json.loads(saved(home).read_bytes())
+    if mutation == "v":
+        state["v"] = 3
+    elif mutation == "missing":
+        del state["peer_records"]
+    elif mutation == "extra":
+        state["unknown"] = {}
+    elif mutation == "record":
+        next(iter(state["peer_records"].values()))["canonical"] = peer_record(2).decode()
+    elif mutation == "provenance":
+        next(iter(state["peer_records"].values()))["confirmation"] = {"fingerprint": "verified"}
+    else:
+        next(iter(state["peer_records"].values()))["predecessor"] = "1" * 64
+    saved(home).write_bytes(crypto.canonical(state))
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
+        peer_load(trust, home)
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "listed,required,want", [(False, False, "unverified"), (True, False, "observed"), (True, True, "unverified")]
+)
+def test_peers_observation_confirmation_and_detachment(trust, home, listed, required, want):
+    identity = peer_setup(trust, home, members=[PEER_PRINCIPAL] if listed else [])
+    identity_path = saved(home).with_name("hub-identity-state.json")
+    identity_bytes = identity_path.read_bytes()
+    raw = peer_record()
+    first = peer_observe(trust, home, raw, require_verified=required)
+    assert first.disposition == "accepted" and first.peer.provenance == want
+    assert first.peer.use.eligible == (want == "observed")
+    first.peer.data["peers"].clear()
+    assert peer_load(trust, home).head == raw
+    complete = saved(home).read_bytes()
+    assert peer_observe(trust, home, raw, require_verified=required).disposition == "replay"
+    assert saved(home).read_bytes() == complete
+    confirmed = peer_accept(trust, home, raw, expected=digest(raw))
+    assert confirmed.peer.provenance == "verified" and confirmed.peer.use.eligible
+    assert peer_load(trust, home, require_verified=True).use.eligible
+    complete = saved(home).read_bytes()
+    assert peer_accept(trust, home, raw, expected=digest(raw)).disposition == "replay"
+    assert saved(home).read_bytes() == complete and identity_path.read_bytes() == identity_bytes
+    identity.confirm_identity(brigade_home=home, origin=PEER_ORIGIN, expected_hub_id=PEER_HUB, source="operator")
+    assert peer_load(trust, home).identity_provenance == "verified"
+    assert peer_load(trust, home).policy_freshness == "unproven"
+    assert saved(home).read_bytes() == complete
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "signature",
+        "kem",
+        "kid",
+        "principal",
+        "hub",
+        "mesh",
+        "duplicate",
+        "deep",
+        "large",
+        "unicode",
+        "timestamp",
+        "suite",
+        "role",
+        "fingerprint",
+        "short-fingerprint",
+        "cas",
+    ],
+)
+def test_peers_invalid_candidates_never_poison_or_write(trust, home, bad):
+    peer_setup(trust, home)
+    original = peer_record()
+    peer_accept(trust, home, original)
+    value = json.loads(peer_record(2))
+    raw = None
+    fp = crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32))
+    expected = digest(original)
+    if bad == "signature":
+        value["self_sig"] = crypto.encode_binary(bytes(64))
+    elif bad == "kem":
+        value["enc_pub"] = crypto.encode_binary(bytes(crypto.PUBLIC_KEY_BYTES))
+    elif bad == "kid":
+        value["kid"] = KID
+    elif bad in {"principal", "hub", "mesh", "timestamp", "suite", "role"}:
+        fields = {
+            "principal": {"principal": "other-peer"},
+            "hub": {"hub": OTHER},
+            "mesh": {"hub": "mesh"},
+            "timestamp": {"created_at": "yesterday"},
+            "suite": {"suites": ["bad"]},
+            "role": {"role": "node"},
+        }
+        raw = peer_record(2, **fields[bad])
+    elif bad == "duplicate":
+        raw = b'{"v":1,' + crypto.canonical(value)[1:]
+    elif bad == "deep":
+        raw = b'{"x":' + b"[" * 5 + b"0" + b"]" * 5 + b"}"
+    elif bad == "large":
+        raw = b" " * (crypto.MAX_RAW_ENVELOPE_BYTES + 1)
+    elif bad == "unicode":
+        raw = b'{"x":"\\ud800"}'
+    elif bad == "fingerprint":
+        fp = crypto.fingerprint(key())
+    elif bad == "short-fingerprint":
+        fp = "AAAA"
+    elif bad == "cas":
+        expected = "0" * 64
+    raw = raw or crypto.canonical(value)
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError):
+        peer_accept(trust, home, raw, expected=expected, fingerprint=fp)
+    assert saved(home).read_bytes() == before
+    if bad not in {"fingerprint", "short-fingerprint", "cas"}:
+        with pytest.raises(crypto.MeshError):
+            peer_observe(trust, home, raw)
+        assert saved(home).read_bytes() == before
+    assert peer_load(trust, home).use.eligible
+
+
+def test_peers_membership_current_use_history_continuity_and_changed(trust, home):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record()
+    second = peer_record(2, previous=first)
+    peer_observe(trust, home, first)
+    assert peer_load(trust, home, require_verified=True).use.error == "recipient_key_unverified"
+    accept(trust, home, hub=PEER_HUB, seq=8)
+    assert peer_load(trust, home).use.error == "recipient_key_not_member"
+    assert peer_history(trust, home, first, json.loads(first)["created_at"]).error == "sender_key_not_member"
+    assert peer_observe(trust, home, second).disposition == "accepted"
+    assert peer_load(trust, home).head == second
+    accept(trust, home, hub=PEER_HUB, seq=9, entries=[PEER_PRINCIPAL])
+    assert peer_load(trust, home).use.eligible
+    assert peer_history(trust, home, first, json.loads(first)["created_at"]).eligible
+    unrelated = peer_record(3)
+    assert peer_observe(trust, home, unrelated).disposition == "changed"
+    assert peer_load(trust, home).head == second
+    third = peer_record(4, previous=second)
+    assert peer_observe(trust, home, third).disposition == "accepted"
+    assert peer_load(trust, home).use.error == "recipient_key_changed"
+    accept(trust, home, hub=PEER_HUB, seq=10, entries=[PEER_PRINCIPAL])
+    peer_observe(trust, home, third)
+    assert peer_load(trust, home).use.error == "recipient_key_changed"
+    assert peer_accept(trust, home, unrelated, expected=digest(third)).disposition == "refused"
+    fresh = peer_record(5)
+    result = peer_accept(trust, home, fresh, expected=digest(third))
+    assert result.disposition == "accepted" and result.peer.use.eligible
+    assert len(result.peer.history) == 4
+    assert result.peer.provenance == "verified"
+
+
+@pytest.mark.parametrize("links", [0, 1, 8, 9])
+def test_peers_chain_bound_and_restart(trust, home, links):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    chain = []
+    for number in range(2, links + 2):
+        chain.append(peer_record(number, previous=chain[-1] if chain else first))
+    result = peer_observe(trust, home, chain[-1] if chain else first, chain=tuple(chain))
+    assert result.disposition == ("changed" if links == 9 else "accepted" if links else "replay")
+    view = peer_load(trust, home)
+    assert len(view.history) == (1 if links == 9 else links + 1)
+    assert view.use.error == ("recipient_key_changed" if links == 9 else None)
+
+
+@pytest.mark.parametrize("bad", ["gap", "order", "loop", "instant", "revoked", "principal"])
+def test_peers_failed_authenticated_chain_retains_changed(trust, home, bad):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    second = peer_record(2, previous=first)
+    third = peer_record(3, previous=second)
+    chain = (second, third)
+    if bad == "gap":
+        chain = (third,)
+    elif bad == "order":
+        chain = (third, second, third)
+    elif bad == "loop":
+        chain = (second, first, third)
+    elif bad == "instant":
+        second = peer_record(2, previous=first, created_at="2026-01-02T01:01:00+01:00")
+        third = peer_record(3, previous=second)
+        chain = (second, third)
+    elif bad == "revoked":
+        trust.record_hub_revocation(
+            brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=json.loads(second)["kid"], cutoff=TIME
+        )
+    else:
+        second = peer_record(2, previous=first, principal="other-peer")
+        chain = (second, third)
+    result = peer_observe(trust, home, third, chain=chain)
+    assert result.disposition == "changed" and result.evidence_recorded
+    assert peer_load(trust, home).head == first
+    assert peer_load(trust, home).use.error == "recipient_key_changed"
+    before = saved(home).read_bytes()
+    assert peer_observe(trust, home, third, chain=chain).disposition == "changed"
+    assert saved(home).read_bytes() == before
+
+
+def test_peers_manual_cas_history_and_cross_principal_irreversible_barrier(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    second = peer_record(2)
+    peer_accept(trust, home, first)
+    trust.record_hub_revocation(
+        brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=json.loads(first)["kid"], cutoff=TIME
+    )
+    assert peer_load(trust, home).use.error == "recipient_key_revoked"
+    result = peer_accept(trust, home, first)
+    assert result.disposition == "replay" and result.peer.use.error == "recipient_key_revoked"
+    assert peer_history(trust, home, first, "2026-01-02T00:00:00Z").error == "sender_key_revoked"
+    peer_accept(trust, home, second, expected=digest(first))
+    assert peer_load(trust, home).use.eligible
+    before = saved(home).read_bytes()
+    assert peer_accept(trust, home, first, expected=digest(second)).disposition == "refused"
+    assert saved(home).read_bytes() == before
+    alternate = peer_record(2, created_at="2026-01-02T00:03:00Z")
+    assert peer_accept(trust, home, alternate, expected=digest(second)).disposition == "refused"
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "instant,eligible",
+    [
+        ("2026-01-02T00:00:59Z", False),
+        ("2026-01-02T00:01:00Z", True),
+        ("2026-01-02T00:01:59Z", True),
+        ("2026-01-02T00:02:00Z", True),
+        ("2026-01-02T00:06:59.999999Z", True),
+        ("2026-01-02T00:07:00Z", False),
+    ],
+)
+def test_peers_history_interval_only_retirement_skew(trust, home, instant, eligible):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    peer_observe(trust, home, peer_record(2, previous=first))
+    use = peer_history(trust, home, first, instant)
+    assert use.record == first and use.eligible == eligible
+    assert use.validity["start"] == "2026-01-02T00:01:00Z"
+    assert use.validity["retirement"] == "2026-01-02T00:02:00Z"
+    assert use.error == (None if eligible else "mesh_peer_outside_interval")
+
+
+@pytest.mark.parametrize("prerequisite", ["identity", "origin", "floor", "stale"])
+def test_peers_identity_prerequisites_refuse_without_extension(trust, home, prerequisite):
+    identity = peer_setup(trust, home, initialize=False)
+    origin = PEER_ORIGIN
+    if prerequisite == "identity":
+        saved(home).with_name("hub-identity-state.json").unlink()
+        want = "hub_identity_unverified"
+    elif prerequisite == "origin":
+        origin = "https://unknown.example"
+        want = "hub_identity_unverified"
+    elif prerequisite == "floor":
+        target = peer_identity(seq=2)
+        identity.require_identity_floor(
+            brigade_home=home, kind="hub-identity", hub=PEER_HUB, signer=signer(), seq=2, digest=digest(target)
+        )
+        want = "hub_identity_floor_unsatisfied"
+    else:
+        identity.observe_identity(
+            brigade_home=home, origin="https://other.example", raw=peer_identity(origin="https://other.example", seq=2)
+        )
+        want = "signed_statement_rollback"
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^" + want + "$"):
+        trust.initialize_peers(brigade_home=home, origin=origin)
+    assert saved(home).read_bytes() == before
+    if prerequisite == "floor":
+        identity.observe_identity(brigade_home=home, origin=PEER_ORIGIN, raw=target)
+        assert (
+            trust.initialize_peers(brigade_home=home, origin="HTTPS://PEER-HUB.EXAMPLE:443/").policy_freshness
+            == "unproven"
+        )
+        peer_accept(trust, home, peer_record())
+        identity.require_identity_floor(
+            brigade_home=home,
+            kind="hub-identity",
+            hub=PEER_HUB,
+            signer=signer(),
+            seq=3,
+            digest=digest(peer_identity(seq=3)),
+        )
+        with pytest.raises(crypto.MeshError, match="^hub_identity_floor_unsatisfied$"):
+            peer_load(trust, home)
+        with pytest.raises(crypto.MeshError, match="^hub_identity_floor_unsatisfied$"):
+            peer_accept(trust, home, peer_record(2), expected=digest(peer_record()))
+
+
+def test_peers_current_membership_scoped_floor_and_replaced_anchor(trust, home):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    raw = peer_record()
+    peer_observe(trust, home, raw)
+    pin(trust, home, hub=OTHER)
+    accept(trust, home, hub=OTHER, seq=8)
+    # A global mark on a different hub is not this hub's accepted membership.
+    assert peer_load(trust, home).use.eligible
+    floor(trust, home, signed(hub=PEER_HUB, seq=9), hub=PEER_HUB)
+    assert peer_load(trust, home).use.error == "recipient_key_unverified"
+    pin(trust, home, hub=PEER_HUB, seed=SEED2, previous=signer())
+    accept(trust, home, hub=PEER_HUB, seed=SEED2, seq=0, entries=[PEER_PRINCIPAL])
+    view = peer_load(trust, home)
+    assert view.use.error == "mesh_peer_membership_reconciliation_unsupported"
+    assert view.use.floors[0]["signer"] == signer()
+    peer_accept(trust, home, raw, expected=digest(raw))
+    assert peer_load(trust, home).use.eligible
+    pin(trust, home, hub=PEER_HUB, previous=signer(SEED2))
+    accept(trust, home, hub=PEER_HUB, seq=9)
+    assert peer_load(trust, home).use.eligible  # Explicit peer confirmation survives removal.
+
+
+def test_peers_exact_unverified_promotion_and_old_anchor_never_reactivates(trust, home):
+    peer_setup(trust, home)
+    raw = peer_record()
+    peer_observe(trust, home, raw)
+    accept(trust, home, hub=PEER_HUB, seq=8, entries=[PEER_PRINCIPAL])
+    assert peer_load(trust, home).use.error == "recipient_key_unverified"
+    peer_observe(trust, home, raw, require_verified=True)
+    assert peer_load(trust, home).provenance == "unverified"
+    peer_observe(trust, home, raw)
+    assert peer_load(trust, home).provenance == "observed"
+    pin(trust, home, hub=PEER_HUB, seed=SEED2, previous=signer())
+    assert peer_load(trust, home).use.error == "recipient_key_unverified"
+    accept(trust, home, hub=PEER_HUB, seed=SEED2, seq=0, entries=[PEER_PRINCIPAL])
+    assert peer_load(trust, home).use.eligible
+    peer_observe(trust, home, peer_record(2, previous=raw))
+    assert (
+        peer_history(trust, home, raw, json.loads(raw)["created_at"], require_verified=True).error
+        == "sender_key_unverified"
+    )
+
+
+def test_peers_completed_chain_retry_and_verified_confirmation_keep_original_times(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    before = saved(home).read_bytes()
+    assert peer_accept(trust, home, first, expected=digest(first)).disposition == "replay"
+    assert saved(home).read_bytes() == before
+    second = peer_record(2, previous=first)
+    third = peer_record(3, previous=second)
+    chain = (second, third)
+    peer_observe(trust, home, third, chain=chain)
+    before = saved(home).read_bytes()
+    assert peer_observe(trust, home, third, chain=chain).disposition == "replay"
+    assert saved(home).read_bytes() == before
+    assert peer_observe(trust, home, first).disposition == "refused"
+    assert saved(home).read_bytes() == before
+
+
+def test_peers_invalid_intermediate_self_signature_cannot_poison(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    second = peer_record(2, previous=first)
+    third = peer_record(3, previous=second)
+    value = json.loads(second)
+    value["self_sig"] = crypto.encode_binary(bytes(64))
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_record_invalid$"):
+        peer_observe(trust, home, third, chain=(crypto.canonical(value), third))
+    assert saved(home).read_bytes() == before
+    assert peer_load(trust, home).use.eligible
+
+
+@pytest.mark.parametrize(
+    "mutation", ["missing-required", "bool-required", "recipient-tuple", "sender-tuple", "old-hub"]
+)
+def test_peers_use_arguments_are_explicit_and_current_hub_only(trust, home, mutation):
+    peer_setup(trust, home)
+    raw = peer_record()
+    peer_accept(trust, home, raw)
+    args = dict(
+        brigade_home=home, origin=PEER_ORIGIN, principal=PEER_PRINCIPAL, purpose="recipient", require_verified=False
+    )
+    if mutation == "missing-required":
+        del args["require_verified"]
+    elif mutation == "bool-required":
+        args["require_verified"] = 0
+    elif mutation == "recipient-tuple":
+        args["kid"] = json.loads(raw)["kid"]
+    elif mutation == "sender-tuple":
+        args["purpose"] = "sender"
+    else:
+        args.update(purpose="sender", hub=OTHER, kid=json.loads(raw)["kid"], signed_created_at=TIME)
+    before = saved(home).read_bytes()
+    with pytest.raises((crypto.MeshError, TypeError)):
+        with trust.peer_for_use(**args):
+            pytest.fail("invalid role selected a key")
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["accept", "changed", "chain", "initialize"])
+@pytest.mark.parametrize("fault", ["replace", "postrename", "unlink", "fsync", "unlock", "close"])
+def test_peers_writer_lost_returns_and_exact_retry(trust, home, monkeypatch, operation, fault):
+    import fcntl
+
+    peer_setup(trust, home, initialize=operation != "initialize")
+    first = peer_record()
+    second = peer_record(2, previous=first if operation == "chain" else None)
+    third = peer_record(3, previous=second) if operation == "chain" else None
+    if operation in {"changed", "chain"}:
+        peer_accept(trust, home, first)
+    raw = second if operation == "changed" else first
+
+    def action():
+        if operation == "initialize":
+            return trust.initialize_peers(brigade_home=home, origin=PEER_ORIGIN)
+        if operation == "changed":
+            return peer_observe(trust, home, raw)
+        if operation == "chain":
+            return peer_observe(trust, home, third, chain=(second, third))
+        return peer_accept(trust, home, raw)
+
+    before = saved(home).read_bytes()
+    inode = saved(home).parent.stat().st_ino
+    original_replace, original_unlink = dirfd.replace_children, dirfd.unlink_child
+    original_fsync, original_flock, original_close = dirfd.fsync_directory, fcntl.flock, os.close
+    seen = {"replaced": False, "faults": 0}
+
+    def fail():
+        seen["faults"] += 1
+        raise OSError(errno.EIO, "public peer lost return")
+
+    def replace(*args, **kwargs):
+        if fault == "replace":
+            fail()
+        original_replace(*args, **kwargs)
+        seen["replaced"] = True
+        if fault == "postrename":
+            fail()
+
+    def unlink(parent, name, **kwargs):
+        if fault == "unlink" and seen["replaced"] and name.startswith(".trust-"):
+            fail()
+        return original_unlink(parent, name, **kwargs)
+
+    def fsync(fd):
+        if fault == "fsync" and seen["replaced"]:
+            fail()
+        return original_fsync(fd)
+
+    def flock(fd, mode):
+        original_flock(fd, mode)
+        if fault == "unlock" and mode == fcntl.LOCK_UN and seen["replaced"]:
+            fail()
+
+    def close(fd):
+        hit = fault == "close" and seen["replaced"] and os.fstat(fd).st_ino == inode
+        original_close(fd)
+        if hit:
+            fail()
+
+    caught = result = None
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "replace_children", replace)
+        patch.setattr(dirfd, "unlink_child", unlink)
+        patch.setattr(dirfd, "fsync_directory", fsync)
+        patch.setattr(fcntl, "flock", flock)
+        patch.setattr(os, "close", close)
+        try:
+            result = action()
+        except BaseException as error:
+            caught = error
+    assert seen["faults"] == 1
+    if operation == "changed":
+        assert caught is None and result.disposition == "changed"
+        assert result.error == "recipient_key_changed" and not result.evidence_recorded
+        assert result.storage_error in {"mesh_trust_storage_failure", "mesh_trust_durability_indeterminate"}
+    else:
+        assert type(caught) is crypto.MeshError
+        assert caught.code in {"mesh_trust_storage_failure", "mesh_trust_durability_indeterminate"}
+    complete = saved(home).read_bytes()
+    assert (complete == before) == (fault == "replace")
+    if fault != "replace":
+        assert json.loads(complete)["generation"] == json.loads(before)["generation"] + 1
+    retry = action()
+    if operation != "initialize":
+        assert retry.disposition == (
+            "changed" if operation == "changed" else "accepted" if fault == "replace" else "replay"
+        )
+    if fault != "replace":
+        assert saved(home).read_bytes() == complete
+    if operation == "accept":
+        trust.record_hub_revocation(
+            brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=json.loads(raw)["kid"], cutoff=TIME
+        )
+        assert action().peer.use.error == "recipient_key_revoked"
+
+
+def test_peers_ordinary_capacity_preserves_authenticated_reserve(trust, home, monkeypatch):
+    peer_setup(trust, home)
+    before = saved(home).read_bytes()
+    ordinary = len(crypto.canonical(dict(json.loads(before), conflicts={})))
+    with monkeypatch.context() as patch:
+        patch.setattr(trust, "_ORDINARY_BYTES", ordinary + 100)
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+            peer_accept(trust, home, peer_record())
+        assert saved(home).read_bytes() == before
+        conflict = signed(hub=PEER_HUB, seq=7, entries=[PEER_PRINCIPAL])
+        assert accept(trust, home, conflict, hub=PEER_HUB).status == "signed_statement_conflict"
+        complete = saved(home).read_bytes()
+        assert len(complete) > ordinary + 100
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+            peer_accept(trust, home, peer_record())
+        assert saved(home).read_bytes() == complete
+    assert peer_load(trust, home).head is None
+
+
+def test_peers_read_never_adopts_temp_and_existing_mutators_preserve_history(trust, home):
+    identity = peer_setup(trust, home)
+    raw = peer_record()
+    peer_accept(trust, home, raw)
+    before = peer_load(trust, home).data
+    leftover = saved(home).with_name(".trust-" + "f" * 32 + ".tmp")
+    leftover.write_bytes(b"uncommitted")
+    leftover.chmod(0o600)
+    peer_load(trust, home)
+    peer_history(trust, home, raw, json.loads(raw)["created_at"])
+    assert leftover.read_bytes() == b"uncommitted"
+    accept(trust, home, hub=PEER_HUB, seq=8)
+    floor(trust, home, signed(hub=PEER_HUB, seq=9), hub=PEER_HUB)
+    trust.record_hub_revocation(brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=KID, cutoff=TIME)
+    pin(trust, home, hub=PEER_HUB, seed=SEED2, previous=signer())
+    identity.observe_identity(brigade_home=home, origin=PEER_ORIGIN, raw=peer_identity(seq=2))
+    after = peer_load(trust, home).data
+    assert after["peers"] == before["peers"] and after["peer_records"] == before["peer_records"]
+
+
+@pytest.mark.parametrize("operation", ["accept", "changed"])
+@pytest.mark.parametrize("primary", ["write", "cancel", "none"])
+def test_peers_buffered_failures_preserve_primary_and_complete_generation(
+    trust, home, buffered_snapshot_fault, operation, primary
+):
+    class Cancelled(BaseException):
+        pass
+
+    peer_setup(trust, home)
+    first, candidate = peer_record(), peer_record(2)
+    if operation == "changed":
+        peer_accept(trust, home, first)
+    before = saved(home).read_bytes()
+    failure = (
+        OSError(errno.ENOSPC, "primary write") if primary == "write" else Cancelled() if primary == "cancel" else None
+    )
+    caught = result = None
+    with buffered_snapshot_fault(failure, OSError(errno.EIO, "secondary close reflush"), extra_cleanup=True) as seen:
+        try:
+            result = peer_observe(trust, home, candidate) if operation == "changed" else peer_accept(trust, home, first)
+        except BaseException as error:
+            caught = error
+    if primary == "cancel":
+        assert caught is failure
+    elif operation == "changed":
+        assert caught is None and result.disposition == "changed"
+        assert not result.evidence_recorded and result.storage_error == "mesh_trust_storage_failure"
+    else:
+        assert type(caught) is crypto.MeshError and caught.code == "mesh_trust_storage_failure"
+    assert seen["closes"] == seen["stream_closes"] == seen["unlinks"] == 1
+    assert seen["replacement_live"]
+    assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data["v"] == 2
+
+
+@pytest.mark.parametrize("writer", ["revocation", "membership", "identity"])
+def test_peers_locked_use_blocks_process_writer_and_next_scope_rechecks(trust, home, writer):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record()
+    peer_observe(trust, home, first)
+    marker = home / "writer-started"
+    script = """
+import json, sys
+from pathlib import Path
+from brigade import fleet_mesh_trust as trust, fleet_mesh_hub_identity as identity
+home, marker, writer, hub, kid, membership, raw_identity = sys.argv[1:]
+Path(marker).write_text("started")
+if writer == "revocation":
+    trust.record_hub_revocation(brigade_home=Path(home), hub=hub, principal="other-peer", kid=kid, cutoff="2026-01-02T00:00:00Z")
+elif writer == "membership":
+    trust.import_statement(brigade_home=Path(home), hub=hub, kind="membership", raw=membership.encode())
+else:
+    identity.observe_identity(brigade_home=Path(home), origin="https://peer-hub.example", raw=raw_identity.encode())
+print("committed", flush=True)
+"""
+    before = saved(home).read_bytes()
+    with trust.peer_for_use(
+        brigade_home=home, origin=PEER_ORIGIN, principal=PEER_PRINCIPAL, purpose="recipient", require_verified=False
+    ) as use:
+        assert use.eligible and use.record == first
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(home),
+                str(marker),
+                writer,
+                PEER_HUB,
+                json.loads(first)["kid"],
+                signed(hub=PEER_HUB, seq=8).decode(),
+                peer_identity(seq=2).decode(),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            import time
+
+            deadline = time.monotonic() + 5
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists()
+            with pytest.raises(subprocess.TimeoutExpired):
+                process.communicate(timeout=0.2)
+            assert saved(home).read_bytes() == before and use.eligible
+        except BaseException:
+            process.kill()
+            process.communicate()
+            raise
+    output, error = process.communicate(timeout=10)
+    assert process.returncode == 0 and output.strip() == "committed", error
+    fresh = peer_load(trust, home)
+    assert (
+        fresh.use.error
+        == {"revocation": "recipient_key_revoked", "membership": "recipient_key_not_member", "identity": None}[writer]
+    )
+    if writer == "identity":
+        assert fresh.identity_generation == use.identity_generation + 1
+    else:
+        assert fresh.trust_generation == use.trust_generation + 1
+
+    # Caller exceptions/cancellation release the very same inode lock.
+    class Cancelled(BaseException):
+        pass
+
+    with pytest.raises(Cancelled):
+        with trust.peer_for_use(
+            brigade_home=home, origin=PEER_ORIGIN, principal=PEER_PRINCIPAL, purpose="recipient", require_verified=False
+        ):
+            raise Cancelled()
+    assert peer_load(trust, home).head == first
+
+
+def test_peers_process_cas_race_has_one_accepted_head(trust, home):
+    peer_setup(trust, home)
+    script = """
+import sys
+from pathlib import Path
+from brigade import fleet_mesh_trust as trust, fleet_mesh_crypto as crypto
+try:
+    result = trust.accept_peer(brigade_home=Path(sys.argv[1]), origin="https://peer-hub.example", principal="test-peer", raw=sys.argv[2].encode(), expected_fingerprint=sys.argv[3], expected_head_digest=None)
+    print(result.disposition)
+except crypto.MeshError as error:
+    print(error.code)
+"""
+    candidates = (peer_record(), peer_record(2))
+    processes = [
+        subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                script,
+                str(home),
+                raw.decode(),
+                crypto.fingerprint(crypto.decode_binary(json.loads(raw)["sig_pub"], 32)),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for raw in candidates
+    ]
+    outputs = []
+    for process in processes:
+        output, error = process.communicate(timeout=10)
+        assert process.returncode == 0, error
+        outputs.append(output.strip())
+    assert sorted(outputs) == ["accepted", "mesh_peer_head_cas_mismatch"]
+    view = peer_load(trust, home)
+    assert view.head == candidates[outputs.index("accepted")] and len(view.history) == 1
+
+
+@pytest.mark.parametrize("backend", ["extra", "unsupported", "platform"])
+def test_peers_optional_backend_and_platform_preserve_diagnostics(trust, home, monkeypatch, backend):
+    peer_setup(trust, home)
+    raw = peer_record()
+    peer_accept(trust, home, raw)
+    before = saved(home).read_bytes()
+
+    def fail():
+        raise crypto.MeshExtraMissing() if backend == "extra" else crypto.MeshError("mesh_backend_unsupported")
+
+    with monkeypatch.context() as patch:
+        if backend == "platform":
+            patch.setattr(dirfd, "posix_available", lambda: False)
+            want = "mesh_trust_platform_unsupported"
+        else:
+            patch.setattr(crypto, "probe_backend", fail)
+            want = "mesh_extra_missing" if backend == "extra" else "mesh_backend_unsupported"
+        for action in (
+            lambda: peer_load(trust, home),
+            lambda: peer_accept(trust, home, raw),
+            lambda: peer_observe(trust, home, raw),
+        ):
+            with pytest.raises(crypto.MeshError) as caught:
+                action()
+            assert caught.value.code == want
+    assert saved(home).read_bytes() == before
+
+
+def test_peers_record_count_capacity_does_not_block_evidence_without_growth(trust, home, monkeypatch):
+    peer_setup(trust, home)
+    raw = peer_record()
+    peer_accept(trust, home, raw)
+    for number in range(2, 17):
+        raw = peer_record(number, previous=raw)
+        peer_observe(trust, home, raw)
+    before = saved(home).read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(trust, "_MAX_ENTRIES", 16)
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+            peer_observe(trust, home, peer_record(17, previous=raw))
+        assert saved(home).read_bytes() == before
+        accept(trust, home, hub=PEER_HUB, seq=8)
+        trust.record_hub_revocation(
+            brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=json.loads(raw)["kid"], cutoff=TIME
+        )
+        after = peer_load(trust, home)
+        assert len(after.history) == 16 and after.use.error == "recipient_key_revoked"
+
+
+def test_peers_missing_identity_never_initializes_files(trust, home):
+    for action in (
+        lambda: trust.initialize_peers(brigade_home=home, origin=PEER_ORIGIN),
+        lambda: peer_load(trust, home),
+        lambda: peer_accept(trust, home, peer_record()),
+    ):
+        with pytest.raises(crypto.MeshError) as caught:
+            action()
+        assert caught.value.code == "hub_identity_unverified"
+        assert not (home / "fleet").exists()
+
+
+def test_peers_conflicts_are_retained_evidence_without_admitting_rejected_membership(trust, home):
+    identity = peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record()
+    peer_observe(trust, home, first)
+    conflict = signed(hub=PEER_HUB, seq=7)
+    assert accept(trust, home, conflict, hub=PEER_HUB).status == "signed_statement_conflict"
+    value = json.loads(peer_identity())
+    value["require_sealed"] = True
+    del value["sig"]
+    fork = crypto.canonical(statements.sign_statement(value, SEED, expected_kind="hub-identity"))
+    assert (
+        identity.observe_identity(brigade_home=home, origin=PEER_ORIGIN, raw=fork).status == "signed_statement_conflict"
+    )
+    view = peer_load(trust, home)
+    assert view.use.eligible and view.use.membership["members"] == [PEER_PRINCIPAL]
+    assert {e["digest"] for e in view.use.conflicts} == {digest(conflict), digest(fork)}
+    assert view.identity_digest == digest(peer_identity())
+    assert view.policy_freshness == "unproven"
+
+
+def test_peers_manual_resolution_preserves_original_observation_confirmation_and_retired_cas(trust, home):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record()
+    peer_observe(trust, home, first)
+    observed_at = peer_load(trust, home).history[0]["accepted_at"]
+    peer_observe(trust, home, peer_record(2))
+    assert peer_accept(trust, home, first, expected=digest(first)).peer.use.eligible
+    confirmed = peer_load(trust, home).history[0]["confirmation"].copy()
+    second = peer_record(3, previous=first)
+    peer_observe(trust, home, second)
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_head_cas_mismatch$"):
+        peer_accept(trust, home, first, expected=digest(first))
+    view = peer_load(trust, home)
+    assert view.history[0]["accepted_at"] == observed_at and view.history[0]["confirmation"] == confirmed
+    assert view.history[0]["observation"]["digest"] == digest(signed(hub=PEER_HUB, seq=7, entries=[PEER_PRINCIPAL]))
+    assert view.head == second and view.provenance == "verified"
+
+
+def test_peers_cross_hub_chain_refuses_without_changed_evidence(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    foreign = peer_record(2, previous=first, hub=OTHER)
+    final = peer_record(3, previous=foreign)
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_scope_mismatch$"):
+        peer_observe(trust, home, final, chain=(foreign, final))
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize("fault", ["unlock", "close"])
+def test_peers_use_primary_cancellation_wins_over_cleanup(
+    trust, home, trust_read_cleanup_fault, trust_directory_close_fault, fault
+):
+    class Cancelled(BaseException):
+        pass
+
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    primary = Cancelled()
+    caught = None
+    scope = (
+        trust_read_cleanup_fault("unlock", OSError(errno.EIO, "secondary unlock"))
+        if fault == "unlock"
+        else trust_directory_close_fault(home, "final")
+    )
+    with scope:
+        try:
+            with trust.peer_for_use(
+                brigade_home=home,
+                origin=PEER_ORIGIN,
+                principal=PEER_PRINCIPAL,
+                purpose="recipient",
+                require_verified=True,
+            ) as use:
+                assert use.eligible
+                raise primary
+        except BaseException as error:
+            caught = error
+    assert caught is primary
+    assert peer_load(trust, home).use.eligible
+
+
+def test_peers_bad_predecessor_signature_is_authenticated_changed(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    candidate = json.loads(peer_record(2, previous=first))
+    candidate["prev_sig"] = crypto.encode_binary(bytes(64))
+    raw = crypto.canonical(candidate)
+    result = peer_observe(trust, home, raw)
+    assert result.disposition == "changed" and result.evidence_recorded
+    assert result.peer.head == first and result.peer.use.error == "recipient_key_changed"
+    assert result.peer.use.changed[0]["canonical"].encode() == raw
+
+
+def test_peers_effective_barrier_keeps_all_sources_and_earliest_cutoff(trust, home):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first)
+    kid = json.loads(first)["kid"]
+    trust.record_hub_revocation(
+        brigade_home=home, hub=PEER_HUB, principal="other-peer", kid=kid, cutoff="2026-01-02T01:00:00Z"
+    )
+    accept(
+        trust,
+        home,
+        hub=PEER_HUB,
+        kind="revocation",
+        seq=7,
+        entries=[revoked(kid=kid, principal=PEER_PRINCIPAL, cutoff="2026-01-02T00:30:00Z")],
+    )
+    pin(trust, home, hub=PEER_HUB, seed=SEED2, previous=signer())
+    accept(
+        trust,
+        home,
+        hub=PEER_HUB,
+        seed=SEED2,
+        kind="revocation",
+        seq=0,
+        entries=[revoked(kid=kid, principal="third-peer", cutoff="2026-01-02T00:10:00Z")],
+    )
+    use = peer_history(trust, home, first, "2026-01-02T00:01:00Z")
+    assert use.error == "sender_key_revoked" and use.record == first
+    assert use.barrier["cutoff"] == "2026-01-02T00:10:00Z"
+    assert use.barrier["principals"] == ["other-peer", PEER_PRINCIPAL, "third-peer"]
+    assert len(use.barrier["sources"]) == 3
+    before = saved(home).read_bytes()
+    assert peer_accept(trust, home, first).peer.use.error == "recipient_key_revoked"
+    assert saved(home).read_bytes() == before
+    second = peer_record(2)
+    peer_accept(trust, home, second, expected=digest(first))
+    assert peer_load(trust, home).use.eligible
+    assert peer_history(trust, home, first, "2026-01-02T00:09:59.999999Z").error == "sender_key_revoked"
+    assert peer_history(trust, home, first, "2026-01-02T00:10:00Z").error == "sender_key_revoked"
+
+
+def test_peers_operations_never_change_private_custody_or_identity(trust, home):
+    from brigade import fleet_mesh_keys as custody
+
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    custody.load_local_keys(brigade_home=home, principal="local-node", hub_id=PEER_HUB, create=True)
+    directory = saved(home).parent
+    protected = {path.name: path.read_bytes() for path in directory.iterdir() if path.name != "trust-state.json"}
+    assert len(protected) == 2
+    first = peer_record()
+    peer_observe(trust, home, first)
+    peer_accept(trust, home, first, expected=digest(first))
+    peer_observe(trust, home, peer_record(2, previous=first))
+    peer_history(trust, home, first, json.loads(first)["created_at"])
+    peer_load(trust, home)
+    assert {
+        path.name: path.read_bytes() for path in directory.iterdir() if path.name != "trust-state.json"
+    } == protected
+
+
+def test_peers_full_peer_table_preserves_peers_during_evidence_import(trust, home, monkeypatch):
+    peer_setup(trust, home)
+    for number in range(1, 17):
+        principal = f"test-peer-{number}"
+        raw = peer_record(number, principal=principal)
+        trust.accept_peer(
+            brigade_home=home,
+            origin=PEER_ORIGIN,
+            principal=principal,
+            raw=raw,
+            expected_fingerprint=crypto.fingerprint(crypto.decode_binary(json.loads(raw)["sig_pub"], 32)),
+            expected_head_digest=None,
+        )
+    before = saved(home).read_bytes()
+    with monkeypatch.context() as patch:
+        patch.setattr(trust, "_MAX_ENTRIES", 16)
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_capacity$"):
+            peer_accept(trust, home, peer_record(17))
+        assert saved(home).read_bytes() == before
+        accept(trust, home, hub=PEER_HUB, seq=8)
+        result = accept(trust, home, signed(hub=PEER_HUB, seq=8, entries=[PEER_PRINCIPAL]), hub=PEER_HUB)
+        assert result.status == "signed_statement_conflict" and result.evidence_recorded
+        after = trust.load_trust(brigade_home=home).data
+        assert after["peers"] == json.loads(before)["peers"]
+        assert after["peer_records"] == json.loads(before)["peer_records"]
