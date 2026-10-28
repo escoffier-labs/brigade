@@ -1348,7 +1348,13 @@ def _list_names(directory: _Directory, *, prefix: str, suffix: str) -> list[str]
         if directory.descriptor is None:  # pragma: no cover - exercised on Windows.
             names = [path.name for path in directory.path.glob(f"{prefix}*{suffix}")]
         else:
-            names = os.listdir(directory.descriptor)
+            # Storage may predate lock acquisition; enumerate through a fresh
+            # open description while staying anchored to the verified directory.
+            scan_fd = os.open(".", _directory_flags(), dir_fd=directory.descriptor)
+            try:
+                names = os.listdir(scan_fd)
+            finally:
+                os.close(scan_fd)
     except OSError as exc:
         raise GrokbotJobError("unsafe-storage") from exc
     return sorted(name for name in names if name.startswith(prefix) and name.endswith(suffix))

@@ -9,8 +9,9 @@ import stat
 import subprocess
 import sys
 import threading
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
-from multiprocessing import Pipe, Process
+from multiprocessing import Barrier, Pipe, Process
 from pathlib import Path
 
 import pytest
@@ -71,8 +72,20 @@ def _claim_in_process(target: str, job_id: str, lease_id: str, connection) -> No
         connection.close()
 
 
-def _enqueue_scout_in_process(target: str, issue_number: int, connection) -> None:
+def _enqueue_scout_in_process(target: str, issue_number: int, connection, storage_ready=None) -> None:
     """Exercise the Scout admission guard from two independent producers."""
+    patch = pytest.MonkeyPatch()
+    if storage_ready is not None:
+        original_lock = grokbot_jobs._queue_lock
+
+        @contextmanager
+        def synchronized_lock(storage):
+            # Admission opens storage before requesting the queue lock.
+            storage_ready.wait(timeout=10)
+            with original_lock(storage):
+                yield
+
+        patch.setattr(grokbot_jobs, "_queue_lock", synchronized_lock)
     spec = _spec()
     spec.update({"label": "Repository Scout", "role": "repository-scout", "artifact": {"kind": "report"}})
     try:
@@ -84,6 +97,7 @@ def _enqueue_scout_in_process(target: str, issue_number: int, connection) -> Non
     else:
         connection.send(result)
     finally:
+        patch.undo()
         connection.close()
 
 
@@ -190,11 +204,13 @@ def test_storage_is_private_and_keeps_the_full_envelope(tmp_path: Path):
     assert "pytest -q tests/test_grokbot_jobs.py" in raw
 
 
-def test_concurrent_scout_admission_creates_only_one_active_job(tmp_path: Path):
+@pytest.mark.parametrize("open_storage_first", [False, True], ids=["unsynchronized", "storage-open-before-admission"])
+def test_concurrent_scout_admission_creates_only_one_active_job(tmp_path: Path, open_storage_first: bool):
+    storage_ready = Barrier(2) if open_storage_first else None
     first_parent, first_child = Pipe(duplex=False)
     second_parent, second_child = Pipe(duplex=False)
-    first = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 1, first_child))
-    second = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 2, second_child))
+    first = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 1, first_child, storage_ready))
+    second = Process(target=_enqueue_scout_in_process, args=(str(tmp_path), 2, second_child, storage_ready))
     first.start()
     second.start()
     first_child.close()

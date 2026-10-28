@@ -56,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
+
 - Fleet Hub refuses plaintext replies to retained sealed messages, including retries of pre-upgrade plaintext replies. Exact detached retries remain available after parent expiry, and invalid retries do not reveal whether a foreign message id is retained.
 
 - Content guard detects and fully redacts Windows home paths with forward or mixed separators, while preserving quoted spaces and surrounding prose (#1913).
