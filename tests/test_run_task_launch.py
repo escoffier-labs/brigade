@@ -523,3 +523,109 @@ def test_claim_requires_pristine_prepared_history(task_run):
         assert projection.last_sequence == len(rebuilt)
         with pytest.raises(tasks.TaskJournalError):
             tasks._fold(run_dir.name, rebuilt)
+
+
+@pytest.mark.parametrize("mode", ["allowed", "count", "wall", "claimed-error", "substitution"])
+def test_budget_exact_binding_composes_real_claim_and_dispatch(task_run, mode):
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import run_budget
+
+    run_dir, workspace = task_run
+    handle = support.prepared(task_run)
+    version = tasks.read_tasks(run_dir)[0].version
+    started = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    declaration = run_budget.RunBudgetDeclaration(
+        worker_dispatch_count=1, wall_clock_seconds=1 if mode == "wall" else None
+    )
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=declaration,
+        append_event=lambda *args: None,
+        clock=lambda: started + timedelta(seconds=2),
+    )
+    coordinator.set_started_at(started)
+    if mode == "count":
+        coordinator.reserve_worker_dispatch(request_id="previous")
+    supplied = []
+
+    def record(candidate):
+        supplied.append(candidate)
+        claim = tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=version,
+            seat="worker",
+            dispatch_attempt=candidate,
+        )
+        assert claim.outcome == "granted"
+        if mode == "claimed-error":
+            raise RuntimeError("after durable claim")
+        run_lifecycle.record_dispatch_fact(
+            run_dir,
+            workspace=workspace,
+            event_type="run.dispatch.requested",
+            seat="worker",
+            attempt=candidate,
+        )
+        return candidate + 1 if mode == "substitution" else candidate
+
+    def reserve():
+        return coordinator.reserve_and_record_dispatch(
+            seat="worker",
+            allocate_attempt=lambda: 1,
+            record_requested=record,
+            reclaim_pending=False,
+        )
+
+    if mode in {"count", "wall"}:
+        with pytest.raises(run_budget.BudgetPolicyError) as exc:
+            reserve()
+        assert exc.value.dimension == ("wall_clock_seconds" if mode == "wall" else "worker_dispatch_count")
+        assert supplied == []
+        assert tasks.read_tasks(run_dir)[0].launch_claim is None
+    elif mode == "claimed-error":
+        with pytest.raises(RuntimeError, match="after durable claim"):
+            reserve()
+    elif mode == "substitution":
+        with pytest.raises(run_budget.BudgetError) as exc:
+            reserve()
+        assert exc.value.code == "dispatch_binding_mismatch"
+    else:
+        assert reserve() == 1
+    events = run_journal.read_journal(run_dir / "events/lifecycle.jsonl").events
+    claims = [e for e in events if e.event_type == "task.launch-claimed"]
+    requested = [e for e in events if e.event_type == "run.dispatch.requested"]
+    if mode in {"count", "wall"}:
+        assert not claims and not requested
+    else:
+        assert supplied == [1]
+        current = tasks.read_tasks(run_dir)[0]
+        assert current.launch_claim == tasks.TaskLaunchBinding("worker", 1)
+        assert coordinator.projection.used["worker_dispatch_count"] == 1
+        assert (
+            tasks.claim_task_launch(
+                run_dir,
+                workspace=workspace,
+                handle=handle,
+                expected_version=current.version,
+                seat="worker",
+                dispatch_attempt=1,
+            ).outcome
+            == "already-claimed"
+        )
+        assert len(claims) == 1
+        if mode == "claimed-error":
+            assert not requested
+            with pytest.raises(run_budget.BudgetPolicyError):
+                coordinator.reserve_and_record_dispatch(
+                    seat="worker",
+                    allocate_attempt=lambda: 2,
+                    record_requested=record,
+                    reclaim_pending=False,
+                )
+            assert supplied == [1]
+        else:
+            assert len(requested) == 1
+            assert claims[0].sequence < requested[0].sequence
+            assert requested[0].payload["attempt"] == claims[0].payload["dispatch_attempt"] == 1

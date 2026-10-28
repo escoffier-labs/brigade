@@ -1581,3 +1581,52 @@ def test_adapter_reload_after_reconcile_usage_does_not_invent_grants():
     assert restarted.allowed is True
     assert restarted.replayed is False
     assert recovered.projection.used["model_call_count"] == 2
+
+
+@pytest.mark.parametrize("returned", [None, True, False, 0, -1, 2])
+def test_exact_dispatch_binding_rejects_substitution_without_refund(returned):
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=1),
+        append_event=lambda *args: None,
+    )
+    supplied = []
+
+    def record(attempt):
+        supplied.append(attempt)
+        return returned
+
+    with pytest.raises(run_budget.BudgetError) as exc:
+        coordinator.reserve_and_record_dispatch(
+            seat="worker", allocate_attempt=lambda: 1, record_requested=record, reclaim_pending=False
+        )
+    assert exc.value.code == "dispatch_binding_mismatch"
+    assert supplied == [1]
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+    assert not any(e.get("event_type") == "run.dispatch.requested" for e in coordinator._events_cache)
+    with pytest.raises(run_budget.BudgetPolicyError):
+        coordinator.reserve_and_record_dispatch(
+            seat="worker", allocate_attempt=lambda: 2, record_requested=record, reclaim_pending=False
+        )
+    assert supplied == [1]
+
+
+def test_exact_dispatch_binding_reload_allocates_fresh_candidate():
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=2),
+        append_event=lambda *args: None,
+    )
+    coordinator.reload([{"event_type": "run.dispatch.requested", "payload": {"seat": "worker", "attempt": 1}}])
+    supplied = []
+
+    def record(attempt):
+        supplied.append(attempt)
+        return attempt
+
+    assert (
+        coordinator.reserve_and_record_dispatch(
+            seat="worker", allocate_attempt=lambda: 1, record_requested=record, reclaim_pending=False
+        )
+        == 2
+    )
+    assert supplied == [2]
+    assert coordinator.projection.used["worker_dispatch_count"] == 2

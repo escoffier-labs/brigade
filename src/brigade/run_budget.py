@@ -1704,6 +1704,7 @@ class BudgetCoordinator:
         seat: str,
         allocate_attempt: Callable[[], int],
         record_requested: Callable[[int], int | None],
+        reclaim_pending: bool = True,
     ) -> int | None:
         """Atomically allocate attempt, reserve, and durably record requested.
 
@@ -1713,11 +1714,19 @@ class BudgetCoordinator:
         ceiling still allows authorization; concurrent callers then allocate a
         fresh attempt. The durable ``run.dispatch.requested`` fact is written
         before unlock so external transport cannot start without it.
+
+        With ``reclaim_pending=False``, always allocate and admit before calling
+        the recorder, which must return exactly the supplied positive integer.
+        Callback failure or a mismatched binding retains the reservation because
+        a claim or request may already be durable. This option is not a durable
+        fence: another identity can still be requested from this process-local
+        coordinator. Production activation requires replay checks, immutable
+        identity through admission and transport, and resume/retry guards.
         """
         if not isinstance(seat, str) or not seat:
             raise BudgetError("seat must be a non-empty string", code="reservation_invalid")
         with self._lock:
-            pending = self._open_pending_attempt_unlocked(seat)
+            pending = self._open_pending_attempt_unlocked(seat) if reclaim_pending else None
             if pending is not None:
                 pending_id = dispatch_reservation_request_id(seat, pending)
                 if pending_id not in self._launch_claims and self._has_durable_dispatch_requested(seat, pending):
@@ -1743,9 +1752,16 @@ class BudgetCoordinator:
             try:
                 recorded_attempt = record_requested(attempt)
             except Exception:
-                if not decision.replayed:
+                if reclaim_pending and not decision.replayed:
                     self._unreserve_unlocked(request_id=request_id, units=1)
                 raise
+            if not reclaim_pending and (
+                type(recorded_attempt) is not int or recorded_attempt < 1 or recorded_attempt != attempt
+            ):
+                raise BudgetError(
+                    "recorder must return the allocated dispatch attempt",
+                    code="dispatch_binding_mismatch",
+                )
             if recorded_attempt is None:
                 recorded_attempt = attempt
             if self._pending_dispatch_units > 0:
