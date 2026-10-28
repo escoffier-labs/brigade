@@ -4,6 +4,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime
 import errno
+import io
 import json
 import os
 from pathlib import Path
@@ -806,6 +807,194 @@ def test_consumed_parent_directory_close_preserves_new_owner_and_cleans_child(tm
         assert seen["owned"] == set()
         assert _state_path(tmp_path).read_bytes() == before
     assert _load(tmp_path).active.record["kid"]
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("secondary", ["io", "cancel"])
+def test_writer_stream_close_preserves_primary_flush_failure(tmp_path, monkeypatch, custody_descriptors, secondary):
+    class Cancelled(BaseException):
+        pass
+
+    saved = _load(tmp_path, create=True)
+    path = _state_path(tmp_path)
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    primary = Cancelled()
+    cleanup = OSError(errno.EIO, "private stream cleanup", str(path)) if secondary == "io" else Cancelled()
+    real_fdopen = os.fdopen
+    writes, streams = [], []
+
+    class FailingRaw(io.FileIO):
+        def write(self, data):
+            writes.append(len(data))
+            raise primary if len(writes) == 1 else cleanup
+
+    def fdopen(fd, mode, **kwargs):
+        if mode != "wb":
+            return real_fdopen(fd, mode, **kwargs)
+        stream = io.BufferedWriter(FailingRaw(fd, mode, closefd=False))
+        streams.append(stream)
+        return stream
+
+    caught = None
+    with monkeypatch.context() as fault:
+        fault.setattr(os, "fdopen", fdopen)
+        try:
+            _rotate(tmp_path)
+        except BaseException as error:
+            caught = error
+    assert len(streams) == 1 and streams[0].closed
+    assert len(writes) == 2 and 0 < writes[0] == writes[1] < io.DEFAULT_BUFFER_SIZE
+    assert custody_descriptors == set()
+    assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+    assert list(path.parent.glob(".*.tmp")) == []
+    assert caught is primary
+    assert _load(tmp_path) == saved
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(
+    "primary, close_fault, unlink_fault",
+    [
+        ("cancel", "io", None),
+        ("cancel", "cancel", None),
+        ("cancel", None, "io"),
+        ("cancel", None, "cancel"),
+        ("cancel", "io", "cancel"),
+        ("cancel", None, None),
+        ("unsafe", "io", None),
+        ("unsafe", "cancel", None),
+        ("unsafe", None, "io"),
+        ("unsafe", None, "cancel"),
+        ("unsafe", "cancel", "io"),
+        ("unsafe", None, None),
+        (None, "io", "cancel"),
+        (None, "cancel", "io"),
+        (None, "unsafe", "io"),
+        (None, None, "io"),
+        (None, None, "cancel"),
+        (None, None, None),
+    ],
+)
+def test_writer_cleanup_preserves_primary_or_first_cleanup_failure(
+    tmp_path, monkeypatch, custody_descriptors, primary, close_fault, unlink_fault
+):
+    from brigade import fleet_mesh_keys as custody
+
+    class Cancelled(BaseException):
+        pass
+
+    saved = _load(tmp_path, create=True)
+    path = _state_path(tmp_path)
+    before = path.read_bytes(), path.stat().st_mtime_ns
+    real_open, real_close, real_fsync, real_unlink = os.open, os.close, os.fsync, os.unlink
+    real_private_stat = custody._private_stat
+    cancellation = Cancelled()
+    close_error = (
+        Cancelled()
+        if close_fault == "cancel"
+        else OSError(errno.EACCES if close_fault == "unsafe" else errno.EIO, "private close diagnostic", str(path))
+    )
+    unlink_error = (
+        Cancelled() if unlink_fault == "cancel" else OSError(errno.EROFS, "private unlink diagnostic", str(path))
+    )
+    seen = {"dest": None, "temporary": None, "reused": None, "closes": 0, "fsyncs": 0, "cleanup": []}
+    body_errors = []
+
+    def opened(name, flags, *args, **kwargs):
+        fd = real_open(name, flags, *args, **kwargs)
+        if flags & os.O_WRONLY:
+            seen["dest"], seen["temporary"] = fd, name
+            if primary == "unsafe":
+                os.fchmod(fd, 0o640)  # Real destination validation must reject it.
+        return fd
+
+    def private_stat(fd, **kwargs):
+        try:
+            real_private_stat(fd, **kwargs)
+        except BaseException as error:
+            body_errors.append(error)
+            raise
+
+    def fsync(fd):
+        if fd == seen["dest"]:
+            seen["fsyncs"] += 1
+            if primary == "cancel":
+                body_errors.append(cancellation)
+                raise cancellation
+        return real_fsync(fd)
+
+    def closed(fd):
+        if fd == seen["dest"]:
+            seen["closes"] += 1
+            seen["cleanup"].append("close")
+        real_close(fd)
+        if fd == seen["dest"] and close_fault:
+            replacement = real_open(os.devnull, os.O_RDONLY)
+            if replacement != fd:
+                os.dup2(replacement, fd)
+                real_close(replacement)
+            seen["reused"] = fd
+            raise close_error
+
+    def unlinked(name, *args, **kwargs):
+        if name == seen["temporary"]:
+            seen["cleanup"].append("unlink")
+            seen["unlink_present"] = (path.parent / name).exists()
+            if unlink_fault:
+                raise unlink_error
+        return real_unlink(name, *args, **kwargs)
+
+    caught = returned = None
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(os, "open", opened)
+            fault.setattr(os, "close", closed)
+            fault.setattr(os, "fsync", fsync)
+            fault.setattr(os, "unlink", unlinked)
+            fault.setattr(custody, "_private_stat", private_stat)
+            try:
+                returned = _rotate(tmp_path)
+            except BaseException as error:
+                caught = error
+        # Faults are restored before assertions and pytest capture handling.
+        assert seen["temporary"] is not None
+        assert seen["fsyncs"] == (0 if primary == "unsafe" else 1)
+        assert seen["closes"] == 1
+        assert custody_descriptors == ({seen["reused"]} if close_fault else set())
+        if close_fault:
+            os.fstat(seen["reused"])  # An ambiguous close must not close its new owner.
+        assert seen["cleanup"] == ["close", "unlink"]
+        assert seen["unlink_present"] == bool(primary)
+        if primary:
+            assert len(body_errors) == 1 and caught is body_errors[0]
+            if primary == "unsafe":
+                assert type(caught) is crypto.MeshError and caught.code == str(caught) == "mesh_keys_unsafe"
+            else:
+                assert caught is cancellation
+            assert (path.read_bytes(), path.stat().st_mtime_ns) == before
+            assert _load(tmp_path) == saved
+            assert list(path.parent.glob(".*.tmp")) == ([path.parent / seen["temporary"]] if unlink_fault else [])
+        else:
+            assert body_errors == []
+            first_error = close_error if close_fault else unlink_error if unlink_fault else None
+            if first_error is None:
+                assert caught is None and returned == _load(tmp_path)
+            elif isinstance(first_error, OSError):
+                code = "mesh_keys_unsafe" if first_error.errno == errno.EACCES else "mesh_keys_io_error"
+                assert type(caught) is crypto.MeshError and caught.code == str(caught) == code
+            else:
+                assert caught is first_error
+            active = _load(tmp_path)
+            complete = path.read_bytes()
+            assert len(active.retired) == 1 and active.retry_key == saved.retry_key
+            assert active.retired[0].private_keys == saved.active.private_keys
+            assert active.active.private_keys != saved.active.private_keys
+            assert _load(tmp_path, create=True) == active
+            assert path.read_bytes() == complete
+            assert list(path.parent.glob(".*.tmp")) == []
+    finally:
+        if seen["reused"] is not None:
+            real_close(seen["reused"])
 
 
 @pytest.fixture

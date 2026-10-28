@@ -305,21 +305,46 @@ def _write(fd: int, name: str, state: LocalKeys) -> None:
         raise crypto.MeshError("mesh_keys_invalid")
     _reap_temporary_files(fd)
     temporary = "." + secrets.token_hex(16) + ".tmp"
+    dest: int | None
     dest = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=fd)
+    completed = False
     try:
-        with os.fdopen(dest, "wb", closefd=False) as stream:
+        stream = os.fdopen(dest, "wb", closefd=False)
+        stream_completed = False
+        try:
             _private_stat(dest)
             stream.write(raw)
             stream.flush()
             os.fsync(dest)
+            stream_completed = True
+        finally:
+            try:
+                stream.close()
+            except BaseException:
+                if stream_completed:
+                    raise
+                # A close-time flush must not replace the active write failure.
         os.replace(temporary, name, src_dir_fd=fd, dst_dir_fd=fd)
         os.fsync(fd)
+        completed = True
     finally:
-        os.close(dest)
+        closing, dest = dest, None
+        cleanup_error: BaseException | None = None
+        if closing is not None:
+            try:
+                os.close(closing)
+            except BaseException as error:
+                cleanup_error = error  # Never retry an ambiguous close.
         try:
             os.unlink(temporary, dir_fd=fd)
         except FileNotFoundError:
             pass
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+        if completed and cleanup_error is not None:
+            raise cleanup_error
+        # An active body error retains priority after both cleanup attempts.
 
 
 def load_local_keys(*, brigade_home: Path, principal: str, hub_id: str, create: bool = False) -> LocalKeys:
