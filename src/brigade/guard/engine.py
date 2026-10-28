@@ -282,6 +282,20 @@ def _line_at(text: str, start: int, end: int) -> str:
 
 # An f-string opening quote with no other quote between it and the field.
 _FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
+# A second, deliberately small grammar admits completed earlier fields with a
+# quoted subscript key (#1983). Quotes remain forbidden in literal text, and
+# fields must close before the candidate host's field starts. Unsupported
+# expressions keep the existing hostname detection rather than guessing.
+_FSTRING_EARLIER_FIELD = (
+    r"\{\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
+    r"""(?:\[\s*(?:'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")\s*\])?\s*\}"""
+)
+_FSTRING_QUOTED_FIELD_OPEN = re.compile(
+    r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')"""
+    + r"""(?:[^"'{}\\\n]|\\[^"'{}\n]|\{\{|\}\}|"""
+    + _FSTRING_EARLIER_FIELD
+    + r")*$"
+)
 # Positions where prose does not put an f-string: line start, '=', a
 # `return` statement, a call paren right after a name, or a bracket opened
 # after '=' or '('.
@@ -300,7 +314,7 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     if braces % 2 == 0:
         return False
     stem = opener[:-braces]
-    match = _FSTRING_OPEN.search(stem)
+    match = _FSTRING_OPEN.search(stem) or _FSTRING_QUOTED_FIELD_OPEN.search(stem)
     # The prefix must start a literal in an expression position, not in prose,
     # another string, or a comment, and the literal must still be open at the brace.
     if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):

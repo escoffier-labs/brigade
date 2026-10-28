@@ -66,6 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
+
 - Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
 
 - Fleet Hub refuses plaintext replies to retained sealed messages, including retries of pre-upgrade plaintext replies. Exact detached retries remain available after parent expiry, and invalid retries do not reveal whether a foreign message id is retained.
