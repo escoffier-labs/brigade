@@ -43,6 +43,7 @@ class ComponentInspection:
     actual_byte_size: int | None
     actual_sha256: str | None
     path_binary: str | None
+    installed_component_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -153,7 +154,7 @@ def inspect_components(
         )
 
     inspections: list[ComponentInspection] = []
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
+    for component_id in component_manifest.manifest_component_ids(manifest):
         inspections.append(
             _inspect_component(
                 component_id,
@@ -200,52 +201,36 @@ def _environment_blocked_report(
     """Return a read-only unsupported report when roots or manifest cannot be resolved."""
     report_state_path = state_path or Path(component_paths.installed_state_path(_UNAVAILABLE_DATA_ROOT))
     data_root = roots.data_root if roots is not None else _UNAVAILABLE_DATA_ROOT
-    components = tuple(
-        ComponentInspection(
-            component_id=component_id,
-            status="unsupported",
-            detail=platform_error,
-            expected_component_revision=(
-                manifest.components[component_id].component_revision if manifest is not None else None
-            ),
-            installed_component_revision=(
-                installed_state.components[component_id].component_revision
-                if installed_state is not None and component_id in installed_state.components
-                else None
-            ),
-            expected_asset_name=None,
-            expected_byte_size=None,
-            expected_sha256=None,
-            installed_asset_name=(
-                installed_state.components[component_id].asset_name
-                if installed_state is not None and component_id in installed_state.components
-                else None
-            ),
-            installed_byte_size=(
-                installed_state.components[component_id].byte_size
-                if installed_state is not None and component_id in installed_state.components
-                else None
-            ),
-            installed_sha256=(
-                installed_state.components[component_id].sha256
-                if installed_state is not None and component_id in installed_state.components
-                else None
-            ),
-            recorded_executable=(
-                installed_state.components[component_id].executable
-                if installed_state is not None and component_id in installed_state.components
-                else None
-            ),
-            managed_executable_path=component_paths.managed_executable_path(
-                data_root,
-                component_id,
-            ),
-            actual_byte_size=None,
-            actual_sha256=None,
-            path_binary=None,
+    ids = component_manifest.manifest_component_ids(manifest) if manifest else component_manifest.KNOWN_COMPONENT_IDS
+    inspections: list[ComponentInspection] = []
+    for component_id in ids:
+        installed_key = (
+            component_manifest.wire_id(installed_state.components, component_id) if installed_state else None
         )
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS
-    )
+        record = installed_state.components[installed_key] if installed_state and installed_key else None
+        inspections.append(
+            ComponentInspection(
+                component_id=component_id,
+                status="unsupported",
+                detail=platform_error,
+                expected_component_revision=(
+                    manifest.components[component_id].component_revision if manifest else None
+                ),
+                installed_component_revision=record.component_revision if record else None,
+                expected_asset_name=None,
+                expected_byte_size=None,
+                expected_sha256=None,
+                installed_asset_name=record.asset_name if record else None,
+                installed_byte_size=record.byte_size if record else None,
+                installed_sha256=record.sha256 if record else None,
+                recorded_executable=record.executable if record else None,
+                managed_executable_path=component_paths.managed_executable_path(data_root, component_id),
+                actual_byte_size=None,
+                actual_sha256=None,
+                path_binary=None,
+                installed_component_id=installed_key,
+            )
+        )
     return ComponentReport(
         brigade_version=brigade.__version__,
         manifest_schema_version=manifest.schema_version if manifest is not None else None,
@@ -261,7 +246,7 @@ def _environment_blocked_report(
         installed_brigade_version=installed_state.brigade_version if installed_state else None,
         installed_platform=installed_state.platform if installed_state else None,
         manifest_unknown_diagnostics=manifest_unknown_diagnostics,
-        components=components,
+        components=tuple(inspections),
     )
 
 
@@ -275,8 +260,9 @@ def _installed_state_matches_manifest(
         or installed_state.brigade_version != manifest.brigade_version
     ):
         return False
-    for component_id in component_manifest.KNOWN_COMPONENT_IDS:
-        installed = installed_state.components.get(component_id)
+    for component_id in component_manifest.manifest_component_ids(manifest):
+        installed_key = component_manifest.wire_id(installed_state.components, component_id)
+        installed = installed_state.components.get(installed_key) if installed_key is not None else None
         if installed is None:
             return False
         component = manifest.components[component_id]
@@ -384,6 +370,7 @@ def render_json(report: ComponentReport) -> dict[str, Any]:
         "components": [
             {
                 "component_id": component.component_id,
+                "installed_component_id": component.installed_component_id,
                 "status": component.status,
                 "detail": component.detail,
                 "expected_component_revision": component.expected_component_revision,
@@ -464,7 +451,8 @@ def _inspect_component(
         file_inspection_error = str(exc)
         managed_exists = True
 
-    installed_record = installed_state.components.get(component_id) if installed_state is not None else None
+    installed_key = component_manifest.wire_id(installed_state.components, component_id) if installed_state else None
+    installed_record = installed_state.components.get(installed_key) if installed_state and installed_key else None
     status, detail = _diagnose_component(
         platform=platform,
         platform_error=platform_error,
@@ -499,6 +487,7 @@ def _inspect_component(
         actual_byte_size=actual_byte_size,
         actual_sha256=actual_sha256,
         path_binary=path_binary,
+        installed_component_id=installed_key,
     )
 
 

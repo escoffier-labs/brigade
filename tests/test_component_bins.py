@@ -192,3 +192,49 @@ def test_resolve_argv_rewrites_agent_notify_head(tmp_path, monkeypatch):
         "version",
         "--json",
     ]
+
+
+def test_family_resolution_and_explicit_override_conflicts(tmp_path):
+    old = _write_executable(tmp_path / "managed" / "graphtrail")
+    new = _write_executable(tmp_path / "path" / "brigade-code-graph")
+    _write_installed_state(tmp_path / "data", {"graphtrail": old})
+    env = _env(tmp_path, PATH=str(new.parent))
+    assert component_bins.resolve("brigade-code-graph", env=env) == str(old)
+    env.update(BRIGADE_CODE_GRAPH_BIN=str(new), GRAPHTRAIL_BIN=str(old))
+    assert component_bins.resolve("graphtrail", env=env) is None
+    env["GRAPHTRAIL_BIN"] = str(new)
+    assert component_bins.resolve("graphtrail", env=env) == str(new)
+    env["BRIGADE_CODE_GRAPH_BIN"] = ""
+    assert component_bins.resolve("graphtrail", env=env) is None
+
+
+def test_legacy_request_finds_canonical_managed_identity(tmp_path):
+    new = _write_executable(tmp_path / "managed" / "brigade-evidence")
+    _write_installed_state(tmp_path / "data", {"brigade-evidence": new})
+    assert component_bins.resolve("miseledger", env=_env(tmp_path)) == str(new)
+
+
+def test_argv_refuses_explicit_override_instead_of_executing_path(tmp_path, monkeypatch):
+    import pytest
+
+    on_path = _write_executable(tmp_path / "path" / "graphtrail")
+    monkeypatch.setenv("PATH", str(on_path.parent))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing"))
+    with pytest.raises(ValueError, match="override"):
+        component_bins.resolve_argv(["graphtrail", "--version"])
+
+
+def test_each_family_honors_canonical_override_and_path_for_legacy_request(tmp_path):
+    families = [
+        ("graphtrail", "brigade-code-graph", "BRIGADE_CODE_GRAPH_BIN"),
+        ("graphtrail-mcp", "brigade-code-graph-mcp", "BRIGADE_CODE_GRAPH_MCP_BIN"),
+        ("miseledger", "brigade-evidence", "BRIGADE_EVIDENCE_BIN"),
+    ]
+    for old, new, key in families:
+        binary = _write_executable(tmp_path / "path" / new)
+        env = _env(tmp_path, PATH=str(binary.parent))
+        assert component_bins.resolve(old, env=env) == str(binary)
+        env[key] = str(tmp_path / "missing")
+        assert component_bins.resolve(old, env=env) is None
+        env[key] = str(binary)
+        assert component_bins.resolve(old, env=env) == str(binary)

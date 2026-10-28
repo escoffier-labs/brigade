@@ -2531,3 +2531,42 @@ def test_run_post_install_smoke_rejects_timeout(tmp_path):
     managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=sleep_script)
     with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke timed out"):
         run_post_install_smoke(managed, runner=slow_runner)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path, monkeypatch, reverse):
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    old_payload = json.loads(manifest_path.read_text())
+    aliases = {
+        "graphtrail": "brigade-code-graph",
+        "graphtrail-mcp": "brigade-code-graph-mcp",
+        "miseledger": "brigade-evidence",
+    }
+    new_payload = json.loads(manifest_path.read_text())
+    new_payload["manifest_revision"] = "canonical-fixture"
+    downloads = all_fixture_payloads()
+    for old, new in aliases.items():
+        record = new_payload["components"].pop(old)
+        record["executable"] = new
+        for asset in record["assets"].values():
+            old_url = asset["download_url"]
+            asset["asset_name"] = asset["asset_name"].replace(old, new, 1)
+            asset["download_url"] = old_url.rsplit("/", 1)[0] + "/" + asset["asset_name"]
+            if old_url in downloads:
+                downloads[asset["download_url"]] = downloads[old_url]
+        new_payload["components"][new] = record
+    first, second = (new_payload, old_payload) if reverse else (old_payload, new_payload)
+    for payload in (first, second):
+        manifest_path.write_text(json.dumps(payload))
+        assert setup_native_components(env=env, opener=FakeOpener(downloads)) == 0
+    roots = resolve_roots(env=env)
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    assert set(component_state.load_installed_state(state_path).components) == set(second["components"])
+    assert setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({})) == 0
+    restored = component_state.load_installed_state(state_path)
+    assert set(restored.components) == set(first["components"])
+    for cid, record in restored.components.items():
+        assert Path(record.executable).name == cid
+        assert Path(record.executable).read_bytes() == downloads[record.download_url]
+    for cid in set(second["components"]) - set(first["components"]):
+        assert not Path(component_paths.managed_executable_path(roots.data_root, cid)).exists()
