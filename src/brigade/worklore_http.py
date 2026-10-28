@@ -263,7 +263,11 @@ def _item_route(
         from .worklore_prepared_handoff import get_prepared_handoff
 
         _validate_query(query, set())
-        return 200, {"prepared_handoff": get_prepared_handoff(conn, work_id)}
+        try:
+            prepared_handoff = get_prepared_handoff(conn, work_id)
+        except WorkloreValidationError:
+            return _error("internal-error")
+        return 200, {"prepared_handoff": prepared_handoff}
     if tail == ["ownership"] and method in {"GET", "POST"}:
         if query:
             raise WorkloreValidationError("unknown ownership query field", code="unknown-field")

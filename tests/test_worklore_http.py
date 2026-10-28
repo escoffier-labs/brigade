@@ -114,6 +114,25 @@ def test_prepared_handoff_uses_existing_read_auth_and_refuses_mutations(tmp_path
             conn.close()
 
 
+def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    with _hub(tmp_path) as hub:
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            item = store.create_item(
+                conn, {"title": "Fixture", "kind": "repo"}, actor_id="admin", actor_type="operator"
+            )
+            conn.execute(
+                "UPDATE work_items SET title=? WHERE work_id=?", ("x" * (store.TITLE_MAX + 1), item["work_id"])
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        status, response = _request(hub, "GET", f"/work/items/{item['work_id']}/prepared-handoff", token=ADMIN_TOKEN)
+        assert status == 500
+        assert response == {"error": "internal error", "code": "internal-error"}
+
+
 def test_node_can_read_and_import_but_cannot_transition(tmp_path):
     conn = _http_conn(tmp_path)
     status, created = http.handle(
