@@ -1334,6 +1334,13 @@ def _redirect_file_targets(tokens: list[str]) -> list[str]:
     return targets
 
 
+def _command_path_arguments(tokens: list[str]) -> list[str]:
+    redirections = {index for index, token in enumerate(tokens) if token and set(token) <= set("<>&")}
+    syntax = redirections | {index + 1 for index in redirections}
+    syntax.update(index - 1 for index in redirections if index > 0 and tokens[index - 1].isdecimal())
+    return [token for index, token in enumerate(tokens) if index not in syntax and not token.startswith("-")]
+
+
 def _bash_confident_write_touches_worktree(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
@@ -1361,19 +1368,21 @@ def _bash_confident_write_touches_worktree(target: Path, command: object) -> boo
         names = [Path(token).name for token in stripped]
         command_name = names[0]
         if command_name in _BASH_WRITE_COMMANDS:
-            candidates = [token for token in stripped[1:] if not token.startswith("-")]
+            candidates = _command_path_arguments(stripped[1:])
             if not candidates:
+                if command_name == "tee":
+                    continue  # With no file operands, tee only copies to stdout.
                 return True
             if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
                 touches_worktree = True
         elif command_name == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in stripped[1:]):
-            candidates = [token for token in stripped[1:] if not token.startswith("-")]
+            candidates = _command_path_arguments(stripped[1:])
             if not candidates:
                 return True
             if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
                 touches_worktree = True
         elif command_name == "ruff" and names[1:2] == ["format"] and not {"--check", "--diff"}.intersection(names[2:]):
-            candidates = [token for token in stripped[2:] if not token.startswith("-")]
+            candidates = _command_path_arguments(stripped[2:])
             if not candidates:
                 return True
             if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
@@ -1612,13 +1621,19 @@ def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
         stripped = _strip_env(segment)
         if not stripped:
             continue
-        if Path(stripped[0]).name not in output_only_commands:
+        metadata_command = _is_brigade_verify(stripped) or _is_brigade_run_tokens(stripped)
+        if not metadata_command and Path(stripped[0]).name not in output_only_commands:
             return False
         targets: list[str] = []
-        for index, token in enumerate(stripped[:-1]):
-            if token and set(token) <= set(";&|<>") and ">" in token:
-                targets.append(stripped[index + 1])
+        for destination in _redirect_file_targets(stripped):
+            if metadata_command:
+                relative = _relative_path_under_target(target, destination)
+                if relative is None or _is_brigade_internal_artifact_relative(relative):
+                    continue
+            targets.append(destination)
         if not targets:
+            if metadata_command:
+                continue
             return False
         found_target = True
         if any(not _is_handoff_path(target, path) for path in targets):
@@ -1835,7 +1850,7 @@ def _parse_capture_flag(command: object) -> str | None:
     if not isinstance(command, str) or not command.strip():
         return None
     try:
-        tokens = shlex.split(command, posix=os.name != "nt")
+        tokens = _shell_tokens(command)
     except ValueError:
         return None
     for index, token in enumerate(tokens):
@@ -2384,19 +2399,24 @@ def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> d
                     fields += ("exercised_artifact_id", "exercised_artifact_kind")
                 _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
-        if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
-            capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
-            state.pop("pending_bash_fingerprint", None)
-            state.pop("pending_bash_started_at", None)
-            _write_session_state_preserving_latch(
-                target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
-            )
-            return None
         wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash"
             and _is_confident_bash_write(command)
             and _bash_confident_write_touches_worktree(target, command)
         )
+        capture_artifact_id = None
+        if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
+            capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
+            # Brigade's own metadata must not re-arm closeout, but an explicit
+            # source write elsewhere in the same Bash call still belongs to
+            # this session, including edits after a completed verification.
+            if not wrote:
+                state.pop("pending_bash_fingerprint", None)
+                state.pop("pending_bash_started_at", None)
+                _write_session_state_preserving_latch(
+                    target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
+                )
+                return None
         if not wrote and tool_name == "Bash":
             wrote = _bash_write_detected(
                 target,
@@ -2421,7 +2441,9 @@ def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> d
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
             state.pop("pending_write_at", None)
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
+            )
             presence.emit_presence("PostToolUse", target, session_id)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
