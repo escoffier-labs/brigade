@@ -215,6 +215,80 @@ def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
     assert cloud_tracker.load_registry(tmp_path)["entries"][0]["task_id"] == "task_launch99"
 
 
+@pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX umask and mode checks")
+@pytest.mark.parametrize("setup", ["config", "registry"])
+def test_codex_cloud_setup_creates_durable_secure_ancestors(monkeypatch, tmp_path, setup):
+    from brigade import dirfd
+
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setenv("CODEX_CLOUD_ENV", "env-launch")
+    monkeypatch.setattr(
+        codex_cloud.proc,
+        "run",
+        lambda argv, **k: _result(stdout="task_secure99") if argv[:2] == ["codex", "cloud"] else _result(code=1),
+    )
+    synced = []
+    real_sync = dirfd.fsync_directory
+
+    def record_sync(descriptor):
+        info = codex_cloud.os.fstat(descriptor)
+        synced.append((info.st_dev, info.st_ino))
+        real_sync(descriptor)
+
+    monkeypatch.setattr(dirfd, "fsync_directory", record_sync)
+    previous = codex_cloud.os.umask(0o002)
+    try:
+        # A retry must also confirm publication left by an earlier failed fsync.
+        for _ in range(2):
+            synced.clear()
+            if setup == "config":
+                codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+            else:
+                assert codex_cloud._preflight_registry(tmp_path)
+            brigade_dir = tmp_path / ".brigade"
+            cloud_dir = brigade_dir / "cloud"
+            assert brigade_dir.stat().st_mode & 0o777 == 0o700
+            assert cloud_dir.stat().st_mode & 0o777 == 0o700
+            parent_keys = [(path.stat().st_dev, path.stat().st_ino) for path in (tmp_path, brigade_dir)]
+            assert all(key in synced for key in parent_keys)
+            assert synced.index(parent_keys[0]) < synced.index(parent_keys[1])
+        launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    finally:
+        codex_cloud.os.umask(previous)
+
+    assert launched["ok"] is True, launched
+    assert launched["task_id"] == "task_secure99"
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") == "h1"
+    assert calls["bind"][0]["kwargs"]["provider_task_id"] == "task_secure99"
+
+
+@pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX ownership and mode checks")
+@pytest.mark.parametrize("unsafe_component", [".brigade", ".brigade/cloud"])
+def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(monkeypatch, tmp_path, unsafe_component):
+    _make_recovery_cloud_directory(tmp_path)
+    unsafe = tmp_path / unsafe_component
+    unsafe.chmod(0o775)
+    before = unsafe.stat()
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] == ["codex", "cloud"]:
+            pytest.fail("unsafe ancestor reached provider")
+        return _result(code=1)
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "lease-recovery-unwritable"}
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+    after = unsafe.stat()
+    assert (after.st_dev, after.st_ino, after.st_mode) == (before.st_dev, before.st_ino, before.st_mode)
+    assert calls["bind"] == []
+    assert calls["release"][0]["kwargs"] == {"state": "submit-failed", "holder": "h1"}
+
+
 def test_launch_task_releases_lease_when_submission_fails(monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
@@ -699,6 +773,13 @@ def _recovery_record_bytes(holder="h1"):
     return json.dumps({"schema": "brigade.codex-lease-recovery/1", "lease_id": "lease-1", "holder": holder}).encode()
 
 
+def _make_recovery_cloud_directory(target):
+    # Path.mkdir(parents=True, mode=...) applies mode only to the final directory.
+    brigade_dir = target / ".brigade"
+    brigade_dir.mkdir(mode=0o700)
+    (brigade_dir / "cloud").mkdir(mode=0o700)
+
+
 @pytest.mark.parametrize(
     "kind",
     [
@@ -710,7 +791,8 @@ def _recovery_record_bytes(holder="h1"):
 )
 def test_recovery_v3_rejects_unsafe_record_reads(tmp_path, kind):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(mode=0o700, parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     victim = tmp_path / "victim.json"
     victim.write_bytes(_recovery_record_bytes())
     victim.chmod(0o600)
@@ -747,7 +829,8 @@ def test_recovery_v3_rejects_unsafe_existing_record_writes(tmp_path, kind):
     if kind == "fifo" and not hasattr(codex_cloud.os, "mkfifo"):
         pytest.skip("FIFO creation is unavailable")
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(mode=0o700, parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     victim = tmp_path / "victim.json"
     victim.write_bytes(_recovery_record_bytes())
     victim.chmod(0o600)
@@ -774,7 +857,7 @@ def test_recovery_v3_rejects_unsafe_existing_record_writes(tmp_path, kind):
 
 def test_recovery_v3_refuses_symlinked_directory_for_reads_and_writes(tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o700)
     victim = outside / path.name
@@ -794,7 +877,8 @@ def test_recovery_v3_refuses_symlinked_directory_for_reads_and_writes(tmp_path):
 @pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX ownership and mode checks")
 def test_recovery_v3_refuses_nonprivate_directory_without_chmod(tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     path.parent.chmod(0o755)
     path.write_bytes(_recovery_record_bytes())
     path.chmod(0o600)
@@ -808,7 +892,8 @@ def test_recovery_v3_refuses_nonprivate_directory_without_chmod(tmp_path):
 @pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX UID validation")
 def test_recovery_v3_refuses_foreign_record_descriptor(monkeypatch, tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(mode=0o700, parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     path.write_bytes(_recovery_record_bytes())
     path.chmod(0o600)
     identity = (path.stat().st_dev, path.stat().st_ino)
@@ -828,7 +913,8 @@ def test_recovery_v3_refuses_foreign_record_descriptor(monkeypatch, tmp_path):
 
 def test_recovery_v3_bounds_record_bytes(tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(mode=0o700, parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     path.write_bytes(_recovery_record_bytes("x" * 5000))
     path.chmod(0o600)
     assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
@@ -837,7 +923,8 @@ def test_recovery_v3_bounds_record_bytes(tmp_path):
 @pytest.mark.skipif(not hasattr(codex_cloud.os, "mkfifo"), reason="FIFO creation is unavailable")
 def test_recovery_v3_fifo_read_is_bounded(tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.mkdir(mode=0o700, parents=True)
+    _make_recovery_cloud_directory(tmp_path)
+    path.parent.mkdir(mode=0o700)
     codex_cloud.os.mkfifo(path, 0o600)
     script = (
         "import sys; from pathlib import Path; from brigade import codex_cloud; "
@@ -852,7 +939,7 @@ def test_recovery_v3_fsyncs_new_directory_parent_before_record(monkeypatch, tmp_
         _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="storage")
         return
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
     parent = path.parent.parent.stat()
     synced = []
     real_fsync = codex_cloud.os.fsync
@@ -910,7 +997,7 @@ def test_recovery_v3_rejects_record_substitution_during_directory_fsync(monkeypa
     from brigade import dirfd
 
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
     victim = tmp_path / "victim.json"
     victim.write_bytes(_recovery_record_bytes())
     victim.chmod(0o600)
@@ -943,7 +1030,7 @@ def test_recovery_v3_pins_directory_during_a_path_swap(monkeypatch, tmp_path):
     from brigade import dirfd
 
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir(mode=0o700)
     moved = tmp_path / "moved-private-directory"
@@ -966,8 +1053,7 @@ def test_recovery_v3_pins_directory_during_a_path_swap(monkeypatch, tmp_path):
 
 
 def test_recovery_v3_zero_write_cannot_be_recovered(monkeypatch, tmp_path):
-    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
-    path.parent.parent.mkdir(parents=True)
+    _make_recovery_cloud_directory(tmp_path)
     monkeypatch.setattr(codex_cloud.os, "write", lambda *a, **k: 0)
     with pytest.raises(OSError):
         codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
@@ -2601,6 +2687,8 @@ def test_windows_no_hub_keeps_local_launch_and_registration(monkeypatch, tmp_pat
 def test_windows_roster_dispatch_obeys_hub_storage_policy(monkeypatch, tmp_path, through_agents, hub_configured):
     from types import SimpleNamespace
 
+    # This policy test owns tmp_path; ancestor configuration belongs to other workspaces.
+    monkeypatch.setattr(codex_cloud, "resolve_config_target", lambda start: tmp_path)
     calls = _grant_hub(monkeypatch)
     monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: hub_configured)
     monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))

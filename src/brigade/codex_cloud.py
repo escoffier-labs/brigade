@@ -118,6 +118,23 @@ def _repo_from_cwd(cwd: Path | None) -> str | None:
     return None
 
 
+def _ensure_cloud_directory(target: Path) -> None:
+    """Create cloud ancestors privately and durably without changing existing modes."""
+    with ExitStack() as stack:
+        parent = dirfd.open_directory_chain(Path(target).expanduser().resolve())
+        stack.callback(os.close, parent)
+        for component in (".brigade", "cloud"):
+            try:
+                dirfd.mkdir_child(parent, component, 0o700)
+            except FileExistsError:
+                pass
+            child = dirfd.open_child_directory(parent, component)
+            stack.callback(os.close, child)
+            # Retry any earlier directory publication whose fsync failed.
+            dirfd.fsync_directory(parent)
+            parent = child
+
+
 def _preflight_registry(register_target: Path | None) -> bool:
     """Confirm registry-directory durability without reading or rewriting its live file."""
     if register_target is None:
@@ -129,7 +146,7 @@ def _preflight_registry(register_target: Path | None) -> bool:
     cleanup_ok = True
     try:
         registry_dir = cloud_tracker.registry_path(Path(register_target)).parent
-        registry_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_cloud_directory(Path(register_target))
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
         for _ in range(4):
             candidate = registry_dir / f".registry-preflight-{uuid4().hex}"
@@ -606,6 +623,7 @@ def save_environment_config(
             raise CodexCloudConfigError("environment_id is empty")
         environment = {"kind": "value", "id": value}
     path = config_path(target)
+    _ensure_cloud_directory(target)
     localio.write_json(path, {"schema": CONFIG_SCHEMA, "environment": environment})
     path.chmod(0o600)
     return path
