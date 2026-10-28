@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .fleet_action_auth import ActionError, destination_reference, opaque
+from .isolated_exec import module_argv, trusted_cwd
 
 MAX_OUTPUT = 262144
 T3_RUNTIME_MODES = frozenset({"approval-required", "auto-accept-edits", "auto", "full-access"})
@@ -31,7 +32,7 @@ class T3PreacceptRefusal(ActionError):
         self.code = code
 
 
-def invoke(executable: Path, argv: list[str], *, timeout: float = 3600) -> dict[str, Any]:
+def invoke(executable: Path, argv: list[str], *, timeout: float = 3600, cwd: Path | None = None) -> dict[str, Any]:
     """Bound both pipes in memory while running, with no provider output on disk.
 
     POSIX only: isolated process groups let cleanup stop ordinary descendants,
@@ -45,6 +46,7 @@ def invoke(executable: Path, argv: list[str], *, timeout: float = 3600) -> dict[
     try:
         process = subprocess.Popen(
             [str(executable), *argv],
+            cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -230,21 +232,17 @@ def dispatch(action: dict[str, Any], binding: dict[str, Any], executable: Path, 
             "status": "finished" if payload.get("status") in {"ok", "completed"} else "failed",
             "destination_ref": opaque(payload["runId"]),
         }
-    payload = invoke(
-        Path(sys.executable),
-        [
-            "-m",
-            "brigade.fleet_action_adapters",
-            "--inbox-send",
-            "--to",
-            target["principal"],
-            "--client-id",
-            action_id,
-            "--body-file",
-            str(prompt),
-        ],
-        timeout=15,
+    command = module_argv(
+        "brigade.fleet_action_adapters",
+        "--inbox-send",
+        "--to",
+        target["principal"],
+        "--client-id",
+        action_id,
+        "--body-file",
+        str(prompt.absolute()),
     )
+    payload = invoke(Path(command[0]), command[1:], timeout=15, cwd=trusted_cwd())
     message = payload.get("message")
     if not isinstance(message, dict) or message.get("client_id") != action_id or type(message.get("id")) is not int:
         raise ActionError("transport-acceptance-unknown", 409)

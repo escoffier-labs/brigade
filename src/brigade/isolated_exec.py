@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 # A single line also fits generated systemd ExecStart directives. Keep the
-# installation's dependencies behind stdlib and never process its .pth files.
+# installation's dependencies behind stdlib. -I skips user site, but the
+# interpreter's own site-packages and their .pth startup code still run.
 _BOOTSTRAP = (
     "import importlib.util as u,os,pathlib as p,runpy as r,sys as s;"
     "i,m=s.argv.pop(1),s.argv.pop(1);"

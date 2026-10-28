@@ -7,7 +7,6 @@ import os
 import platform
 import re
 import subprocess
-import sys
 import tempfile
 from datetime import datetime, timezone
 from itertools import islice
@@ -15,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, bug_io, bug_last_error, component_paths, extras, telemetry_export
+from .isolated_exec import module_argv
 from .localio import canonical_json_digest
 
 _DOCTOR_CHECK_TIMEOUT = 5.0
@@ -146,16 +146,13 @@ def collect_diagnostics(target: Path) -> dict[str, Any]:
     # fixed-path checks, each in a killable process with a hard deadline.
     checks: list[dict[str, str]] = []
     target = target.resolve()
-    # Pin imports to this installation, discarding inherited PYTHONPATH. Keep
-    # user site-packages available, but never prepend the affected workspace.
-    env = {**os.environ, "PYTHONSAFEPATH": "1", "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    # Pin the package and ignore inherited Python paths and user-site startup.
     with tempfile.TemporaryDirectory(prefix="brigade-bug-diagnostics-") as cwd:
         for name in ("bootstrap", "agents-quality", "security-config"):
             try:
                 result = subprocess.run(
-                    [sys.executable, "-m", "brigade.bug_doctor", str(target), name, str(_DOCTOR_ENTRY_LIMIT)],
+                    module_argv("brigade.bug_doctor", str(target), name, str(_DOCTOR_ENTRY_LIMIT)),
                     cwd=cwd,
-                    env=env,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.DEVNULL,

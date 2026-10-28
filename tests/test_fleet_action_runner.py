@@ -627,10 +627,11 @@ def test_handle_free_inbox_recovery_resumes_durable_pages(tmp_path, monkeypatch,
 
     def invoke(executable, argv, **kwargs):
         nonlocal failed
-        assert kwargs == {"timeout": 15}
-        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+        if "--inbox-send" in argv:
+            assert kwargs == {"timeout": 15, "cwd": Path(runner.__file__).resolve().parent}
             sends.append(argv)
             return {"error": "fixture lost send response"}
+        assert kwargs == {"timeout": 15}
         assert argv[:4] == ["fleet", "msg", "sent", "--after"] and argv[-1] == "--json"
         after = int(argv[4])
         cursors.append(after)
@@ -760,7 +761,7 @@ def test_cutoff_preserves_result_receipt_for_explicit_report_replay(tmp_path, mo
     provider_calls = []
 
     def ambiguous_send(executable, argv, **kwargs):
-        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+        if "--inbox-send" in argv:
             provider_calls.append("send")
             return {"error": "ambiguous"}
         provider_calls.append("lookup")
@@ -1037,7 +1038,8 @@ def test_supported_transport_contracts(tmp_path, monkeypatch, family, payload, e
     def invoke(tool, argv, **kw):
         if family != "t3":
             assert tool == Path(sys.executable)
-            assert argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]
+            assert argv[:2] == ["-I", "-c"]
+            assert argv[4:6] == ["brigade.fleet_action_adapters", "--inbox-send"]
         return normal(executable, argv, **kw)
 
     monkeypatch.setattr(adapters, "invoke", invoke)
@@ -1186,9 +1188,10 @@ def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path
                 client_id="aa_fixture",
             )
         assert executable == Path(sys.executable)
-        assert argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]
-        assert kw == {"timeout": 15}
-        assert adapters._inbox_main(argv[2:]) == 0
+        assert argv[:2] == ["-I", "-c"]
+        assert argv[4:6] == ["brigade.fleet_action_adapters", "--inbox-send"]
+        assert kw == {"timeout": 15, "cwd": Path(adapters.__file__).resolve().parent}
+        assert adapters._inbox_main(argv[5:]) == 0
         return json.loads(capsys.readouterr().out)
 
     monkeypatch.setattr(adapters, "invoke", invoke)

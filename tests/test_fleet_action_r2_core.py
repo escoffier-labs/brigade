@@ -391,7 +391,7 @@ def test_attempted_inbox_send_only_reads_stable_id_and_never_invents_pending(tmp
     helper_calls = []
 
     def invoke(executable, argv, **kwargs):
-        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+        if "--inbox-send" in argv:
             assert executable == Path(sys.executable)
             helper_calls.append(argv)
             return {"queued": True, "client_id": action["action_id"]} if queued else {"error": "ambiguous"}

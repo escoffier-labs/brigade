@@ -10,7 +10,6 @@ import secrets
 import shutil
 import stat
 import subprocess
-import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -19,6 +18,7 @@ from typing import Any, Iterator
 from . import fleet_action_adapters as adapters, fleet_client, fleet_client_actions as client
 from .fleet_action_auth import ActionError, canonical, digest, opaque, selector
 from .fleet_hub_messages import MAX_SQLITE_INTEGER
+from .isolated_exec import module_argv, trusted_cwd
 
 MANIFEST_SCHEMA = "brigade.fleet_action_manifest.v1"
 AUTOMATIC_RECOVERY_LIFETIME = 24 * 60 * 60
@@ -446,21 +446,23 @@ def _schedule(path: Path, manifest: dict[str, Any], action_id: str, generation: 
         "--property=Type=exec",
         "--property=UMask=0077",
         "--property=RuntimeMaxSec=3900",
+        "--working-directory=" + str(trusted_cwd()),
         "--",
-        sys.executable,
-        "-m",
-        "brigade",
-        "fleet",
-        "actions",
-        "execute",
-        action_id,
-        "--generation",
-        str(generation),
-        "--manifest",
-        str(path.resolve()),
+        *module_argv(
+            "brigade",
+            "fleet",
+            "actions",
+            "execute",
+            action_id,
+            "--generation",
+            str(generation),
+            "--manifest",
+            str(path.resolve()),
+        ),
     ]
     result = subprocess.run(
         argv,
+        cwd=trusted_cwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

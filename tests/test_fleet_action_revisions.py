@@ -124,7 +124,7 @@ def test_accepted_inbox_does_not_starve_next_queued_action(tmp_path, monkeypatch
     normal = runner.adapters.invoke
 
     def invoke(executable, argv, **kwargs):
-        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+        if "--inbox-send" in argv:
             return {"message": {"id": 42, "client_id": first["action_id"]}}
         return normal(executable, argv, **kwargs)
 

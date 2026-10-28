@@ -439,3 +439,39 @@ def test_diagnostics_do_not_import_workspace_package(tmp_path, monkeypatch, sour
     assert not marker.exists()
     assert {"name": "bootstrap: AGENTS.md", "status": "FAIL"} in diagnostics["checks"]
     assert workdirs and all(not directory.exists() for directory in workdirs)
+
+
+def test_diagnostics_ignore_user_site_package_injection(tmp_path, monkeypatch):
+    import sys
+    import sysconfig
+    from pathlib import Path
+
+    # Use the base interpreter because a virtualenv normally disables user site.
+    # Only this temporary user base is visible to the diagnostic children.
+    monkeypatch.setattr(sys, "executable", sys._base_executable)
+    userbase = tmp_path / "userbase"
+    scheme = (
+        "nt_user"
+        if os.name == "nt"
+        else "osx_framework_user"
+        if sys.platform == "darwin" and getattr(sys, "_framework", "")
+        else "posix_user"
+    )
+    usersite = Path(sysconfig.get_path("purelib", scheme=scheme, vars={"userbase": str(userbase)}))
+    usersite.mkdir(parents=True)
+    marker = tmp_path / "shadow-executed"
+    shadow = tmp_path / "injected"
+    package = shadow / "brigade"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    (package / "bug_doctor.py").write_text("print('[]')\n")
+    # User-site startup code can prepend a package even when the parent replaced
+    # PYTHONPATH. Interpreter-owned site .pth remains outside this guarantee.
+    (usersite / "injection.pth").write_text(f"import sys; sys.path.insert(0, {str(shadow)!r})\n")
+    monkeypatch.setenv("PYTHONUSERBASE", str(userbase))
+    monkeypatch.delenv("PYTHONNOUSERSITE", raising=False)
+    target = tmp_path / "workspace"
+    target.mkdir()
+    report = bug_collect.collect_diagnostics(target)
+    assert not marker.exists(), "diagnostics executed an ambient user-site package"
+    assert report["checks"] == [{"status": "FAIL", "name": "bootstrap: AGENTS.md"}]

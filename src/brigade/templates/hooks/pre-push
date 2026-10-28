@@ -59,7 +59,8 @@ if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
   SCANNER_PACKAGE="$(cd "$CONTENT_GUARD_DIR/src/content_guard" && pwd -P)"
   SCANNER_INIT="$SCANNER_PACKAGE/__init__.py"
   # Load only the configured package before entering the Git target. -I
-  # excludes cwd, PYTHONPATH and user-site discovery, without reading .pth.
+  # excludes cwd, PYTHONPATH and user-site discovery. The interpreter's own
+  # site-packages and their .pth startup code remain trusted.
   SCANNER_BOOTSTRAP='import importlib.util as u,os,pathlib as p,runpy as r,sys as s;i,m,t=s.argv[1:4];del s.argv[1:4];f=u.spec_from_file_location("content_guard",i);s.path.append(str(p.Path(i).resolve().parent.parent));q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);os.chdir(t);r.run_module(m,run_name="__main__",alter_sys=True)'
   RUN_EXTERNAL() {
     local module="$1"
