@@ -664,20 +664,17 @@ def test_claim_redaction_preserves_binding_and_never_regrants(closed_tasks, sele
     before = journal.read_bytes()
     workspace = run_dir.parents[2]
     with runguard.run_lock(workspace, run_dir=run_dir):
-        try:
-            decision = tasks.claim_task_launch(
-                run_dir,
-                workspace=workspace,
-                handle=current.handle,
-                expected_version=current.version,
-                seat=current.handle.spec.seat,
-                dispatch_attempt=1,
-            )
-        except tasks.TaskJournalError as exc:
-            assert "owner" in str(exc)
-        else:
-            assert decision.outcome == "terminal"
-            assert decision.task.launch_claim == current.launch_claim
+        assert runguard.is_active_run_owner(workspace, run_dir)
+        decision = tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=current.handle,
+            expected_version=current.version,
+            seat=current.handle.spec.seat,
+            dispatch_attempt=1,
+        )
+        assert decision.outcome == "terminal"
+        assert decision.task.launch_claim == current.launch_claim
         with pytest.raises(tasks.TaskJournalError):
             tasks.claim_task_launch(
                 run_dir,
