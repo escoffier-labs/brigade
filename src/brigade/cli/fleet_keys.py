@@ -88,13 +88,17 @@ def _failure(args: argparse.Namespace, code: str) -> int:
         if args.json:
             print(json.dumps({"error": code, "status": None, "code": code}, sort_keys=True))
             sys.stdout.flush()
-    except (Exception, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        pass
+    except Exception:
         _silence_failed_stream(sys.stdout)
     try:
         recovery = f" {_RECOVERY}" if args.keys_command == "rotate" else ""
         print(f"error: {code}.{recovery}", file=sys.stderr)
         sys.stderr.flush()
-    except (Exception, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        pass
+    except Exception:
         _silence_failed_stream(sys.stderr)
     return 1
 
@@ -150,7 +154,9 @@ def _dispatch(args: argparse.Namespace) -> int:
     try:
         print(text)
         sys.stdout.flush()
-    except (Exception, KeyboardInterrupt):
+    except KeyboardInterrupt:
+        return _failure(args, "mesh_keys_interrupted")
+    except Exception:
         _silence_failed_stream(sys.stdout)
         return _failure(args, "mesh_keys_output_failed")
     return 0

@@ -8,6 +8,7 @@ import os
 import stat
 import subprocess
 import sys
+import sysconfig
 
 import pytest
 
@@ -38,7 +39,10 @@ def load(home, principal="node-a", hub=HUB):
 
 
 def tree_snapshot(home):
-    return {str(p.relative_to(home)): p.read_bytes() if p.is_file() else None for p in home.rglob("*")}
+    return {
+        str(p.relative_to(home)): p.read_bytes() if p.is_file() else ("directory", stat.S_IMODE(p.stat().st_mode))
+        for p in home.rglob("*")
+    }
 
 
 def snapshot(home):
@@ -495,7 +499,15 @@ def test_offline_leaves_bypass_global_hooks(
         assert after == before
     else:
         changed = {path for path in before.keys() | after.keys() if before.get(path) != after.get(path)}
-        assert changed and all(path.startswith("private-home/fleet/mesh-keys/") for path in changed)
+        assert changed and all(
+            path.startswith("private-home/fleet/mesh-keys/")
+            or (
+                path in {"private-home/fleet", "private-home/fleet/mesh-keys"}
+                and path not in before
+                and after[path] == ("directory", 0o700)
+            )
+            for path in changed
+        )
     if verb == "rotate" and outcome in ("success", "output"):
         assert len(load(private_home).retired) == 1
 
@@ -586,9 +598,11 @@ if os.environ['TEST_KEY_OUTCOME'] == 'output':
         TEST_HOOK_MARKER=str(marker),
         TEST_KEY_OUTCOME=outcome,
     )
-    executable = Path(sys.executable).parent / ("brigade.exe" if os.name == "nt" else "brigade")
+    executable = Path(sysconfig.get_path("scripts")) / ("brigade.exe" if os.name == "nt" else "brigade")
+    if entry == "console":
+        assert executable.is_file(), "console entry point is not installed"
     prefix = [sys.executable, "-m", "brigade"] if entry == "module" else [str(executable)]
-    before = snapshot(tmp_path)
+    before = tree_snapshot(tmp_path)
     result = subprocess.run(
         [
             *prefix,
@@ -610,12 +624,20 @@ if os.environ['TEST_KEY_OUTCOME'] == 'output':
     assert result.returncode == (0 if outcome == "success" else 1), result.stderr
     assert not marker.exists()
     assert not any(secret in result.stdout + result.stderr for secret in ("PRIVATE_EXCEPTION", "/PRIVATE_PATH", "\x1b"))
-    after = snapshot(tmp_path)
+    after = tree_snapshot(tmp_path)
     if outcome in ("scope", "runtime") or verb == "show":
         assert after == before
     else:
         changed = {p for p in before.keys() | after.keys() if before.get(p) != after.get(p)}
-        assert changed and all(p.startswith("private-home/fleet/mesh-keys/") for p in changed)
+        assert changed and all(
+            p.startswith("private-home/fleet/mesh-keys/")
+            or (
+                p in {"private-home/fleet", "private-home/fleet/mesh-keys"}
+                and p not in before
+                and after[p] == ("directory", 0o700)
+            )
+            for p in changed
+        )
     if verb == "rotate" and outcome in ("success", "output"):
         assert len(load(private_home).retired) == 1
 
@@ -709,3 +731,33 @@ def test_backend_failure_may_leave_only_empty_private_directories(private_home, 
     entries = list(private_home.rglob("*"))
     assert {str(p.relative_to(private_home)) for p in entries} == {"fleet", "fleet/mesh-keys"}
     assert all(p.is_dir() and stat.S_IMODE(p.stat().st_mode) == 0o700 for p in entries)
+
+
+@POSIX_ONLY
+def test_interrupted_healthy_stdout_keeps_json_error_and_single_rotation(private_home, monkeypatch, capsys):
+    custody.load_local_keys(brigade_home=private_home, principal="node-a", hub_id=HUB, create=True)
+    first = load(private_home)
+    silenced = []
+    from brigade.cli import fleet_keys
+
+    class InterruptedOnce(io.StringIO):
+        interrupted = False
+
+        def write(self, text):
+            if not self.interrupted:
+                self.interrupted = True
+                raise KeyboardInterrupt()
+            return super().write(text)
+
+    stream = InterruptedOnce()
+    with monkeypatch.context() as boundary:
+        boundary.setattr(sys, "stdout", stream)
+        boundary.setattr(fleet_keys, "_silence_failed_stream", lambda output: silenced.append(output))
+        assert run("rotate", "--json") == 1
+    assert silenced == []
+    assert json.loads(stream.getvalue()) == dict(
+        error="mesh_keys_interrupted", status=None, code="mesh_keys_interrupted"
+    )
+    after = load(private_home)
+    assert len(after.retired) == 1 and after.retry_key == first.retry_key
+    assert "mesh_keys_interrupted" in capsys.readouterr().err
