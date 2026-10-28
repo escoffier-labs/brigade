@@ -100,10 +100,18 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     managed = managed_path(name, env=env)
     if managed:
         return managed
-    for alias in names:
-        found = shutil.which(alias, path=search_path)
+    if len(names) == 1:
+        found = shutil.which(name, path=search_path)
         if found:
             return found
+    else:
+        path_value = search_path if search_path is not None else os.environ.get("PATH", os.defpath)
+        candidates = (name, *(alias for alias in names if alias != name))
+        for directory in path_value.split(os.pathsep) if path_value else ():
+            for alias in candidates:
+                found = shutil.which(alias, path=directory or os.curdir)
+                if found:
+                    return found
     home = environment.get("HOME")
     home_path = Path(home) if home else Path.home()
     for relative in (path for alias in names for path in _LEGACY_RELATIVE.get(alias, ())):

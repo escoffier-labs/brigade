@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, cursor_user_cmd, fleet_client
+from tests._home import set_home
 
 
 def _wire_cursor_workspace(path: Path) -> Path:
@@ -20,6 +21,41 @@ def _wire_cursor_workspace(path: Path) -> Path:
 
 def _use_home(monkeypatch, home: Path) -> None:
     monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+
+
+@pytest.mark.parametrize(
+    ("legacy_key", "canonical_key"),
+    [
+        ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN"),
+        ("MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"),
+    ],
+)
+@pytest.mark.parametrize("mode", ["conflicting", "empty", "missing"])
+def test_cursor_user_install_refuses_bad_engine_override_before_writes(
+    tmp_path, monkeypatch, capsys, legacy_key, canonical_key, mode
+):
+    _use_home(monkeypatch, tmp_path)
+    set_home(monkeypatch, str(tmp_path))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    for key in ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN", "MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"):
+        monkeypatch.delenv(key, raising=False)
+    if mode == "conflicting":
+        monkeypatch.setenv(legacy_key, str(tmp_path / "legacy"))
+        monkeypatch.setenv(canonical_key, str(tmp_path / "canonical"))
+    else:
+        monkeypatch.setenv(canonical_key, "" if mode == "empty" else str(tmp_path / "missing"))
+
+    cursor = tmp_path / ".cursor"
+    cursor.mkdir()
+    existing = '{"mcpServers":{"foreign":{"command":"keep-server"}}}\n'
+    (cursor / "mcp.json").write_text(existing)
+    assert cli.main(["harness", "install", "cursor", "--scope", "user", "--write", "--json"]) == 2
+    assert "override" in capsys.readouterr().err
+    assert (cursor / "mcp.json").read_text() == existing
+    assert sorted(path.name for path in cursor.iterdir()) == ["mcp.json"]
+
+    assert cli.main(["harness", "doctor", "cursor", "--scope", "user", "--json"]) == 2
+    assert "override" in capsys.readouterr().err
 
 
 def test_cursor_user_install_dry_run_lists_all_surfaces_without_writing(tmp_path, monkeypatch, capsys):

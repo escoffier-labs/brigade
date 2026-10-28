@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 from pathlib import Path
 
@@ -238,3 +239,15 @@ def test_each_family_honors_canonical_override_and_path_for_legacy_request(tmp_p
         assert component_bins.resolve(old, env=env) is None
         env[key] = str(binary)
         assert component_bins.resolve(old, env=env) == str(binary)
+
+
+def test_family_resolution_preserves_path_directory_order_and_requested_name_ties(tmp_path):
+    legacy = _write_executable(tmp_path / "earlier" / "miseledger")
+    canonical = _write_executable(tmp_path / "later" / "brigade-evidence")
+    env = _env(tmp_path, PATH=os.pathsep.join((str(legacy.parent), str(canonical.parent))))
+    for requested in ("miseledger", "brigade-evidence"):
+        assert component_bins.resolve(requested, env=env) == str(legacy)
+
+    colocated = _write_executable(legacy.parent / "brigade-evidence")
+    assert component_bins.resolve("miseledger", env=env) == str(legacy)
+    assert component_bins.resolve("brigade-evidence", env=env) == str(colocated)
