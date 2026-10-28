@@ -254,10 +254,17 @@ def _locked(descriptor: int) -> Iterator[None]:
         except BlockingIOError:
             _require(time.monotonic() < deadline, "mesh_trust_busy")
             time.sleep(0.01)
+    completed = False
     try:
         yield
+        completed = True
     finally:
-        fcntl.flock(descriptor, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        except BaseException:
+            if completed:
+                raise
+            # Preserve the active primary; release is attempted only once.
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -548,10 +555,12 @@ def _validate(state: Any) -> dict[str, dict[str, Any]]:
 
 
 def _read(descriptor: int) -> dict[str, Any]:
+    source: int | None
     try:
         source = dirfd.open_child_file(descriptor, _NAME, dirfd.file_flags(os.O_RDONLY | os.O_NONBLOCK))
     except FileNotFoundError:
         raise crypto.MeshError("mesh_trust_missing") from None
+    completed = False
     try:
         _private(source)
         _require(os.fstat(source).st_size <= _MAX_BYTES)
@@ -568,6 +577,7 @@ def _read(descriptor: int) -> dict[str, Any]:
             )
             _validate(state)
             _require(crypto.canonical(state) == raw)
+            completed = True
             return state
         except crypto.MeshExtraMissing:
             raise
@@ -578,7 +588,13 @@ def _read(descriptor: int) -> dict[str, Any]:
         except (ValueError, TypeError, KeyError, RecursionError, UnicodeError):
             raise crypto.MeshError("mesh_trust_invalid") from None
     finally:
-        os.close(source)
+        closing, source = source, None
+        try:
+            os.close(closing)
+        except BaseException:
+            if completed:
+                raise
+            # Keep validation/backend/cancellation priority; never retry close.
 
 
 def _snapshot(state: dict[str, Any]) -> TrustSnapshot:

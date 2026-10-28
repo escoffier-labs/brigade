@@ -2108,3 +2108,217 @@ def test_directory_cleanup_preserves_primary_failure(trust, home, monkeypatch, t
     finally:
         saved(home).parent.chmod(0o700)
     assert trust.load_trust(brigade_home=home).data == json.loads(before)
+
+
+@pytest.fixture
+def trust_read_cleanup_fault(monkeypatch):
+    @contextmanager
+    def inject(point, error):
+        import fcntl
+
+        original_open, original_close, original_flock = dirfd.open_child_file, os.close, fcntl.flock
+        seen = {
+            "source": None,
+            "source_done": False,
+            "source_attempts": 0,
+            "directory": None,
+            "directory_closes": 0,
+            "acquires": 0,
+            "unlocks": 0,
+            "faults": 0,
+            "replacement": None,
+            "replacement_live": None,
+        }
+
+        def opened(parent, name, flags, *args, **kwargs):
+            descriptor = original_open(parent, name, flags, *args, **kwargs)
+            if name == "trust-state.json" and not flags & os.O_WRONLY:
+                seen["source"], seen["source_done"] = descriptor, False
+            return descriptor
+
+        def closed(descriptor):
+            if descriptor == seen["directory"]:
+                seen["directory_closes"] += 1
+            source_attempt = descriptor == seen["source"] and (
+                not seen["source_done"] or point == "source-close" and seen["faults"]
+            )
+            if source_attempt:
+                seen["source_attempts"] += 1
+                seen["source_done"] = True
+            original_close(descriptor)
+            if source_attempt and point == "source-close" and not seen["faults"]:
+                seen["faults"] += 1
+                replacement = os.open(os.devnull, os.O_RDONLY)
+                if replacement != descriptor:
+                    os.dup2(replacement, descriptor)
+                    original_close(replacement)
+                seen["replacement"] = descriptor
+                raise error
+
+        def flock(descriptor, operation):
+            if operation == fcntl.LOCK_UN:
+                seen["unlocks"] += 1
+                original_flock(descriptor, operation)
+                if point == "unlock":
+                    seen["faults"] += 1
+                    raise error
+            else:
+                seen["directory"] = descriptor
+                seen["acquires"] += 1
+                if point == "acquire":
+                    seen["faults"] += 1
+                    raise error
+                original_flock(descriptor, operation)
+
+        try:
+            with monkeypatch.context() as fault:
+                fault.setattr(dirfd, "open_child_file", opened)
+                fault.setattr(os, "close", closed)
+                fault.setattr(fcntl, "flock", flock)
+                yield seen
+        finally:
+            # All fault patches are restored before assertions or pytest capture.
+            if seen["replacement"] is not None:
+                try:
+                    os.fstat(seen["replacement"])
+                    seen["replacement_live"] = True
+                except OSError as failure:
+                    assert failure.errno == errno.EBADF
+                    seen["replacement_live"] = False
+                else:
+                    original_close(seen["replacement"])
+
+    return inject
+
+
+@pytest.mark.parametrize("point", ["source-close", "unlock"])
+@pytest.mark.parametrize("primary", ["extra", "backend", "validation", "cancel"])
+def test_read_cleanup_preserves_primary_diagnosis(trust, home, monkeypatch, trust_read_cleanup_fault, point, primary):
+    class Cancelled(BaseException):
+        pass
+
+    bootstrap(trust, home)
+    accept(trust, home)
+    error = (
+        crypto.MeshExtraMissing()
+        if primary == "extra"
+        else crypto.MeshError("mesh_backend_unsupported")
+        if primary == "backend"
+        else Cancelled()
+    )
+    if primary == "validation":
+        state = json.loads(saved(home).read_bytes())
+        state["v"] = 2
+        saved(home).write_bytes(crypto.canonical(state))
+    before = saved(home).read_bytes()
+    caught = None
+    with monkeypatch.context() as primary_fault:
+        if primary != "validation":
+
+            def unavailable():
+                raise error
+
+            primary_fault.setattr(crypto, "probe_backend", unavailable)
+        with trust_read_cleanup_fault(point, OSError(errno.EIO, "private secondary cleanup")) as seen:
+            try:
+                trust.load_trust(brigade_home=home)
+            except BaseException as failure:
+                caught = failure
+    if primary == "validation":
+        assert type(caught) is crypto.MeshError
+        assert caught.code == str(caught) == "mesh_trust_invalid"
+        with pytest.raises(crypto.MeshError, match="^mesh_trust_invalid$"):
+            trust.load_trust(brigade_home=home)
+    else:
+        assert caught is error
+        assert trust.load_trust(brigade_home=home).data == json.loads(before)
+    assert seen["faults"] == seen["unlocks"] == seen["directory_closes"] == 1
+    assert seen["source_attempts"] == 1
+    if point == "source-close":
+        assert seen["replacement_live"] is True
+    assert saved(home).read_bytes() == before
+
+
+@pytest.mark.parametrize("point", ["source-close", "unlock"])
+@pytest.mark.parametrize("cleanup", ["io", "permission", "cancel"])
+def test_cleanup_only_failure_is_not_success_and_retains_error_policy(
+    trust, home, trust_read_cleanup_fault, point, cleanup
+):
+    class Cancelled(BaseException):
+        pass
+
+    bootstrap(trust, home)
+    accept(trust, home)
+    before = saved(home).read_bytes()
+    error = (
+        Cancelled()
+        if cleanup == "cancel"
+        else OSError(errno.EIO if cleanup == "io" else errno.EACCES, "private cleanup-only diagnostic")
+    )
+    caught = None
+    with trust_read_cleanup_fault(point, error) as seen:
+        try:
+            trust.load_trust(brigade_home=home)
+        except BaseException as failure:
+            caught = failure
+    if cleanup == "cancel":
+        assert caught is error
+    else:
+        assert type(caught) is crypto.MeshError
+        expected = "mesh_trust_storage_failure" if cleanup == "io" else "mesh_trust_unsafe"
+        assert caught.code == str(caught) == expected
+    assert seen["faults"] == seen["unlocks"] == seen["directory_closes"] == 1
+    assert seen["source_attempts"] == 1
+    if point == "source-close":
+        assert seen["replacement_live"] is True
+    assert saved(home).read_bytes() == before
+    assert trust.load_trust(brigade_home=home).data == json.loads(before)
+
+
+@pytest.mark.parametrize("cleanup", ["io", "cancel"])
+def test_unlock_lost_return_reloads_binding_generation_and_replays(trust, home, trust_read_cleanup_fault, cleanup):
+    class Cancelled(BaseException):
+        pass
+
+    bootstrap(trust, home)
+    trust.record_hub_revocation(brigade_home=home, hub=HUB, principal="bogus-node", kid=KID, cutoff=TIME)
+    before = trust.load_trust(brigade_home=home).data
+    raw = signed(kind="revocation", entries=[revoked(), revoked(kid=KID2)])
+    error = OSError(errno.EIO, "private lost-return unlock") if cleanup == "io" else Cancelled()
+    caught = None
+    with trust_read_cleanup_fault("unlock", error) as seen:
+        try:
+            accept(trust, home, raw, kind="revocation")
+        except BaseException as failure:
+            caught = failure
+    if cleanup == "cancel":
+        assert caught is error
+    else:
+        assert type(caught) is crypto.MeshError
+        assert caught.code == str(caught) == "mesh_trust_storage_failure"
+    assert seen["faults"] == seen["unlocks"] == seen["directory_closes"] == 1
+    complete = saved(home).read_bytes()
+    state = trust.load_trust(brigade_home=home).data
+    assert state["generation"] == before["generation"] + 1
+    assert set(state["objects"]) == {digest(raw)}
+    assert state["marks"]["revocation:" + signer()]["digest"] == digest(raw)
+    assert len(state["binding_conflicts"]) == 1 and state["conflicts"] == {}
+    retry = accept(trust, home, raw, kind="revocation")
+    assert retry.status == "replay" and retry.evidence_recorded and retry.storage_error is None
+    assert saved(home).read_bytes() == complete
+
+
+def test_failed_lock_acquisition_never_unlocks_and_directory_is_closed(trust, home, trust_read_cleanup_fault):
+    bootstrap(trust, home)
+    before = saved(home).read_bytes()
+    caught = None
+    with trust_read_cleanup_fault("acquire", OSError(errno.EIO, "private acquire fault")) as seen:
+        try:
+            trust.load_trust(brigade_home=home)
+        except BaseException as failure:
+            caught = failure
+    assert type(caught) is crypto.MeshError
+    assert caught.code == str(caught) == "mesh_trust_storage_failure"
+    assert seen["acquires"] == seen["faults"] == seen["directory_closes"] == 1
+    assert seen["unlocks"] == seen["source_attempts"] == 0
+    assert saved(home).read_bytes() == before
