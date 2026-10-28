@@ -14,6 +14,7 @@ import pytest
 
 from brigade import fleet_action_adapters as adapters, fleet_action_runner as runner
 from brigade.fleet_action_auth import ActionError
+from tests._home import set_home
 from tests.test_fleet_action_runner import broker_fixture
 
 pytestmark = pytest.mark.skipif(os.name != "posix", reason="Fleet action jobs require POSIX")
@@ -32,7 +33,7 @@ def test_schedule_resolves_relative_tool_before_entering_trusted_cwd(tmp_path, m
 
 def test_inbox_dispatch_preserves_relative_credential_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, tmp_path / "home")
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home" / ".brigade"))
     monkeypatch.setenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", "message-token")
     for key in ("BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
