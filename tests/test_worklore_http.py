@@ -117,7 +117,20 @@ def test_prepared_handoff_uses_existing_read_auth_and_refuses_mutations(tmp_path
             conn.close()
 
 
-@pytest.mark.parametrize("invalid_field", ["title", "timestamp", "report"])
+@pytest.mark.parametrize(
+    "invalid_field",
+    [
+        "title",
+        "timestamp",
+        "report",
+        "event-empty",
+        "event-array",
+        "ownership-empty",
+        "ownership-null",
+        "report-array",
+        "reporter-missing",
+    ],
+)
 def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, monkeypatch, invalid_field):
     monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
     with _hub(tmp_path) as hub:
@@ -155,8 +168,29 @@ def test_prepared_handoff_stored_validation_is_a_safe_server_error(tmp_path, mon
                 detail = json.loads(raw)
                 if invalid_field == "timestamp":
                     detail["ownership"]["updated_at"] = "not-a-timestamp"
-                else:
+                elif invalid_field == "report":
                     detail["ownership"]["last_report"] = {"provider": "invalid"}
+                elif invalid_field == "event-empty":
+                    detail = {}
+                elif invalid_field == "event-array":
+                    detail = []
+                elif invalid_field == "ownership-empty":
+                    detail["ownership"] = {}
+                elif invalid_field == "ownership-null":
+                    detail["ownership"] = None
+                elif invalid_field == "report-array":
+                    detail["ownership"]["last_report"] = []
+                else:
+                    detail["ownership"]["last_report"] = {
+                        "version": 1,
+                        "provider": "dot",
+                        "session_id": "session-a",
+                        "agent_label": "worker-a",
+                        "observed_at": "2026-01-01T00:00:00+00:00",
+                        "sequence": 1,
+                        "progress": "Fixture",
+                        "evidence_refs": [],
+                    }
                 conn.execute("UPDATE work_events SET detail_json=? WHERE seq=?", (json.dumps(detail), seq))
             conn.commit()
         finally:

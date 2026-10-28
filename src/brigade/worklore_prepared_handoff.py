@@ -169,7 +169,13 @@ def _current_ownership(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]
         ).fetchone()
         if row is not None and (latest is None or row[0] > latest[0]):
             latest = row
-    snapshot = ownership._initial() if latest is None else json.loads(latest[1])["ownership"]
+    if latest is None:
+        return ownership._public(ownership._initial())
+    detail = json.loads(latest[1])
+    snapshot = detail.get("ownership") if isinstance(detail, Mapping) else None
+    required = _OWNERSHIP_FIELDS | _CHECKPOINT_FIELDS | {"last_report", "conflict_check"}
+    if not isinstance(snapshot, Mapping) or not required.issubset(snapshot):
+        raise ownership._invalid("invalid stored ownership snapshot")
     return ownership._public(snapshot)
 
 
@@ -193,9 +199,11 @@ def get_prepared_handoff(conn: sqlite3.Connection, work_id: str) -> dict[str, An
         report = None
         if current["last_report"] is not None:
             saved = current["last_report"]
+            if not isinstance(saved, Mapping):
+                raise ownership._invalid("invalid stored ownership report")
             report = {
                 "data": _report_data({key: value for key, value in saved.items() if key not in _REPORT_STORAGE_FIELDS}),
-                "reporter_node": saved["reporter_node"],
+                "reporter_node": ownership._node(saved.get("reporter_node")),
                 "freshness": "unassessed",
             }
         rows = conn.execute(
