@@ -162,10 +162,17 @@ def _locked(fd: int) -> Iterator[None]:
             if time.monotonic() >= deadline:
                 raise crypto.MeshError("mesh_keys_busy") from None
             time.sleep(0.01)
+    completed = False
     try:
         yield
+        completed = True
     finally:
-        fcntl.flock(fd, fcntl.LOCK_UN)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except BaseException:
+            if completed:
+                raise
+            # Preserve the active primary, including cancellation.
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -232,10 +239,12 @@ def _decode(raw: bytes, *, principal: str, hub_id: str) -> LocalKeys:
 
 
 def _read(fd: int, name: str, *, principal: str, hub_id: str) -> LocalKeys | None:
+    source: int | None
     try:
         source = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=fd)
     except FileNotFoundError:
         return None
+    completed = False
     try:
         _private_stat(source)
         if os.fstat(source).st_size > _MAX_STATE_BYTES:
@@ -244,9 +253,18 @@ def _read(fd: int, name: str, *, principal: str, hub_id: str) -> LocalKeys | Non
             raw = stream.read(_MAX_STATE_BYTES + 1)
         if len(raw) > _MAX_STATE_BYTES:
             raise crypto.MeshError("mesh_keys_invalid")
-        return _decode(raw, principal=principal, hub_id=hub_id)
+        state = _decode(raw, principal=principal, hub_id=hub_id)
+        completed = True
+        return state
     finally:
-        os.close(source)
+        closing, source = source, None
+        if closing is not None:
+            try:
+                os.close(closing)
+            except BaseException:
+                if completed:
+                    raise
+                # Preserve the active primary; never retry an ambiguous close.
 
 
 def _reap_temporary_files(fd: int) -> None:

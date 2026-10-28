@@ -808,6 +808,211 @@ def test_consumed_parent_directory_close_preserves_new_owner_and_cleans_child(tm
     assert _load(tmp_path).active.record["kid"]
 
 
+@pytest.fixture
+def custody_read_cleanup_fault(monkeypatch):
+    @contextmanager
+    def inject(home, point, error):
+        import fcntl
+
+        real_open, real_close, real_flock = os.open, os.close, fcntl.flock
+        seen = {
+            "owned": set(),
+            "source": None,
+            "directory": None,
+            "reused": None,
+            "source_closes": 0,
+            "directory_closes": 0,
+            "unlocks": 0,
+            "faults": 0,
+            "released": False,
+        }
+
+        def opened(path, flags, *args, **kwargs):
+            fd = real_open(path, flags, *args, **kwargs)
+            seen["owned"].add(fd)
+            if str(path).endswith(".json"):
+                seen["source"] = fd
+            elif str(path) == "mesh-keys":
+                seen["directory"] = fd
+            return fd
+
+        def closed(fd):
+            source = fd == seen["source"]
+            if source:
+                seen["source"] = None
+                seen["source_closes"] += 1
+            elif fd == seen["reused"]:
+                seen["source_closes"] += 1
+            if fd == seen["directory"]:
+                seen["directory_closes"] += 1
+            real_close(fd)
+            seen["owned"].discard(fd)
+            if point == "source_close" and source and not seen["faults"]:
+                seen["faults"] += 1
+                replacement = real_open(os.devnull, os.O_RDONLY)
+                if replacement != fd:
+                    os.dup2(replacement, fd)
+                    real_close(replacement)
+                seen["reused"] = fd
+                raise error
+
+        def flock(fd, operation):
+            real_flock(fd, operation)
+            if operation == fcntl.LOCK_UN:
+                seen["unlocks"] += 1
+                # Prove release while the original directory descriptor is still open.
+                probe = real_open(home / "fleet" / "mesh-keys", os.O_RDONLY)
+                try:
+                    real_flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    real_flock(probe, fcntl.LOCK_UN)
+                    seen["released"] = True
+                finally:
+                    real_close(probe)
+                if point == "unlock":
+                    seen["faults"] += 1
+                    raise error
+
+        try:
+            with monkeypatch.context() as fault:
+                fault.setattr(os, "open", opened)
+                fault.setattr(os, "close", closed)
+                fault.setattr(fcntl, "flock", flock)
+                yield seen
+        finally:
+            # Restore the real primitives before pytest assertion/capture handling.
+            if seen["reused"] is not None:
+                try:
+                    os.fstat(seen["reused"])
+                    seen["replacement_alive"] = True
+                except OSError:
+                    seen["replacement_alive"] = False
+            for fd in seen["owned"] | ({seen["reused"]} if seen["reused"] is not None else set()):
+                try:
+                    real_close(fd)
+                except OSError as cleanup:
+                    assert cleanup.errno == errno.EBADF
+
+    return inject
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("point", ["source_close", "unlock"])
+@pytest.mark.parametrize("primary", ["extra", "backend", "invalid", "cancel"])
+@pytest.mark.parametrize("secondary", ["io", "cancel"])
+def test_read_cleanup_preserves_primary_identity(
+    tmp_path, monkeypatch, custody_read_cleanup_fault, point, primary, secondary
+):
+    from brigade import fleet_mesh_keys as custody
+
+    class Cancelled(BaseException):
+        pass
+
+    _load(tmp_path, create=True)
+    saved = _rotate(tmp_path)
+    path = _state_path(tmp_path)
+    if primary == "invalid":
+        state = json.loads(path.read_bytes())
+        state["entries"][-1]["record"]["kid"] = "invalid"
+        path.write_bytes(crypto.canonical(state))
+    before = {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in path.parent.iterdir()}
+    sentinel = (
+        crypto.MeshExtraMissing()
+        if primary == "extra"
+        else crypto.MeshError("mesh_backend_unsupported")
+        if primary == "backend"
+        else Cancelled()
+    )
+    cleanup = OSError(errno.EIO, "private cleanup diagnostic", str(path)) if secondary == "io" else Cancelled()
+    decoded_errors = []
+    real_decode = custody._decode
+
+    def decode(*args, **kwargs):
+        try:
+            return real_decode(*args, **kwargs)
+        except BaseException as error:
+            decoded_errors.append(error)
+            raise
+
+    def unavailable():
+        raise sentinel
+
+    caught = None
+    with monkeypatch.context() as failure:
+        failure.setattr(custody, "_decode", decode)
+        if primary != "invalid":
+            failure.setattr(crypto, "_backend", unavailable)
+        with custody_read_cleanup_fault(tmp_path, point, cleanup) as seen:
+            try:
+                _load(tmp_path)
+            except BaseException as error:
+                caught = error
+    assert len(decoded_errors) == 1
+    assert seen["faults"] == seen["source_closes"] == seen["unlocks"] == seen["directory_closes"] == 1
+    assert seen["released"] and seen["owned"] == set()
+    if point == "source_close":
+        assert seen["replacement_alive"]
+    assert before == {p: (p.read_bytes(), p.stat().st_mtime_ns) for p in path.parent.iterdir()}
+    assert caught is decoded_errors[0]
+    if primary == "invalid":
+        assert type(caught) is crypto.MeshError and caught.code == str(caught) == "mesh_keys_invalid"
+    else:
+        assert caught is sentinel
+        assert _load(tmp_path) == saved
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize(
+    "point, operation",
+    [
+        ("source_close", "read"),
+        ("source_close", "rotate"),
+        ("unlock", "read"),
+        ("unlock", "create"),
+        ("unlock", "rotate"),
+    ],
+)
+@pytest.mark.parametrize("number", [errno.EIO, errno.EACCES, None])
+def test_cleanup_only_failure_keeps_diagnosis_and_reconciles(
+    tmp_path, custody_read_cleanup_fault, point, operation, number
+):
+    home = tmp_path / "custody"
+    first = None if operation == "create" else _load(home, create=True)
+    before = None if first is None else _state_path(home).read_bytes()
+    cleanup = (
+        OSError(number, "private cleanup diagnostic", str(home))
+        if number is not None
+        else BaseException("cancel cleanup")
+    )
+    caught = None
+    with custody_read_cleanup_fault(home, point, cleanup) as seen:
+        try:
+            _rotate(home) if operation == "rotate" else _load(home, create=operation == "create")
+        except BaseException as error:
+            caught = error
+    assert seen["faults"] == seen["unlocks"] == seen["directory_closes"] == 1
+    assert seen["source_closes"] == (0 if operation == "create" else 1)
+    assert seen["released"] and seen["owned"] == set()
+    if point == "source_close":
+        assert seen["replacement_alive"]
+    if number is None:
+        assert caught is cleanup
+    else:
+        code = "mesh_keys_io_error" if number == errno.EIO else "mesh_keys_unsafe"
+        assert type(caught) is crypto.MeshError and caught.code == str(caught) == code
+    complete = _state_path(home).read_bytes()
+    active = _load(home)
+    committed_rotation = operation == "rotate" and point == "unlock"
+    assert len(active.retired) == (1 if committed_rotation else 0)
+    if committed_rotation:
+        assert active.retired[0].private_keys == first.active.private_keys
+        assert active.active.private_keys != first.active.private_keys
+        assert active.retry_key == first.retry_key
+    elif first is not None:
+        assert active == first and complete == before
+    assert _load(home, create=True) == active
+    assert _state_path(home).read_bytes() == complete
+
+
 @POSIX_ONLY
 @pytest.mark.parametrize("operation", ["read", "create", "rotate"])
 @pytest.mark.parametrize("number, code", [(errno.EIO, "mesh_keys_io_error"), (errno.EACCES, "mesh_keys_unsafe")])
