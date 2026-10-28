@@ -1454,10 +1454,13 @@ def peer_for_use(
             except BaseException as error:
                 body_error = error
                 raise
-    except BaseException:
-        if body_error is not None:
-            raise body_error from None
-        raise
+    except BaseException as error:
+        if body_error is None or error is body_error:
+            raise
+    # Restore after a legacy translation, outside its active handler, so Python
+    # preserves the caller's cause, context and suppression intent as well.
+    if body_error is not None:
+        raise body_error
 
 
 def record_for(
@@ -1520,6 +1523,21 @@ def _peer_new(state: dict[str, Any], hub: str, principal: str) -> dict[str, Any]
 
 def _peer_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
+def _peer_admission_clock() -> int:
+    """Actual local wall time on _instant's microsecond axis, not metadata time."""
+    return _instant("1970-01-01T00:00:00Z") + time.time_ns() // 1000
+
+
+def _admit_peer_times(records: list[tuple[str, str, dict[str, Any]]]) -> None:
+    """New admissions only; stored history and completed retries ignore clocks.
+
+    One local cutoff covers the entire authenticated batch under the inode lock.
+    This bounds distant future heads, without relaxing immutable intervals.
+    """
+    cutoff = _peer_admission_clock() + 300_000_000
+    _require(all(_instant(record[2]["created_at"]) <= cutoff for record in records), "mesh_peer_created_in_future")
 
 
 def _peer_refused(
@@ -1585,6 +1603,7 @@ def accept_peer(
                 state, identity, principal, "mesh_peer_history_transition_unsupported", require_verified
             )
         else:
+            _admit_peer_times([parsed])
             peer = _peer_new(state, identity["hub"], principal)
             now = _peer_now()
             evidence = {"fingerprint": expected_fingerprint, "at": now, "head": expected_head_digest or ""}
@@ -1621,12 +1640,15 @@ def _peer_changed(
     principal: str,
     parsed: tuple[str, str, dict[str, Any]],
     require_verified: bool,
+    supplied: list[tuple[str, str, dict[str, Any]]],
 ) -> PeerAcceptanceResult:
     before = deepcopy(state)
     digest, canonical, _ = parsed
     peer = state["peers"][_peer_name(identity["hub"], principal)]
     head = state["peer_records"][peer["history"][-1]]["digest"]
     name = _peer_name(head, digest)
+    if name not in peer["changes"]:
+        _admit_peer_times([parsed, *supplied])
     try:
         if name in peer["changes"]:
             _flush(descriptor)
@@ -1731,8 +1753,11 @@ def observe_peer(
                 _require(not checked_chain or checked_chain[0][0] != head["digest"], "mesh_peer_chain_invalid")
                 links = _peer_chain(state, peer, parsed, chain)
                 if links is None:
-                    result = _peer_changed(descriptor, state, identity, principal, parsed, require_verified)
+                    result = _peer_changed(
+                        descriptor, state, identity, principal, parsed, require_verified, checked_chain
+                    )
                 else:
+                    _admit_peer_times(links)
                     for link in links:
                         _peer_insert(
                             state, peer, link, method="continuity", observation={}, confirmation={}, now=_peer_now()
@@ -1764,6 +1789,7 @@ def observe_peer(
                 if not require_verified and not membership_error and membership and principal in membership["members"]:
                     observation = {"digest": membership["digest"], "signer": membership["signer"], "at": _peer_now()}
                 if head is None:
+                    _admit_peer_times([parsed])
                     peer = _peer_new(state, identity["hub"], principal)
                     _peer_insert(
                         state, peer, parsed, method="first", observation=observation, confirmation={}, now=_peer_now()

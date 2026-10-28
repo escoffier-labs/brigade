@@ -4383,3 +4383,370 @@ def test_r1_body_io_error_survives_final_descriptor_close_failure(trust, home, t
         assert seen["calls"] == 1
     assert caught is primary
     assert peer_load(trust, home).use.eligible
+
+
+# R2 admission protection is deliberately separate from the metadata clock.
+@pytest.fixture
+def r2_admission_clock(trust, monkeypatch):
+    with monkeypatch.context() as patch:
+        patch.setattr(trust, "_peer_admission_clock", lambda: trust._instant(TIME), raising=False)
+        yield patch
+
+
+@pytest.mark.parametrize("listed,required", [(True, False), (False, False), (True, True)])
+def test_r2_far_future_first_contact_refuses_without_any_pin(trust, home, r2_admission_clock, listed, required):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL] if listed else [])
+    raw = peer_record(created_at="9999-12-31T23:59:59Z")
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_observe(trust, home, raw, require_verified=required)
+    assert saved(home).read_bytes() == before
+    assert peer_load(trust, home).head is None
+
+
+@pytest.mark.parametrize(
+    "created_at,allowed",
+    [
+        ("2026-01-02T00:05:00Z", True),
+        ("2026-01-02T01:05:00+01:00", True),
+        ("2026-01-02T00:05:00.000001Z", False),
+        ("2026-01-01T19:05:00.000001-05:00", False),
+    ],
+)
+@pytest.mark.parametrize("operation", ["observe", "manual", "changed"])
+def test_r2_future_admission_inclusive_boundary_and_utc_offsets(
+    trust, home, r2_admission_clock, created_at, allowed, operation
+):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    if operation == "changed":
+        peer_accept(trust, home, peer_record(), require_verified=True)
+        assert peer_load(trust, home, require_verified=True).use.eligible
+    raw = peer_record(2, created_at=created_at)
+    before = saved(home).read_bytes()
+
+    def action():
+        if operation == "manual":
+            return peer_accept(trust, home, raw, require_verified=True)
+        return peer_observe(trust, home, raw)
+
+    if allowed:
+        result = action()
+        assert result.disposition == ("changed" if operation == "changed" else "accepted")
+        assert result.evidence_recorded
+    else:
+        with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+            action()
+        assert saved(home).read_bytes() == before
+        if operation == "changed":
+            assert peer_load(trust, home).use.eligible
+
+
+@pytest.mark.parametrize("position", [0, 1, 2])
+def test_r2_future_continuity_input_never_advances_or_poisons(trust, home, r2_admission_clock, position):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first, require_verified=True)
+    chain = []
+    for index, number in enumerate((2, 3, 4)):
+        chain.append(
+            peer_record(
+                number,
+                previous=chain[-1] if chain else first,
+                created_at="9999-12-31T23:59:59Z" if index == position else None,
+            )
+        )
+    before = saved(home).read_bytes()
+    assert peer_load(trust, home, require_verified=True).use.eligible
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_observe(trust, home, chain[-1], chain=tuple(chain))
+    assert saved(home).read_bytes() == before and peer_load(trust, home).use.eligible
+
+
+def test_r2_batch_captures_one_under_lock_cutoff_and_accepts_equal_boundary(
+    trust, home, r2_admission_clock, monkeypatch
+):
+    import fcntl
+
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first, require_verified=True)
+    second = peer_record(2, previous=first)
+    third = peer_record(3, previous=second, created_at="2026-01-02T00:05:00Z")
+    original_flock = fcntl.flock
+    held = False
+    calls = 0
+
+    def flock(fd, operation):
+        nonlocal held
+        result = original_flock(fd, operation)
+        held = operation != fcntl.LOCK_UN
+        return result
+
+    def clock():
+        nonlocal calls
+        assert held
+        calls += 1
+        return trust._instant(TIME)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fcntl, "flock", flock)
+        patch.setattr(trust, "_peer_admission_clock", clock, raising=False)
+        result = peer_observe(trust, home, third, chain=(second, third))
+    assert calls == 1 and result.disposition == "accepted" and result.peer.head == third
+
+
+@pytest.mark.parametrize("manual_kind", ["first", "replacement", "confirmation"])
+def test_r2_every_new_manual_target_or_confirmation_is_time_admitted(trust, home, r2_admission_clock, manual_kind):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    expected = None
+    raw = peer_record(2, created_at="9999-12-31T23:59:59Z")
+    if manual_kind == "replacement":
+        first = peer_record()
+        peer_accept(trust, home, first, require_verified=True)
+        expected = digest(first)
+        assert peer_load(trust, home).use.eligible
+    elif manual_kind == "confirmation":
+        raw = peer_record(created_at="2026-01-02T00:04:00Z")
+        peer_observe(trust, home, raw)
+        assert peer_load(trust, home).use.eligible
+        expected = digest(raw)
+        r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant("2026-01-01T23:00:00Z"))
+    before = saved(home).read_bytes()
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_accept(trust, home, raw, expected=expected, require_verified=True)
+    assert saved(home).read_bytes() == before
+
+
+def test_r2_near_future_substitute_requires_later_real_rotation_and_virtual_wait(trust, home, r2_admission_clock):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    substitute = peer_record(30, created_at="2026-01-02T00:05:00Z")
+    result = peer_observe(trust, home, substitute)
+    assert result.peer.provenance == "observed" and result.peer.use.eligible
+    original = saved(home).read_bytes()
+    old_real = peer_record(31, created_at="2026-01-02T00:01:00Z")
+    refused = peer_accept(trust, home, old_real, expected=digest(substitute), require_verified=True)
+    assert refused.disposition == "refused" and refused.error == "mesh_peer_history_transition_unsupported"
+    assert saved(home).read_bytes() == original
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant("2026-01-02T00:05:00.000001Z"))
+    fresh_real = peer_record(32, created_at="2026-01-02T00:05:00.000001Z")
+    accepted = peer_accept(trust, home, fresh_real, expected=digest(substitute), require_verified=True)
+    assert accepted.disposition == "accepted" and accepted.peer.use.eligible
+    assert accepted.peer.provenance == "verified" and accepted.peer.history[0]["canonical"].encode() == substitute
+
+
+def test_r2_stolen_key_future_successor_cannot_prevent_clean_revocation_recovery(trust, home, r2_admission_clock):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first, require_verified=True)
+    future = peer_record(2, previous=first, created_at="9999-12-31T23:59:59Z")
+    before = saved(home).read_bytes()
+    assert peer_load(trust, home).use.eligible
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_observe(trust, home, future)
+    assert saved(home).read_bytes() == before and peer_load(trust, home).head == first
+    r1_revoke(trust, home, first, signed_claim=True)
+    assert peer_load(trust, home).use.error == "recipient_key_revoked"
+    real = peer_record(3)
+    accepted = peer_accept(trust, home, real, expected=digest(first), require_verified=True)
+    assert accepted.disposition == "accepted" and accepted.peer.use.eligible
+    assert len(accepted.peer.data["barriers"]) == 1
+
+
+@pytest.mark.parametrize("completed", ["observation", "manual", "continuity", "changed"])
+def test_r2_completed_retries_and_retained_changes_do_not_readmit_after_clock_rollback(
+    trust, home, r2_admission_clock, completed
+):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    first = peer_record()
+    if completed == "observation":
+        peer_observe(trust, home, first)
+
+        def action():
+            return peer_observe(trust, home, first)
+    else:
+        peer_accept(trust, home, first, require_verified=True)
+        if completed == "manual":
+
+            def action():
+                return peer_accept(trust, home, first, require_verified=True)
+        elif completed == "changed":
+            candidate = peer_record(2)
+            peer_observe(trust, home, candidate)
+
+            def action():
+                return peer_observe(trust, home, candidate)
+        else:
+            second = peer_record(2, previous=first)
+            third = peer_record(3, previous=second)
+            peer_observe(trust, home, third, chain=(second, third))
+
+            def action():
+                return peer_observe(trust, home, third, chain=(second, third))
+
+    before = saved(home).read_bytes()
+
+    def forbidden():
+        raise AssertionError("completed replay consulted admission clock")
+
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", forbidden)
+    snapshot = peer_load(trust, home)
+    assert snapshot.head is not None
+    historical = peer_history(trust, home, first, json.loads(first)["created_at"])
+    assert historical.record == first
+    result = action()
+    assert result.disposition == ("changed" if completed == "changed" else "replay") and result.evidence_recorded
+    assert saved(home).read_bytes() == before
+
+
+def test_r2_seen_changed_candidate_is_readmitted_when_complete_chain_would_advance(trust, home, r2_admission_clock):
+    peer_setup(trust, home)
+    first = peer_record()
+    middle = peer_record(2, previous=first)
+    candidate = peer_record(3, previous=middle, created_at="2026-01-02T00:04:00Z")
+    peer_accept(trust, home, first, require_verified=True)
+    assert peer_load(trust, home).use.eligible
+    assert peer_observe(trust, home, candidate).disposition == "changed"
+    before = saved(home).read_bytes()
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", lambda: trust._instant("2026-01-01T23:00:00Z"))
+    with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+        peer_observe(trust, home, candidate, chain=(middle, candidate))
+    assert saved(home).read_bytes() == before and peer_load(trust, home).head == first
+
+
+def test_r2_stored_future_history_remains_clock_independent_and_is_not_repaired(trust, home, r2_admission_clock):
+    peer_setup(trust, home, members=[PEER_PRINCIPAL])
+    peer_observe(trust, home, peer_record())
+    future = peer_record(created_at="9999-12-31T23:59:59Z")
+    state = json.loads(saved(home).read_bytes())
+    entry = next(iter(state["peer_records"].values()))
+    entry.update(canonical=future.decode(), digest=digest(future))
+    saved(home).write_bytes(crypto.canonical(state))
+    before = saved(home).read_bytes()
+
+    def forbidden():
+        raise AssertionError("stored history consulted admission clock")
+
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", forbidden)
+    assert peer_load(trust, home).head == future
+    assert peer_history(trust, home, future, json.loads(future)["created_at"]).record == future
+    assert peer_observe(trust, home, future).disposition == "replay"
+    real = peer_record(2)
+    result = peer_accept(trust, home, real, expected=digest(future), require_verified=True)
+    assert result.disposition == "refused" and result.error == "mesh_peer_history_transition_unsupported"
+    assert saved(home).read_bytes() == before
+
+
+def test_r2_retained_observation_promotion_is_not_new_history_admission(trust, home, r2_admission_clock):
+    peer_setup(trust, home)
+    raw = peer_record(created_at="2026-01-02T00:04:00Z")
+    peer_observe(trust, home, raw)
+    original = peer_load(trust, home).history[0]
+    accept(trust, home, hub=PEER_HUB, seq=8, entries=[PEER_PRINCIPAL])
+
+    def forbidden():
+        raise AssertionError("promotion consulted admission clock")
+
+    r2_admission_clock.setattr(trust, "_peer_admission_clock", forbidden)
+    result = peer_observe(trust, home, raw)
+    assert result.disposition == "accepted" and result.peer.provenance == "observed"
+    assert result.peer.history[0]["canonical"] == original["canonical"]
+    assert result.peer.history[0]["accepted_at"] == original["accepted_at"]
+
+
+@pytest.mark.parametrize("error_kind", ["value", "io", "cancel"])
+@pytest.mark.parametrize("chain_kind", ["explicit", "implicit", "suppressed"])
+@pytest.mark.parametrize("cleanup", ["none", "unlock-io", "unlock-cancel", "close-io", "close-cancel"])
+def test_r2_use_preserves_caller_cause_context_and_suppression(
+    trust, home, monkeypatch, error_kind, chain_kind, cleanup
+):
+    import fcntl
+
+    class Cancelled(BaseException):
+        pass
+
+    peer_setup(trust, home)
+    peer_accept(trust, home, peer_record(), require_verified=True)
+    primary = {
+        "value": ValueError("caller"),
+        "io": OSError(errno.EIO, "caller I/O"),
+        "cancel": Cancelled("caller cancellation"),
+    }[error_kind]
+    cause = KeyError("explicit caller cause")
+    context = KeyError("implicit caller context")
+    secondary = (
+        OSError(errno.EIO, "secondary cleanup") if cleanup.endswith("io") else Cancelled("secondary cancellation")
+    )
+    original_close, original_flock = os.close, fcntl.flock
+    inode = saved(home).parent.stat().st_ino
+    faults = 0
+
+    def flock(fd, mode):
+        nonlocal faults
+        original_flock(fd, mode)
+        if mode == fcntl.LOCK_UN:
+            faults += 1
+            raise secondary
+
+    def close(fd):
+        nonlocal faults
+        hit = os.fstat(fd).st_ino == inode
+        original_close(fd)
+        if hit:
+            faults += 1
+            raise secondary
+
+    expected = caught = None
+    with monkeypatch.context() as patch:
+        if cleanup.startswith("unlock"):
+            patch.setattr(fcntl, "flock", flock)
+        elif cleanup.startswith("close"):
+            patch.setattr(os, "close", close)
+        try:
+            with trust.peer_for_use(
+                brigade_home=home,
+                origin=PEER_ORIGIN,
+                principal=PEER_PRINCIPAL,
+                purpose="recipient",
+                require_verified=True,
+            ):
+                try:
+                    raise context
+                except KeyError:
+                    try:
+                        if chain_kind == "explicit":
+                            raise primary from cause
+                        if chain_kind == "suppressed":
+                            raise primary from None
+                        raise primary
+                    except BaseException as error:
+                        expected = (error.__cause__, error.__context__, error.__suppress_context__)
+                        raise
+        except BaseException as error:
+            caught = error
+    assert caught is primary and expected is not None
+    assert caught.__cause__ is expected[0]
+    assert caught.__context__ is expected[1]
+    assert caught.__suppress_context__ is expected[2]
+    assert faults == (0 if cleanup == "none" else 1)
+    assert peer_load(trust, home).use.eligible
+
+
+@pytest.mark.parametrize("future_index", [None, 0, 4, 8])
+def test_r2_nine_authenticated_links_check_new_changed_admission_times(trust, home, r2_admission_clock, future_index):
+    peer_setup(trust, home)
+    first = peer_record()
+    peer_accept(trust, home, first, require_verified=True)
+    chain = []
+    for index, number in enumerate(range(2, 11)):
+        instant = "9999-12-31T23:59:59Z" if index == future_index else f"2026-01-02T00:02:{index + 1:02}Z"
+        chain.append(peer_record(number, previous=chain[-1] if chain else first, created_at=instant))
+    before = saved(home).read_bytes()
+    assert peer_load(trust, home).use.eligible
+    if future_index is None:
+        result = peer_observe(trust, home, chain[-1], chain=tuple(chain))
+        assert result.disposition == "changed" and result.evidence_recorded
+        assert result.peer.head == first and result.peer.use.error == "recipient_key_changed"
+    else:
+        with pytest.raises(crypto.MeshError, match="^mesh_peer_created_in_future$"):
+            peer_observe(trust, home, chain[-1], chain=tuple(chain))
+        assert saved(home).read_bytes() == before and peer_load(trust, home).use.eligible
