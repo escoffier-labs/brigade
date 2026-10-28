@@ -80,6 +80,10 @@ _TABLES = {
     "conflicts",
 }
 _PEER_TABLES = {"peers", "peer_records"}
+# Admission only: legacy evidence retains its existing hard ceilings.
+_PEER_BYTES = 8 * 1024 * 1024
+_PEER_HEADROOM = 8 * 1024 * 1024
+_MAX_PEER_CHANGES = 8
 _KINDS = {"membership", "revocation"}
 _HEX = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _PRINCIPAL = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|agent:[a-z][a-z0-9._-]{0,62})", re.ASCII)
@@ -603,7 +607,7 @@ def _read(descriptor: int) -> dict[str, Any]:
             # Keep validation/backend/cancellation priority; never retry close.
 
 
-def _snapshot(state: dict[str, Any]) -> TrustSnapshot:
+def _unsatisfied_floors(state: dict[str, Any]) -> tuple[dict[str, Any], ...]:
     scopes = {(floor["kind"], floor["signer"], floor["hub"]) for floor in state["floors"].values()}
     heads: dict[tuple[str, str, str], tuple[int, set[str]]] = {}
     for digest, obj in state["objects"].items():
@@ -622,8 +626,12 @@ def _snapshot(state: dict[str, Any]) -> TrustSnapshot:
     for floor in state["floors"].values():
         head = heads.get((floor["kind"], floor["signer"], floor["hub"]))
         if head is None or head[0] < floor["seq"] or (head[0] == floor["seq"] and floor["digest"] not in head[1]):
-            unsatisfied.append(deepcopy(floor))
-    return TrustSnapshot(deepcopy(state), tuple(unsatisfied))
+            unsatisfied.append(floor)
+    return tuple(unsatisfied)
+
+
+def _snapshot(state: dict[str, Any]) -> TrustSnapshot:
+    return TrustSnapshot(deepcopy(state), deepcopy(_unsatisfied_floors(state)))
 
 
 def _flush(descriptor: int) -> None:
@@ -949,6 +957,16 @@ def record_hub_revocation(*, brigade_home: Path, hub: str, principal: str, kid: 
 
 
 @dataclass(frozen=True)
+class ContinuityRefusal:
+    """Detached proof-dependency refusal, never a descendant revocation."""
+
+    reason: Literal["continuity_ancestor_revoked"]
+    ancestor_ref: str
+    ancestor_digest: str
+    barrier: dict[str, Any]
+
+
+@dataclass(frozen=True)
 class PeerUse:
     """Detached eligibility evidence, valid only inside peer_for_use's lock.
 
@@ -974,6 +992,7 @@ class PeerUse:
     identity_generation: int
     identity_digest: str
     identity_provenance: str
+    continuity_refusal: ContinuityRefusal | None = None
     policy_freshness: Literal["unproven"] = "unproven"
 
 
@@ -1088,7 +1107,7 @@ def _peer_identity(descriptor: int, origin: str) -> dict[str, Any]:
 def _membership(state: dict[str, Any], hub: str) -> tuple[dict[str, Any] | None, str | None]:
     history = state["hubs"].get(hub, [])
     signer = history[-1] if history else None
-    pending = [f for f in _snapshot(state).unsatisfied_floors if f["kind"] == "membership" and f["hub"] == hub]
+    pending = [f for f in _unsatisfied_floors(state) if f["kind"] == "membership" and f["hub"] == hub]
     if any(f["signer"] != signer for f in pending):
         return None, "mesh_peer_membership_reconciliation_unsupported"
     if pending:
@@ -1126,6 +1145,7 @@ def _validate_peers(state: dict[str, Any], values: dict[str, dict[str, Any]]) ->
                 "method",
             },
         )
+        _require(isinstance(entry["canonical"], str))
         digest, canonical, value = _peer_record(entry["canonical"].encode("ascii"))
         _require((entry["hub"], entry["principal"], entry["kid"]) == (value["hub"], value["principal"], value["kid"]))
         _require(
@@ -1195,6 +1215,7 @@ def _validate_peers(state: dict[str, Any], values: dict[str, dict[str, Any]]) ->
         _require(type(peer["changes"]) is dict and len(peer["changes"]) <= _MAX_ENTRIES)
         for identity, change in peer["changes"].items():
             _fields(change, {"canonical", "digest", "head", "resolved_by"})
+            _require(isinstance(change["canonical"], str))
             digest, canonical, candidate = _peer_record(change["canonical"].encode("ascii"))
             _require(candidate["hub"] == peer["hub"] and candidate["principal"] == peer["principal"])
             _require(change["digest"] == digest and change["canonical"] == canonical and change["head"] in indices)
@@ -1221,6 +1242,20 @@ def _provenance(state: dict[str, Any], reference: str) -> str:
     return "unverified"
 
 
+def _continuity_refusal(state: dict[str, Any], reference: str) -> ContinuityRefusal | None:
+    # Eight limits a supplied batch, not accumulated retained ancestry. Only
+    # independent confirmation ends this dependency, never membership observation.
+    for _ in range(_MAX_ENTRIES):
+        entry = state["peer_records"][reference]
+        barrier = state["barriers"].get(_barrier_key(entry["hub"], entry["kid"]))
+        if barrier:
+            return ContinuityRefusal("continuity_ancestor_revoked", reference, entry["digest"], deepcopy(barrier))
+        if entry["confirmation"] or entry["method"] != "continuity":
+            return None
+        reference = entry["predecessor"]
+    raise crypto.MeshError("mesh_trust_invalid")
+
+
 def _peer_use(
     state: dict[str, Any],
     identity: dict[str, Any],
@@ -1237,6 +1272,7 @@ def _peer_use(
     reference = history[-1] if history and purpose == "recipient" else _peer_name(hub, principal, kid or "")
     entry = state["peer_records"].get(reference)
     barrier = state["barriers"].get(_barrier_key(hub, entry["kid"] if entry else kid or ""))
+    dependency = _continuity_refusal(state, reference) if entry and not barrier else None
     membership, membership_error = _membership(state, hub)
     changes = tuple(peer["changes"].values()) if peer else ()
     provenance = _provenance(state, reference) if entry else None
@@ -1264,7 +1300,7 @@ def _peer_use(
     status = provenance or "missing"
     if barrier:
         status, error = "revoked", purpose + "_key_revoked"
-    elif peer and any(not change["resolved_by"] for change in changes):
+    elif dependency is not None or (peer and any(not change["resolved_by"] for change in changes)):
         status, error = "changed", purpose + "_key_changed"
     elif entry is None:
         status, error = "missing", purpose + "_key_missing"
@@ -1288,7 +1324,12 @@ def _peer_use(
         deepcopy(barrier),
         deepcopy(membership),
         deepcopy(changes),
-        tuple(deepcopy([f for f in state["floors"].values() if f["hub"] == hub] + identity["floors"])),
+        tuple(
+            dict(f, source=source)
+            for source, floors in (("trust", state["floors"].values()), ("identity", identity["floors"]))
+            for f in floors
+            if f["hub"] == hub
+        ),
         tuple(
             deepcopy([c for c in state["conflicts"].values() if c["rejected"]["hub"] == hub] + identity["conflicts"])
         ),
@@ -1299,6 +1340,7 @@ def _peer_use(
         identity["generation"],
         identity["digest"],
         identity["provenance"],
+        continuity_refusal=dependency,
     )
 
 
@@ -1332,6 +1374,21 @@ def _peer_state(descriptor: int, origin: str) -> tuple[dict[str, Any], dict[str,
     return state, identity
 
 
+def _admit_peers(state: dict[str, Any]) -> None:
+    """Preflight a real peer commit, including next-generation serialization.
+
+    Reads and legacy evidence admissions retain the original 56/64 MiB limits.
+    Headroom is finite evidence allowance, not unlimited revocation availability.
+    """
+    prospective = dict(state, generation=state["generation"] + 1)
+    _require(len(crypto.canonical({name: state[name] for name in _PEER_TABLES})) <= _PEER_BYTES, "mesh_trust_capacity")
+    _require(
+        len(crypto.canonical(dict(prospective, conflicts={}))) <= _ORDINARY_BYTES - _PEER_HEADROOM,
+        "mesh_trust_capacity",
+    )
+    _require(len(crypto.canonical(prospective)) <= _MAX_BYTES - _PEER_HEADROOM, "mesh_trust_capacity")
+
+
 def initialize_peers(*, brigade_home: Path, origin: str) -> PeerSnapshot:
     """Explicitly extend a valid v1 store against an accepted current identity."""
     _platform()
@@ -1341,6 +1398,7 @@ def initialize_peers(*, brigade_home: Path, origin: str) -> PeerSnapshot:
         state = _read(descriptor)
         if state["v"] == 1:
             state.update(v=2, peers={}, peer_records={})
+            _admit_peers(state)
             _save(descriptor, state)
         else:
             _flush(descriptor)
@@ -1383,12 +1441,23 @@ def peer_for_use(
         _tag(kid, "k1_")
         _instant(signed_created_at)
     origin = statements.normalize_origin(origin)
-    with _peer_directory(brigade_home) as descriptor:
-        state, identity = _peer_state(descriptor, origin)
-        _require(hub is None or hub == identity["hub"], "mesh_peer_scope_mismatch")
-        yield _peer_use(
-            state, identity, principal, require_verified, purpose=purpose, kid=kid, instant=signed_created_at
-        )
+    body_error: BaseException | None = None
+    try:
+        with _peer_directory(brigade_home) as descriptor:
+            state, identity = _peer_state(descriptor, origin)
+            _require(hub is None or hub == identity["hub"], "mesh_peer_scope_mismatch")
+            result = _peer_use(
+                state, identity, principal, require_verified, purpose=purpose, kid=kid, instant=signed_created_at
+            )
+            try:
+                yield result
+            except BaseException as error:
+                body_error = error
+                raise
+    except BaseException:
+        if body_error is not None:
+            raise body_error from None
+        raise
 
 
 def record_for(
@@ -1453,8 +1522,10 @@ def _peer_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
-def _peer_refused(state: dict[str, Any], identity: dict[str, Any], principal: str, code: str) -> PeerAcceptanceResult:
-    return PeerAcceptanceResult("refused", code, _peer_snapshot(state, identity, principal))
+def _peer_refused(
+    state: dict[str, Any], identity: dict[str, Any], principal: str, code: str, require_verified: bool
+) -> PeerAcceptanceResult:
+    return PeerAcceptanceResult("refused", code, _peer_snapshot(state, identity, principal, require_verified))
 
 
 def accept_peer(
@@ -1465,13 +1536,14 @@ def accept_peer(
     raw: bytes,
     expected_fingerprint: str,
     expected_head_digest: str | None,
+    require_verified: bool,
 ) -> PeerAcceptanceResult:
     """Independent full fingerprint plus explicit head-digest CAS, no trust inputs.
 
     Identical completed retries retain pre-transition CAS and timestamps. A
     later revocation changes the returned current view, never revives that kid.
     """
-    _peer_parameters(principal, False)
+    _peer_parameters(principal, require_verified)
     origin = statements.normalize_origin(origin)
     parsed = _peer_record(raw)
     digest, _, value = parsed
@@ -1494,18 +1566,24 @@ def accept_peer(
         if retained is not None and (
             head is None or retained["digest"] != head["digest"] or retained["digest"] != digest
         ):
-            result = _peer_refused(state, identity, principal, "mesh_peer_history_transition_unsupported")
+            result = _peer_refused(
+                state, identity, principal, "mesh_peer_history_transition_unsupported", require_verified
+            )
         elif retry or (current == digest and confirmation and not unresolved):
             _flush(descriptor)
-            result = PeerAcceptanceResult("replay", None, _peer_snapshot(state, identity, principal), True)
+            result = PeerAcceptanceResult(
+                "replay", None, _peer_snapshot(state, identity, principal, require_verified), True
+            )
         elif _barrier_key(value["hub"], value["kid"]) in state["barriers"]:
-            result = _peer_refused(state, identity, principal, "recipient_key_revoked")
+            result = _peer_refused(state, identity, principal, "recipient_key_revoked", require_verified)
         elif (
             head
             and current != digest
             and _instant(value["created_at"]) <= _instant(json.loads(head["canonical"])["created_at"])
         ):
-            result = _peer_refused(state, identity, principal, "mesh_peer_history_transition_unsupported")
+            result = _peer_refused(
+                state, identity, principal, "mesh_peer_history_transition_unsupported", require_verified
+            )
         else:
             peer = _peer_new(state, identity["hub"], principal)
             now = _peer_now()
@@ -1528,8 +1606,11 @@ def accept_peer(
             for change in peer["changes"].values():
                 if not change["resolved_by"]:
                     change["resolved_by"] = digest
+            _admit_peers(state)
             _save(descriptor, state)
-            result = PeerAcceptanceResult("accepted", None, _peer_snapshot(state, identity, principal), True)
+            result = PeerAcceptanceResult(
+                "accepted", None, _peer_snapshot(state, identity, principal, require_verified), True
+            )
     return result
 
 
@@ -1550,7 +1631,9 @@ def _peer_changed(
         if name in peer["changes"]:
             _flush(descriptor)
         else:
+            _require(len(peer["changes"]) < _MAX_PEER_CHANGES, "mesh_trust_capacity")
             peer["changes"][name] = {"canonical": canonical, "digest": digest, "head": head, "resolved_by": ""}
+            _admit_peers(state)
             _save(descriptor, state)
     except crypto.MeshExtraMissing:
         raise
@@ -1572,7 +1655,7 @@ def _peer_changed(
 def _peer_chain(
     state: dict[str, Any], peer: dict[str, Any], parsed: tuple[str, str, dict[str, Any]], chain: tuple[bytes, ...]
 ) -> list[tuple[str, str, dict[str, Any]]] | None:
-    if len(chain) > 8:
+    if len(chain) > 8 or _continuity_refusal(state, peer["history"][-1]) is not None:
         return None
     head = state["peer_records"][peer["history"][-1]]
     previous = json.loads(head["canonical"])
@@ -1613,18 +1696,21 @@ def observe_peer(
     chain: tuple[bytes, ...] = (),
     require_verified: bool,
 ) -> PeerAcceptanceResult:
-    """Authenticate supplied bytes; observation/continuity never confirm a key."""
+    """Authenticate supplied bytes; chain contains successors only, at most eight.
+
+    Nine authenticated successors diagnose changed. Longer tuples refuse before
+    crypto. Exact completed retries reconcile retained continuity history.
+    """
     _peer_parameters(principal, require_verified)
-    _require(
-        type(chain) is tuple and (len(chain) > 8 or all(isinstance(link, bytes) for link in chain)),
-        "mesh_peer_arguments_invalid",
-    )
+    _require(type(chain) is tuple, "mesh_peer_arguments_invalid")
+    _require(len(chain) <= 9, "mesh_peer_chain_invalid")
+    _require(all(isinstance(link, bytes) for link in chain), "mesh_peer_arguments_invalid")
     origin = statements.normalize_origin(origin)
     parsed = _peer_record(raw)
     digest, _, value = parsed
     # Authenticate every supplied link's self-signature before classifying a
     # continuity failure. Invalid input must not manufacture changed evidence.
-    checked_chain = [_peer_record(link) for link in chain] if len(chain) <= 8 else []
+    checked_chain = [_peer_record(link) for link in chain]
     result = None
     try:
         with _peer_directory(brigade_home) as descriptor:
@@ -1637,9 +1723,12 @@ def observe_peer(
             if retained is not None and (
                 head is None or retained["digest"] != head["digest"] or retained["digest"] != digest
             ):
-                result = _peer_refused(state, identity, principal, "mesh_peer_history_transition_unsupported")
+                result = _peer_refused(
+                    state, identity, principal, "mesh_peer_history_transition_unsupported", require_verified
+                )
             elif head and head["digest"] != digest:
                 assert peer is not None
+                _require(not checked_chain or checked_chain[0][0] != head["digest"], "mesh_peer_chain_invalid")
                 links = _peer_chain(state, peer, parsed, chain)
                 if links is None:
                     result = _peer_changed(descriptor, state, identity, principal, parsed, require_verified)
@@ -1649,6 +1738,7 @@ def observe_peer(
                             state, peer, link, method="continuity", observation={}, confirmation={}, now=_peer_now()
                         )
                     peer["acceptance"] = {}
+                    _admit_peers(state)
                     _save(descriptor, state)
                     result = PeerAcceptanceResult(
                         "accepted", None, _peer_snapshot(state, identity, principal, require_verified), True
@@ -1678,10 +1768,12 @@ def observe_peer(
                     _peer_insert(
                         state, peer, parsed, method="first", observation=observation, confirmation={}, now=_peer_now()
                     )
+                    _admit_peers(state)
                     _save(descriptor, state)
                     disposition: Literal["accepted", "replay"] = "accepted"
                 elif peer is not None and _provenance(state, peer["history"][-1]) == "unverified" and observation:
                     head["observation"] = observation
+                    _admit_peers(state)
                     _save(descriptor, state)
                     disposition = "accepted"
                 else:
