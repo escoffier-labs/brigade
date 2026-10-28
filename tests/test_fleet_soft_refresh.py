@@ -5,7 +5,7 @@ import xml.etree.ElementTree as ET
 
 import pytest
 
-from brigade import fleet_deck_shell, fleet_deck_sidebar, ui_theme
+from brigade import fleet_deck_shell, fleet_deck_sidebar, fleet_investigation, ui_theme
 from tests.test_fleet_command_deck import CONFIG, _asset_request, _bearer, _request, _start_hub
 
 EXPECTED_CSP_TEMPLATE = (
@@ -51,6 +51,15 @@ def test_soft_refresh_script_is_nonced_only_when_refresh_is_on():
     off = fleet_deck_shell.deck_page("t", "overview", "", "", "n0nce", as_of="x", refresh_seconds=None)
     assert "http-equiv" not in off and "<noscript>" not in off
     assert "data-soft-refresh" not in off and "fetch(" not in off
+
+
+def test_refreshing_page_registers_the_copy_handler_before_any_panel_appears(tmp_path):
+    # Swapped-in fragments never run scripts, so a panel that appears on a later refresh
+    # relies on the copy handler registered at first load.
+    with _start_hub(tmp_path, CONFIG) as (hub, _db):
+        _status, _headers, deck = _request(hub, "GET", "/deck", headers=_bearer())
+        assert ui_theme.SOFT_REFRESH_BODY_MARKER in deck
+        assert fleet_investigation.COPY_SCRIPT in deck
 
 
 def test_soft_refresh_script_never_executes_or_leaves_origin():

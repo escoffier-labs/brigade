@@ -1939,7 +1939,9 @@ def _document(
         + script
         + (
             fleet_investigation.COPY_SCRIPT
-            if "data-copy-target=" in body and fleet_investigation.COPY_SCRIPT not in script
+            # A refreshing page can gain an investigation panel later; the soft refresh only
+            # reruns registered initializers, so register the copy handler up front.
+            if ("data-copy-target=" in body or refresh) and fleet_investigation.COPY_SCRIPT not in script
             else ""
         ),
     )
