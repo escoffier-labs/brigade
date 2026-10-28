@@ -39,6 +39,12 @@ def test_full_profile_uses_same_sections_as_brief_renderer():
     assert full == brief_sections.render_sections(brief_sections.FULL_SECTIONS)
     assert "## Session close" in full
     assert "Work loop protocol" in full
+    assert "Brigade Stack is the local work loop" in full
+    assert "active harness's available skills" in full
+    assert "applicable installed workflow skills" in full
+    assert "If Superpowers is installed, use its `using-superpowers` entrypoint." in full
+    assert "Invoke the `using-skillet` skill" not in full
+    assert "Route worker-sized or parallelizable implementation through `brigade run`" in full
     for item in brief_sections.session_close_items():
         assert item in full
 
