@@ -112,6 +112,37 @@ def _write_compliant_evidence(repo: Path, fingerprint: str, *, started_at) -> st
     return run_id
 
 
+@pytest.mark.parametrize("mode", ["missing", "empty", "conflict"])
+def test_cursor_adoption_reports_invalid_engine_overrides_without_writes(tmp_path, monkeypatch, capsys, mode):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cursor_repo = _wired_repo(workspace, "cursor", "cursor")
+    claude_repo = _wired_repo(workspace, "claude", "claude")
+    home = tmp_path / "home"
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cursor_user_cmd.install(write=True, json_output=True) == 0
+    _fleet_config(workspace, [("cursor", cursor_repo), ("claude", claude_repo)])
+    before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+    capsys.readouterr()
+    monkeypatch.setenv("MISELEDGER_BIN", "" if mode == "empty" else str(tmp_path / "missing-engine"))
+    if mode == "conflict":
+        monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(tmp_path / "other-engine"))
+
+    assert repos_cmd.adoption_report(target=workspace, json_output=True) == 0
+    rows = json.loads(capsys.readouterr().out)["rows"]
+    row = next(row for row in rows if row["row_key"] == "cursor:cursor")
+    assert row["state"] == "stale"
+    assert row["wiring"]["mcp"] == "stale"
+    assert any("invalid engine executable override" in issue for issue in row["issues"])
+    assert any(row["row_key"] == "claude:claude" for row in rows)
+    assert repos_cmd.adoption_repair(target=workspace, json_output=True) == 0
+    repair = json.loads(capsys.readouterr().out)
+    assert repair["would_write"] is False
+    assert repair["would_run_commands"] is False
+    assert any(action["repo_id"] == "cursor" and action["state"] == "stale" for action in repair["actions"])
+    assert before == {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
+
+
 def test_adoption_report_distinguishes_all_fleet_states(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
