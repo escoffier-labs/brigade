@@ -128,6 +128,12 @@ def _identifier(value: object, *, principal: bool = False, identity: bool = Fals
     return value
 
 
+def _action(value: object) -> Action:
+    if not isinstance(value, str) or value not in _ACTIONS:
+        raise ValueError("invalid audit action")
+    return cast(Action, value)
+
+
 def _detail(raw: object, *, admission: bool = True) -> AuditDetail:
     if not isinstance(raw, dict) or not raw.keys() <= _ID_FIELDS | {"role", "grants", "count"}:
         raise ValueError("invalid audit detail fields")
@@ -192,8 +198,7 @@ def append(conn: sqlite3.Connection, *, actor: str, action: Action, subject: str
     """
     actor = _identifier(actor, principal=True, identity=True)
     subject = _identifier(subject, principal=True, identity=True)
-    if not isinstance(action, str) or action not in _ACTIONS:
-        raise ValueError("invalid audit action")
+    action = _action(action)
     validated = _detail(detail)
     legacy_control = getattr(sqlite3, "LEGACY_TRANSACTION_CONTROL", None)
     implicit_transaction = getattr(conn, "autocommit", None) == legacy_control and conn.isolation_level is not None
@@ -218,8 +223,8 @@ def page(conn: sqlite3.Connection, *, after_id: int = 0, limit: int = 100) -> li
 
     The future caller must authenticate before reading. No schema initialization
     or transaction management occurs here. Invalid bounds raise ValueError.
-    Stored detail retains structural validation, independent of later changes
-    to credential markers used to admit new writes.
+    Stored identities, action and detail retain structural validation,
+    independent of later changes to credential markers used to admit new writes.
     """
     if type(after_id) is not int or not 0 <= after_id <= 2**63 - 1:
         raise ValueError("invalid audit cursor")
@@ -233,9 +238,9 @@ def page(conn: sqlite3.Connection, *, after_id: int = 0, limit: int = 100) -> li
         AuditRow(
             id=row[0],
             at=row[1],
-            actor=row[2],
-            action=row[3],
-            subject=row[4],
+            actor=_identifier(row[2], principal=True, identity=True, admission=False),
+            action=_action(row[3]),
+            subject=_identifier(row[4], principal=True, identity=True, admission=False),
             detail=_detail(json.loads(row[5]), admission=False),
         )
         for row in rows

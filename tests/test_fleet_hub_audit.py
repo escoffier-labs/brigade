@@ -398,6 +398,78 @@ def test_paging_is_ordered_strictly_after_id_with_parsed_detail(conn):
     assert len(audit.page(conn, limit=500)) == 5
 
 
+@pytest.mark.parametrize("field", ["actor", "subject"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("", id="empty"),
+        pytest.param(" \t", id="whitespace"),
+        pytest.param("n" * 129, id="oversized"),
+        pytest.param("unknown", id="reserved"),
+        pytest.param("agent:Fixture", id="uppercase-agent"),
+        pytest.param("agent:1fixture", id="numeric-agent"),
+        pytest.param("agent:" + "a" * 64, id="oversized-agent"),
+        pytest.param("agent:fixt*", id="wildcard-agent"),
+        pytest.param(b"fixture", id="blob"),
+    ],
+)
+def test_paging_refuses_malformed_stored_identities_without_echoing_values(conn, field, value):
+    saved = audit.append(conn, actor="admin", action="invite.create", subject="fixture", detail={})
+    row = {"actor": "admin", "subject": "fixture"}
+    row[field] = value
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-01-01T00:00:00+00:00", row["actor"], "invite.create", row["subject"], "{}"),
+    )
+    assert [row["id"] for row in audit.page(conn, limit=1)] == [saved]
+    for kwargs in ({}, {"after_id": saved}):
+        with pytest.raises(ValueError) as error:
+            audit.page(conn, **kwargs)
+        assert str(error.value) == "invalid audit identifier"
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log").fetchone() == (2,)
+
+
+@pytest.mark.parametrize("action", ["custom.action", "invite.create\n", "", b"invite.create"])
+def test_paging_refuses_invalid_stored_actions_without_echoing_values(conn, action):
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-01-01T00:00:00+00:00", "admin", action, "fixture", "{}"),
+    )
+    with pytest.raises(ValueError) as error:
+        audit.page(conn)
+    assert str(error.value) == "invalid audit action"
+    assert conn.execute("SELECT COUNT(*) FROM fleet_audit_log").fetchone() == (1,)
+
+
+@pytest.mark.parametrize("action", ACTIONS)
+def test_paging_accepts_structurally_valid_direct_sql_rows(conn, action):
+    conn.execute(
+        "INSERT INTO fleet_audit_log(at,actor,action,subject,detail) VALUES(?,?,?,?,?)",
+        ("2026-01-01T00:00:00+00:00", "n" * 128, action, "agent:" + "a" * 63, '{"count":2}'),
+    )
+    row = audit.page(conn)[0]
+    assert row["actor"] == "n" * 128
+    assert row["action"] == action
+    assert row["subject"] == "agent:" + "a" * 63
+    assert row["detail"] == {"count": 2}
+
+
+@pytest.mark.parametrize("field", ["actor", "subject"])
+@pytest.mark.parametrize("value", ["fixture-node", "agent:fixture"])
+def test_identity_history_remains_readable_when_write_admission_markers_tighten(conn, monkeypatch, field, value):
+    kwargs = {"actor": "admin", "action": "invite.create", "subject": "other", "detail": {}}
+    kwargs[field] = value
+    audit.append(conn, **kwargs)
+    conn.commit()
+    original = audit.page(conn)
+    monkeypatch.setattr(audit, "_CREDENTIAL", re.compile(re.escape(value)))
+    assert audit.page(conn) == original
+    with pytest.raises(ValueError) as error:
+        audit.append(conn, **kwargs)
+    assert value not in str(error.value)
+    assert audit.page(conn) == original
+
+
 def test_history_remains_readable_when_write_admission_markers_tighten(conn, monkeypatch):
     detail = {
         "principal_id": "agent:fixture",
