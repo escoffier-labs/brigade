@@ -122,13 +122,13 @@ Private implementation choices fixed by this plan: use frozen dataclasses, immut
 Use the correct checkout's development environment. The existing checkout has `.venv/ci312`, but workers must verify their own environment rather than copy executable paths or assume it exists. With a valid environment:
 
 ```bash
-PATH="$PWD/.venv/ci312/bin:$PATH" PY="$PWD/.venv/ci312/bin/python" PYTHONPATH="$PWD/src" \
+PATH="$PWD/.venv/ci312/bin:$PATH" PY="$PWD/.venv/ci312/bin" PYTHONPATH="$PWD/src" \
   .venv/ci312/bin/brigade work verify run --target . \
   --argv-json '["./scripts/verify-focused","tests/test_native_t3_contract.py"]' \
   --capture brigade-work
 ```
 
-Substitute the actual selectors for lane B/integration. Full PR gate uses `--argv-json '["./scripts/verify"]' --timeout 3600`. Observe completion and read the actual receipt. Ad hoc receipts are audit-only, and an unknown installed skill warning does not establish attributed/scoring evidence. Do not repeat a passing gate without a new change, failure or unresolved concern.
+`PY` is the binary directory because the repository scripts invoke `$PY/python`, `$PY/ruff` and `$PY/mypy`. Substitute the actual selectors for lane B/integration. Full PR gate uses `--argv-json '["./scripts/verify"]' --timeout 3600`. Observe completion and read the actual receipt. Ad hoc receipts are audit-only, and an unknown installed skill warning does not establish attributed/scoring evidence. Do not repeat a passing gate without a new change, failure or unresolved concern.
 
 ## Self-review
 
