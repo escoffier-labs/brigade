@@ -34,14 +34,14 @@
 
 ## Execution route and preflight
 
-The user requested Codex workers and Astra for consequential review. Preserve that selection within admitted, actually callable routes. Shared Codex AGENTS.md, Dispatch and routing authority, requires substantial or parallelizable implementation through `brigade run` worker seats. Its Brigade workflow also requires `brigade run` for multi-module/public API changes. The repository's no-seat-credentials warning is scoped to Cursor Cloud.
+The user requested Codex workers and Astra for consequential review. On 2026-10-29 the user clarified the governing route: use T3 Code for supported harnesses, and `brigade run` only when T3 Code does not support the harness. Preserve that selection within actually callable routes and retain Brigade graph checks, verification receipts, ownership and review. Older shared-file wording must not reverse this current user direction. The repository's no-seat-credentials warning is scoped to Cursor Cloud.
 
-At planning time, the local roster has `agents.sol61` with `cli = "codex"`, model `gpt-6.1-sol`. That does not establish T3-backed execution or live admission. The T3 dispatch skill also preserves the local Brigade requirement. Do not silently use direct Codex exec or native delegation in place of the required route. The earlier membership-slice exception does not authorize this slice.
+At planning time, the local roster has `agents.sol61` with `cli = "codex"`, model `gpt-6.1-sol`. That does not establish T3-backed execution or live admission. The user separately authorized native T3/Codex Sol for this slice before giving the general routing clarification. Use the supported native Codex child route for this in-turn task. Use native T3 delegation when background work, another provider or an app-owned separate checkout is required. Never substitute direct provider exec after a T3 refusal.
 
 - [ ] Read current instructions, roster, `brigade work brief --target .`, supported fleet status and claims. Keep one parent owner and do not duplicate a live claim.
-- [ ] Inspect current supported route/admission/doctor/capacity information and the installed `brigade run --help`. Confirm a Codex worker seat whose actual transport satisfies the T3 requirement. A dry plan is not dispatch success.
-- [ ] If a compliant route is unavailable or uncertain, report the exact route gap and finish independent preparation. Hold launch until a supported route is established or the user gives an exact new exception. Do not edit the roster or policy to remove the gap.
-- [ ] For an admitted route, use one direct worker task through the actual selected seat. Preserve its graph brief, immutable source, artifacts and returned handles. No planner fan-out is needed for this single writing/proof unit. Never create a T3 child's checkout in a shell or prompt.
+- [ ] Confirm the selected T3/Codex model and applicable invocation contract. Preserve the exact accepted handle. An exposed catalog or dry plan is not dispatch success.
+- [ ] If T3 cannot support the requested harness, inspect the approved Brigade-run seat and its live requirements. A temporary T3 failure does not itself authorize an unrequested provider or route switch. Do not edit roster or policy to remove a refusal.
+- [ ] Use one explicitly selected Sol worker for this writing/proof unit. Preserve graph context, immutable source, artifacts and returned handles. No planner fan-out is needed. Never create a T3 child's checkout in a shell or prompt.
 
 ## Task 1: Runbook and existing-storage integration proof
 
