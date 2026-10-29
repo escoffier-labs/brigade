@@ -44,6 +44,10 @@ DETAIL_LIMIT = 240
 # to support both `agy models` and `agy --version` in automation.
 _ANTIGRAVITY_MIN_VERSION = (1, 1, 25)
 _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS = 2.0
+# Prompt-free listings take about two seconds on agy 1.4.10. Allow startup
+# margin without spending the entire 30-second seat deadline on metadata.
+# The caller also caps this budget at the remaining per-seat deadline.
+_ANTIGRAVITY_METADATA_TIMEOUT_SECONDS = 10.0
 _MODEL_SMOKE_MARKER = "BRIGADE_SEAT_HEALTH_EXACT_MARKER"
 _MODEL_SMOKE_PROMPT = (
     "Return exactly BRIGADE_SEAT_HEALTH_EXACT_MARKER and nothing else. Do not use tools. Do not write files."
@@ -244,6 +248,9 @@ class SeatHealthProbe:
 
         deadline = started + PER_SEAT_TIMEOUT_SECONDS
         checks: list[SeatHealthCheck] = []
+        # Per invocation, never shared across concurrent seats, environments,
+        # or uncached probes. Custom adapters retain ownership of every check.
+        metadata: dict[str, tuple[proc.DelimitedResult | None, str]] = {}
         for name in ADAPTER_CHECK_MATRIX[_adapter_kind(seat, roster)]:
             remaining = deadline - self._clock()
             if remaining <= 0:
@@ -260,6 +267,7 @@ class SeatHealthProbe:
                     allow_model_smoke,
                     require_hard_isolation=require_hard_isolation,
                     sandbox=sandbox,
+                    metadata=metadata,
                 )
             )
         result = _result(
@@ -380,6 +388,7 @@ class SeatHealthProbe:
         *,
         require_hard_isolation: bool = False,
         sandbox: str | None = None,
+        metadata: dict[str, tuple[proc.DelimitedResult | None, str]] | None = None,
     ) -> SeatHealthCheck:
         started = self._clock()
         try:
@@ -397,6 +406,7 @@ class SeatHealthProbe:
                     allow_model_smoke,
                     require_hard_isolation=require_hard_isolation,
                     sandbox=sandbox,
+                    metadata=metadata,
                 )
         except TimeoutError:
             return _timeout_check(name, self._clock() - started)
@@ -415,7 +425,21 @@ class SeatHealthProbe:
         *,
         require_hard_isolation: bool = False,
         sandbox: str | None = None,
+        metadata: dict[str, tuple[proc.DelimitedResult | None, str]] | None = None,
     ) -> SeatHealthCheck:
+        if seat.cli == "antigravity" and name in {"authentication-entitlement", "model-reachability"}:
+            if metadata is None:
+                metadata = {}
+            if "models" not in metadata:
+                metadata["models"] = _antigravity_models(seat, timeout_seconds)
+            result, detail = metadata["models"]
+            if result is not None and result.timed_out:
+                return _timeout_check(name)
+            if name == "authentication-entitlement":
+                return self._antigravity_auth_check(result, detail)
+            if seat.model is None:
+                return SeatHealthCheck(name, "degraded", "seat has no exact model declaration")
+            return self._antigravity_model_check(seat, result, detail)
         if name == "declaration":
             return SeatHealthCheck(name, "passed", "roster declaration validated")
         if name == "executable-identity":
@@ -433,8 +457,6 @@ class SeatHealthProbe:
                 if auth.state == "unauthenticated":
                     return SeatHealthCheck(name, "failed", auth.detail, cause_code="auth-required")
                 return SeatHealthCheck(name, "degraded", auth.detail, cause_code="auth-status-unavailable")
-            if seat.cli == "antigravity":
-                return self._antigravity_auth_check(seat, timeout_seconds)
             return SeatHealthCheck(
                 name,
                 "degraded",
@@ -531,8 +553,6 @@ class SeatHealthProbe:
             )
         if seat.model is None:
             return SeatHealthCheck("model-reachability", "degraded", "seat has no exact model declaration")
-        if seat.cli == "antigravity":
-            return self._antigravity_model_check(seat, timeout_seconds)
         # Roster doctor retains its established inventory rendering below.  It
         # asks the shared coordinator for all other facts without duplicating a
         # provider inventory call, and it deliberately never sends a smoke
@@ -592,11 +612,10 @@ class SeatHealthProbe:
         finally:
             _remove_temp_repo(root)
 
-    def _antigravity_auth_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
-        result, detail = _antigravity_models(seat, timeout_seconds)
+    def _antigravity_auth_check(self, result: proc.DelimitedResult | None, detail: str) -> SeatHealthCheck:
         if result is None:
             return SeatHealthCheck("authentication-entitlement", "failed", detail, cause_code="models-command-failed")
-        output = f"{result.stdout}\n{result.stderr}"
+        output = "\n".join((*result.items, result.stderr))
         if _antigravity_auth_error(output):
             return SeatHealthCheck(
                 "authentication-entitlement",
@@ -651,11 +670,10 @@ class SeatHealthProbe:
             )
         return SeatHealthCheck("version-gates", "passed", f"agy version {'.'.join(match.groups())}")
 
-    def _antigravity_model_check(self, seat: Any, timeout_seconds: float) -> SeatHealthCheck:
-        result, detail = _antigravity_models(seat, timeout_seconds)
+    def _antigravity_model_check(self, seat: Any, result: proc.DelimitedResult | None, detail: str) -> SeatHealthCheck:
         if result is None:
             return SeatHealthCheck("model-reachability", "failed", detail, cause_code="models-command-failed")
-        output = f"{result.stdout}\n{result.stderr}"
+        output = "\n".join((*result.items, result.stderr))
         if _antigravity_auth_error(output):
             return SeatHealthCheck(
                 "model-reachability",
@@ -690,15 +708,21 @@ class SeatHealthProbe:
         return _model_smoke_result(result.ok, result.text, result.detail, cause, result.timed_out)
 
 
-def _antigravity_models(seat: Any, timeout_seconds: float) -> tuple[proc.Result | None, str]:
+def _antigravity_models(seat: Any, timeout_seconds: float) -> tuple[proc.DelimitedResult | None, str]:
     argv, env, env_error = _antigravity_probe_invocation(seat, "models")
     if env_error:
         return None, env_error
     try:
-        return (
-            proc.run(argv, timeout=min(timeout_seconds, _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS), env=env),
-            "",
+        result = proc.run_delimited(
+            argv,
+            delimiter=b"\n",
+            timeout=min(timeout_seconds, _ANTIGRAVITY_METADATA_TIMEOUT_SECONDS),
+            env=env,
+            max_bytes=proc.MAX_CAPTURE_BYTES,
         )
+        if not result.timed_out and (result.truncated or result.stderr_truncated):
+            return None, "agy models output is incomplete"
+        return result, ""
     except OSError as exc:
         return None, safe_detail(str(exc))
 
