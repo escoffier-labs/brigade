@@ -256,3 +256,27 @@ def test_denied_verifier_replacement_keeps_the_verifier_worktree(worktrees):
     fingerprint = runtime._session_fingerprint(SESSION)
     assert runtime._verify_replacement(first, "pytest tests/test_first_only.py", fingerprint) in reason
     assert runtime._verify_replacement(second, "pytest tests/test_first_only.py", fingerprint) not in reason
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "cp -t {other} {source}",
+        "cp --target-directory={other} {source}",
+        "cp --target-directory {other} {source}",
+        "cp -v {source} {other}",
+        "install -m 644 {source} {other}",
+    ],
+)
+def test_copy_destinations_with_options_are_attributed(worktrees, command):
+    first, second = worktrees
+    command = command.format(other=shlex.quote(str(second)), source=shlex.quote(str(first / "source.py")))
+    fields = {"tool_name": "Bash", "tool_input": {"command": command}}
+    event(first, "PreToolUse", **fields)
+    (second / "source.py").write_text("copied\n")
+    event(first, "PostToolUse", **fields)
+    blocked = event(first, "Stop", stop_hook_active=False)
+    assert blocked is not None and blocked.get("decision") == "block"
+    assert replacement(second) in blocked["reason"]
+    verify(first, first)
+    assert event(first, "Stop", stop_hook_active=False)["decision"] == "block"

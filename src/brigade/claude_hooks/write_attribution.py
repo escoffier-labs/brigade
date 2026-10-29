@@ -52,7 +52,24 @@ def _git_command(tokens: list[str], cwd: Path) -> tuple[list[str], Path]:
 # Short options whose next token is a value, not a path the command writes
 # (`touch -r REF` only reads REF's times). Long `--opt=value` forms are already
 # dropped as options.
-_OPTION_VALUES = {"touch": "rdt", "truncate": "rs", "mkdir": "m", "mv": "S"}
+_OPTION_VALUES = {"touch": "rdt", "truncate": "rs", "mkdir": "m", "mv": "St", "cp": "St", "install": "gmoSt"}
+_TARGET_DIRECTORY_COMMANDS = {"cp", "install", "mv"}
+
+
+def _target_directory(tokens: list[str]) -> str | None:
+    """The ``-t DIR`` / ``--target-directory=DIR`` destination of cp, install, or mv."""
+    for index, token in enumerate(tokens):
+        if token == "--":
+            return None
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        if token == "--target-directory":
+            return following
+        if token.startswith("--target-directory="):
+            return token.split("=", 1)[1]
+        if token.startswith("-") and not token.startswith("--") and "t" in token[1:]:
+            rest = token[token.index("t", 1) + 1 :]
+            return rest or following
+    return None
 
 
 def _without_option_values(name: str, tokens: list[str]) -> list[str] | None:
@@ -66,10 +83,10 @@ def _without_option_values(name: str, tokens: list[str]) -> list[str] | None:
         if token == "--":
             letters = ""
         elif letters and token.startswith("-") and not token.startswith("--") and len(token) > 1:
-            if name == "mv" and "t" in token[1:]:
-                return None  # -t names the destination directory; keep the cwd fallback
             skip = token[-1] in letters
-        elif token in {"--reference", "--date", "--size", "--mode", "--suffix", "--target-directory"}:
+        elif token == "--target-directory" and name in _TARGET_DIRECTORY_COMMANDS:
+            skip = True  # read separately by _target_directory
+        elif token in {"--reference", "--date", "--size", "--mode", "--suffix", "--owner", "--group"}:
             return None  # a separated long-option value: stay conservative
         kept.append(token)
     return kept
@@ -97,12 +114,14 @@ def _write_operands(tokens: list[str]) -> list[str] | None:
     if name in rt._BASH_WRITE_COMMANDS:
         if name in {"apply_patch", "patch", "mktemp"}:
             return None
-        if name in {"cp", "install"}:
-            # Source operands are read. Only a simple final destination is
-            # confident, otherwise retain the existing conservative fallback.
-            if any(arg.startswith("-") for arg in tokens[1:]):
-                return None
-            return args[-1:] or None
+        if name in _TARGET_DIRECTORY_COMMANDS:
+            directory = _target_directory(tokens[1:])
+            if directory is not None:
+                # cp/install sources are read; mv sources are removed, so they change too.
+                return [directory, *args] if name == "mv" else [directory]
+            if name in {"cp", "install"}:
+                # Source operands are read; the final operand is the destination.
+                return args[-1:] or None
         return args if args or name == "tee" else None
     return []
 
@@ -175,6 +194,12 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
         operands = _write_operands(stripped)
         if operands is None:
             add(effective, True)
+            # Still observe every literal path operand, so a fingerprint catches a
+            # write the parser could not place.
+            for raw in rt._command_path_arguments(stripped[1:]):
+                path = _literal_path(raw, effective)
+                if path is not None:
+                    add(path)
         else:
             for operand in operands:
                 destination(operand, effective)
