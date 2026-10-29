@@ -1,7 +1,7 @@
 ---
 name: fleet-hub-upgrade
 description: Use when upgrading a Brigade Fleet Hub and the node clients that publish to it - Hub-first ordering, pre-flight diff of node-to-Hub payloads and SCHEMA_VERSION, snapshot-and-switch deploy with rollback, and node verification. Never downgrade code against a newer schema or edit the Hub database directly.
-allowed-tools: Read, Grep, Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(brigade fleet status:*)
+allowed-tools: Read, Grep, Bash(git diff:*), Bash(git log:*), Bash(git show:*), Bash(brigade fleet sessions:*)
 compatibility: Operators running a self-hosted Brigade Fleet Hub with one or more enrolled node clients. Host-specific deploy commands are the operator's own; this skill is the generic checklist.
 ---
 
@@ -57,8 +57,10 @@ For each `<node-host>`:
 
 1. Upgrade the node's Brigade install to `<target-sha>`.
 2. Restart every unit that imports that install.
-3. Trigger one telemetry publish.
-4. Confirm the write landed: no `unsupported field` errors in the unit journal since the restart, and the node shows as fresh on the Hub (`brigade fleet status --all`).
+3. Trigger one telemetry publish through the node's usual publisher, or `brigade fleet policy observe --file <snapshot.json>`. Require exit 0: a refused write fails the command.
+4. Confirm the write landed on the telemetry surface: no `unsupported field` errors in the unit journal since the restart, and the node's telemetry age on the Hub's machine views (Overview or Capacity) is newer than the restart. If the release changed session publishing, `brigade fleet sessions` should list the node's open sessions with fresh heartbeat times.
+
+Do not use `brigade fleet status` for this. It lists run events, not telemetry, so an idle node can be missing from it and an unrelated recent run can look fresh after a failed publish.
 
 Do not mark a node done on install success alone. Freshness on the Hub is the evidence.
 

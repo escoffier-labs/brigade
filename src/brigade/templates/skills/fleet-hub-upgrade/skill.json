@@ -9,7 +9,7 @@
     "Bash(git diff:*)",
     "Bash(git log:*)",
     "Bash(git show:*)",
-    "Bash(brigade fleet status:*)"
+    "Bash(brigade fleet sessions:*)"
   ],
   "tests": ["brigade skills lint fleet-hub-upgrade"]
 }
