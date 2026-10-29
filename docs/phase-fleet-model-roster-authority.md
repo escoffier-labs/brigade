@@ -540,6 +540,9 @@ and `but` clauses, report ambiguity. Explicit how-to topic steps and negated
 continuations remain within their clause. Indirect requests such as "Help me
 write", fully quoted requests, unfamiliar objects, and unsupported complements
 can return `none`. Use declared workloads or explicit workers for such cases.
+Each recognized action contributes a proven task role or fixed implementation
+evidence. An unsupported action object remains ordinary alone and makes the
+task ambiguous when combined with proven audience or visual work.
 
 The Hub consumes declared `writing` and `frontend` workloads through the
 existing effective policy roles of the same names. Declare their OS and

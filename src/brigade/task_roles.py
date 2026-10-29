@@ -130,13 +130,13 @@ def _instruction_clauses(text: str) -> list[str]:
     return clauses
 
 
-def _object_head_state(context: str, pattern: re.Pattern[str], complement: re.Pattern[str]) -> str | None:
-    """Distinguish a closed audience object from a modifier of another object."""
+def _closed_object(context: str, pattern: re.Pattern[str], complement: re.Pattern[str]) -> bool:
+    """Accept only the first relevant head with a supported prefix and ending."""
     head = pattern.search(context)
     if head is None or _OBJECT_PREFIX.fullmatch(context[: head.start()]) is None:
-        return None
+        return False
     tail = context[head.end() :].strip()
-    return "closed" if not tail or complement.fullmatch(tail) is not None else "modifier"
+    return not tail or complement.fullmatch(tail) is not None
 
 
 def classify(text: str) -> TaskRoleDecision:
@@ -162,17 +162,13 @@ def classify(text: str) -> TaskRoleDecision:
         # No task text from this context may enter diagnostic or persisted evidence.
         context = _TOPIC.split(clause[action.end() :], maxsplit=1)[0][:320]
         code_category = next((category for category, pattern in _CODE_OBJECTS if pattern.search(context)), None)
-        writing_head = _object_head_state(context, _WRITING_OBJECT, _WRITING_COMPLEMENT)
-        visual_head = _object_head_state(context, _VISUAL_OBJECT, _VISUAL_COMPLEMENT)
-        writing = verb in _WRITING_VERBS and writing_head == "closed"
-        visual = verb in _VISUAL_VERBS and visual_head == "closed"
+        writing = verb in _WRITING_VERBS and _closed_object(context, _WRITING_OBJECT, _WRITING_COMPLEMENT)
+        visual = verb in _VISUAL_VERBS and _closed_object(context, _VISUAL_OBJECT, _VISUAL_COMPLEMENT)
         if verb == "make" and not _VISUAL_MAKE.search(context):
             visual = False
-        # Implementation-only verbs are requests even with an unfamiliar object.
-        # Build/implement are visual only when the requested object proves that.
-        implementation = verb not in _WRITING_VERBS | _VISUAL_VERBS or (verb in {"build", "implement"} and not visual)
-        modifier = writing_head == "modifier" or visual_head == "modifier"
-        if code_category is not None or implementation or modifier:
+        # Every recognized action contributes a role or implementation evidence.
+        # An unsupported object must not disappear when combined with audience work.
+        if code_category is not None or not (writing or visual):
             vetoed.add("code-context")
             markers.add(f"backend-request:{code_category or 'code'}")
             continue

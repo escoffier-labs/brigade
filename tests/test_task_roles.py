@@ -305,3 +305,33 @@ def test_conjoined_closed_audience_objects_remain_writing():
     decision = task_roles.classify("Draft release notes and write a short email about the parser")
     assert (decision.status, decision.workload) == ("matched", "writing")
     assert decision.markers == ()
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [
+        "write the email-to-post converter",
+        "write a renderer using email",
+        "write a post-processing step for imported records",
+        "write a script that posts to SyntheticChat",
+    ],
+)
+@pytest.mark.parametrize("separator", [" and ", " plus ", ", then "])
+def test_supported_backend_actions_cannot_disappear_in_mixed_work(backend, separator):
+    assert task_roles.classify(backend).status == "none"
+    for audience in ["Draft release notes", "Redesign the login page"]:
+        for first in [True, False]:
+            left, right = (audience, backend) if first else (backend, audience)
+            decision = task_roles.classify(left + separator + right)
+            assert (decision.status, decision.workload) == ("ambiguous", "general")
+            assert decision.markers
+
+
+@pytest.mark.parametrize("verb", ["write", "edit", "update", "draft", "design", "restyle", "make", "build", "fix"])
+def test_recognized_action_with_unsupported_object_retains_fixed_evidence(verb):
+    task = f"{verb} SyntheticOnlyOpaqueK73"
+    assert task_roles.classify(task).status == "none"
+    decision = task_roles.classify("Draft release notes and " + task)
+    assert decision.status == "ambiguous"
+    assert decision.markers == ("backend-request:code",)
+    assert "syntheticonly" not in str(decision.payload()).lower()
