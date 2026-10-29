@@ -42,6 +42,20 @@ def test_paired_identity_and_snapshot(tmp_path):
     assert model_trials.paired_plan(changed)["cells"][0]["cell_id"] != plan["cells"][0]["cell_id"]
 
 
+@pytest.mark.parametrize("selection", [["audit-only"], ["passing-verify", "audit-only"]])
+def test_reduced_manifest_refuses_absent_cases_before_snapshots(tmp_path, selection):
+    manifest = json.loads(FIXTURE.read_text())
+    manifest["cases"] = ["passing-verify"]
+    for arm in ("baseline", "candidate"):
+        manifest[arm] = str(FIXTURE.parent / arm)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    output = tmp_path / "output"
+    with pytest.raises(ValueError, match="case selection"):
+        model_trials.paired_execute(path, output, protocol, cases=selection)
+    assert not output.exists() or list(output.iterdir()) == []
+
+
 def trusted(callback):
     callback.paired_adapter_identity = {"id": "test.host-protocol.v1"}
     return callback

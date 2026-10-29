@@ -317,7 +317,8 @@ def _execute(
     if {a: _package_identity(f) for a, f in packages.items()} != planned["packages"]:
         raise ValueError("packages changed during planning")
     if cases is not None:
-        if not cases or any(c not in CASES for c in cases):
+        available = {cell["case"] for cell in planned["cells"]}
+        if not cases or any(c not in available for c in cases):
             raise ValueError("unsupported case selection")
         planned["cells"] = [c for c in planned["cells"] if c["case"] in cases]
     # Check all preexisting contents, including digest and unused artifacts,
