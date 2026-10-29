@@ -1262,6 +1262,13 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		fmt.Fprint(errw, "\r\033[K")
 	}
 	if err != nil {
+		if bools["json"] {
+			if result.Status == "" {
+				result.Status = "failed"
+				result.Errors = []string{err.Error()}
+			}
+			writeJSON(out, result)
+		}
 		return fatalf(errw, "import: %s", err)
 	}
 	if bools["json"] {

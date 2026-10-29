@@ -256,3 +256,22 @@ miseledger scans changed --json
 ```
 
 Crawler and native-import scan manifests contain path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. They do not contain harvested text.
+
+## Import completion and replay
+
+`import adapter --json` reports `status` as `complete`, `already_known`,
+`partial`, or `failed`. A persistence, input-read, or commit error during
+adapter ingestion returns a nonzero exit code and an `errors` array. On error, `inserted_items` counts only
+inserts in committed batches. The open batch rolls back; earlier batches stay
+durable. Replaying the original input uses idempotent upserts to finish the
+remaining records without duplicating committed items. A completed import
+marker is written only after the full input and final transaction succeed.
+
+Malformed adapter lines remain skippable parse warnings for compatibility.
+`complete` means the importer finished, so consumers requiring every row must
+also check `warnings`. Brigade receipt indexing requires a valid completion
+summary with no warnings or failures before advancing its export cursor. A
+clean legacy summary with `inserted_items` and `already_known` is accepted;
+missing, malformed, partial, or failure-bearing summaries leave receipts
+pending and preserve the export for replay. Concurrent cursor acknowledgements
+merge the latest hashes under the existing shared file-lock primitive.
