@@ -293,7 +293,7 @@ compare the entire export, including its digest. Source hex is fixture setup,
 never part of the actual export. Copying the template into a consumer is invalid.
 A real export binds its local target and must be regenerated there.
 
-`tests/test_context_handoff.py` verifies all 15 accounting and 3 canonical
+`tests/test_context_handoff.py` verifies all 17 accounting and 4 canonical
 vectors against the producer, privacy, same-size changes beyond the cap,
 changed-during-read and final validation races, new overrides and markers,
 directory rebinding, empty-directory selection traces, symlinks, nonregular
