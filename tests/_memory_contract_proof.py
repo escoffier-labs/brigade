@@ -106,7 +106,7 @@ class Authority:
             INSERT INTO meta VALUES (0, 0, 0, 0);
             CREATE TABLE grants (principal TEXT, device TEXT, action TEXT, start INTEGER,
                                  active INTEGER, PRIMARY KEY(principal, device, action));
-            CREATE TABLE items (item TEXT PRIMARY KEY, revision TEXT, approved INTEGER);
+            CREATE TABLE items (item TEXT PRIMARY KEY, revision TEXT, approved INTEGER, owner TEXT);
             CREATE TABLE revisions (item TEXT, revision TEXT, handle TEXT, sequence INTEGER,
                                     recipients TEXT, PRIMARY KEY(item, revision));
             CREATE TABLE outcomes (scoped TEXT PRIMARY KEY, digest TEXT, state TEXT, head INTEGER);
@@ -123,12 +123,17 @@ class Authority:
         ):
             for action in actions:
                 self.db.execute("INSERT INTO grants VALUES (?, ?, ?, 0, 1)", (*actor, action))
-        for item, approved in ((TEAM, 1), (CANDIDATE, 0), (PERSONAL, 0)):
-            self.db.execute("INSERT INTO items VALUES (?, 'rev-0', ?)", (item, approved))
-        self.db.execute("INSERT INTO revisions VALUES (?, 'rev-0', 'opaque-0', 0, ?)", (TEAM, json.dumps((A[1], B[1]))))
+        for n, (item, approved, owner) in enumerate(
+            ((TEAM, 1, None), (CANDIDATE, 0, None), (PERSONAL, 1, "private-owner"))
+        ):
+            self.db.execute("INSERT INTO items VALUES (?, 'rev-0', ?, ?)", (item, approved, owner))
+            self.db.execute(
+                "INSERT INTO revisions VALUES (?, 'rev-0', ?, 0, ?)", (item, f"opaque-{n}", json.dumps((A[1], B[1])))
+            )
         self.verifier = ScriptedVerifier()
         self.ledger_complete = True
-        self.restored_absence = False
+        self.restore_epoch = 0
+        self.checkpoint_gap = False
         # Independent control-plane copies, deliberately outside backend storage.
         self.checkpoints = []
         self.checkpoint(CHECKPOINT)
@@ -145,6 +150,7 @@ class Authority:
 
     def checkpoint(self, actor):
         if self.allowed(actor, "checkpoint") is None:
+            self.checkpoint_gap = True
             return False
         self.checkpoints.append((self.head, self.snapshot_digest(self.db)))
         return True
@@ -205,13 +211,14 @@ class Authority:
         return {"state": row[1], "terminal": True, "head": row[2]}
 
     def outcome(self, actor, attempt):
-        if self.allowed(actor, "outcome") is None or actor[0] != attempt.owner:
+        owner = self.allowed(actor, "outcome") is not None and actor[0] == attempt.owner
+        if not owner and self.allowed(actor, "recover") is None:
             return REFUSAL.copy()
         found = self._lookup(attempt)
         if found is not None:
             return found
         return {
-            "state": "absent" if self.ledger_complete and not self.restored_absence else "ambiguous",
+            "state": "absent" if self.ledger_complete and attempt.epoch >= self.restore_epoch else "ambiguous",
             "terminal": False,
         }
 
@@ -221,12 +228,18 @@ class Authority:
         self.db.execute("INSERT INTO audit VALUES (?, ?, ?)", (scoped, state, self.head))
         return {"state": state, "terminal": True, "head": self.head}
 
-    def _valid(self, attempt, *, current_roles=True):
+    @staticmethod
+    def bounded(attempt):
         return (
             len(repr(attempt).encode()) <= 4096
             and attempt.signatures == 2
             and len(attempt.artifact.recipients) <= 4
             and len(set(attempt.artifact.recipients)) == len(attempt.artifact.recipients)
+        )
+
+    def _valid(self, attempt, *, current_roles=True):
+        return (
+            self.bounded(attempt)
             and request_digest(attempt) == attempt.digest
             and self.verifier.verify("review", attempt.review, attempt.artifact, self.db, current_roles=current_roles)
             and self.verifier.verify(
@@ -242,8 +255,10 @@ class Authority:
 
     def _transition(self, actor, attempt, *, cancel):
         result = REFUSAL.copy()
-        committed = False
+        wrote = False
         self.trace.clear()
+        if not self.bounded(attempt):
+            return result
         self.db.execute("BEGIN IMMEDIATE")
         try:
             owner = actor[0] == attempt.owner
@@ -255,7 +270,7 @@ class Authority:
             found = self._lookup(attempt)
             if found is not None:
                 return found
-            if not self.ledger_complete or self.restored_absence:
+            if not self.ledger_complete or attempt.epoch < self.restore_epoch:
                 return {"state": "ambiguous", "terminal": False}
             if not self._valid(attempt, current_roles=not cancel):
                 return result
@@ -295,12 +310,12 @@ class Authority:
                     self.db.execute("UPDATE items SET revision=? WHERE item=?", (revision, artifact.item))
                     self.db.execute("UPDATE meta SET head=head+1")
                     result = self._terminal(attempt, "committed")
-                    committed = True
+            wrote = True
             self.db.execute("COMMIT")
         finally:
             if self.db.in_transaction:
                 self.db.execute("ROLLBACK")
-        if committed:
+        if wrote:
             self.checkpoint(CHECKPOINT)
         return result
 
@@ -308,8 +323,8 @@ class Authority:
         grant = self.allowed(actor, "read")
         if grant is None or sink != "local-client":
             return None
-        row = self.db.execute("SELECT revision, approved FROM items WHERE item=?", (item,)).fetchone()
-        if row is None or not row[1]:
+        row = self.db.execute("SELECT revision, approved, owner FROM items WHERE item=?", (item,)).fetchone()
+        if row is None or not row[1] or (row[2] is not None and row[2] != actor[0]):
             return None
         revision = revision or row[0]
         record = self.db.execute(
@@ -328,23 +343,32 @@ class Authority:
         # SQLite online backup API, not a file copy of a live database.
         with sqlite3.connect(":memory:") as destination:
             self.db.backup(destination)
-            return destination.serialize()
+            return "\n".join(destination.iterdump())
 
     def restore(self, actor, backup):
-        if self.allowed(actor, "recover") is None or not backup or not self.ledger_complete or not self.checkpoints:
+        if (
+            self.allowed(actor, "recover") is None
+            or not backup
+            or not self.ledger_complete
+            or not self.checkpoints
+            or self.checkpoint_gap
+        ):
             return REFUSAL.copy()
         expected = self.checkpoints[-1]
+        # Check the retained snapshot floor before executing any fixture dump SQL.
+        if not isinstance(backup, str) or sha256(backup.encode()).hexdigest() != expected[1]:
+            return REFUSAL.copy()
         with sqlite3.connect(":memory:") as candidate:
             try:
-                candidate.deserialize(backup)
+                candidate.executescript(backup)
                 if self.snapshot_digest(candidate) != expected[1]:
                     return REFUSAL.copy()
-            except sqlite3.DatabaseError:
+            except (sqlite3.DatabaseError, TypeError):
                 return REFUSAL.copy()
-        # Only exact complete fixture snapshot accepted. Epoch advance closes old writes.
-        self.db.deserialize(backup)
+            candidate.backup(self.db)
+        # Missing old-epoch operations stay ambiguous, while new-epoch work can proceed.
         self.advance("epoch")
-        self.restored_absence = True
+        self.restore_epoch = self.db.execute("SELECT epoch FROM meta").fetchone()[0]
         return {"state": "restored"}
 
     def diagnostics(self):
@@ -377,6 +401,7 @@ class TrustedClient:
         if content is None or len(content[0].encode()) > 16384:
             return REFUSAL.copy()
         excerpt = content[0].encode()[:excerpt_bytes].decode("utf-8", errors="ignore")
+        self.sinks.append((sink, item, revision))
         return {"item": item, "revision": revision, "citation": content[1], "excerpt": excerpt}
 
     def reconcile(self):

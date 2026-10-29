@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 import sqlite3
 
 import pytest
@@ -24,6 +25,8 @@ from tests._memory_contract_proof import (
     TrustedClient,
     AdapterA,
     AdapterB,
+    publisher_core,
+    request_digest,
 )
 
 
@@ -60,8 +63,8 @@ def test_two_consumers_and_denied_surfaces(proof):
         for item in (CANDIDATE, PERSONAL, "unknown"):
             assert adapter.read(item) == REFUSAL
         assert adapter.read(TEAM, sink="cloud:ungranted") == REFUSAL
-    assert client.sinks == []
-    exported = authority.db.serialize() + authority.diagnostics().encode()
+    assert client.sinks == [("local-client", TEAM, "rev-0")] * 2
+    exported = authority.backup().encode() + authority.diagnostics().encode()
     assert all(marker.encode() not in exported for marker in MARKERS)
     assert all(marker not in json.dumps(REFUSAL) for marker in MARKERS)
 
@@ -81,7 +84,7 @@ def test_identity_labels_and_devices_grant_nothing(proof):
         assert authority.commit(actor, prepare(authority)) == REFUSAL
     assert len({actor[0] for actor in (A, B, REVIEWER, PUBLISHER, ADMIN, RECOVERY, CHECKPOINT)}) == 7
     assert len({actor[1] for actor in (A, B, REVIEWER, PUBLISHER, ADMIN, RECOVERY, CHECKPOINT)}) == 7
-    assert counts(authority) == (1, 0, 0)
+    assert counts(authority) == (3, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -104,7 +107,7 @@ def test_review_binding_substitution(proof, field, value):
     # Even a newly scripted publisher decision cannot substitute an old review.
     forged = authority.authorize(PUBLISHER, "op-2", forged.artifact, attempt.review)
     assert authority.commit(PUBLISHER, forged) == REFUSAL
-    assert counts(authority) == (1, 0, 0)
+    assert counts(authority) == (3, 0, 0)
     assert authority.head == 0
 
 
@@ -118,7 +121,7 @@ def test_publisher_owner_and_scoped_id_binding(proof):
     ):
         assert authority.commit(PUBLISHER, forged) == REFUSAL
     assert authority.commit(ADMIN, attempt) == REFUSAL
-    assert counts(authority) == (1, 0, 0)
+    assert counts(authority) == (3, 0, 0)
 
 
 def test_scripted_failures_and_transaction_order(proof):
@@ -135,7 +138,7 @@ def test_scripted_failures_and_transaction_order(proof):
     assert authority.trace.index("BEGIN IMMEDIATE") < next(
         i for i, s in enumerate(authority.trace) if "FROM grants" in s
     )
-    assert counts(authority) == (2, 1, 1)
+    assert counts(authority) == (4, 1, 1)
 
 
 def test_one_head_two_attempts_and_stale_review(proof):
@@ -147,7 +150,7 @@ def test_one_head_two_attempts_and_stale_review(proof):
     refreshed = authority.authorize(PUBLISHER, "op-c", second.artifact, second.review)
     assert refreshed.head == 1
     assert authority.commit(PUBLISHER, refreshed)["state"] == "conflict"
-    assert authority.head == 1 and counts(authority) == (2, 3, 3)
+    assert authority.head == 1 and counts(authority) == (4, 3, 3)
 
 
 @pytest.mark.parametrize("transition", ["policy", "fence", "epoch", "recipient", "wrap-surgery"])
@@ -163,9 +166,11 @@ def test_prepared_mutable_state_rechecked(proof, transition):
     else:
         authority.advance(transition)
     result = authority.commit(PUBLISHER, attempt)
-    assert result["state"] in {"conflict", "unavailable"}
+    expected = "unavailable" if transition == "wrap-surgery" else "conflict"
+    assert result["state"] == expected
+    assert counts(authority)[1:] == ((0, 0) if transition == "wrap-surgery" else (1, 1))
     assert authority.head == 0
-    assert counts(authority)[0] == 1
+    assert counts(authority)[0] == 3
 
 
 def test_lost_response_historical_recovery_digest_and_revocation(proof):
@@ -178,12 +183,12 @@ def test_lost_response_historical_recovery_digest_and_revocation(proof):
     assert authority.commit(PUBLISHER, old) == receipt
     assert authority.outcome(PUBLISHER, old) == receipt
     assert authority.commit(PUBLISHER, replace(old, digest="changed"))["state"] == "conflict"
-    assert counts(authority) == (3, 2, 2)
+    assert counts(authority) == (5, 2, 2)
     authority.revoke(PUBLISHER)
     for actor in (PUBLISHER, ("unknown", "device-x")):
         assert authority.outcome(actor, old) == REFUSAL
         assert authority.commit(actor, old) == REFUSAL
-    assert counts(authority) == (3, 2, 2)
+    assert counts(authority) == (5, 2, 2)
 
 
 @pytest.mark.parametrize("cancel_first", [True, False])
@@ -194,11 +199,11 @@ def test_cancel_commit_terminal_orderings(proof, cancel_first):
         first = authority.cancel(PUBLISHER, attempt)
         assert first["state"] == "abandoned"
         assert authority.commit(PUBLISHER, attempt) == first
-        assert authority.head == 0 and counts(authority) == (1, 1, 1)
+        assert authority.head == 0 and counts(authority) == (3, 1, 1)
     else:
         first = authority.commit(PUBLISHER, attempt)
         assert authority.cancel(PUBLISHER, attempt) == first
-        assert authority.head == 1 and counts(authority) == (2, 1, 1)
+        assert authority.head == 1 and counts(authority) == (4, 1, 1)
 
 
 def test_recovery_can_cancel_without_restoring_owner(proof):
@@ -210,7 +215,7 @@ def test_recovery_can_cancel_without_restoring_owner(proof):
     assert authority.cancel(RECOVERY, attempt)["state"] == "abandoned"
     assert authority.commit(PUBLISHER, attempt) == REFUSAL
     assert authority.outcome(PUBLISHER, attempt) == REFUSAL
-    assert authority.head == 0 and counts(authority) == (1, 1, 1)
+    assert authority.head == 0 and counts(authority) == (3, 1, 1)
 
 
 def test_pending_absence_and_preadmission_refusal(proof):
@@ -219,7 +224,7 @@ def test_pending_absence_and_preadmission_refusal(proof):
     client.pending = attempt
     authority.verifier.fail = {"publisher"}
     assert client.retry() == REFUSAL
-    assert client.pending == attempt and counts(authority) == (1, 0, 0)
+    assert client.pending == attempt and counts(authority) == (3, 0, 0)
     authority.verifier.fail.clear()
     assert client.reconcile() == {"state": "exact-retry"}
     assert client.pending == attempt
@@ -229,7 +234,7 @@ def test_pending_absence_and_preadmission_refusal(proof):
     assert client.retry() == {"state": "ambiguous"}
     authority.ledger_complete = True
     assert client.retry()["state"] == "committed"
-    assert client.pending is None and counts(authority) == (2, 1, 1)
+    assert client.pending is None and counts(authority) == (4, 1, 1)
 
 
 def test_atomic_rollback_on_audit_failure(proof):
@@ -241,7 +246,7 @@ def test_atomic_rollback_on_audit_failure(proof):
     )
     with pytest.raises(sqlite3.IntegrityError, match="scripted audit failure"):
         authority.commit(PUBLISHER, attempt)
-    assert authority.head == 0 and counts(authority) == (1, 0, 0)
+    assert authority.head == 0 and counts(authority) == (3, 0, 0)
     assert authority.checkpoints[-1] == checkpoint
 
 
@@ -292,7 +297,9 @@ def test_bounds_and_solo_side_effects(proof, tmp_path):
     assert authority.commit(PUBLISHER, too_many) == REFUSAL
     assert authority.head == 0
     snapshot = authority.side_effects()
-    assert snapshot == [(".", "directory", 0o700), ("authority.sqlite", "file", 0o600)]
+    assert [(name, kind) for name, kind, _ in snapshot] == [(".", "directory"), ("authority.sqlite", "file")]
+    if os.name == "posix":
+        assert [mode for _, _, mode in snapshot] == [0o700, 0o600]
     assert sorted(p.name for p in tmp_path.iterdir()) == ["fixture"]
     assert authority.profile == "local-solo-fixture"
 
@@ -303,7 +310,7 @@ def test_revoked_promotion_role_cannot_admit(proof, actor):
     attempt = prepare(authority)
     authority.revoke(actor)
     assert authority.commit(PUBLISHER, attempt) == REFUSAL
-    assert authority.head == 0 and counts(authority) == (1, 0, 0)
+    assert authority.head == 0 and counts(authority) == (3, 0, 0)
 
 
 def test_unknown_and_revoked_read_and_outcome_share_shape(proof):
@@ -329,16 +336,16 @@ def test_restore_rejects_missing_ledger_and_restored_absence_is_not_replayed(pro
     client.pending = pending
     backup = authority.backup()
     with sqlite3.connect(":memory:") as damaged:
-        damaged.deserialize(backup)
+        damaged.executescript(backup)
         damaged.execute("DROP TABLE outcomes")
-        assert authority.restore(RECOVERY, damaged.serialize()) == REFUSAL
+        assert authority.restore(RECOVERY, "\n".join(damaged.iterdump())) == REFUSAL
     assert authority.restore(RECOVERY, backup)["state"] == "restored"
-    # An original epoch cannot be silently replaced by a fresh ID after restore.
+    # The client retains the original pending identity across restore.
     assert client.retry(replace(pending, request="fresh-after-restore")) == REFUSAL
     assert client.pending == pending
     assert client.retry() == {"state": "ambiguous"}
     assert client.pending == pending
-    assert authority.head == 0 and counts(authority) == (1, 0, 0)
+    assert authority.head == 0 and counts(authority) == (3, 0, 0)
 
 
 def test_restored_absence_remains_ambiguous(proof):
@@ -348,4 +355,161 @@ def test_restored_absence_remains_ambiguous(proof):
     assert client.reconcile() == {"state": "ambiguous"}
     assert client.retry() == {"state": "ambiguous"}
     assert client.pending is not None
-    assert authority.head == 0 and counts(authority) == (1, 0, 0)
+    assert authority.head == 0 and counts(authority) == (3, 0, 0)
+
+
+def resign(authority, attempt):
+    """Issue a fresh scripted publisher decision to isolate other guards."""
+    authority.verifier.publishers[attempt.publisher] = publisher_core(attempt)
+    return replace(attempt, digest=request_digest(attempt))
+
+
+def test_new_epoch_can_publish_while_old_absence_stays_ambiguous(proof):
+    authority, client = proof
+    client.pending = prepare(authority, "old-pending")
+    assert authority.restore(RECOVERY, authority.backup())["state"] == "restored"
+    fresh = prepare(authority, "new-epoch")
+    assert fresh.epoch == 1
+    assert authority.commit(PUBLISHER, fresh)["state"] == "committed"
+    assert client.reconcile() == {"state": "ambiguous"}
+    assert client.pending is not None
+
+
+@pytest.mark.parametrize("terminal", ["abandoned", "conflict"])
+def test_restore_cannot_drop_ledger_only_terminal(proof, terminal):
+    authority, _ = proof
+    attempt = prepare(authority)
+    before = authority.backup()
+    if terminal == "abandoned":
+        outcome = authority.cancel(PUBLISHER, attempt)
+    else:
+        authority.db.execute("UPDATE meta SET head=1")
+        outcome = authority.commit(PUBLISHER, attempt)
+    assert outcome["state"] == terminal
+    assert authority.restore(RECOVERY, before) == REFUSAL
+    assert authority.outcome(PUBLISHER, attempt) == outcome
+
+
+def test_checkpoint_gap_cannot_restore_revoked_access(proof):
+    authority, client = proof
+    before = authority.backup()
+    authority.revoke(CHECKPOINT)
+    authority.revoke(B)
+    assert client.read(B, TEAM) == REFUSAL
+    assert authority.restore(RECOVERY, before) == REFUSAL
+    assert client.read(B, TEAM) == REFUSAL
+
+
+def test_recovery_lookup_without_restoring_publisher_privileges(proof):
+    authority, client = proof
+    attempt = prepare(authority)
+    receipt = authority.commit(PUBLISHER, attempt)
+    authority.revoke(PUBLISHER)
+    assert authority.outcome(PUBLISHER, attempt) == REFUSAL
+    assert authority.outcome(RECOVERY, attempt) == receipt
+    assert client.read(RECOVERY, TEAM) == REFUSAL
+    assert authority.commit(RECOVERY, prepare(authority, "other")) == REFUSAL
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("bundle", "x" * 5000), ("signatures", 3), ("artifact", None)],
+    ids=["bundle", "signatures", "recipients"],
+)
+def test_structural_bounds_reject_before_write_lock(proof, field, value):
+    authority, _ = proof
+    attempt = prepare(authority)
+    if field == "artifact":
+        value = replace(attempt.artifact, recipients=tuple(f"device-{n}" for n in range(5)))
+    attempt = resign(authority, replace(attempt, **{field: value}))
+    authority.ledger_complete = False
+    authority.trace.clear()
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert "BEGIN IMMEDIATE" not in authority.trace
+
+
+@pytest.mark.parametrize("field,value", [("request", "other-id"), ("scope", "other-scope")])
+def test_public_digest_cannot_replace_publisher_binding(proof, field, value):
+    authority, _ = proof
+    attempt = replace(prepare(authority), **{field: value})
+    attempt = replace(attempt, digest=request_digest(attempt))
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert authority.verifier.calls[-2:] == [("review", True), ("publisher", True)]
+
+
+def test_other_granted_publisher_cannot_act_as_operation_owner(proof):
+    authority, _ = proof
+    other = ("other-publisher", "other-publisher-device")
+    authority.db.execute("INSERT INTO grants VALUES (?, ?, 'publish', 0, 1)", other)
+    assert authority.commit(other, prepare(authority)) == REFUSAL
+    assert counts(authority)[1:] == (0, 0)
+
+
+@pytest.mark.parametrize("guard", ["head", "recipient"])
+def test_mutable_guards_without_policy_or_item_base_change(proof, guard):
+    authority, _ = proof
+    attempt = prepare(authority)
+    if guard == "head":
+        authority.db.execute("UPDATE meta SET head=1")
+    else:
+        authority.db.execute("DELETE FROM grants WHERE principal=?", (B[0],))
+    assert authority.commit(PUBLISHER, attempt)["state"] == "conflict"
+    assert counts(authority)[1:] == (1, 1)
+
+
+def test_read_wrap_membership_and_history_are_independent(proof):
+    authority, client = proof
+    authority.db.execute("UPDATE revisions SET recipients=? WHERE item=?", (json.dumps((B[1],)), TEAM))
+    assert client.read(A, TEAM) == REFUSAL
+    new = ("future-reader", "future-device")
+    authority.enroll(ADMIN, new)
+    authority.db.execute("UPDATE revisions SET recipients=? WHERE item=?", (json.dumps((B[1], new[1])), TEAM))
+    assert client.read(new, TEAM) == REFUSAL
+
+
+def test_unapproved_and_private_items_have_real_payloads(proof):
+    authority, client = proof
+    assert authority.db.execute("SELECT count(*) FROM revisions").fetchone()[0] == 3
+    assert client.read(A, CANDIDATE) == REFUSAL
+    authority.db.execute("UPDATE items SET approved=1 WHERE item=?", (CANDIDATE,))
+    assert client.read(A, CANDIDATE)["excerpt"] == MARKERS[1]
+    assert client.read(A, PERSONAL) == REFUSAL
+    authority.db.execute("UPDATE items SET owner=NULL WHERE item=?", (PERSONAL,))
+    assert client.read(A, PERSONAL)["excerpt"] == MARKERS[2]
+
+
+def test_local_disclosure_callback_is_live_but_cloud_is_not(proof):
+    _, client = proof
+    assert client.read(A, TEAM)["excerpt"] == MARKERS[0]
+    assert client.sinks == [("local-client", TEAM, "rev-0")]
+    assert client.read(A, TEAM, sink="cloud:ungranted") == REFUSAL
+    assert client.sinks == [("local-client", TEAM, "rev-0")]
+
+
+def test_request_digest_is_checked_separately_from_scripted_signature(proof):
+    authority, _ = proof
+    attempt = replace(prepare(authority), digest="invalid-public-digest")
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert authority.verifier.calls == []
+
+
+def test_original_publisher_signer_revocation_with_other_active_device(proof):
+    authority, _ = proof
+    attempt = prepare(authority)
+    alternate = (PUBLISHER[0], "publisher-alternate-device")
+    authority.db.execute("INSERT INTO grants VALUES (?, ?, 'publish', 0, 1)", alternate)
+    authority.revoke(PUBLISHER)
+    assert authority.commit(alternate, attempt) == REFUSAL
+    assert authority.verifier.calls[-2:] == [("review", True), ("publisher", True)]
+    assert counts(authority)[1:] == (0, 0)
+
+
+@pytest.mark.parametrize("epoch_field", ["operation", "artifact"])
+def test_each_epoch_binding_is_current_independently(proof, epoch_field):
+    authority, _ = proof
+    if epoch_field == "operation":
+        attempt = resign(authority, replace(prepare(authority), epoch=1))
+    else:
+        attempt = prepare(authority, epoch=1)
+    assert authority.commit(PUBLISHER, attempt)["state"] == "conflict"
+    assert authority.head == 0
