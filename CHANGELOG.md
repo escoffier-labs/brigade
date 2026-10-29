@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
+- Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
@@ -93,6 +93,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 
 - Native source builds add `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` entry points over the existing engines. Legacy commands, archive locations, protocol identities, and release assets remain compatible.
+
+- Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
 
 ### Fixed
 
