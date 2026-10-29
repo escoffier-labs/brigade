@@ -1,217 +1,295 @@
 {
-  "base": "97b9137329ae67dd6122d36e6eb33bc831315d79",
-  "head": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+  "base": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
+  "head": "25c97e6f618b9e0fa905746683296a571224dd2e",
   "method": "Exact Git objects rendered by GitHub Markdown API in a fixed local wrapper. Missing base documents show the actual git-show diagnostic. No server.",
   "captures": [
     {
-      "file": "runbook-before-desktop.png",
-      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
-      "blob": null,
-      "source_sha256": null,
-      "source_present": false,
+      "file": "changelog-before-desktop.png",
+      "source_path": "CHANGELOG.md",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
+      "blob": "6695e86cd6058db0400ea557388076e6f25eceba",
+      "source_sha256": "e749a27bdb79d2476cf24db7d59eaa117a00205aaa7879617dee2dd9c82bbd35",
+      "source_present": true,
+      "source_excerpt": "lines 1-60",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "808ec410217ae36887a03d51064d9559127531fb1e11b65395efff5328bdd851"
+      "sha256": "fcc4313e358143d3dc10475807fd760cc41184020aadd5de2548df79d73b821d"
+    },
+    {
+      "file": "changelog-before-mobile.png",
+      "source_path": "CHANGELOG.md",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
+      "blob": "6695e86cd6058db0400ea557388076e6f25eceba",
+      "source_sha256": "e749a27bdb79d2476cf24db7d59eaa117a00205aaa7879617dee2dd9c82bbd35",
+      "source_present": true,
+      "source_excerpt": "lines 1-60",
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "94d10e262c0dcfb7bb253ad9ac91515bcd2107ac76c8ade94fa0164250cf9a28"
+    },
+    {
+      "file": "changelog-after-desktop.png",
+      "source_path": "CHANGELOG.md",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
+      "blob": "10a3753364da3603093759a3a8ecf733ea3f7a50",
+      "source_sha256": "7a8e4df22baf30f680c5e566270b928199cb80250d9c8c55f5139fe88138070b",
+      "source_present": true,
+      "source_excerpt": "lines 1-60",
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "625ea1e16ccc1ab7241d9039652bf9d1e16ca3b4515fa871de8f3f0c846b18ff"
+    },
+    {
+      "file": "changelog-after-mobile.png",
+      "source_path": "CHANGELOG.md",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
+      "blob": "10a3753364da3603093759a3a8ecf733ea3f7a50",
+      "source_sha256": "7a8e4df22baf30f680c5e566270b928199cb80250d9c8c55f5139fe88138070b",
+      "source_present": true,
+      "source_excerpt": "lines 1-60",
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "e5659de1862b5388f10681427c4694047ecdcae8f068171d53e9c2985b20a427"
+    },
+    {
+      "file": "runbook-before-desktop.png",
+      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "source_excerpt": "complete document",
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "bacf80e52d6da77b7ed4de08b17293fae71d2d95fd58a7df2553922254ca1c00"
     },
     {
       "file": "runbook-before-mobile.png",
       "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
       "blob": null,
       "source_sha256": null,
       "source_present": false,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "fc7ffb9e959ff423f6c2edf5401ee3272a49a2887b6c69747c212fda809fe1a8"
+      "sha256": "27d4dbf64a7c0d27a740dc3a73f734a805e560663b49ac228e49166058c6adb2"
     },
     {
       "file": "runbook-after-desktop.png",
       "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "bf6cea891832b4b0bb8740ef4b4f2205dea4e8cd",
       "source_sha256": "33f7dc7bf9cbc9f3891e057a17a814c0033a57f0f9e28b4124a4554d547e8377",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "85f5702843540c92577fd57d3f33f110cdf62671917b915a3ec157698a9540dc"
+      "sha256": "48704844355690972a7560db99e61335cccfd4d720acf266b5f8659c2470c819"
     },
     {
       "file": "runbook-after-mobile.png",
       "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "bf6cea891832b4b0bb8740ef4b4f2205dea4e8cd",
       "source_sha256": "33f7dc7bf9cbc9f3891e057a17a814c0033a57f0f9e28b4124a4554d547e8377",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "fbf6e947871785b3cdc12943a9757cd184f896f697cd738846e253c1a12c33f6"
+      "sha256": "3345c9697a36760775919f94f9c2013cd1bbfe119c0535080cbed540b0b9a857"
     },
     {
       "file": "design-before-desktop.png",
       "source_path": "docs/phase-2046-native-closeout-design.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
       "blob": null,
       "source_sha256": null,
       "source_present": false,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "67ae00cafbd4a946f6ccb2cfc5facab84d9051dca690f9ec8e8ad439b65c8801"
+      "sha256": "7fc11e05dc7c1f5aaba60b0cb7e7a9136968463bfa4f509735c5bfd7bed1b2a3"
     },
     {
       "file": "design-before-mobile.png",
       "source_path": "docs/phase-2046-native-closeout-design.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
       "blob": null,
       "source_sha256": null,
       "source_present": false,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "70a185ffc4b790218f92075554e1be1a85f3951c0b33adc5d75f413877258f09"
+      "sha256": "cb9303718ccece17d6c11d437277e7e143b339ac09bdf25f5f1fcaac1261a19e"
     },
     {
       "file": "design-after-desktop.png",
       "source_path": "docs/phase-2046-native-closeout-design.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "b5fcff79c35b7b704a68d78c5fa6fe887019de47",
       "source_sha256": "a94a66b60b1847cbac60e7e5ac0058ff95c2142adbaeefe3c481961a5fc81b77",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "850740fac60484857916dc5d945bab2d5bdf9609516358a0a1f72f5fced45bfa"
+      "sha256": "e4d6d4a2feb7491e5fff0705d2d61af24d018751f1816a244aa09d7a558faacf"
     },
     {
       "file": "design-after-mobile.png",
       "source_path": "docs/phase-2046-native-closeout-design.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "b5fcff79c35b7b704a68d78c5fa6fe887019de47",
       "source_sha256": "a94a66b60b1847cbac60e7e5ac0058ff95c2142adbaeefe3c481961a5fc81b77",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "d45bb35357e9106e3a42604c36bf13f1cc14041b2639e8dd7badfea7d7b5de67"
+      "sha256": "bdb702f5e528cf1e8b7c6a08ebbfcffc2d24e77f3f5ee0473b117b984f33f477"
     },
     {
       "file": "plan-before-desktop.png",
       "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
       "blob": null,
       "source_sha256": null,
       "source_present": false,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "27cc3ebe4b4dce586dfc2aef79a25495f16f0ee1a2d6166810170c348d92fcf4"
+      "sha256": "832a829c87818bac84ff89ffb9587106e04e3f73b12a1bc33eafe6081ebb567d"
     },
     {
       "file": "plan-before-mobile.png",
       "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
-      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "commit": "e89c7ef48d72aa35b9eddfa8e2f63fb6d8f90a27",
       "blob": null,
       "source_sha256": null,
       "source_present": false,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "49690d21537ed8ef443cd6f3df18f9ce105dc1173e68eb4fd7cd4c439afd9b65"
+      "sha256": "19212aa9d304d59d013d2bc2db04a1f0b9ea1fcc5f4bdf05b279617d0e7cbad7"
     },
     {
       "file": "plan-after-desktop.png",
       "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "5ccf131e5902b84dfb6701ec6205ece87c651796",
       "source_sha256": "bd5389237ad02a4dc4badeed154fb4198c23b278cd251f55997053eac33225ea",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "857639486061b38a6e20383bed61b4a7f7c1ddf8259e01bc49f9d1728bcd2bdd"
+      "sha256": "49582ff6d896fb090c619c538caa890987c616f52b95401110e204c37bb29685"
     },
     {
       "file": "plan-after-mobile.png",
       "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "5ccf131e5902b84dfb6701ec6205ece87c651796",
       "source_sha256": "bd5389237ad02a4dc4badeed154fb4198c23b278cd251f55997053eac33225ea",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "6b141758ab79b55ad0e8afd37bbded18ae6e344bee4e492567a5403689a3b88b"
+      "sha256": "548842c21f6d60d34a75555556d77f0854bf43da82ea9ad5058b3888b7e9f219"
     },
     {
       "file": "unchanged-after-desktop.png",
       "source_path": "docs/runbooks/research-live-acceptance.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "fc2de088e28039dc264c5e10b999e458d4b714fd",
       "source_sha256": "09fdcfcedaae464b8431df6d133cdc335e63a63e961a4a706842cc5dca8f458b",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         1440,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "93db100537aae286470cae268259864f324b73fc86fa1ee8e55969fd7aa6ede6"
+      "sha256": "ff9cb416c079ada67f3f851039b88bb55fd529fc548ffe81a8bac5f658a550be"
     },
     {
       "file": "unchanged-after-mobile.png",
       "source_path": "docs/runbooks/research-live-acceptance.md",
-      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "commit": "25c97e6f618b9e0fa905746683296a571224dd2e",
       "blob": "fc2de088e28039dc264c5e10b999e458d4b714fd",
       "source_sha256": "09fdcfcedaae464b8431df6d133cdc335e63a63e961a4a706842cc5dca8f458b",
       "source_present": true,
+      "source_excerpt": "complete document",
       "viewport": [
         390,
         1000
       ],
       "theme": "light",
       "scroll": 0,
-      "sha256": "ac5eef4ea53393a773e8b2ec7375dd34c1fd71a98138c5d7680fc52c8d93d634"
+      "sha256": "e20686a6d77dda35f9bb91927e52a55fd47e3bca15a87fd1bb7f138a62dc2ec7"
     }
   ]
 }
