@@ -1,12 +1,12 @@
 <p align="center">
-  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade (by Escoffier Labs)" width="640">
+  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade Stack by Escoffier Labs" width="640">
 </p>
 
 <p align="center">
   <strong>Coordinate your agents. Keep the tools you use.</strong>
 </p>
 
-Brigade is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
+Brigade Stack is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
 
 <p align="center">
   <a href="https://brigade.tools">Website</a> ·
@@ -28,7 +28,7 @@ Brigade is an open-source coordination layer for AI coding agents. It sits besid
 
 **Stable:** v0.30.0 on PyPI and npm. **Beta:** main is the 0.31 preview line. [Channels](docs/update-channels.md)
 
-## Why Brigade
+## Why Brigade Stack
 
 You run several agents at once. Sol in Codex takes one task, Opus manages another, and Argon takes a third here and there, whether they share one window in a multi-harness tool like T3 Code or each run in its own app. Your Grok Bot runs the rest of your life, and your Dots spin up work of their own. Every agent starts from its own conversation. None of them knows who owns which task, what the others already tried, or whether a fix was actually checked.
 
@@ -51,30 +51,30 @@ A local setup needs no server. Fleet Hub adds shared ownership, presence, messag
 
 ## Quick start
 
-With Node.js 22 or newer (Linux glibc x64/ARM64, macOS, or Windows x64):
+Install the stable bridge with npm (Node.js `^22.15.0 || >=23.11.0`):
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.30.0
-brigade setup
+npm install --global brigadestack@0.30.0
+brigadestack --version
 ```
 
-Or with Python 3.10+: `pipx install brigade-cli` (or `uv tool install brigade-cli`), then `brigade setup`.
-
-Wire up a repository for the tools you use, then read the first brief:
+In a Git repository you control, preview the setup, apply it, and read the brief:
 
 ```bash
-brigade operator quickstart --target ./my-repo --harnesses codex,claude --dry-run   # preview
-brigade operator quickstart --target ./my-repo --harnesses codex,claude
-brigade work brief --target ./my-repo
+brigadestack operator quickstart --target . --harnesses codex --dry-run
+brigadestack operator quickstart --target . --harnesses codex
+brigadestack work brief --target .
 ```
 
-Run a check so the result is recorded:
+Replace `codex` with the harnesses you use, such as `codex,claude`. Record a first check:
 
 ```bash
-brigade work verify run --target ./my-repo --command "pytest -q"
+brigadestack work verify run --target . --command "git diff --check" --capture brigade-work
 ```
 
-The npm package manages its own Python, so the first launch needs network access. Git is required for repository features. See the [npm package notes](npm/feasibility/README.md), [first 10 minutes](docs/first-10-minutes.md), and [adopting an existing setup](docs/agent-assisted-setup.md).
+This checks whitespace in your unstaged diff and records the command, exit code, and logs. Use your project's test command for subsequent checks. The [first 10 minutes](docs/first-10-minutes.md) walks through health checks and receipt inspection.
+
+The npm bridge exposes `brigadestack` and downloads a managed Python on first launch. Git is required for this walkthrough. For Python installs, platform limits, optional engine setup, and existing `brigade` installs, see [Quickstart](QUICKSTART.md#1-install). Existing commands, Python imports, and `.brigade/` data remain compatible.
 
 ## Works with
 
@@ -124,4 +124,4 @@ The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffi
 
 </details>
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), npm [`@escoffier-labs/brigade`](https://www.npmjs.com/package/@escoffier-labs/brigade), command `brigade`.
+Brigade Stack by Escoffier Labs. Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigadestack`](https://pypi.org/project/brigadestack/), npm [`brigadestack`](https://www.npmjs.com/package/brigadestack), command `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages and `brigade` command remain supported.

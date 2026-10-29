@@ -1,28 +1,28 @@
-# First 10 Minutes With Brigade
+# First 10 Minutes With Brigade Stack
 
-This is the shortest path from install to a healthy local setup. It is meant for a repo or workspace you control.
+Start with one Git repository you control. This walkthrough uses the published 0.30.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
 
-## 1. Install
+## 1. Install and check the command
+
+Choose an install route in [Quickstart](../QUICKSTART.md#1-install). For npm:
 
 ```bash
-pipx install brigade-cli
-brigade setup
-brigade --version
+npm install --global brigadestack@0.30.0
+brigadestack --version
+brigadestack --help
 ```
 
-Expected: `brigade X.Y.Z` matching the [latest release](https://pypi.org/project/brigade-cli/).
+Expected version: `brigade 0.30.0`. The bridge exposes `brigadestack` and delegates to the compatible Brigade CLI. Existing users can use their `brigade` command throughout. With npx, prefix every invocation as described in [Quickstart](../QUICKSTART.md#npm).
 
-If `pipx` is missing, follow the [Linux, macOS, or Windows install steps](../QUICKSTART.md#1-install), then rerun the command above. Brigade requires Python 3.10 or newer and does not require WSL on Windows.
+## 2. Pick a target
 
-## 2. Pick A Target
-
-For a code repo:
+Enter an existing repository:
 
 ```bash
 cd ./my-repo
 ```
 
-For a scratch check on Linux or macOS:
+Or create a disposable repository on Linux or macOS:
 
 ```bash
 target="$(mktemp -d)"
@@ -33,150 +33,81 @@ cd "$target"
 In PowerShell:
 
 ```powershell
-$target = Join-Path $env:TEMP "brigade-scratch"
+$target = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
 git init -q -b main $target
 Set-Location $target
 ```
 
-For an operator workspace such as an OpenClaw or Hermes home, use that workspace directory instead of a code repo.
-
 ## 3. Preview
 
-For the current Codex-style setup:
-
 ```bash
-brigade operator quickstart --target . --harnesses codex --dry-run
+brigadestack operator quickstart --target . --harnesses codex --dry-run
 ```
 
-For multiple writer surfaces:
+Replace `codex` with the tools you use, such as `codex,claude`. Dry-run lists planned steps without applying them. For a file-by-file template preview:
 
 ```bash
-brigade operator quickstart --target . --harnesses codex,claude,opencode,antigravity,pi,cursor,aider,goose,continue,copilot,qwen,kimi,adal,openhands,grok,amp,crush --dry-run
+brigadestack init --target . --harnesses codex --dry-run
 ```
-
-For an OpenClaw or Hermes workspace:
-
-```bash
-brigade operator quickstart --target . --depth workspace --harnesses openclaw,hermes --owner openclaw --dry-run
-```
-
-Quickstart's dry-run lists the planned steps. For the file-by-file preview of what would be written, use `brigade init --target . --harnesses codex --dry-run` (init is the template-install step that quickstart runs first). Neither writes anything, starts services, installs schedulers, publishes, pushes, tags, or mutates remotes.
 
 ## 4. Apply
 
-Run the same command without `--dry-run`:
+```bash
+brigadestack operator quickstart --target . --harnesses codex
+```
+
+The isolated Linux smoke returned `status: ok` and exit 0. Other hosts may report warnings or failures. Inspect the named step and its suggested command before treating setup as ready. A warning is not proof that every check passed.
+
+Quickstart creates local configuration under `.brigade/`, including MCP catalog and work-loop configuration. It selects handoff source folders for the writer harnesses you chose. For Codex, that inbox is `.codex/memory-handoffs/`. It does not start services or install schedulers.
+
+Review the generated changes with `git status` and `git diff` before committing. The managed handoff `TEMPLATE.md` can travel with the repository. Session notes and local `.brigade/` state should stay private. See [agent-assisted setup](agent-assisted-setup.md) for adoption in an existing workspace.
+
+## 5. Check health and read the brief
 
 ```bash
-brigade operator quickstart --target . --harnesses codex
+brigadestack operator doctor --target . --profile local-operator
+brigadestack work brief --target .
 ```
 
-Expected shape:
-
-```text
-status: ok
-```
-
-A `status: warn` (with exit code 1) means setup completed but a step has a host-specific advisory, most commonly a global gitignore or hooks path interacting with the new files; the step output names the `verify-harness` command that explains it. Warnings inform, they do not block.
-
-Quickstart scopes handoff source coverage to the writer harnesses you selected. A `--harnesses codex` setup watches `.codex/memory-handoffs/` and leaves Claude, OpenCode, Hermes, and OpenClaw paths quiet until you add them.
-
-Quickstart also scaffolds `.brigade/mcp.json` and `.brigade/dogfood.toml` so MCP sync and the work loop have local config from the first run.
-
-## 5. Check Health
-
-```bash
-brigade operator doctor --target . --profile local-operator
-brigade handoff doctor --target .
-brigade security scan --target . --output-dir .brigade/security/latest
-brigade security doctor --target .
-```
-
-Healthy first-run shape (the key lines to look for):
+On the isolated stable smoke, the operator doctor reported:
 
 ```text
 ready: yes
 blocking_issues: 0
 ```
 
-from `operator doctor`, every `handoff doctor` line prefixed `[ok]`, `findings: 0` from the security scan, and every `security doctor` line `[ok]`. The doctors print one line per check, so expect a couple dozen `[ok]` lines rather than a one-line summary.
+Read the full output on your machine. Optional wiring may still produce advisories. The brief can list missing optional configuration for surfaces you have not enabled. You do not need to configure every surface to record a first check. If a doctor reports a blocking issue, use its suggested diagnostic and resolve it before relying on that surface.
 
-`operator doctor` may suggest `brigade daily plan --target .` as the next command. That is normal. It means setup is ready and Brigade can now show the local daily loop.
+## 6. Run a check and inspect its receipt
 
-## 6. Handoff Concepts In 60 Seconds
-
-A handoff is a note an agent writes for the memory owner to file later. Four things decide where it lands:
-
-- **Inbox**: each harness writes to its own folder (`.codex/memory-handoffs/` for Codex sessions, `.claude/memory-handoffs/` for Claude Code). Use the inbox matching the tool that learned the fact; for a note you are writing yourself, any selected inbox works - the ingester watches all of them.
-- **Type** (`--type`): what kind of note this is - `decision`, `workflow`, `gotcha`, and more (`brigade handoff draft --help` lists the valid values). It helps the reviewer, not the router.
-- **Action**: `no-card` (the default) appends a short fact to a shared document such as `.learnings/LEARNINGS.md` or `TOOLS.md`. `create-card`/`update-card` proposes a standalone memory card for bigger durable topics, and requires `--target-card` plus card content starting with YAML frontmatter.
-- **Content** (`--content` or `--content-file`): the durable note itself, required. The title and summary are the envelope; the content is what gets filed.
-
-When unsure, `no-card` with a two-sentence content is the right default. `brigade handoff-template` prints the full format.
-
-Already have handoff-style notes in your own format? `brigade handoff migrate --target .` shows which ones convert cleanly into the Brigade template; `--apply` rewrites them and preserves the originals.
-
-One more concept: the **memory owner**. Quickstart auto-selects which harness owns durable memory (it prints the pick and `--owner` overrides it). In a code repo this mostly decides which tool's conventions the ingest docs assume; the auto-pick is fine until you have an opinion.
-
-## 7. What To Commit
-
-Usually safe to commit after review:
-
-- `AGENTS.md`, `CLAUDE.md`, `INSTALL_FOR_AGENTS.md`, `SAFETY_RULES.md`
-- `MEMORY.md` and reviewed memory cards if this repo owns memory
-- `rules/`
-- `tools/`
-- `hooks/` (the pre-push content-guard hook; activate it with `git config core.hooksPath hooks`, but skip that if a global `core.hooksPath` already runs content-guard, since the repo setting would override it)
-- public docs
-- the managed handoff template for each selected writer harness — for Claude Code, `.claude/memory-handoffs/TEMPLATE.md` (required for Claude onboarding; `verify-harness` fails readiness when a global exclude hides it); for other writers, the matching `<inbox>/TEMPLATE.md`
-
-Handoff inboxes stay local except each inbox's managed `TEMPLATE.md`, which Brigade deliberately un-ignores so the handoff format travels with the repo. Session handoff files in those folders stay ignored. A `?? .claude/` or `?? .codex/` in `git status` is usually just that template file.
-
-Usually local-only:
-
-- `.brigade/`
-- `.codex/` (except `.codex/memory-handoffs/TEMPLATE.md` when Codex is selected)
-- `.claude/` (except `.claude/memory-handoffs/TEMPLATE.md` when Claude Code is selected)
-- `.opencode/`
-- `.antigravity/`
-- `.pi/`
-- `.cursor/`
-- `.hermes/`
-- `.openclaw/`
-- `.mcp/`
-- generated `scripts/` projections
-
-If the target is a local operator workspace rather than a git repo, treat the same split as a backup rule: durable reviewed memory can be synced, generated host wiring should stay local.
-
-## 8. If It Fails
-
-Collect redacted machine-readable output:
+Start with a Git check that works in the scratch repository:
 
 ```bash
-brigade --version
-brigade operator quickstart --target . --harnesses codex --json
-brigade operator doctor --target . --profile local-operator --json
-brigade operator verify-harness --target . --harness codex --json
-brigade handoff doctor --target . --json
-brigade tools doctor --target . --json
-brigade skills doctor --target . --json
-brigade security scan --target . --fail-on none --json
+brigadestack work verify run --target . --command "git diff --check" --capture brigade-work
 ```
 
-Review before sharing. Do not paste tokens, private hostnames, private repo names, or unredacted absolute paths into a public issue.
+`git diff --check` checks your unstaged diff for whitespace errors. In an empty repository it passes without checking application behavior. For actual development, replace it with your project's check command, such as `pytest -q` when pytest and the tests are installed.
 
-If Claude verification reports `ready: no` with `handoff_template_shadowed`, a global `core.excludesFile` rule is hiding the managed template. Brigade does not edit global Git configuration. Fresh installs and a normal `brigade init` rerun (without `--force`) refresh parent un-ignore rules in the managed gitignore block without overwriting existing manifest files; see [new-user-quickstart.md — Claude handoff template hidden by a global Git exclude](new-user-quickstart.md#claude-handoff-template-hidden-by-a-global-git-exclude) for platform-specific `git check-ignore` and verify-harness commands plus manual repo-local recovery.
+The command prints the run ID, status, command exit code, and receipt path. The receipt includes log paths. Open the printed receipt and logs under `.brigade/work/verify-runs/<run-id>/`. Confirm that the receipt records the command you intended, the target, and exit 0. A failed command leaves a failed receipt to inspect. Repeated checks may reuse a matching passing receipt.
 
-Open the Quickstart setup problem form:
+`--capture brigade-work` attributes the observed result to the installed work-loop skill. This ad hoc command produces audit evidence. It does not score an artifact. Artifact scoring needs an eligible registered verifier manifest. See [verification receipts](technical-guide.md#daily-work-loop) for details.
 
-```text
-https://github.com/escoffier-labs/brigade/issues/new/choose
+Run the brief again:
+
+```bash
+brigadestack work brief --target .
 ```
 
-Include:
+It now has the verification result available for the next agent.
 
-- exact commands
-- `brigade --version`
-- Python version
-- OS
-- selected harnesses
-- the redacted `issue_report` object from quickstart JSON
+## 7. If a step fails
+
+Collect the exact command, exit code, OS, selected harnesses, and version. For setup diagnosis:
+
+```bash
+brigadestack --version
+brigadestack operator doctor --target . --profile local-operator --json
+brigadestack operator verify-harness --target . --harness codex --json
+```
+
+Review output before sharing it. Remove tokens, private hostnames, repository names, and absolute personal paths. Use the [setup problem form](https://github.com/escoffier-labs/brigade/issues/new/choose) with the redacted evidence. Do not rerun setup with `--force` to suppress an unexplained failure.
