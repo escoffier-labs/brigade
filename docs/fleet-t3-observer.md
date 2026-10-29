@@ -105,16 +105,22 @@ must review and explicitly wire publishing into the existing telemetry path.
 
 The optional session heartbeat renews the exact snapshot last published by a
 Claude hook or a Codex `brigade work brief`. It does not rebuild repository,
-checkout, branch, or dirty-path metadata. Enable it for explicitly listed wired
-checkouts from the existing telemetry service, alongside the T3 observer:
+checkout, branch, or dirty-path metadata. Enable it for a primary checkout and
+its linked worktrees from the existing telemetry service, alongside the T3 observer:
 
 ```ini
 [Service]
-ExecStartPost=-/absolute/path/to/brigade/venv/bin/python -m brigade.fleet_session_heartbeat --target /example/project --publish
+ExecStartPost=-/absolute/path/to/brigade/venv/bin/python -m brigade.fleet_session_heartbeat --worktrees-of /example/project --publish
 ```
 
-Repeat `--target` for other checkouts, including separate worktrees. Use the
-existing enrolled node credentials and Hub configuration. Without `--publish`,
+Repeat `--worktrees-of` for other repositories. Discovery queries Git with a
+two-second timeout and examines at most 512 worktree entries across at most 32
+repository queries. Git output is capped at 1 MiB. Only existing, wired
+worktrees with regular `.presence` sidecars qualify. Bare and prunable entries
+are skipped, and sidecar checks refuse symlinks. Candidates are ordered by their
+newest sidecar modification time. Explicit `--target` checkouts take priority
+and combine with discovered worktrees without duplicates. Use the existing
+enrolled node credentials and Hub configuration. Without `--publish`,
 the module reports counts without sending presence. Removing the command opts
 out. Removing a harness from the target's Brigade configuration also stops its
 renewals. No service, timer, credentials, or configuration is installed by this
@@ -139,13 +145,16 @@ use the separate native T3 observer. macOS and Windows currently skip renewals
 because this module cannot prove process birth identity there. Existing sessions
 need another successful hook or brief after upgrading before they qualify.
 
-Each invocation has a 15-second work budget and accepts at most 32 targets,
+Each invocation shares a 15-second work budget between discovery and renewal,
+and accepts at most 32 unique targets,
 2,048 directory entries per target, 200 session records, and 50 publications.
 State reads are capped at 64 KiB. Each publication reserves the client's full
 two-second timeout plus 250 ms. Run the invocation under an outer 20-second hard
 timeout for filesystem stalls and cleanup. The first Hub failure ends the poll
 without retries or spooling. JSON contains counts and fixed error codes, without
-session IDs, paths, process arguments, or transport error text. Exit 0 means
+session IDs, paths, process arguments, or transport error text. Discovery reports
+`discovered_targets` and `discovery_errors` counts. A failed or timed-out Git
+query adds an error and contributes no targets. Exit 0 means
 complete, 2 means the cap or deadline left partial work, and 1 means failure.
 The `-` service prefix keeps heartbeat failures from failing telemetry.
 

@@ -332,3 +332,236 @@ def test_codex_noninteractive_child_does_not_bind_outer_interactive_session(monk
     table.rows[80] = ProcessIdentity(80, 42, "456", "fake-boot", "codex", ("codex", "exec"))
     monkeypatch.setattr(os, "getpid", lambda: 80)
     assert ProcessTable.owner(table, "codex") is None
+
+
+@pytest.fixture
+def worktrees(setup, monkeypatch):
+    from brigade import proc
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    target, snapshot, processes, sent, _ = setup
+    entries = []
+
+    def add(name, *, wired=True, sidecar=True, mtime=1, flags=()):
+        path = target / name
+        path.mkdir()
+        if wired:
+            write_config(path, Config(version=1, selection=Selection(depth="repo", harnesses=("codex",))))
+        if sidecar:
+            saved = replace(snapshot, checkout_path=str(path), session_id=name, harness="codex")
+            _remember(saved)
+            record = path / ".brigade/work/claude-hooks/sessions" / state.record_name("codex", name)
+            os.utime(record, ns=(mtime, mtime))
+        entries.append("\0".join([f"worktree {path}", "HEAD abcdef", *flags]) + "\0\0")
+        return path
+
+    monkeypatch.setattr(heartbeat.proc, "run", lambda *a, **k: proc.Result(0, "".join(entries), ""))
+    processes.rows[42] = replace(processes.rows[42], executable="codex", arguments=("codex",))
+    return target, add, entries, processes, sent
+
+
+def test_worktree_discovery_selects_only_wired_present_targets_newest_first(worktrees):
+    target, add, entries, processes, sent = worktrees
+    oldest = add("oldest", mtime=10)
+    newest = add("newest", mtime=30)
+    middle = add("middle", mtime=20, flags=("locked maintenance",))
+    add("unwired", wired=False, mtime=100)
+    add("empty", sidecar=False)
+    add("prunable", flags=("prunable missing metadata",))
+    add("bare", flags=("bare",))
+    entries.append(f"worktree {target / 'missing'}\0locked unavailable\0\0")
+    report = heartbeat.observe(
+        [],
+        worktrees_of=[target],
+        publish=True,
+        processes=processes,
+        publisher=lambda s: sent.append(s) or fleet_client.SessionWriteResult(True),
+    )
+    assert report["published"] == report["discovered_targets"] == 3
+    assert [s.checkout_path for s in sent] == [str(newest), str(middle), str(oldest)]
+    assert report["discovery_errors"] == 0
+    assert str(target) not in json.dumps(report)
+
+
+def test_discovery_combines_explicit_targets_and_deduplicates_before_cap(worktrees, monkeypatch):
+    target, add, _, processes, sent = worktrees
+    explicit = add("explicit", mtime=1)
+    newest = add("newest", mtime=30)
+    add("older", mtime=20)
+    monkeypatch.setattr(heartbeat, "TARGET_LIMIT", 2)
+    report = heartbeat.observe(
+        [explicit, explicit],
+        worktrees_of=[target, target],
+        publish=True,
+        processes=processes,
+        publisher=lambda s: sent.append(s) or fleet_client.SessionWriteResult(True),
+    )
+    assert [s.checkout_path for s in sent] == [str(explicit), str(newest)]
+    assert report["published"] == 2
+    assert report["truncated"]
+
+
+def test_worktree_entry_limit_is_shared_across_repositories(worktrees, monkeypatch):
+    target, add, _, processes, sent = worktrees
+    first = add("first", mtime=10)
+    second = add("second", mtime=20)
+    add("beyond-limit", mtime=100)
+    monkeypatch.setattr(heartbeat, "WORKTREE_ENTRY_LIMIT", 2)
+    report = heartbeat.observe(
+        [],
+        worktrees_of=[target, target / "first"],
+        publish=True,
+        processes=processes,
+        publisher=lambda s: sent.append(s) or fleet_client.SessionWriteResult(True),
+    )
+    assert [s.checkout_path for s in sent] == [str(second), str(first)]
+    assert report["truncated"]
+
+
+@pytest.mark.parametrize("code", [1, 124])
+def test_discovery_git_failure_is_counted_without_leaking_details(worktrees, monkeypatch, code):
+    from brigade import proc
+
+    target, add, _, processes, sent = worktrees
+    add("ignored")
+    monkeypatch.setattr(
+        heartbeat.proc, "run", lambda *a, **k: proc.Result(code, f"worktree {target}\0\0", "private git failure")
+    )
+    report = heartbeat.observe([], worktrees_of=[target], processes=processes)
+    assert report["discovery_errors"] == 1
+    assert report["discovered_targets"] == report["observed"] == 0
+    assert not report["ok"]
+    assert sent == []
+    assert "private" not in json.dumps(report) and str(target) not in json.dumps(report)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink fixture")
+@pytest.mark.parametrize("component", [".brigade", "work", "claude-hooks", "sessions", "record"])
+def test_discovery_never_follows_sidecar_symlinks(worktrees, component):
+    target, add, _, processes, _ = worktrees
+    candidate = add("linked")
+    path = candidate / ".brigade/work/claude-hooks/sessions" / state.record_name("codex", "linked")
+    if component != "record":
+        path = next(parent for parent in path.parents if parent.name == component)
+    outside = target / "outside-state"
+    path.rename(outside)
+    path.symlink_to(outside, target_is_directory=component != "record")
+    report = heartbeat.observe([], worktrees_of=[target], processes=processes)
+    assert report["discovered_targets"] == report["observed"] == 0
+
+
+def test_discovery_and_observation_share_one_deadline(worktrees, monkeypatch):
+    from brigade import proc
+
+    target, add, entries, processes, sent = worktrees
+    add("session")
+    clock = [100.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: clock[0])
+
+    def slow_git(*args, **kwargs):
+        assert 0 < kwargs["timeout"] <= heartbeat.WORKTREE_TIMEOUT_SECONDS
+        clock[0] += heartbeat.OBSERVATION_BUDGET_SECONDS
+        return proc.Result(0, "".join(entries), "")
+
+    monkeypatch.setattr(heartbeat.proc, "run", slow_git)
+    report = heartbeat.observe([], worktrees_of=[target], processes=processes)
+    assert report["error"] == "observation_timeout"
+    assert report["truncated"] and report["observed"] == 0
+    assert sent == []
+
+
+def test_main_accepts_worktree_discovery_without_explicit_target(worktrees, monkeypatch, capsys):
+    target, add, _, processes, _ = worktrees
+    add("session")
+    monkeypatch.setattr(heartbeat, "ProcessTable", lambda: processes)
+    assert heartbeat.main(["--worktrees-of", str(target)]) == 0
+    assert json.loads(capsys.readouterr().out)["live"] == 1
+
+
+def test_discovery_reads_real_git_worktree_porcelain(setup):
+    from brigade import proc
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    target, snapshot, processes, _, _ = setup
+    linked = target.parent / (target.name + " linked checkout")
+    for command in (
+        ["git", "init", "-q", str(target)],
+        [
+            "git",
+            "-C",
+            str(target),
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.com",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        ["git", "-C", str(target), "worktree", "add", "--detach", str(linked), "HEAD"],
+    ):
+        result = proc.run(command, timeout=5)
+        assert result.code == 0, result.stderr
+    write_config(linked, Config(version=1, selection=Selection(depth="repo", harnesses=("claude",))))
+    _remember(replace(snapshot, checkout_path=str(linked), session_id="linked-example"))
+    report = heartbeat.observe([], worktrees_of=[target], processes=processes)
+    assert report["discovered_targets"] == report["live"] == 2
+    assert report["ok"]
+
+
+@pytest.mark.parametrize("failure", ["overflow", "decode", "launch"])
+def test_discovery_unusable_git_output_is_counted(worktrees, monkeypatch, failure):
+    from brigade import proc
+
+    target, add, entries, processes, _ = worktrees
+    add("session")
+
+    def failed(*args, **kwargs):
+        if failure == "launch":
+            raise OSError("private command failure")
+        return proc.Result(
+            0,
+            "".join(entries),
+            "",
+            output_limit_exceeded=failure == "overflow",
+            stdout_decode_error="invalid bytes" if failure == "decode" else None,
+        )
+
+    monkeypatch.setattr(heartbeat.proc, "run", failed)
+    report = heartbeat.observe([], worktrees_of=[target], processes=processes)
+    assert report["discovery_errors"] == 1
+    assert report["discovered_targets"] == report["observed"] == 0
+    assert not report["ok"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Linux procfs fixture requires POSIX symlinks")
+@pytest.mark.parametrize("native_layout", [True, False])
+def test_versioned_claude_owner_requires_verified_native_installation(tmp_path, monkeypatch, native_layout):
+    from pathlib import Path
+
+    monkeypatch.setattr("brigade.fleet_session_process.sys.platform", "linux")
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    root = tmp_path / "proc"
+    process = root / "42"
+    process.mkdir(parents=True)
+    boot = root / "sys/kernel/random"
+    boot.mkdir(parents=True)
+    (boot / "boot_id").write_text("fake-boot")
+    (process / "stat").write_text("42 (claude) " + " ".join(["S", "1", *(["0"] * 17), "123"]))
+    (process / "cmdline").write_bytes(b"claude\0")
+    installation = Path.home() / ".local/share/claude/versions" if native_layout else tmp_path / "other/versions"
+    installation.mkdir(parents=True)
+    binary = installation / "2.1.39"
+    binary.write_bytes(b"example executable")
+    binary.chmod(0o755)
+    (process / "exe").symlink_to(binary)
+    monkeypatch.setattr(os, "getpid", lambda: 42)
+    table = ProcessTable(root)
+    proof = {"pid": 42, "start": "123", "boot": "fake-boot"}
+    assert table.alive(proof, "claude") is native_layout
+    assert table.owner("claude") == (proof if native_layout else None)
+    binary.chmod(0o777)
+    assert not table.alive(proof, "claude")

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import re
+import stat
 import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -51,7 +53,23 @@ class ProcessTable:
             if not boot or len(boot) > 128 or len(raw_args) > 8192 or not start.isdecimal():
                 return None
             args = tuple(arg.decode("utf-8", "strict") for arg in raw_args.rstrip(b"\0").split(b"\0"))
-            executable = Path(os.readlink(directory / "exe")).name
+            executable_path = Path(os.readlink(directory / "exe"))
+            executable = executable_path.name
+            # Native Claude's launcher is a symlink. procfs exposes the
+            # versioned binary, so verify its installation path and inode
+            # metadata rather than trusting argv[0] or a version basename.
+            if (
+                re.fullmatch(r"\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?", executable)
+                and executable_path.parent == (Path.home() / ".local/share/claude/versions").resolve()
+            ):
+                info = (directory / "exe").stat()
+                if (
+                    stat.S_ISREG(info.st_mode)
+                    and info.st_uid == os.getuid()
+                    and info.st_mode & stat.S_IXUSR
+                    and not info.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+                ):
+                    executable = "claude"
             return ProcessIdentity(pid, parent, start, boot, executable, args)
         except (OSError, ValueError, IndexError, UnicodeError):
             return None
