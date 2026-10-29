@@ -14,7 +14,7 @@ import re
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Mapping
+from typing import Any, Iterable, Mapping
 
 SCHEMA_VERSION = 1
 MAX_ROWS = 300
@@ -305,6 +305,11 @@ class Machine:
         return sum(1 for config in self.harnesses if not config.readable)
 
 
+def _machine_labels(rows: Iterable[Row]) -> tuple[str, ...]:
+    """One label per distinct node: enrolled nodes may share a label or have none."""
+    return tuple(sorted({row.node_id: row.machine for row in rows}.values()))
+
+
 @dataclass(frozen=True)
 class Server:
     name: str
@@ -313,7 +318,7 @@ class Server:
 
     @property
     def machines(self) -> tuple[str, ...]:
-        return tuple(sorted({row.machine for row in self.rows}))
+        return _machine_labels(self.rows)
 
     @property
     def harnesses(self) -> tuple[str, ...]:
@@ -324,7 +329,7 @@ class Server:
         return bool(self.rows) and all(row.scope == "account" for row in self.rows)
 
     def machines_with(self, label: str) -> tuple[str, ...]:
-        return tuple(sorted({row.machine for row in self.rows if row.label == label}))
+        return _machine_labels(row for row in self.rows if row.label == label)
 
     @property
     def issue(self) -> str:
@@ -434,7 +439,7 @@ def summary(server: Server) -> str:
 def verdict(server: Server) -> str:
     """One plain sentence from the real rows."""
     configured = {row for row in server.rows if row.status not in {"missing", "disabled"}}
-    machines = sorted({row.machine for row in configured})
+    machines = _machine_labels(configured)
     harnesses = sorted({row.column.capitalize() for row in configured})
     if machines:
         where = f"Configured on {_plural(len(machines), 'machine')} in {', '.join(harnesses)}."

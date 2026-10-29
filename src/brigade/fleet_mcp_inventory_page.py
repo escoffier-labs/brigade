@@ -117,12 +117,12 @@ def _server_agent(server: Server, view: McpView) -> str:
         f"<td><code>{_esc(r.status)}</code></td></tr>"
         for r in sorted(server.rows, key=lambda r: (r.machine, r.harness, r.scope))
     ]
-    names = set(server.machines)
+    node_ids = {row.node_id for row in server.rows}
     reports = [
         f"<tr><td>{_esc(m.label)}</td><td>{_esc(m.brigade_version)}</td><td>{_esc(m.observed_at)}</td>"
         f"<td>{'yes' if m.catalog_present else 'no'}</td><td>{_esc(_configs(m))}</td></tr>"
         for m in view.machines
-        if m.reported and m.label in names
+        if m.reported and m.node_id in node_ids
     ]
     return explorer.agent(
         _table(("Machine", "Harness", "Scope", "Transport", "Remote host", "Managed", "Enabled", "Status code"), rows)

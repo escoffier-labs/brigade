@@ -840,3 +840,16 @@ def test_malformed_user_config_is_unreadable_even_though_it_is_inventory_only(wo
     report = fleet_mcp_report.build_report(workspace, now=NOW)
     claude_user = next(h for h in report["harnesses"] if (h["harness"], h["scope"]) == ("claude", "user"))
     assert claude_user == {"harness": "claude", "scope": "user", "config_found": True, "readable": False}
+
+
+def test_machines_sharing_a_label_are_counted_separately():
+    def row(node_id):
+        return inventory.Row(
+            node_id, "unnamed machine", "sample-tool", "claude", "project", "stdio", True, "missing", True, None
+        )
+
+    server = inventory.Server("sample-tool", (row("node-a"), row("node-b")), frozenset({"missing"}))
+    assert server.machines == ("unnamed machine", "unnamed machine")
+    assert server.issue == "missing on 2 machines"
+    assert inventory.summary(server).startswith("2 machines")
+    assert "Missing on unnamed machine, unnamed machine." in inventory.verdict(server)
