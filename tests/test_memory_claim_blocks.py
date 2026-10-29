@@ -183,3 +183,52 @@ def test_opaque_blocks_cannot_establish_list_container(markdown, opener):
     body = markdown(f"{opener}\n- literal ^c-abcdef\n</section>\n\n    code ^c-fedcba\n\nAfter.")
     assert [b.text for b in delta.blocks(body)] == ["After."]
     assert delta.claim_body(body) == body
+
+
+REVIEW_CASES = [
+    pytest.param("- Restart steps:\n## Commands\n    code ^c-abcdef", ["- Restart steps:"], id="F1-heading"),
+    pytest.param("- item\n```sh\nmake\n```\n    code ^c-abcdef", ["- item"], id="F1-fence"),
+    pytest.param("- item\n<div>\n</div>\n\n    code ^c-abcdef", ["- item"], id="F1-html"),
+    pytest.param("- item\n> quote\n\n    code ^c-abcdef", ["- item"], id="F1-quote"),
+    pytest.param("- item\n[r]: /u\n\n    code ^c-abcdef", ["- item"], id="F1-reference"),
+    pytest.param("1. num\n# Head\n    - deep ^c-abcdef", ["1. num"], id="F1-code-marker"),
+    pytest.param("- Example:\n  ```\n  code\n```\n\ncode ^c-abcdef", ["- Example:"], id="F2-dedent-fence"),
+    pytest.param("- ```\n~~~\n```\n- item ^c-abcdef", [], id="F2-other-fence"),
+    pytest.param("- ```\n</div>\n  ```\ncode ^c-abcdef", [], id="F2-html"),
+    pytest.param("Before.\n\n-\n\nAfter.", ["Before.", "After."], id="F3-empty"),
+    pytest.param("-\n      code ^c-abcdef", [], id="F3-code"),
+    pytest.param("lazy ^c-fedcba\n    code ^c-abcdef\n---", [], id="F4-setext"),
+    pytest.param("a | b\n--- | ---\n[r]: /u\nPara one. ^c-abcdef", [], id="F5-table-reference"),
+]
+
+
+@pytest.mark.parametrize("source,expected", REVIEW_CASES)
+def test_review_structure_lifetimes(markdown, source, expected):
+    body = markdown(source)
+    assert [b.text for b in delta.blocks(body)] == expected
+    assert delta.claim_body(body).encode() == body.encode()
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+    assert delta.claim_body(anchored).encode() == body.encode()
+    assert all(b.block_id != "c-abcdef" for b in delta.blocks(body))
+    if "^c-abcdef" in body:
+        assert delta.claim_body(body) != delta.claim_body(body.replace("^c-abcdef", "^c-123abc"))
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("- First\nlazy ordinary continuation", ["- First\nlazy ordinary continuation"]),
+        ("ordinary\n    continued", ["ordinary\n    continued"]),
+        ("-\n\tOrdinary.", ["\tOrdinary."]),
+        ("-\n  Ordinary.\n  - Nested.\n\nAfter.", ["  Ordinary.", "  - Nested.", "After."]),
+        ("- item\n# H\n    code ^c-abcdef\n\nAfter.", ["- item", "After."]),
+    ],
+)
+def test_review_positive_claims(markdown, source, expected):
+    body = markdown(source)
+    newline = "\r\n" if "\r\n" in body else "\n"
+    assert [b.text for b in delta.blocks(body)] == [s.replace("\n", newline) for s in expected]
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+    assert delta.claim_body(anchored) == body
