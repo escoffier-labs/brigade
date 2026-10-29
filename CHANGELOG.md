@@ -8,7 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Native source builds add `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` entry points over the existing engines. Legacy commands, archive locations, protocol identities, and release assets remain compatible.
+- Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
+- `brigade dogfood` reads the TOML literal strings it now writes without applying escapes, so Windows paths in `.brigade/dogfood.toml` keep their backslashes.
+
 - Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
 - Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
 - Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.
