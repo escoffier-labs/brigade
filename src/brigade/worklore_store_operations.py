@@ -512,11 +512,11 @@ def list_items(
 
 
 def _event_candidates(conn: sqlite3.Connection, *, after: Mapping[str, str] | None, limit: int) -> list[Any]:
-    predicate = ""
+    predicate = f" WHERE {_core()._UNSCOPED_EVENT_PREDICATE}"
     params: tuple[object, ...] = ()
     if after is not None:
         # Keep the descending timestamp/sequence scan on its composite index.
-        predicate = " WHERE (occurred_at, seq) < (?, ?)"
+        predicate += " AND (occurred_at, seq) < (?, ?)"
         params = (after["occurred_at"], _cursor_seq(after))
     return list(
         conn.execute(
@@ -615,7 +615,8 @@ def list_events_page(
         predicate = " AND seq > ?"
         params.append(_cursor_seq(cursor_values))
     rows = conn.execute(
-        f"SELECT {', '.join(_EVENT_PAGE_COLUMNS)} FROM work_events WHERE work_id = ?{predicate} "
+        f"SELECT {', '.join(_EVENT_PAGE_COLUMNS)} FROM work_events WHERE work_id = ? "
+        f"AND {_core()._UNSCOPED_EVENT_PREDICATE}{predicate} "
         "ORDER BY seq ASC LIMIT ?",
         (*params, page_size + 1),
     ).fetchall()
