@@ -193,3 +193,54 @@ class PolicyAndSkills(Fixture):
         self.assertEqual(self.call("skill_get", name="missing"), {"error": "skill_not_found"})
         with self.assertRaises(DotError):
             self.call("skill_get", name="example", resource="../outside")
+
+
+class RequiredPolicySources(Fixture):
+    @requires_local_state
+    def test_each_required_source_failure_is_closed_even_with_saved_hash(self):
+        for index in range(3):
+            for failure in ("missing", "directory", "oversize", "unicode", "symlink", "untrusted"):
+                with self.subTest(index=index, failure=failure):
+                    paths = PolicyAndSkills.policy_files(self)
+                    saved = self.call("fleet_policy")
+                    path = paths[index]
+                    path.unlink()
+                    if failure == "directory":
+                        path.mkdir()
+                    elif failure == "oversize":
+                        path.write_bytes(b"x" * (1024 * 1024 + 1))
+                    elif failure == "unicode":
+                        path.write_bytes(b"\xff")
+                    elif failure == "symlink":
+                        outside = self.root / "private-policy.md"
+                        outside.write_text("private policy bytes")
+                        path.symlink_to(outside)
+                    elif failure == "untrusted":
+                        path.write_text("private policy bytes")
+                        path.parent.chmod(0o777)
+                    try:
+                        with self.assertRaisesRegex(DotError, "^source_unavailable$") as caught:
+                            self.call("fleet_policy", since_hash=saved["hash"])
+                        self.assertEqual(str(caught.exception), "source_unavailable")
+                    finally:
+                        path.parent.chmod(0o755)
+                        if path.is_dir():
+                            path.rmdir()
+                        elif path.exists() or path.is_symlink():
+                            path.unlink()
+
+    @requires_local_state
+    def test_success_preserves_source_identity_hash_mtime_and_unchanged_response(self):
+        paths = PolicyAndSkills.policy_files(self)
+        raw = [path.read_bytes() for path in paths]
+        result = self.call("fleet_policy")
+        identities = [(str(path), hashlib.sha256(data).hexdigest()) for path, data in zip(paths, raw, strict=True)]
+        expected_hash = hashlib.sha256(json.dumps(identities, separators=(",", ":")).encode()).hexdigest()
+        self.assertEqual(result["hash"], expected_hash)
+        for source, path, data in zip(result["sources"], paths, raw, strict=True):
+            self.assertEqual(
+                (source["path"], source["sha256"], source["mtime"]),
+                (str(path), hashlib.sha256(data).hexdigest(), path.stat().st_mtime),
+            )
+            self.assertIn('Banned phrases (compact): ["filler"]', source["content"])
+        self.assertEqual(self.call("fleet_policy", since_hash=expected_hash), {"hash": expected_hash, "changed": False})

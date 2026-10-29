@@ -266,8 +266,11 @@ def policy(workspace: Path, since_hash: str | None = None) -> dict[str, Any]:
     banned: list[str] = []
     for relative in POLICY_PATHS:
         path = workspace / relative
-        raw, info = read_file(path)
-        content = raw.decode("utf-8")
+        try:
+            raw, info = read_file(path)
+            content = raw.decode("utf-8")
+        except (OSError, ValueError, UnicodeError):
+            raise DotError("source_unavailable") from None
 
         def compact(match):
             phrases = re.findall(r'^- "(.*)"\s*$', match.group(), re.M)
