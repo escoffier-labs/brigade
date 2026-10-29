@@ -302,3 +302,14 @@ def test_directory_changes_after_shell_keywords_are_observed(worktrees, command)
     assert replacement(second) in blocked["reason"]
     verify(first, first)
     assert event(first, "Stop", stop_hook_active=False)["decision"] == "block"
+
+
+@pytest.mark.parametrize("command", ["date --date 2020-01-01", "stat --format %s source.py", "id --group"])
+def test_read_only_commands_with_option_values_keep_the_gate_disarmed(worktrees, command):
+    first, _ = worktrees
+    fields = {"tool_name": "Bash", "tool_input": {"command": command}}
+    event(first, "PreToolUse", **fields)
+    event(first, "PostToolUse", **fields)
+    assert event(first, "Stop", stop_hook_active=False) is None
+    state = runtime.read_session_state(first, SESSION)
+    assert state is not None and state["write_observed"] is False

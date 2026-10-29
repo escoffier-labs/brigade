@@ -75,7 +75,9 @@ def _target_directory(tokens: list[str]) -> str | None:
 
 
 def _without_option_values(name: str, tokens: list[str]) -> list[str] | None:
-    letters = _OPTION_VALUES.get(name, "")
+    if name not in _OPTION_VALUES:
+        return tokens  # option-value rules only describe the write commands listed above
+    letters = _OPTION_VALUES[name]
     kept: list[str] = []
     skip = False
     for token in tokens:
