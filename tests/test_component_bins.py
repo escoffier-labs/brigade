@@ -56,6 +56,12 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
     }
 
 
+def _assert_path_match(actual: str | None, expected: Path) -> None:
+    # Windows lookup may preserve the PATHEXT spelling rather than file casing.
+    assert actual is not None
+    assert os.path.normcase(actual) == os.path.normcase(str(expected))
+
+
 def test_managed_path_returns_installed_executable(tmp_path):
     binary = _write_executable(tmp_path / "managed" / "graphtrail")
     _write_installed_state(tmp_path / "data", {"graphtrail": binary})
@@ -100,7 +106,7 @@ def test_resolve_falls_back_to_supplied_path(tmp_path, monkeypatch):
     on_path = _write_executable(tmp_path / "pathdir" / "graphtrail")
     monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
     env = _env(tmp_path, PATH=str(on_path.parent))
-    assert component_bins.resolve("graphtrail", env=env) == str(on_path)
+    _assert_path_match(component_bins.resolve("graphtrail", env=env), on_path)
 
 
 def test_resolve_falls_back_to_legacy_location(tmp_path, monkeypatch):
@@ -115,7 +121,7 @@ def test_resolve_unknown_name_uses_path_only(tmp_path, monkeypatch):
     on_path = _write_executable(tmp_path / "pathdir" / "custom-tool")
     monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
     env = _env(tmp_path, PATH=str(on_path.parent))
-    assert component_bins.resolve("custom-tool", env=env) == str(on_path)
+    _assert_path_match(component_bins.resolve("custom-tool", env=env), on_path)
 
 
 def test_resolve_override_tilde_uses_supplied_home(tmp_path, monkeypatch):
@@ -184,7 +190,7 @@ def test_resolve_agent_notify_falls_back_to_supplied_path(tmp_path, monkeypatch)
     on_path = _write_executable(tmp_path / "pathdir" / "agent-notify")
     monkeypatch.setenv("PATH", str(tmp_path / "elsewhere"))
     env = _env(tmp_path, PATH=str(on_path.parent))
-    assert component_bins.resolve("agent-notify", env=env) == str(on_path)
+    _assert_path_match(component_bins.resolve("agent-notify", env=env), on_path)
 
 
 def test_resolve_argv_rewrites_agent_notify_head(tmp_path, monkeypatch):
@@ -239,7 +245,7 @@ def test_each_family_honors_canonical_override_and_path_for_legacy_request(tmp_p
     for old, new, key in families:
         binary = _write_executable(tmp_path / "path" / new)
         env = _env(tmp_path, PATH=str(binary.parent))
-        assert component_bins.resolve(old, env=env) == str(binary)
+        _assert_path_match(component_bins.resolve(old, env=env), binary)
         env[key] = str(tmp_path / "missing")
         assert component_bins.resolve(old, env=env) is None
         env[key] = str(binary)
@@ -251,11 +257,11 @@ def test_family_resolution_preserves_path_directory_order_and_requested_name_tie
     canonical = _write_executable(tmp_path / "later" / "brigade-evidence")
     env = _env(tmp_path, PATH=os.pathsep.join((str(legacy.parent), str(canonical.parent))))
     for requested in ("miseledger", "brigade-evidence"):
-        assert component_bins.resolve(requested, env=env) == str(legacy)
+        _assert_path_match(component_bins.resolve(requested, env=env), legacy)
 
     colocated = _write_executable(legacy.parent / "brigade-evidence")
-    assert component_bins.resolve("miseledger", env=env) == str(legacy)
-    assert component_bins.resolve("brigade-evidence", env=env) == str(colocated)
+    _assert_path_match(component_bins.resolve("miseledger", env=env), legacy)
+    _assert_path_match(component_bins.resolve("brigade-evidence", env=env), colocated)
 
 
 def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch):
@@ -265,7 +271,7 @@ def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch)
     for name, key in (("agent-notify", "AGENT_NOTIFY_BIN"), ("sessionfind", "SESSIONFIND_BIN")):
         binary = _write_executable(tmp_path / name / name)
         env = _env(tmp_path, PATH=str(binary.parent), **{key: ""})
-        assert component_bins.resolve(name, env=env) == str(binary)
+        _assert_path_match(component_bins.resolve(name, env=env), binary)
         monkeypatch.setenv("PATH", str(binary.parent))
         monkeypatch.setenv(key, "")
-        assert component_bins.resolve_argv([name, "version"])[0] == str(binary)
+        _assert_path_match(component_bins.resolve_argv([name, "version"])[0], binary)
