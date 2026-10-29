@@ -1,10 +1,9 @@
 # Codex context accounting handoff, version 1
 
-Status: producer schema v1 frozen after the focused gate passed on 2026-10-29.
-Receipt `20261029-161331-work-verify-efbb02` covers 593 producer and impacted
-regression tests plus lint, format, type, version and snapshot checks. Consumer
-implementation and cross-tool validation remain separate work. This is a
-fresh disk accounting contract, without session or behavior equivalence claims.
+Status: schema v1 has a Brigade producer and an independent validation-only
+consumer in Bootstrap Doctor. Shared fixtures and cross-tool CLI checks cover
+accounting, source identities and stale-input refusals. This is a fresh disk
+accounting contract, without session or behavior equivalence claims.
 
 ## Scope and entry points
 
@@ -70,8 +69,7 @@ repository path, prefixed before hashing with the ASCII domain
 itself is never exported. The explicit consumer repository must have the same
 location digest and directory identity. A clone,
 replacement directory, moved worktree or alternate checkout requires a new
-inspection. This identity is local, not portable or authenticated.
-Handoffs are local artifacts, not anonymized telemetry. Digests can confirm
+inspection. Treat handoffs as local artifacts. Digests can confirm
 guessed paths or short source contents and do not make the data confidential.
 
 Every relative path uses `/`. It must have no absolute prefix, empty segment,
@@ -100,7 +98,8 @@ Also require `trust: {value: "trusted" or "unset", source: "caller-supplied"}`,
 `read_access: {value: "full", source: "caller-supplied"}`, and
 `environment_order: {value: ["explicit-cwd"], source: "caller-supplied"}`.
 No discovered user-base provenance is claimed by this explicit-supplied route.
-The source-acquisition ceilings below are protocol constants, not Codex limits.
+The source-acquisition ceilings below are fixed by this protocol. They bound
+inspection independently of Codex's configured budget.
 
 Zero cap, untrusted loading, restricted access, unsupported platforms and
 unevaluated results produce no consumable export. Disabled or uninspected
@@ -281,7 +280,6 @@ expected selected rows and expected totals. Source hex belongs only to this
 test corpus. Actual exports contain no source bodies or body-derived excerpts.
 `canonical_digest_vectors` separately pin canonical serialization. Filesystem
 identities must be generated per local fixture, never copied from a real host.
-These are accounting vectors, not claimed producer export fixtures.
 
 [Export fixture](fixtures/codex-context-handoff-export-v1.json) is a complete
 producer export template generated from synthetic files. Its wrapper is
