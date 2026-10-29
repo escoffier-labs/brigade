@@ -316,3 +316,22 @@ def test_list_raw_html_ends_at_nonblank_dedent(markdown, opener, closer, nested,
     assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
     assert delta.claim_body(anchored) == delta.claim_body(body)
     assert "literal ^c-abcdef" in delta.claim_body(anchored)
+
+
+@pytest.mark.parametrize("prefix", ["", "First clause\n"])
+@pytest.mark.parametrize("comment", ["<!-- note -->", "<!-- note\ncontinued -->"])
+def test_inline_comment_keeps_entire_paragraph_opaque(markdown, prefix, comment):
+    paragraph = prefix + f"The cache {comment} stays warm and\ncold nodes recover. ^c-123abc"
+    body = markdown(paragraph + "\n\nAfter.")
+    assert [b.text for b in delta.blocks(body)] == ["After."]
+    assert delta.claim_body(body) == body
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert paragraph.replace("\n", "\r\n" if "\r\n" in body else "\n") in anchored
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_list_comment_ends_at_container_dedent(markdown, nested):
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    body = markdown(f"{prefix}<!-- note\n{indent}hidden ^c-abcdef\n\nOuter. ^c-123abc\n\nAfter.")
+    assert [b.text for b in delta.blocks(body)] == (["- Parent."] if nested else []) + ["Outer. ^c-123abc", "After."]
+    assert delta.claim_body(body) == body.replace("Outer. ^c-123abc", "Outer.")

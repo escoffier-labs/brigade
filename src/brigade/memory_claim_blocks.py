@@ -18,6 +18,7 @@ _HEADING = re.compile(r"^ {0,3}#{1,6}(?: |$)")
 _REFERENCE = re.compile(r"^ {0,3}\[[^\]\n]+\]: *(.*)$")
 _TABLE = re.compile(r"^ {0,3}\|? *:?-+:? *(?:\| *:?-+:? *)*\|? *$")
 _RAW_HTML = (
+    (re.compile(r"^ {0,3}<!--"), re.compile(r"-->")),
     (
         re.compile(r"^ {0,3}<(?:pre|script|style|textarea)(?:[ >]|$)", re.I),
         re.compile(r"</(?:pre|script|style|textarea)>", re.I),
@@ -223,8 +224,10 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             index += 1
             continue
         if "<!--" in line:
-            # An inline multiline comment makes the containing paragraph opaque.
+            # Keep the entire inline-comment paragraph opaque, including any
+            # continuation after a same-line or multiline closing marker.
             start = None
+            opaque = True
             comment = "-->" not in line.split("<!--", 1)[1]
             index += 1
             continue
