@@ -988,3 +988,326 @@ def test_runbook_capture_closer_start_failure_preserves_primary_exception(monkey
     with pytest.raises(SystemExit) as raised:
         runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
     assert raised.value is original
+
+
+def _versioned_tool(path, label):
+    return _write_tool(
+        path,
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        f'  printf "{label} version\\n"\n  exit 0\nfi\nprintf "{label}" > "$1"\n',
+    )
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_pin_path_drift_refuses_or_records_actual_selected_tool(tmp_path, monkeypatch, capsys, override):
+    accepted = tmp_path / "accepted"
+    changed = tmp_path / "changed"
+    accepted.mkdir()
+    changed.mkdir()
+    tool_a = _versioned_tool(accepted / "tool", "accepted")
+    tool_b = _versioned_tool(changed / "tool", "changed")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "drift",
+                "pins": [{"command": "tool", "version_cmd": "--version"}],
+                "steps": [{"run": f"tool {marker}"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(accepted))
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("PATH", str(changed))
+    assert runbook_cmd.plan(target=tmp_path, runbook=runbook, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)["steps"][0]["pin"]
+    assert planned["status"] == "mismatch"
+    assert planned["expected_path"] == str(tool_a)
+    assert planned["resolved_path"] == str(tool_b)
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["expected_sha256"] == _sha256(tool_a)
+    assert check["observed_sha256"] == _sha256(tool_b)
+    assert check["expected_path"] == str(tool_a) and check["resolved_path"] == str(tool_b)
+    assert check["status"] == "mismatch"
+    if override:
+        assert rc == 0 and marker.read_text() == "changed"
+        assert check["override"] is True and check["version_output"] == "changed version"
+        assert check["step_index"] == 1 and check["step_id"] == "step-1"
+        assert result["steps"][0]["pin"] == check
+    else:
+        assert rc == 2 and result["status"] == "pin-check-failed"
+        assert not marker.exists() and not (tmp_path / ".brigade" / "runbooks" / "runs").exists()
+        assert "version_output" not in check
+
+
+def test_pin_path_identity_drifts_even_when_tool_bytes_match(tmp_path, monkeypatch, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = _write_tool(first / "tool")
+    b = _write_tool(second / "tool", a.read_text())
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(json.dumps({"steps": [{"run": f"tool {marker}"}]}))
+    monkeypatch.setenv("PATH", str(first))
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("PATH", str(second))
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["expected_sha256"] == check["observed_sha256"] == _sha256(b)
+    assert check["status"] == "mismatch" and not marker.exists()
+
+
+def test_missing_selected_tool_does_not_validate_or_probe_stored_pin(tmp_path, monkeypatch, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "stored")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": "tool marker"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "missing"))
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["status"] == "missing" and check["resolved_path"] is None
+    assert check["observed_sha256"] is None and "version_output" not in check
+    assert tool.exists()
+
+
+@pytest.mark.parametrize(
+    "command,path", [("./tool", "/missing"), ("../bin/tool", "/missing"), ("tool", "bin"), ("tool", "")]
+)
+def test_pinning_uses_effective_step_cwd_and_relative_search_path(tmp_path, monkeypatch, capsys, command, path):
+    target = tmp_path / "target"
+    cwd = target / "work"
+    cwd.mkdir(parents=True)
+    (cwd / "bin").mkdir()
+    tool_path = cwd / ("bin/tool" if path == "bin" else "tool")
+    if command == "../bin/tool":
+        (target / "bin").mkdir()
+        tool_path = target / "bin/tool"
+    tool = _versioned_tool(tool_path, "local")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(json.dumps({"steps": [{"run": f"{command} {marker}", "cwd": "work"}]}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", path)
+    assert runbook_cmd.pin(target=target, runbook=runbook, json_output=True) == 0
+    pin = json.loads(capsys.readouterr().out)["pins"][0]
+    assert pin["path"] == str(tool)
+    assert runbook_cmd.run(target=target, runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert marker.read_text() == "local"
+    assert receipt["steps"][0]["cwd"] == str(cwd)
+    assert receipt["pin_checks"][0]["resolved_path"] == str(tool)
+
+
+def test_pinning_refuses_distinct_executables_with_same_command_name(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_tool(first / "tool")
+    _write_tool(second / "tool")
+    runbook = tmp_path / "runbook.json"
+    original = json.dumps(
+        {"steps": [{"run": "./tool marker", "cwd": str(first)}, {"run": "./tool marker", "cwd": str(second)}]}
+    )
+    runbook.write_text(original)
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 2
+    assert "different executables" in capsys.readouterr().err
+    assert runbook.read_text() == original
+
+
+def test_runtime_pin_checks_each_step_after_prior_step_changes_executable(tmp_path, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "original")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [
+                    {"id": "replace", "run": f"printf replacement > {tool}"},
+                    {"id": "later", "run": f"{tool} {marker}"},
+                ],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed" and result["steps"][0]["status"] == "completed"
+    assert result["steps"][1]["status"] == "blocked" and not marker.exists()
+    check = result["pin_checks"][0]
+    assert check["status"] == "mismatch" and check["step_id"] == "later"
+    assert check["override"] is False and "version_output" not in check
+
+
+def test_per_step_pin_checks_do_not_collapse_matching_command_names(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    tool_a = _versioned_tool(first / "tool", "first")
+    tool_b = _versioned_tool(second / "tool", "second")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool_a), "sha256": _sha256(tool_a)}],
+                "steps": [
+                    {"id": "one", "run": "./tool marker", "cwd": str(first)},
+                    {"id": "two", "run": "./tool marker", "cwd": str(second)},
+                ],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    checks = json.loads(capsys.readouterr().out)["pin_checks"]
+    assert [(c["step_id"], c["status"]) for c in checks] == [("one", "ok"), ("two", "mismatch")]
+    assert checks[1]["observed_sha256"] == _sha256(tool_b)
+    assert not (first / "marker").exists()
+
+
+def test_version_probe_that_changes_selected_executable_does_not_leave_stale_evidence(tmp_path, capsys):
+    tool = _write_tool(tmp_path / "tool", '#!/bin/sh\nprintf changed > "$0"\nprintf old-version\n')
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"{tool} {marker}"}],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 1
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["version_changed_executable"] is True and check["status"] == "mismatch"
+    assert "version_output" not in check and not marker.exists()
+
+
+@pytest.mark.parametrize("search_cwd", [False, True])
+@pytest.mark.parametrize(
+    "command,filename", [("tool", "tool.CMD"), ("tool.CMD", "tool.CMD"), ("tool.EXE", "tool.EXE.CMD")]
+)
+def test_windows_pin_resolution_uses_child_cwd_and_pathext(tmp_path, monkeypatch, search_cwd, command, filename):
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    tool = _write_tool(cwd / filename)
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "/missing")
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    if search_cwd:
+        monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    else:
+        monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "1")
+    assert runbook_cmd._resolve_step_argv0(command, cwd) == (str(tool) if search_cwd else None)
+
+
+def test_windows_pin_resolution_uses_default_pathext_for_empty_value(tmp_path, monkeypatch):
+    tool = _write_tool(tmp_path / "tool.CMD")
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "/missing")
+    monkeypatch.setenv("PATHEXT", "")
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    assert runbook_cmd._resolve_step_argv0("tool", tmp_path) == str(tool)
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+def test_relative_target_uses_same_cwd_for_pinning_and_execution(tmp_path, monkeypatch, capsys, pinned, explicit_cwd):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "project"
+    cwd = target / "work" if explicit_cwd else target
+    cwd.mkdir(parents=True)
+    tool = _write_tool(cwd / "tool", '#!/bin/sh\npwd > "$1"\n')
+    marker = tmp_path / "marker"
+    step = {"run": f"{tool} {marker}"}
+    if explicit_cwd:
+        step["cwd"] = "work"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(json.dumps({"steps": [step]}))
+    assert runbook_cmd._step_cwd(Path("project"), step) == cwd
+    if pinned:
+        assert runbook_cmd.pin(target=Path("project"), runbook=runbook, json_output=True) == 0
+        capsys.readouterr()
+    assert runbook_cmd.run(target=Path("project"), runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["steps"][0]["cwd"] == marker.read_text().strip() == str(cwd)
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_relative_stored_pin_path_does_not_hide_actual_override_evidence(tmp_path, monkeypatch, capsys, override):
+    tool = _versioned_tool(tmp_path / "tool", "actual")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": "tool", "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"tool {marker}"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["status"] == "mismatch" and check["expected_path"] == "tool"
+    assert check["resolved_path"] == str(tool) and check["observed_sha256"] == _sha256(tool)
+    if override:
+        assert rc == 0 and marker.read_text() == "actual"
+        assert check["version_output"] == "actual version" and check["override"] is True
+    else:
+        assert rc == 2 and not marker.exists() and "version_output" not in check
+
+
+def test_unused_configured_pin_preserves_runtime_version_metadata(tmp_path, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "unused")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": "printf hello"}],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["version_output"] == "unused version" and check["status"] == "ok"
+    assert "step_index" not in check
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_unused_pin_version_mutation_is_rechecked_before_steps(tmp_path, capsys, override):
+    tool = _write_tool(tmp_path / "tool", '#!/bin/sh\nprintf changed > "$0"\nprintf old-version\n')
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"printf executed > {marker}"}],
+            }
+        )
+    )
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    check = result["pin_checks"][0]
+    assert check["version_changed_executable"] is True and check["status"] == "mismatch"
+    assert "version_output" not in check
+    if override:
+        assert rc == 0 and marker.read_text() == "executed"
+        assert check["override"] is True and "pin mismatch override allowed" in captured.err
+    else:
+        assert rc == 2 and result["status"] == "pin-check-failed" and not marker.exists()
