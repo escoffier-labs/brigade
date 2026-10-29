@@ -2,8 +2,9 @@
 
 Callers supply an already authenticated hub id. Only explicit initialization
 creates state; no operation repairs unsafe or corrupt state. Anchor selection is
-explicit CAS per hub. Membership/revocation streams use global (kind, full
-SHA256 public-key hash) marks. Other statement kinds are deliberately refused.
+explicit CAS per hub. Membership/revocation and explicitly imported manifest
+evidence use global (kind, full SHA256 public-key hash) marks. Manifests never
+grant peer use, independent confirmation, or revocation/continuity authority.
 
 Snapshots retain canonical complete signed objects and all anchor transitions.
 Membership under a replaced anchor is historical evidence only. Floors expose
@@ -84,7 +85,7 @@ _PEER_TABLES = {"peers", "peer_records"}
 _PEER_BYTES = 8 * 1024 * 1024
 _PEER_HEADROOM = 8 * 1024 * 1024
 _MAX_PEER_CHANGES = 8
-_KINDS = {"membership", "revocation"}
+_KINDS = {"membership", "revocation", "manifest"}
 _HEX = re.compile(r"[0-9a-f]{64}", re.ASCII)
 _PRINCIPAL = re.compile(r"(?:[A-Za-z0-9][A-Za-z0-9._-]{0,127}|agent:[a-z][a-z0-9._-]{0,62})", re.ASCII)
 _TIME = re.compile(
@@ -874,6 +875,26 @@ def import_statement(*, brigade_home: Path, hub: str, kind: str, raw: bytes) -> 
     only after the conflict evidence is flushed.
     """
     _platform()
+    _require(isinstance(kind, str) and kind in {"membership", "revocation"}, "statement_kind_unsupported")
+    return _import_evidence(brigade_home=brigade_home, hub=hub, kind=kind, raw=raw)
+
+
+def import_manifest(*, brigade_home: Path, hub: str, raw: bytes) -> ImportResult:
+    """Authenticate and durably retain offline manifest evidence only.
+
+    The caller supplies an authenticated hub with an independently pinned active
+    signer. Sequence marks, scoped floors, conflicts and capacity share the
+    existing snapshot transaction. Listing, omission and relisting never admit
+    peers, confirm fingerprints, resolve changes or undo revocation. Transport
+    imports remain membership/revocation only. Older readers fail closed on
+    retained manifest evidence; reading older snapshots needs no conversion.
+    """
+    _platform()
+    return _import_evidence(brigade_home=brigade_home, hub=hub, kind="manifest", raw=raw)
+
+
+def _import_evidence(*, brigade_home: Path, hub: str, kind: str, raw: bytes) -> ImportResult:
+    """Shared active-anchor admission transaction for retained signed evidence."""
     _kind(kind)
     _tag(hub, "h_")
     with _directory(brigade_home, create=False) as descriptor, _locked(descriptor):
