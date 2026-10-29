@@ -679,7 +679,8 @@ function Get-ComponentReport {
 function Assert-ReleaseManifestAndAssets {
     param(
         [string]$Version,
-        [string]$Destination
+        [string]$Destination,
+        [string]$PythonExe = "python"
     )
     $tag = "v$Version"
     $base = "https://github.com/escoffier-labs/brigade/releases/download/$tag"
@@ -688,37 +689,86 @@ function Assert-ReleaseManifestAndAssets {
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
     Invoke-WebRequest -UseBasicParsing -Uri "$base/component-manifest-v1.json" -OutFile $manifestPath
     Invoke-WebRequest -UseBasicParsing -Uri "$base/checksums.txt" -OutFile $checksumsPath
+    # ConvertFrom-Json silently overwrites identical keys. Use the existing
+    # bootstrap Python to reject them before PowerShell consumes the manifest.
+    $uniqueKeysProbe = @'
+import json, sys
+from pathlib import Path
+def unique(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate manifest key: ' + key)
+        result[key] = value
+    return result
+json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=unique)
+'@
+    & $PythonExe -c $uniqueKeysProbe $manifestPath
+    if ($LASTEXITCODE -ne 0) { throw "invalid or duplicate release manifest keys" }
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $checksums = @{}
     foreach ($line in Get-Content -LiteralPath $checksumsPath) {
-        if ($line -notmatch '^([0-9a-f]{64})\s+(.+)$') { throw "malformed checksums.txt line: $line" }
+        if ($line -cnotmatch '^([0-9a-f]{64})\s+(\S+)$') { throw "malformed checksums.txt line: $line" }
         if ($checksums.ContainsKey($Matches[2])) { throw "duplicate checksums.txt asset: $($Matches[2])" }
         $checksums[$Matches[2]] = $Matches[1]
     }
-    $expected = @()
-    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    $legacyIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+    $platforms = @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+    if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw "release manifest must contain exactly five components" }
+    foreach ($property in $manifest.components.PSObject.Properties) {
+        if (@($legacyIds | Where-Object { $_ -ceq $property.Name }).Count -ne 1) { throw "invalid release component ID" }
+    }
+    $expected = @{}
+    foreach ($componentId in $legacyIds) {
         $component = $manifest.components.$componentId
-        if (-not $component -or $component.source.repository -ne "escoffier-labs/brigade" -or $component.source.release_tag -ne $tag) {
+        if (-not $component -or $component.source.repository -cne "escoffier-labs/brigade" -or $component.source.release_tag -cne $tag) {
             throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
+        }
+        if (@($component.assets.PSObject.Properties).Count -ne 5) { throw "release manifest has invalid platform matrix" }
+        foreach ($property in $component.assets.PSObject.Properties) {
+            if (@($platforms | Where-Object { $_ -ceq $property.Name }).Count -ne 1) { throw "invalid release platform" }
         }
         foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")) {
             $asset = $component.assets.$platform
-            if (-not $asset) { throw "release manifest missing $componentId $platform" }
-            $expected += $asset.asset_name
-            if ($asset.download_url -ne "$base/$($asset.asset_name)") { throw "release manifest has moving or wrong URL for $($asset.asset_name)" }
-            if ($checksums[$asset.asset_name] -ne $asset.sha256) { throw "checksums mismatch for $($asset.asset_name)" }
-            $assetPath = Join-Path $Destination $asset.asset_name
-            Invoke-WebRequest -UseBasicParsing -Uri $asset.download_url -OutFile $assetPath
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant() -ne $asset.sha256) {
-                throw "release asset digest mismatch for $($asset.asset_name)"
-            }
+            $name = "$componentId-$platform"
+            if ($platform -eq "windows-amd64") { $name += ".exe" }
+            if (-not $asset -or $asset.asset_name -cne $name -or $asset.sha256 -cnotmatch '^[0-9a-f]{64}$') { throw "release manifest has invalid asset metadata" }
+            if ($asset.download_url -cne "$base/$name") { throw "release manifest has moving or wrong URL for $name" }
+            if ($checksums[$name] -cne $asset.sha256) { throw "checksums mismatch for $name" }
+            $expected[$name] = $asset.sha256
         }
     }
-    if ($expected.Count -ne 25 -or $checksums.Count -ne 26 -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
-        throw "release checksums must contain exactly 25 native assets and component-manifest-v1.json"
+    $canonical = @{}
+    foreach ($componentId in @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")) {
+        foreach ($platform in $platforms) {
+            $name = "$componentId-$platform"
+            if ($platform -eq "windows-amd64") { $name += ".exe" }
+            $canonical[$name] = $true
+        }
     }
-    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -ne $checksums["component-manifest-v1.json"]) {
+    if ($checksums.Count -eq 41) {
+        foreach ($name in $canonical.Keys) {
+            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete canonical matrix" }
+            $expected[$name] = $checksums[$name]
+        }
+    }
+    if ($checksums.Count -ne ($expected.Count + 1) -or -not $checksums.ContainsKey("component-manifest-v1.json")) {
+        throw "release checksums must contain exactly 25 or 40 native assets and component-manifest-v1.json"
+    }
+    foreach ($name in $checksums.Keys) {
+        if ($name -cne "component-manifest-v1.json" -and -not $expected.ContainsKey($name)) { throw "unexpected release asset: $name" }
+        # Hashtable lookup is case-insensitive; require the exact published basename.
+        if ($name -cne "component-manifest-v1.json" -and @($expected.Keys | Where-Object { $_ -ceq $name }).Count -ne 1) { throw "invalid release basename: $name" }
+    }
+    if ((Get-FileHash -Algorithm SHA256 -LiteralPath $manifestPath).Hash.ToLowerInvariant() -cne $checksums["component-manifest-v1.json"]) {
         throw "release manifest digest mismatch"
+    }
+    foreach ($name in $expected.Keys) {
+        $assetPath = Join-Path $Destination $name
+        Invoke-WebRequest -UseBasicParsing -Uri "$base/$name" -OutFile $assetPath
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $assetPath).Hash.ToLowerInvariant() -cne $expected[$name]) {
+            throw "release asset digest mismatch for $name"
+        }
     }
     return $manifest
 }
@@ -947,7 +997,7 @@ try {
     Assert-BrigadeResolvesFromPipxBin -PipxBinDir $pipxBinDir
     if ($InstallMode -eq "pypi") {
         Assert-BrigadeVersionMatches -Expected $BrigadeVersion
-        $releaseManifest = Assert-ReleaseManifestAndAssets -Version $BrigadeVersion -Destination (Join-Path $acceptRoot "release-assets")
+        $releaseManifest = Assert-ReleaseManifestAndAssets -Version $BrigadeVersion -Destination (Join-Path $acceptRoot "release-assets") -PythonExe $bootstrapPython
     }
 
     & brigade --version
@@ -1010,6 +1060,22 @@ try {
     $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
     $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
+
+    if ($InstallMode -eq "pypi") {
+        $canonicalGraph = Join-Path $acceptRoot "release-assets/brigade-code-graph-windows-amd64.exe"
+        if (Test-Path -LiteralPath $canonicalGraph) {
+            $canonicalMcp = Join-Path $acceptRoot "release-assets/brigade-code-graph-mcp-windows-amd64.exe"
+            $canonicalEvidence = Join-Path $acceptRoot "release-assets/brigade-evidence-windows-amd64.exe"
+            & $canonicalGraph --version | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "canonical graph version smoke failed" }
+            $canonicalResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $canonicalMcp
+            if ($LASTEXITCODE -ne 0) { throw "canonical graph MCP smoke failed" }
+            $response = $canonicalResponse | ConvertFrom-Json
+            if ($response.jsonrpc -ne "2.0" -or $response.id -ne 1 -or -not $response.PSObject.Properties["result"]) { throw "canonical graph MCP returned invalid initialize response" }
+            & $canonicalEvidence version | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw "canonical evidence version smoke failed" }
+        }
+    }
 
     $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
     if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }

@@ -2363,3 +2363,50 @@ def test_ci_gate_requires_classification_even_when_every_job_succeeded(flag):
         text=True,
     )
     assert result.returncode == (0 if flag == "false" else 1), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("case", ["legacy", "additive", "partial", "corrupt", "extra", "duplicate"])
+def test_windows_release_asset_validation_runtime(tmp_path, case):
+    """Run the production PowerShell validator with local release transport fixtures."""
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("pwsh is unavailable; PowerShell release validation not executed")
+    from tests.test_published_artifact_acceptance import _release_fixture
+    import hashlib
+
+    base, bodies, checksums = _release_fixture(additive=case != "legacy")
+    if case == "partial":
+        del checksums["brigade-evidence-linux-amd64"]
+    elif case == "corrupt":
+        bodies["brigade-evidence-windows-amd64.exe"] = b"bad alias"
+    elif case == "extra":
+        checksums["unknown-linux-amd64"] = "a" * 64
+    elif case == "duplicate":
+        body = bodies["component-manifest-v1.json"]
+        bodies["component-manifest-v1.json"] = body.replace(b'"components": {', b'"components": {}, "components": {', 1)
+        checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+    source = tmp_path / "source"
+    source.mkdir()
+    for name, body in bodies.items():
+        (source / name).write_bytes(body)
+    (source / "checksums.txt").write_text("".join(f"{digest}  {name}\n" for name, digest in checksums.items()))
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    function = _extract_powershell_function(script, "Assert-ReleaseManifestAndAssets")
+    # Resolve only exact immutable same-tag fixture URLs; never contact a network.
+    harness = tmp_path / "probe.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + function
+        + "\nfunction Invoke-WebRequest { param([switch]$UseBasicParsing, [string]$Uri, [string]$OutFile)\n"
+        + f"if (-not $Uri.StartsWith('{base}')) {{ throw 'unexpected URL' }}\n"
+        + "$name = $Uri.Split('/')[-1]\n"
+        + f"Copy-Item -LiteralPath (Join-Path '{source.as_posix()}' $name) -Destination $OutFile\n}}\n"
+        + f"$manifest = Assert-ReleaseManifestAndAssets -Version '1.2.3' -Destination '{(tmp_path / 'out').as_posix()}'\n"
+        + "if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw 'legacy return changed' }\n"
+    )
+    result = subprocess.run([pwsh, "-NoProfile", "-File", str(harness)], text=True, capture_output=True)
+    if case in {"legacy", "additive"}:
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert len(list((tmp_path / "out").iterdir())) == (27 if case == "legacy" else 42)
+    else:
+        assert result.returncode != 0, "malformed release was accepted"

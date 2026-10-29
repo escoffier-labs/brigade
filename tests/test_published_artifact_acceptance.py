@@ -1093,3 +1093,155 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
             runner=_import_search_runner(calls, export_lines=""),
             env={"HOME": str(tmp_path / "profile")},
         )
+
+
+def _release_fixture(*, additive=True):
+    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+    legacy = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+    aliases = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+    platforms = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
+    bodies = {}
+    components = {}
+    for component in legacy + (aliases if additive else ()):
+        assets = {}
+        for platform in platforms:
+            name = f"{component}-{platform}" + (".exe" if platform.startswith("windows") else "")
+            bodies[name] = name.encode()
+            assets[platform] = {
+                "asset_name": name,
+                "sha256": hashlib.sha256(bodies[name]).hexdigest(),
+                "byte_size": len(bodies[name]),
+                "download_url": base + name,
+            }
+        if component in legacy:
+            components[component] = {
+                "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+                "assets": assets,
+            }
+    bodies["component-manifest-v1.json"] = json.dumps({"components": components}).encode()
+    checksums = {name: hashlib.sha256(body).hexdigest() for name, body in bodies.items()}
+    return base, bodies, checksums
+
+
+def _verify_fixture(module, tmp_path, bodies, checksums):
+    checksum_text = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())).encode()
+    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+
+    def fetch(url):
+        assert url.startswith(base)
+        name = url.removeprefix(base)
+        assert "/" not in name
+        return checksum_text if name == "checksums.txt" else bodies[name]
+
+    return module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch)
+
+
+def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_return(acceptance_module, tmp_path):
+    _, bodies, checksums = _release_fixture()
+    result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+    assert len(list((tmp_path / "release-assets").iterdir())) == 41
+    assert set(result) == {"manifest", "native_paths"}
+    assert set(result["native_paths"]) == {"agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    for name, body in bodies.items():
+        assert (tmp_path / "release-assets" / name).read_bytes() == body
+
+
+@pytest.mark.parametrize("count", [1, 5, 14])
+def test_partial_canonical_matrix_is_rejected(acceptance_module, tmp_path, count):
+    _, bodies, checksums = _release_fixture()
+    aliases = [name for name in checksums if name.startswith("brigade-")]
+    for name in aliases[count:]:
+        del checksums[name]
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+
+
+@pytest.mark.parametrize("mutation", ["corrupt", "missing", "malformed", "extra", "platform", "basename", "duplicate"])
+def test_additive_release_rejects_alias_integrity_and_inventory_drift(acceptance_module, tmp_path, mutation):
+    _, bodies, checksums = _release_fixture()
+    name = "brigade-evidence-windows-amd64.exe"
+    if mutation == "corrupt":
+        bodies[name] = b"corrupt canonical bytes"
+    elif mutation == "missing":
+        del checksums[name]
+    elif mutation == "malformed":
+        checksums[name] = "z" * 64
+    elif mutation in {"extra", "platform", "basename"}:
+        bad_name = {
+            "extra": "unrelated-linux-amd64",
+            "platform": "brigade-evidence-linux-riscv64",
+            "basename": "../brigade-evidence",
+        }[mutation]
+        checksums[bad_name] = "a" * 64
+    else:
+        # Duplicate JSON keys must not silently replace an authenticated component.
+        body = bodies["component-manifest-v1.json"]
+        bodies["component-manifest-v1.json"] = body.replace(b'"components": {', b'"components": {}, "components": {', 1)
+        checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+    with pytest.raises(acceptance_module.AcceptanceError):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+
+
+def test_canonical_smoke_uses_only_host_targets_and_initializes_mcp(acceptance_module, tmp_path):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        output = '{"jsonrpc":"2.0","id":1,"result":{}}' if len(argv) == 1 else "canonical version"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    paths = {name: tmp_path / name for name in ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")}
+    acceptance_module.smoke_canonical_components(paths, runner=runner, env={"HOME": str(tmp_path)})
+    assert [call[0] for call in calls] == [
+        [str(paths["brigade-code-graph"]), "--version"],
+        [str(paths["brigade-code-graph-mcp"])],
+        [str(paths["brigade-evidence"]), "version"],
+    ]
+    assert json.loads(calls[1][1]["input"])["method"] == "initialize"
+    assert all(call[1]["env"] == {"HOME": str(tmp_path)} for call in calls)
+
+
+@pytest.mark.parametrize("component", ["brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence"])
+@pytest.mark.parametrize("platform", ["linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64"])
+def test_each_canonical_download_is_checked_against_its_own_digest(acceptance_module, tmp_path, component, platform):
+    _, bodies, checksums = _release_fixture()
+    name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+    bodies[name] = b"corrupt canonical target"
+    with pytest.raises(acceptance_module.AcceptanceError, match="digest"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+
+
+@pytest.mark.parametrize("additive", [False, True])
+@pytest.mark.parametrize("mutation", ["url", "platform", "basename", "checksum-drift", "duplicate-checksum"])
+def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
+    acceptance_module, tmp_path, additive, mutation
+):
+    base, bodies, checksums = _release_fixture(additive=additive)
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    asset = manifest["components"]["graphtrail"]["assets"]["linux-amd64"]
+    if mutation == "url":
+        asset["download_url"] = base.replace("v1.2.3", "latest") + asset["asset_name"]
+    elif mutation == "platform":
+        assets = manifest["components"]["graphtrail"]["assets"]
+        assets["linux-riscv64"] = assets.pop("linux-arm64")
+    elif mutation == "basename":
+        asset["asset_name"] = "../graphtrail-linux-amd64"
+    elif mutation == "checksum-drift":
+        checksums[asset["asset_name"]] = "a" * 64
+    else:
+        # Pass an actual duplicate line through the production parser.
+        checksum_text = "".join(f"{digest}  {name}\n" for name, digest in checksums.items())
+        checksum_text += f"{'a' * 64}  graphtrail-linux-amd64\n"
+        with pytest.raises(acceptance_module.AcceptanceError, match="repeats"):
+            acceptance_module.verify_release_assets(
+                "1.2.3",
+                tmp_path,
+                fetch_bytes=lambda url: (
+                    checksum_text.encode() if url == base + "checksums.txt" else bodies[url.removeprefix(base)]
+                ),
+            )
+        return
+    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
+    checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+    with pytest.raises(acceptance_module.AcceptanceError):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
