@@ -1,18 +1,19 @@
 <p align="center">
-  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade Stack (by Escoffier Labs)" width="640">
+  <img src="docs/assets/brigade-wordmark.svg" alt="Brigade (by Escoffier Labs)" width="640">
 </p>
 
 <p align="center">
-  <strong>Coordinate your agents. Keep the tools you use.</strong><br>
-  Brigade Stack works alongside Codex, Claude Code, Cursor, OpenCode, T3 Code, Grok Bot, OpenClaw, Hermes, Dot, and Duet. It adds coordination, shared context, and checkable work records to your existing setup.
+  <strong>Coordinate your agents. Keep the tools you use.</strong>
 </p>
 
+Brigade is an open-source coordination layer for AI coding agents. It sits beside Codex, Claude Code, Cursor, OpenCode, T3 Code, and the rest, and gives them shared tasks, shared memory, and verification records any agent can check.
+
 <p align="center">
-  <a href="https://brigade.tools/docs/getting-started/install">Install</a> ·
+  <a href="https://brigade.tools">Website</a> ·
   <a href="https://brigade.tools/docs">Docs</a> ·
-  <a href="#works-with-your-existing-setup">Integrations</a> ·
+  <a href="QUICKSTART.md">Quickstart</a> ·
   <a href="docs/comparison.md">Compare</a> ·
-  <a href="QUICKSTART.md">Quickstart</a>
+  <a href="CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
@@ -25,128 +26,96 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Keep using your preferred agent tools. Start with one tool in one repository, then connect more agents and machines as you need them.
+**Stable:** v0.30.0 on PyPI and npm. **Beta:** main is the 0.31 preview line. [Channels](docs/update-channels.md)
 
-**Stable:** v0.30.0 on PyPI and npm. **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). Beta features and work in progress are labeled below. See the [changelog](CHANGELOG.md).
+## Why Brigade
 
-## Give the next agent more than a conversation
+You run several agents at once. Sol in Codex takes one task, Opus manages another, and Argon takes a third here and there, whether they share one window in a multi-harness tool like T3 Code or each run in its own app. Your Grok Bot runs the rest of your life, and your Dots spin up work of their own. Every agent starts from its own conversation. None of them knows who owns which task, what the others already tried, or whether a fix was actually checked.
 
-You investigate a bug in Claude Code, implement a fix in Codex, and return to the work through T3 Code. Brigade Stack gives that work continuity:
+Brigade holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
 
-1. **Start with context.** Read the work brief, relevant memory, and existing evidence.
-2. **Make ownership explicit.** Claim tasks and inspect dependencies or conflicting work.
-3. **Run within your rules.** Use configured model access, scopes, budgets, and approval gates for Brigade Stack-managed execution.
-4. **Check the result.** Run verification and keep the command, exit code, logs, and Git state.
-5. **Hand off the work.** Leave the result, remaining blockers, and evidence where another agent can inspect them.
+- **Keep your tools.** Works alongside the agents you already use. Start with one tool in one repository and add more when you need them.
+- **Work agents can pick up.** Tasks, dependencies, claims, and handoffs make the next action discoverable without replaying a conversation.
+- **Checkable results.** Verification records keep the command, exit code, logs, and Git state, so another agent can confirm "tests pass" for itself.
+- **You set the limits.** Model access, scopes, budgets, and approval gates apply to Brigade-managed work, and you can inspect or stop it.
 
-Agents can continue within the authority you give them. You choose where approval is required and can inspect or stop Brigade Stack-managed work.
+## How it works
 
-<a id="what-brigade-adds"></a>
+1. **Start with context.** Agents begin from a work brief: relevant memory, open tasks, and existing evidence.
+2. **Claim the work.** Ownership is explicit, and conflicting or dependent work is visible.
+3. **Run within your rules.** Managed execution uses your configured models, scopes, budgets, and approvals.
+4. **Verify the result.** Checks run through Brigade and leave a record another agent can inspect.
+5. **Hand off.** The result, remaining blockers, and evidence stay where the next agent will find them.
 
-## What Brigade Stack adds
+A local setup needs no server. Fleet Hub adds shared ownership, presence, messaging, and model policy across machines when you want it. See the [execution model](docs/execution-model.md).
 
-### Work that agents can pick up
+## Quick start
 
-Tasks, dependencies, ready-work views, claims, and handoffs make the next action discoverable. Fleet Hub adds shared coordination across enrolled machines, including ownership views, presence, messaging, and model policy.
-
-**0.31 beta:** Dispatch ready tasks into separate worktrees, supervise children, and retain results for review. Watch mode fills available capacity within configured limits. A successful worker run leaves work for review and landing.
-
-### Evidence you can inspect
-
-Run a check through Brigade Stack:
-
-```bash
-brigade work verify run --target . --command "pytest -q"
-```
-
-The verification record captures the command and its actual exit code, logs, and Git state. Run journals and lineage connect execution to its context. Evidence packages let another agent inspect a selected verification record and check its integrity.
-
-A passing command establishes the result of that check. Completion still depends on the work's acceptance criteria.
-
-### Context that travels between tools
-
-Keep a designated memory owner, with handoffs from the tools doing the work. Brigade Stack provides handoff linting, ingestion coverage, recall, and memory-care checks. Shared skill and tool catalogs can project reviewed configuration into supported tools.
-
-**0.31 beta:** Memory reflection derives evidence-backed candidates and can create consolidation proposals for review. It does not automatically rewrite claims.
-
-### Visibility while agents work
-
-Inspect runs, work ownership, machines, and cloud tasks through Brigade Stack's CLI and operator views. Fleet messaging lets enrolled agents exchange information under explicit grants.
-
-**0.31 beta:** Run patrol identifies local lane states and offers explicit repair actions. The Command Deck and CI-board integrations continue to expand.
-
-## Works with your existing setup
-
-Choose the integrations you need. Each connects a different part of the workflow.
-
-| Your system | Brigade Stack connection |
-| --- | --- |
-| **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and supported tool and skill configuration. Execution adapters and hooks vary by tool. |
-| **T3 Code** | Remote execution integration and session visibility. The complete app-owned child-task governance flow is in progress. |
-| **Grok Bot** | Role-scoped connector packs for bounded jobs and configured workflows. |
-| **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, workspace setup, and memory care. |
-| **Dot** | A connector for memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
-| **Duet** | **0.31 beta:** A connector for memory, skills, Hub messaging, and read-only fleet views. Duet executes on its own cloud machine. |
-
-Capabilities differ by integration, configuration, and release channel. Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), and [Duet guide](docs/duet-connector.md).
-
-## Start with one repository
-
-With Node.js 22 or newer on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64:
+With Node.js 22 or newer (Linux glibc x64/ARM64, macOS, or Windows x64):
 
 ```bash
 npm install --global @escoffier-labs/brigade@0.30.0
 brigade setup
 ```
 
-The npm package manages its own Python environment. The first launch downloads a managed Python, so it needs network access. Leave optional dependencies enabled, and install Git for repository features. Upgrade npm-managed installs with npm. See the [npm package notes](npm/feasibility/README.md).
+Or with Python 3.10+: `pipx install brigade-cli` (or `uv tool install brigade-cli`), then `brigade setup`.
 
-Or use Python 3.10 or newer with `pipx install brigade-cli` or `uv tool install brigade-cli`, followed by `brigade setup`.
-
-Preview the setup for a repository you control:
+Wire up a repository for the tools you use, then read the first brief:
 
 ```bash
-brigade operator quickstart --target ./my-repo --harnesses codex,claude --dry-run
-```
-
-Apply the setup, then read the first brief:
-
-```bash
+brigade operator quickstart --target ./my-repo --harnesses codex,claude --dry-run   # preview
 brigade operator quickstart --target ./my-repo --harnesses codex,claude
 brigade work brief --target ./my-repo
 ```
 
-Select the tools you use. The local setup can be used without a Fleet Hub. Add fleet coordination or hosted-agent connectors when you need them.
+Run a check so the result is recorded:
 
-[First 10 minutes](docs/first-10-minutes.md) · [Adopt an existing setup](docs/agent-assisted-setup.md) · [Stable and beta channels](docs/update-channels.md)
+```bash
+brigade work verify run --target ./my-repo --command "pytest -q"
+```
 
-## Where the beta is heading
+The npm package manages its own Python, so the first launch needs network access. Git is required for repository features. See the [npm package notes](npm/feasibility/README.md), [first 10 minutes](docs/first-10-minutes.md), and [adopting an existing setup](docs/agent-assisted-setup.md).
 
-- **Independent work across a fleet.** Shared ownership, dependencies, and evidence help agents recover their next action without reconstructing a conductor's conversation. [Fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121)
-- **Governed delegation through T3 Code.** Explicit batches, independently addressable child results, and isolated workspaces under Brigade Stack's existing controls. [Delegation epic](https://github.com/escoffier-labs/brigade/issues/2046)
-- **Cross-repository campaigns.** Track one assignment across repositories with bounded ownership and evidence-backed completion. Execution and completion wiring remain in progress. [Campaigns](https://github.com/escoffier-labs/brigade/issues/1128)
-- **More ways for agents to connect.** Encrypted messaging, teammate invitations, no-hub delivery, and Hub Lite are being built in stages. [Mesh design](docs/phase-agent-mesh.md)
+## Works with
+
+| Tool | Connection |
+| --- | --- |
+| **Codex, Claude Code, Cursor, OpenCode** | Workspace instructions, handoff inboxes, and tool and skill configuration. Hooks vary by tool. |
+| **T3 Code** | Remote execution and session visibility. Full child-task governance is in progress. |
+| **Grok Bot** | Role-scoped connector packs for bounded jobs. |
+| **OpenClaw, Hermes** | Memory-owner workflows, writer handoffs, and memory care. |
+| **Dot** | Memory, skills, Hub messaging, and authorized T3 fleet dispatch. |
+| **Duet** (0.31 beta) | Memory, skills, Hub messaging, and read-only fleet views. |
+
+Hosted connectors need explicit setup. See the [technical guide](docs/technical-guide.md), [Dot guide](docs/grokbot-dot.md), and [Duet guide](docs/duet-connector.md).
 
 ## MCP servers
 
-Brigade Stack includes a memory MCP server with bounded recall, work briefs, and handoff drafting, plus a read-only skills MCP server:
+A memory server with bounded recall, work briefs, and handoff drafting, plus a read-only skills server:
 
 ```bash
 brigade memory serve-mcp --stdio
 brigade skills serve-mcp --stdio
 ```
 
-The memory server's `write_handoff` tool drafts a handoff and never edits a canonical card. [MCP transport details](docs/technical-guide.md#streamable-http-for-the-mcp-servers).
+`write_handoff` drafts a handoff and never edits a canonical card. [Transport details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)
 
 <!-- MCP Registry ownership markers; keep each on its own line. -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
+## In the 0.31 beta
+
+- **Parallel workers.** Dispatch ready tasks into separate worktrees, supervise them, and keep results for review.
+- **Memory reflection.** Evidence-backed consolidation proposals for review. Nothing is rewritten automatically.
+- **Run patrol.** Detects local lane states and offers explicit repair actions.
+- **In progress:** [fleet coordination](https://github.com/escoffier-labs/brigade/issues/1121), [governed T3 delegation](https://github.com/escoffier-labs/brigade/issues/2046), [cross-repository campaigns](https://github.com/escoffier-labs/brigade/issues/1128), and the [agent mesh](docs/phase-agent-mesh.md).
+
 ## Reference
 
-[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Report an issue](https://github.com/escoffier-labs/brigade/issues) · [MIT license](LICENSE)
+[Commands](docs/command-inventory.md) · [Execution model](docs/execution-model.md) · [Comparisons](docs/comparison.md) · [Contributing](CONTRIBUTING.md) · [Issues](https://github.com/escoffier-labs/brigade/issues) · [MIT license](LICENSE)
 
-The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
+The Python CLI may send a passive version request. [Telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
 
 <details>
 <summary>About the downloads badge</summary>
