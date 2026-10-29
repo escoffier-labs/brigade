@@ -1084,6 +1084,30 @@ def test_missing_selected_tool_does_not_validate_or_probe_stored_pin(tmp_path, m
     assert tool.exists()
 
 
+def _cwd_lookup_tool(path, label, *, windows):
+    if not windows:
+        return _versioned_tool(path, label)
+    writer = path.with_name(path.name + "_marker.py")
+    writer.write_text(
+        f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({label!r}, encoding='utf-8')\n"
+    )
+    tool = path.with_suffix(".CMD")
+    tool.write_text(
+        f'@echo off\r\n"{sys.executable}" "%~dp0{writer.name}" "%~1"\r\n',
+        encoding="utf-8",
+        newline="",
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+def _cwd_lookup_command(command, marker, *, windows):
+    if windows:
+        command = command.replace("/", "\\")
+        return f'"{command}" "{marker}"'
+    return shlex.join([command, str(marker)])
+
+
 @pytest.mark.parametrize(
     "command,path", [("./tool", "/missing"), ("../bin/tool", "/missing"), ("tool", "bin"), ("tool", "")]
 )
@@ -1096,12 +1120,16 @@ def test_pinning_uses_effective_step_cwd_and_relative_search_path(tmp_path, monk
     if command == "../bin/tool":
         (target / "bin").mkdir()
         tool_path = target / "bin/tool"
-    tool = _versioned_tool(tool_path, "local")
+    windows = sys.platform == "win32"
+    tool = _cwd_lookup_tool(tool_path, "local", windows=windows)
     marker = tmp_path / "marker"
     runbook = tmp_path / "runbook.json"
-    runbook.write_text(json.dumps({"steps": [{"run": f"{command} {marker}", "cwd": "work"}]}))
+    run_command = _cwd_lookup_command(command, marker, windows=windows)
+    runbook.write_text(json.dumps({"steps": [{"run": run_command, "cwd": "work"}]}))
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("PATH", path)
+    if windows:
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     assert runbook_cmd.pin(target=target, runbook=runbook, json_output=True) == 0
     pin = json.loads(capsys.readouterr().out)["pins"][0]
     assert pin["path"] == str(tool)
@@ -1110,6 +1138,35 @@ def test_pinning_uses_effective_step_cwd_and_relative_search_path(tmp_path, monk
     assert marker.read_text() == "local"
     assert receipt["steps"][0]["cwd"] == str(cwd)
     assert receipt["pin_checks"][0]["resolved_path"] == str(tool)
+
+
+@pytest.mark.parametrize("path", ["bin", ""])
+def test_cwd_lookup_windows_fixture_pins_wrapper_and_writes_exact_marker(tmp_path, monkeypatch, path):
+    cwd = tmp_path / "work space"
+    directory = cwd / "bin" if path else cwd
+    directory.mkdir(parents=True)
+    tool = _cwd_lookup_tool(directory / "tool", "local", windows=True)
+    marker = tmp_path / "marker with space"
+    writer = directory / "tool_marker.py"
+    monkeypatch.setenv("PATH", path)
+    # Exercise the payload independently of cmd.exe on every platform. Native
+    # wrapper execution belongs to the four real runbook cases above.
+    subprocess.run([sys.executable, str(writer), str(marker)], check=True, timeout=5)
+    assert marker.read_text() == "local"
+    assert tool.read_bytes() == f'@echo off\r\n"{sys.executable}" "%~dp0{writer.name}" "%~1"\r\n'.encode()
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "1")
+    pins, error = runbook_cmd._pin_payload_from_runbook(tmp_path, {"steps": [{"run": "tool marker", "cwd": str(cwd)}]})
+    assert error is None
+    assert pins == [{"command": "tool", "path": str(tool), "sha256": _sha256(tool)}]
+
+
+@pytest.mark.parametrize("command,expected", [("./tool", r".\tool"), ("../bin/tool", r"..\bin\tool"), ("tool", "tool")])
+def test_cwd_lookup_windows_command_preserves_tokens(command, expected):
+    marker = r"C:\fixture space\marker"
+    run = _cwd_lookup_command(command, marker, windows=True)
+    assert runbook_cmd._command_tokens(run) == [expected, marker]
 
 
 def test_pinning_refuses_distinct_executables_with_same_command_name(tmp_path, capsys):
