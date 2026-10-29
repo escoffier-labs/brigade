@@ -1,0 +1,574 @@
+{
+  "baseline": "5db7fdac2c0c1cc23e7ef0fa80a2d407add145aa",
+  "impact_queries": [
+    {
+      "query": "_missing_additive_columns",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub.py",
+          "symbol": "_missing_additive_columns"
+        }
+      ],
+      "callers": [
+        "tests/test_fleet_message_grants.py:test_authorization_upgrade_from_intact_v45_via_init_db"
+      ]
+    },
+    {
+      "query": "_apply_schema",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub.py",
+          "symbol": "_apply_schema"
+        }
+      ],
+      "callers": []
+    },
+    {
+      "query": "_interactive_presence_for_brief",
+      "selected": [
+        {
+          "file": "src/brigade/work_cmd/session/briefing.py",
+          "symbol": "_interactive_presence_for_brief"
+        }
+      ],
+      "callers": [
+        "tests/test_fleet_session_dedupe.py:test_codex_brief_presence_uses_session_metadata_cwd",
+        "tests/test_fleet_session_heartbeat.py:test_codex_brief_tracks_the_payload_it_published"
+      ]
+    },
+    {
+      "query": "_session_request_body",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_client.py",
+          "symbol": "_session_request_body"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_client_task_report.py:publish_task_session",
+        "src/brigade/fleet_dot.py:_report_task_session",
+        "src/brigade/fleet_dot.py:report_session",
+        "tests/test_fleet_dot.py:report_transport.presence",
+        "tests/test_fleet_dot.py:test_schema23_migration_preserves_old_snapshots_and_refuses_downgrade"
+      ]
+    },
+    {
+      "query": "count_live_by_node",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "count_live_by_node"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_deck_pages_http.py:build_view",
+        "tests/test_fleet_command_deck.py:test_station_session_counts_ignore_the_activity_row_limit"
+      ]
+    },
+    {
+      "query": "_handle_event",
+      "selected": [
+        {
+          "file": "src/brigade/claude_hooks/runtime.py",
+          "symbol": "_handle_event"
+        }
+      ],
+      "callers": []
+    },
+    {
+      "query": "list_sessions",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "list_sessions"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_command_deck.py:fetch_interactive_sessions",
+        "src/brigade/fleet_hub_http.py:list_sessions",
+        "src/brigade/fleet_hub_messages.py:_station_read",
+        "src/brigade/fleet_owners.py:_sessions",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_expired_active_rows_are_hidden_until_history",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_handle_session_does_not_commit_caller_owned_transaction",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_node_writes_reject_body_node_id_and_admin_requires_it",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_public_rows_omit_auth_material",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_upsert_retry_refresh_end_and_expiry",
+        "tests/test_fleet_claims.py:TestInteractiveSessions.test_validation_rejects_before_any_write",
+        "tests/test_fleet_command_deck.py:test_station_session_counts_ignore_the_activity_row_limit",
+        "tests/test_fleet_command_deck.py:test_terminal_reports_do_not_hide_live_presence_at_sql_cap",
+        "tests/test_fleet_dot.py:test_cloud_history_limit_and_text_filter_use_decoded_report_text",
+        "tests/test_fleet_dot.py:test_cloud_linkage_replay_and_staleness",
+        "tests/test_fleet_dot.py:test_parent_cycles_are_refused_even_for_initially_unresolved_parent",
+        "tests/test_fleet_dot.py:test_schema23_migration_preserves_old_snapshots_and_refuses_downgrade",
+        "tests/test_fleet_dot.py:test_v2_local_http_publication_readback_replay_and_revocation",
+        "tests/test_fleet_session_presence.py:test_heartbeat_cadence_keeps_a_long_session_listed_past_the_ttl",
+        "tests/test_fleet_session_presence.py:test_session_without_heartbeats_expires_one_ttl_after_its_last_write"
+      ]
+    },
+    {
+      "query": "_publish_recent",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_openclaw_observer.py",
+          "symbol": "_publish_recent"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_t3_observer.py:observe"
+      ]
+    },
+    {
+      "query": "_session_payload",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "_session_payload"
+        }
+      ],
+      "callers": []
+    },
+    {
+      "query": "RecentSession",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_openclaw_observer.py",
+          "symbol": "RecentSession"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_t3_observer.py:_active_threads"
+      ]
+    },
+    {
+      "query": "read_record",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_session_heartbeat_state.py",
+          "symbol": "read_record"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_session_heartbeat.py:observe",
+        "tests/test_fleet_session_heartbeat.py:test_disabled_history_does_not_starve_first_live_renewal"
+      ]
+    },
+    {
+      "query": "init_schema",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "init_schema"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_hub.py:_apply_schema",
+        "tests/test_fleet_command_deck.py:conn",
+        "tests/test_fleet_command_deck.py:test_recent_report_cap_is_applied_before_merging_active_presence",
+        "tests/test_fleet_command_deck.py:test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity",
+        "tests/test_fleet_dot.py:test_cloud_history_filters_before_limit",
+        "tests/test_fleet_dot.py:test_cloud_history_limit_and_text_filter_use_decoded_report_text",
+        "tests/test_fleet_dot.py:test_cloud_linkage_replay_and_staleness",
+        "tests/test_fleet_dot.py:test_late_observation_does_not_refresh_ttl_or_end_provider",
+        "tests/test_fleet_dot.py:test_parent_cycles_are_refused_even_for_initially_unresolved_parent",
+        "tests/test_fleet_dot.py:test_parent_traversal_is_bounded_and_source_scope_cannot_change",
+        "tests/test_fleet_dot.py:test_schema23_migration_preserves_old_snapshots_and_refuses_downgrade",
+        "tests/test_fleet_dot.py:test_v2_stores_full_report_replaces_dynamic_fields_and_fences_replay",
+        "tests/test_fleet_session_presence.py:hub_conn"
+      ]
+    },
+    {
+      "query": "SessionSnapshot",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_session_presence.py",
+          "symbol": "SessionSnapshot"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_dot.py:parse_report",
+        "src/brigade/fleet_openclaw_observer.py:_workspace_snapshot",
+        "src/brigade/fleet_session_heartbeat_state.py:snapshot_from_record",
+        "tests/test_fleet_dot.py:test_schema23_migration_preserves_old_snapshots_and_refuses_downgrade",
+        "tests/test_fleet_session_heartbeat.py:setup",
+        "tests/test_fleet_session_presence.py:test_overlap_marks_truncated_observations_partial",
+        "tests/test_fleet_session_presence.py:test_overlap_warns_once_and_skips_same_session_or_disjoint_paths",
+        "tests/test_fleet_sync.py:session_snapshot"
+      ]
+    },
+    {
+      "query": "_active_threads",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_t3_observer.py",
+          "symbol": "_active_threads"
+        }
+      ],
+      "callers": []
+    },
+    {
+      "query": "publish_tracked",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_session_heartbeat_state.py",
+          "symbol": "publish_tracked"
+        }
+      ],
+      "callers": [
+        "src/brigade/fleet_session_presence.py:_publish_presence",
+        "src/brigade/work_cmd/session/briefing.py:_interactive_presence_for_brief",
+        "tests/test_fleet_session_heartbeat.py:_invalidate",
+        "tests/test_fleet_session_heartbeat.py:_remember",
+        "tests/test_fleet_session_heartbeat.py:test_failed_new_publication_disables_previous_snapshot",
+        "tests/test_fleet_session_heartbeat.py:test_inflight_hook_cannot_be_pruned",
+        "tests/test_fleet_session_heartbeat.py:test_publish_disables_old_record_before_sending_new_payload",
+        "tests/test_fleet_session_heartbeat.py:test_session_end_serializes_after_inflight_heartbeat.end"
+      ]
+    },
+    {
+      "query": "_upsert_session",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "_upsert_session"
+        }
+      ],
+      "callers": []
+    },
+    {
+      "query": "_validate_session_request",
+      "selected": [
+        {
+          "file": "src/brigade/fleet_hub_sessions.py",
+          "symbol": "_validate_session_request"
+        }
+      ],
+      "callers": []
+    }
+  ],
+  "affected_test_modules": [
+    "tests/test_care_cmd.py",
+    "tests/test_center_actions_cmd.py",
+    "tests/test_center_report_cmd.py",
+    "tests/test_claude_hooks_artifact_race.py",
+    "tests/test_claude_hooks_compaction_marker.py",
+    "tests/test_claude_hooks_doctor.py",
+    "tests/test_claude_hooks_envelope.py",
+    "tests/test_claude_hooks_isolation.py",
+    "tests/test_claude_hooks_latch_race.py",
+    "tests/test_claude_hooks_mixed_bash.py",
+    "tests/test_claude_hooks_runtime.py",
+    "tests/test_claude_hooks_state_containment.py",
+    "tests/test_claude_hooks_stdin_bounds.py",
+    "tests/test_claude_hooks_tilde_user.py",
+    "tests/test_claude_hooks_unseen_dependents.py",
+    "tests/test_claude_hooks_user_target.py",
+    "tests/test_claude_hooks_worktrees.py",
+    "tests/test_cloud_tracker.py",
+    "tests/test_context_learning_closeout_cmd.py",
+    "tests/test_error_refusal_copy.py",
+    "tests/test_fleet_action_dispatch_cmd.py",
+    "tests/test_fleet_claims.py",
+    "tests/test_fleet_command_deck.py",
+    "tests/test_fleet_dashboard.py",
+    "tests/test_fleet_dot.py",
+    "tests/test_fleet_enrollment.py",
+    "tests/test_fleet_inbox_delivery.py",
+    "tests/test_fleet_mcp.py",
+    "tests/test_fleet_session_heartbeat.py",
+    "tests/test_fleet_session_presence.py",
+    "tests/test_fleet_t3_observer.py",
+    "tests/test_fleet_who_paging.py",
+    "tests/test_init.py",
+    "tests/test_memory_cmd.py",
+    "tests/test_notifications_cmd.py",
+    "tests/test_outcome_backfill_scorecard.py",
+    "tests/test_pantry_cmd.py",
+    "tests/test_phase_ledger_session_cmd.py",
+    "tests/test_release_train_evidence_cmd.py",
+    "tests/test_report_review_closeout_cmd.py",
+    "tests/test_repos_actions_cmd.py",
+    "tests/test_repos_adoption_cmd.py",
+    "tests/test_repos_release_train_cmd.py",
+    "tests/test_repos_sweep_health_cmd.py",
+    "tests/test_run_reap.py",
+    "tests/test_runs_patrol_reconciliation.py",
+    "tests/test_update_notify.py",
+    "tests/test_work_cmd_backup.py",
+    "tests/test_work_cmd_imports.py",
+    "tests/test_work_cmd_ledger.py",
+    "tests/test_work_cmd_reviews.py",
+    "tests/test_work_cmd_scanners.py",
+    "tests/test_work_cmd_services.py",
+    "tests/test_work_cmd_session.py",
+    "tests/test_work_cmd_sweeps.py",
+    "tests/test_work_cmd_verification.py",
+    "npm/feasibility/signal-tests/test_runner.py",
+    "tests/fleet_investigation_assertions.py",
+    "tests/test_aboyeur.py",
+    "tests/test_acpx_adapter.py",
+    "tests/test_agent_change_approval_integration.py",
+    "tests/test_agent_change_approval_resources.py",
+    "tests/test_agent_notify_station_contracts.py",
+    "tests/test_agent_request.py",
+    "tests/test_approval.py",
+    "tests/test_attestation_input.py",
+    "tests/test_authority_store_hmac.py",
+    "tests/test_bug_report.py",
+    "tests/test_bug_review_regressions.py",
+    "tests/test_care_windows_isolation.py",
+    "tests/test_causal_receipt.py",
+    "tests/test_center_agent_activity.py",
+    "tests/test_center_readiness_cmd.py",
+    "tests/test_ci_workflow.py",
+    "tests/test_claim_loss_review.py",
+    "tests/test_claude_actions_import.py",
+    "tests/test_claude_hooks_entry.py",
+    "tests/test_cli_fleet_keys.py",
+    "tests/test_cli_help.py",
+    "tests/test_cli_inventory_contract.py",
+    "tests/test_cli_setup.py",
+    "tests/test_cloud_jules_pr.py",
+    "tests/test_code_export.py",
+    "tests/test_codex_appserver.py",
+    "tests/test_codex_cloud.py",
+    "tests/test_component_install.py",
+    "tests/test_component_manifest_provenance.py",
+    "tests/test_component_report.py",
+    "tests/test_control_crosswalk.py",
+    "tests/test_cursor_install_state_migration.py",
+    "tests/test_daemon_renderer_isolation.py",
+    "tests/test_daily_driver_cmd.py",
+    "tests/test_dashboard_runs.py",
+    "tests/test_dirfd.py",
+    "tests/test_doctor.py",
+    "tests/test_doctor_agent.py",
+    "tests/test_dot_hub_tools.py",
+    "tests/test_dot_inbox_tools.py",
+    "tests/test_dot_lifecycle.py",
+    "tests/test_download_metrics.py",
+    "tests/test_evidence_ack_crypto.py",
+    "tests/test_evidence_derivative.py",
+    "tests/test_evidence_package_snapshot.py",
+    "tests/test_external_scanner_isolation.py",
+    "tests/test_extras_gate.py",
+    "tests/test_fleet_action_http.py",
+    "tests/test_fleet_action_launch_isolation.py",
+    "tests/test_fleet_admin_followup.py",
+    "tests/test_fleet_admin_preview.py",
+    "tests/test_fleet_admin_reset.py",
+    "tests/test_fleet_admin_stats_collector.py",
+    "tests/test_fleet_audience.py",
+    "tests/test_fleet_authority_proof.py",
+    "tests/test_fleet_ci_review.py",
+    "tests/test_fleet_claim_display.py",
+    "tests/test_fleet_claim_loss_cancellation.py",
+    "tests/test_fleet_cloud.py",
+    "tests/test_fleet_deck_badges.py",
+    "tests/test_fleet_hub_container_recipes.py",
+    "tests/test_fleet_hub_message_keys.py",
+    "tests/test_fleet_hub_policy.py",
+    "tests/test_fleet_hub_reject_body.py",
+    "tests/test_fleet_hub_review_bounds.py",
+    "tests/test_fleet_hub_teammates.py",
+    "tests/test_fleet_late_review.py",
+    "tests/test_fleet_list_detail.py",
+    "tests/test_fleet_mcp_events.py",
+    "tests/test_fleet_mcp_review.py",
+    "tests/test_fleet_mesh_crypto.py",
+    "tests/test_fleet_mesh_hub_identity.py",
+    "tests/test_fleet_mesh_keys.py",
+    "tests/test_fleet_mesh_trust.py",
+    "tests/test_fleet_message_grants.py",
+    "tests/test_fleet_model_admission.py",
+    "tests/test_fleet_native_launch_binding.py",
+    "tests/test_fleet_overview_routing.py",
+    "tests/test_fleet_policy.py",
+    "tests/test_fleet_policy_core_completion.py",
+    "tests/test_fleet_policy_migration.py",
+    "tests/test_fleet_policy_page.py",
+    "tests/test_fleet_project_board.py",
+    "tests/test_fleet_questions.py",
+    "tests/test_fleet_repo_policy_page.py",
+    "tests/test_fleet_roster_page.py",
+    "tests/test_fleet_routing.py",
+    "tests/test_fleet_session_bootstrap.py",
+    "tests/test_fleet_skill_bindings.py",
+    "tests/test_fleet_skills_review.py",
+    "tests/test_fleet_sync.py",
+    "tests/test_fleet_t3_transport.py",
+    "tests/test_forward_plan_skill.py",
+    "tests/test_github_reader.py",
+    "tests/test_governance_inventory.py",
+    "tests/test_grokbot_backup_actions.py",
+    "tests/test_grokbot_client_identity.py",
+    "tests/test_grokbot_feed.py",
+    "tests/test_grokbot_fleet_remediation.py",
+    "tests/test_grokbot_fleet_tools.py",
+    "tests/test_grokbot_jobs.py",
+    "tests/test_grokbot_mcp.py",
+    "tests/test_grokbot_obsidian_runtime.py",
+    "tests/test_grokbot_ops.py",
+    "tests/test_grokbot_pack_relay.py",
+    "tests/test_grokbot_t3_inbox.py",
+    "tests/test_grokbot_t3_watch.py",
+    "tests/test_handoff_cmd.py",
+    "tests/test_harness_conformance_probe.py",
+    "tests/test_harness_user_scope.py",
+    "tests/test_harness_user_scope_slice2.py",
+    "tests/test_hub_seat_resolution.py",
+    "tests/test_jules_cloud.py",
+    "tests/test_managed.py",
+    "tests/test_mcp_fidelity.py",
+    "tests/test_mcp_http.py",
+    "tests/test_mcp_projection.py",
+    "tests/test_memory_contract_proof.py",
+    "tests/test_memory_inventory_cmd.py",
+    "tests/test_memory_outcome_evidence.py",
+    "tests/test_memory_proposal_v2.py",
+    "tests/test_memory_proposals.py",
+    "tests/test_memory_reflect.py",
+    "tests/test_memory_topology_cmd.py",
+    "tests/test_memory_vault_projection.py",
+    "tests/test_memory_vault_search.py",
+    "tests/test_message_endpoint_scope.py",
+    "tests/test_model_scorecard.py",
+    "tests/test_model_trials.py",
+    "tests/test_model_trials_paired.py",
+    "tests/test_native_release_packaging.py",
+    "tests/test_operator_checkup.py",
+    "tests/test_operator_cmd.py",
+    "tests/test_outcome_cmd.py",
+    "tests/test_outcome_repair.py",
+    "tests/test_outcome_reused_receipt_dedup.py",
+    "tests/test_pre_push_hook.py",
+    "tests/test_profiles.py",
+    "tests/test_provenance_envelope.py",
+    "tests/test_publish_workflow.py",
+    "tests/test_published_artifact_acceptance.py",
+    "tests/test_receipt_schema_audit.py",
+    "tests/test_release_cmd.py",
+    "tests/test_release_reconcile_evidence_cmd.py",
+    "tests/test_repos_cmd.py",
+    "tests/test_repos_friction_cmd.py",
+    "tests/test_research_claim_audit.py",
+    "tests/test_research_cmd.py",
+    "tests/test_research_doctor.py",
+    "tests/test_research_llm.py",
+    "tests/test_roadmap_cmd.py",
+    "tests/test_roster.py",
+    "tests/test_roster_cmd.py",
+    "tests/test_roster_doctor.py",
+    "tests/test_roster_readiness.py",
+    "tests/test_run_budget.py",
+    "tests/test_run_cassette.py",
+    "tests/test_run_cassette_dispatch.py",
+    "tests/test_run_cassette_fencing.py",
+    "tests/test_run_cassette_privacy.py",
+    "tests/test_run_cassette_review.py",
+    "tests/test_run_cassette_round13.py",
+    "tests/test_run_cassette_round3.py",
+    "tests/test_run_cassette_round6.py",
+    "tests/test_run_cassette_round8.py",
+    "tests/test_run_cli.py",
+    "tests/test_run_detach.py",
+    "tests/test_run_events_cursor_control.py",
+    "tests/test_run_journal_qualification.py",
+    "tests/test_run_lifecycle.py",
+    "tests/test_run_redaction.py",
+    "tests/test_run_redaction_batches.py",
+    "tests/test_run_redaction_tasks.py",
+    "tests/test_run_seat.py",
+    "tests/test_run_task_batch_recovery.py",
+    "tests/test_run_task_journal.py",
+    "tests/test_run_transport.py",
+    "tests/test_run_transport_failfast.py",
+    "tests/test_run_transport_recovery.py",
+    "tests/test_runguard.py",
+    "tests/test_runguard_wait.py",
+    "tests/test_runs_cmd.py",
+    "tests/test_runs_patrol.py",
+    "tests/test_runs_patrol_apply.py",
+    "tests/test_runs_watch.py",
+    "tests/test_scanner_runs_dir_adoption.py",
+    "tests/test_seat_health.py",
+    "tests/test_seat_health_policy.py",
+    "tests/test_security_cmd.py",
+    "tests/test_self_invocation_runs.py",
+    "tests/test_skills_cmd.py",
+    "tests/test_skills_state_windows.py",
+    "tests/test_stations_verify.py",
+    "tests/test_subprocess_coverage.py",
+    "tests/test_telemetry_export.py",
+    "tests/test_ui_theme_integration.py",
+    "tests/test_update_cmd.py",
+    "tests/test_verify_script.py",
+    "tests/test_windows_job.py",
+    "tests/test_windows_pytest.py",
+    "tests/test_work_cmd_campaign.py",
+    "tests/test_work_cmd_claim.py",
+    "tests/test_work_cmd_dispatch_annotations.py",
+    "tests/test_work_cmd_edges.py",
+    "tests/test_work_cmd_ledger_integrity.py",
+    "tests/test_work_cmd_partition.py",
+    "tests/test_work_cmd_work_graph_hardening.py",
+    "tests/test_work_dispatch_apply.py",
+    "tests/test_work_dispatch_review.py",
+    "tests/test_work_dispatch_round2.py",
+    "tests/test_work_dispatch_watch.py",
+    "tests/test_work_import_provenance_stamp.py",
+    "tests/test_work_run_archive.py",
+    "tests/test_work_store_measurement.py",
+    "tests/test_work_verify_plan_argv.py",
+    "tests/test_work_verify_plan_command.py",
+    "tests/test_worker_events.py",
+    "tests/test_worker_failure.py",
+    "tests/test_worklore_brigade.py",
+    "tests/test_worklore_campaign_take.py",
+    "tests/test_worklore_campaigns.py",
+    "tests/test_worklore_github.py",
+    "tests/test_worklore_ownership.py",
+    "tests/test_worklore_scope.py",
+    "tests/test_worklore_store.py",
+    "tests/thread_sync.py",
+    "tests/test_agent_change.py",
+    "tests/test_agent_change_approval_policy.py",
+    "tests/test_cloud_bound_ttl.py",
+    "tests/test_context_cmd.py",
+    "tests/test_fleet_action_native_references.py",
+    "tests/test_fleet_action_openclaw_bots.py",
+    "tests/test_fleet_action_page.py",
+    "tests/test_fleet_action_r2_core.py",
+    "tests/test_fleet_action_revisions.py",
+    "tests/test_fleet_action_runner.py",
+    "tests/test_fleet_claim_generations.py",
+    "tests/test_fleet_deck_alerts.py",
+    "tests/test_fleet_hub_event_bounds.py",
+    "tests/test_fleet_model_roster.py",
+    "tests/test_fleet_owners_view.py",
+    "tests/test_grokbot_t3_lifecycle.py",
+    "tests/test_grokbot_t3_platform.py",
+    "tests/test_hub_empty_states.py",
+    "tests/test_managed_block.py",
+    "tests/test_memory_read_only_paths.py",
+    "tests/test_memory_retrieval_eval.py",
+    "tests/test_memory_vault_propose.py",
+    "tests/test_pi_mcp_bridge.py",
+    "tests/test_release_readiness_hygiene_cmd.py",
+    "tests/test_release_waivers_manifest_cmd.py",
+    "tests/test_research_review_regressions.py",
+    "tests/test_roadmap_inventory_cmd.py",
+    "tests/test_route_policy.py",
+    "tests/test_run_cassette_round10.py",
+    "tests/test_run_cassette_round12.py",
+    "tests/test_run_cassette_round7.py",
+    "tests/test_run_cassette_round9.py",
+    "tests/test_run_task_batches.py",
+    "tests/test_run_task_launch.py",
+    "tests/test_runs_patrol_receipts.py",
+    "tests/test_scorecard.py",
+    "tests/test_task_roles.py",
+    "tests/test_tools_cmd_facade.py",
+    "tests/test_waiver_policy_health_cmd.py"
+  ],
+  "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges)."
+}
