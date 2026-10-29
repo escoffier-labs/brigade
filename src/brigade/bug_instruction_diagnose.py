@@ -14,10 +14,10 @@ from .bug_redaction import Redactor, assert_clean, assert_terminal_safe
 
 _SETTING_KEYS = ("project_doc_max_bytes", "fallback_filenames", "root_markers", "trust", "read_access")
 _CONTRIBUTIONS = {
-    "loaded": "Selected file contributes in chain order; ancestor contributions remain.",
+    "loaded": "Selected file contributes in chain order. Ancestor contributions remain.",
     "empty": "Selected file has no non-whitespace contribution within its read budget.",
     "truncated": "Selected file contributes partially within the supplied project byte cap.",
-    "cap_exhausted": "Earlier contributions exhausted the project byte cap; this selected file contributes no bytes.",
+    "cap_exhausted": "Earlier contributions exhausted the project byte cap. This selected file contributes no bytes.",
     "unknown": "The producer could not establish this file's contribution.",
 }
 
@@ -55,7 +55,7 @@ def _filenames(raw: str | None, *, fallback: bool) -> list[str] | None:
 
 
 def compare(args: argparse.Namespace) -> dict[str, Any]:
-    """Model only explicitly supplied project scope; actual session is unknown."""
+    """Model only explicitly supplied project scope. Actual session is unknown."""
     if args.harness != "codex" or args.name is not None:
         raise ValueError("Codex project instructions required")
     for value in (args.target, args.cwd):
@@ -108,7 +108,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
             {
                 "status": "not_evaluated",
                 "expected": "A complete modeled project instruction chain.",
-                "observed": "Unsupported assumptions or incomplete inspection; instruction selection remains unknown.",
+                "observed": "Unsupported assumptions or incomplete inspection. Instruction selection remains unknown.",
             }
         )
     elif settings["trust"]["value"] == "untrusted" or settings["project_doc_max_bytes"]["value"] == 0:
@@ -158,7 +158,7 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
                     "path": safe_label(expected),
                     "status": "not_selected",
                     "expected": "Caller expected this project-relative label in the selected chain.",
-                    "observed": "Expected label is not selected; existence was not checked separately and no cause is established.",
+                    "observed": "Expected label is not selected. Existence was not checked separately and no cause is established.",
                 }
             )
     projection = {
@@ -171,12 +171,12 @@ def compare(args: argparse.Namespace) -> dict[str, Any]:
     digest = hashlib.sha256(json.dumps(projection, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     symptom = _safe(redactor, args.summary)
     uncertainty = (
-        "Supplied configuration and fresh-disk modeling only; actual session loading and model behavior unknown. "
-        "No atomic snapshot; access times may change."
+        "Supplied configuration and fresh-disk modeling only. Actual session loading and model behavior unknown. "
+        "No atomic snapshot. Access times may change."
     )
     next_check = (
-        "Confirm the selected project, explicit cwd, caller-supplied Codex version and effective settings locally; "
-        "then use brigade context preview with those same explicit project settings."
+        "Confirm the selected project, explicit cwd, caller-supplied Codex version and effective settings locally. "
+        "Then use brigade context preview with those same explicit project settings."
     )
     text = f"Symptom: {symptom}\nHarness: codex\nComponent: instructions\nEvidence digest: {digest}\n"
     text += "Expected: AGENTS.override.md precedes AGENTS.md, then supplied fallbacks, in each selected directory.\n"
