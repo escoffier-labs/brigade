@@ -99,7 +99,11 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
         readable = True
         live: dict[str, dict[str, Any]] = {}
         try:
-            live = adapter.read_file(path.read_text() if found else None)
+            text = path.read_text() if found else None
+            # Validate like the sync plan does: some adapters read malformed text as
+            # an empty mapping, and inventory-only configs never reach that plan.
+            mcp_cmd._validate_native_config(adapter_name, text)
+            live = adapter.read_file(text)
         except (OSError, ValueError, UnicodeError):
             readable = False
         slot = harnesses.setdefault(

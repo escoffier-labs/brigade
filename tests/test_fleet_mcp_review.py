@@ -833,3 +833,10 @@ def test_unreadable_config_is_never_reported_as_healthy():
     assert "unreadable config" in pill and "pill--ok" not in pill
     verdict = inventory.machine_verdict(machine)
     assert "Everything matches" not in verdict and "1 config could not be read" in verdict
+
+
+def test_malformed_user_config_is_unreadable_even_though_it_is_inventory_only(workspace, tmp_path):
+    (tmp_path / "home" / ".claude.json").write_text("{not json")
+    report = fleet_mcp_report.build_report(workspace, now=NOW)
+    claude_user = next(h for h in report["harnesses"] if (h["harness"], h["scope"]) == ("claude", "user"))
+    assert claude_user == {"harness": "claude", "scope": "user", "config_found": True, "readable": False}
