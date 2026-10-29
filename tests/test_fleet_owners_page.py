@@ -9,7 +9,6 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 
-from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_hub, fleet_hub_policy, fleet_owners_page, fleet_policy
 from brigade.fleet_owners import Holding, Overlap, OwnersView
@@ -255,7 +254,13 @@ def test_page_requires_dashboard_access_and_is_read_only(tmp_path):
             assert "Content-Security-Policy" in response_headers
             assert response_headers["Cache-Control"] == "no-store"
             assert "No charters declared" in body
-            assert not {"form", "input", "button"} & set(_Tags(body).tags)
+            # The Admin/Agent display switch is client-only presentation, not a write control.
+            from brigade import fleet_admin_explorer
+
+            assert body.count(fleet_admin_explorer.audience_toggle()) == 1
+            assert not {"form", "input", "button"} & set(
+                _Tags(body.replace(fleet_admin_explorer.audience_toggle(), "")).tags
+            )
         assert _request(hub, "/deck/owners?cursor=1", headers=_bearer())[0] == 400
 
 
@@ -397,7 +402,7 @@ def test_long_holding_lists_are_capped_with_a_note():
     assert "example/repo-049" in body and "example/repo-050" not in body
 
 
-def test_owners_link_is_in_the_navigation_of_every_deck_page_and_board(tmp_path, monkeypatch):
+def test_ownership_is_discoverable_through_repositories_from_every_deck_page_and_board(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
     with _hub(tmp_path) as (hub, _db):
         for path in (
@@ -412,7 +417,13 @@ def test_owners_link_is_in_the_navigation_of_every_deck_page_and_board(tmp_path,
         ):
             status, _, body = _request(hub, path, headers=_bearer())
             assert status == 200, path
-            assert 'href="/deck/owners"' in body, path
+            # The sidebar Projects entry opens the section whose tabs include Repositories.
+            assert 'href="/deck/repos"' in body or 'href="/deck/projects"' in body, path
+            if path in ("/deck/repos", "/deck/owners", "/view/repos"):
+                assert 'href="/deck/owners"' in body, path
+            else:
+                assert 'href="/deck/owners"' not in body, path
+        assert 'href="/deck/repos"' in _request(hub, "/deck/projects", headers=_bearer())[2]
         _, _, body = _request(hub, "/deck/owners", headers=_bearer())
-        assert f'<a href="/deck/owners" aria-current="page">{NAV_ICONS["owners"]}owners</a>' in body
+        assert '<a href="/deck/projects" aria-current="page">' in body  # sidebar Projects entry
         assert '<a href="/deck" aria-current="page">' not in body

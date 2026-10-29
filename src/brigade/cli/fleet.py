@@ -208,6 +208,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_messages import register as register_messages
 
     register_messages(fleet_sub)
+    from .fleet_keys import register as register_keys
+
+    register_keys(fleet_sub)
 
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
@@ -512,6 +515,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_roster import register as register_roster
 
     register_roster(fleet_sub)
+
+    from .fleet_skills import register as register_skills
+
+    register_skills(fleet_sub)
+
+    from .fleet_projects import register as register_projects
+
+    register_projects(fleet_sub)
 
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:

@@ -243,7 +243,7 @@ def test_form_labels_are_not_uppercase():
 
 def test_sidebar_resources_hide_on_narrow_screens():
     narrow = ui_theme.BASE_CSS.split("@media (max-width: 900px)")[1].split("@media")[0]
-    hide = re.search(r"([^{}]+)\{ display: none; \}", narrow).group(1)
+    hide = " ".join(re.findall(r"([^{}]+)\{ display: none; \}", narrow))
     assert ".resources" in hide and ".sidebar-meta" in hide
 
 
@@ -311,3 +311,14 @@ def test_machine_table_seen_header_stays_right_aligned_without_notes():
         for selector in selectors.split(",")
     }
     assert "text-align: right" in rules[".machine-table--no-notes th:nth-child(4)"]
+
+
+def test_document_soft_refresh_moves_the_meta_refresh_into_noscript():
+    page = ui_theme.document("t", "n", "b", as_of="x", refresh_seconds=10, soft_refresh=True)
+    assert '<noscript><meta http-equiv="refresh" content="10"></noscript>' in page
+    assert page.count('http-equiv="refresh"') == 1
+    assert page.count(ui_theme.SOFT_REFRESH_BODY_MARKER) == 1
+    assert page.index('<link rel="icon" type="image/svg+xml" href="/favicon.svg">') < page.index('href="/favicon.ico"')
+    # Without a refresh interval soft_refresh has nothing to do.
+    plain = ui_theme.document("t", "n", "b", as_of="x", refresh_seconds=None, soft_refresh=True)
+    assert "http-equiv" not in plain and "data-soft-refresh" not in plain

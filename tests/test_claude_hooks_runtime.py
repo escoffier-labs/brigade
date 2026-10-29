@@ -1852,6 +1852,37 @@ def test_posttooluse_records_only_successful_confident_bash_writes(tmp_path: Pat
     assert runtime.read_session_state(target, "bash-write")["write_observed"] is True
 
 
+@pytest.mark.parametrize(
+    "command,write,touches",
+    [
+        ("gh pr checks 1 2>&1 | tail -3", False, False),
+        ("ls >&2", False, False),
+        ("ls 2>/dev/null", False, False),
+        ("echo x > /tmp/outside.log", True, False),
+        ("echo x > notes.md", True, True),
+        ("echo x >> notes.md", True, True),
+        ("ls &>out.txt", True, True),
+        ("ls >& out.txt", True, True),
+        ("ls >", True, True),
+    ],
+)
+def test_confident_bash_write_reads_redirect_targets(tmp_path: Path, command, write, touches):
+    target = _wired_claude(tmp_path)
+    assert runtime._is_confident_bash_write(command) is write
+    assert (write and runtime._bash_confident_write_touches_worktree(target, command)) is touches
+
+
+def test_read_only_command_with_stderr_merge_does_not_arm_stop(tmp_path: Path, monkeypatch):
+    target = _wired_claude(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id="merge"))
+    tool = {"command": "git status 2>&1 | head -3"}
+    for event in ("PreToolUse", "PostToolUse"):
+        runtime.handle_payload(event, _payload(target, event, session_id="merge", tool_name="Bash", tool_input=tool))
+    assert runtime.read_session_state(target, "merge")["write_observed"] is False
+    assert runtime.handle_payload("Stop", _payload(target, "Stop", session_id="merge", stop_hook_active=False)) is None
+
+
 def test_stop_does_not_block_read_only_or_repeated_stop(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
     monkeypatch.setattr(runtime, "_run_brief", lambda repo: "brief")

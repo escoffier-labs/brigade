@@ -29,7 +29,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 90 command path(s)
+- `brigade fleet`: 97 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -218,6 +218,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet export`
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
+- `brigade fleet keys init`
+- `brigade fleet keys rotate`
+- `brigade fleet keys show`
 - `brigade fleet mcp`
 - `brigade fleet models admit`
 - `brigade fleet models bindings`
@@ -251,6 +254,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet policy inventory probe`
 - `brigade fleet policy inventory status`
 - `brigade fleet policy observe`
+- `brigade fleet policy pr-rules`
 - `brigade fleet policy preview`
 - `brigade fleet policy quota ingest`
 - `brigade fleet policy reservation release`
@@ -266,15 +270,18 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet preference get`
 - `brigade fleet preference pull`
 - `brigade fleet preference set`
+- `brigade fleet projects sync`
 - `brigade fleet roster validate`
 - `brigade fleet serve`
 - `brigade fleet sessions`
 - `brigade fleet sink`
+- `brigade fleet skills report`
 - `brigade fleet stats collect`
 - `brigade fleet status`
 - `brigade fleet work attempt`
 - `brigade fleet work burn`
 - `brigade fleet work create`
+- `brigade fleet work handoff show`
 - `brigade fleet work link`
 - `brigade fleet work list`
 - `brigade fleet work next`

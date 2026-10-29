@@ -1,9 +1,10 @@
 """Dot MCP tool registration, preserving the bridge wire schemas."""
 
 import asyncio
-from typing import Any
+from typing import Annotated, Any
 
 from brigade.grokbot_mcp import OptionalDependencyError
+from ..fleet_dot import MAX_EVIDENCE_REFS, MAX_SUMMARY_CHARS, REPORTED_STATES
 from .adapter import DotTools
 from .contracts import ERROR_MESSAGES, DotError, TOOL_SCHEMAS
 from .events import IDENTITY
@@ -11,10 +12,94 @@ from .profile import DOT, ConnectorProfile
 from .safe_state import identity
 
 
+# Discovery metadata only. The shared parse_report validator remains the
+# authority at dispatch, including safe text, public URLs and the byte bound.
+_REPORT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "description": "Explicit v2 task facts, at most 16384 UTF-8 JSON bytes. Use safe prose without private paths, credentials or query strings. Evidence is reported-unverified. Omitted progress, blocker, result and evidence_refs clear on the next sequence.",
+    "required": [
+        "version",
+        "session_id",
+        "agent_label",
+        "observed_at",
+        "sequence",
+        "task",
+        "reported_state",
+        "source",
+        "source_scope",
+    ],
+    "properties": {
+        "version": {"type": "integer", "const": 2},
+        "session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        },
+        "agent_label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+        },
+        "observed_at": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64,
+            "format": "date-time",
+            "pattern": r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$",
+            "description": "Timezone-aware observation timestamp. Advance only when observing new activity.",
+        },
+        "sequence": {"type": "integer", "minimum": 0, "maximum": 2**53 - 1},
+        "task": {"type": "string", "minLength": 1, "maxLength": MAX_SUMMARY_CHARS},
+        "reported_state": {"type": "string", "enum": sorted(REPORTED_STATES)},
+        "source": {"type": "string", "enum": ["explicit-metadata", "cloud_threads"]},
+        "source_scope": {
+            "type": "string",
+            "enum": ["explicit-session", "caller-created-tasks", "authorized-visible-threads"],
+        },
+        "parent_session_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+            "description": "An explicit parent session, different from session_id.",
+        },
+        "repo_identity": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512,
+            "pattern": r"^[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+            "description": "Canonical host/owner/repository, without scheme or .git suffix.",
+        },
+        "progress": {"type": "string", "minLength": 1, "maxLength": MAX_SUMMARY_CHARS},
+        "blocker": {"type": "string", "minLength": 1, "maxLength": MAX_SUMMARY_CHARS},
+        "result": {"type": "string", "minLength": 1, "maxLength": MAX_SUMMARY_CHARS},
+        "evidence_refs": {
+            "type": "array",
+            "maxItems": MAX_EVIDENCE_REFS,
+            "items": {"type": "string", "minLength": 1, "maxLength": 256},
+            "description": "Opaque IDs (at most 128 characters) or public HTTPS URLs without query, fragment, user info or private hosts. References are unverified.",
+        },
+    },
+    "oneOf": [
+        {"properties": {"source": {"const": "explicit-metadata"}, "source_scope": {"const": "explicit-session"}}},
+        {
+            "properties": {
+                "source": {"const": "cloud_threads"},
+                "source_scope": {"enum": ["caller-created-tasks", "authorized-visible-threads"]},
+            }
+        },
+    ],
+}
+
+
 def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT) -> None:
     """Register only the profile's tools. Others are absent from discovery, not refused at call time."""
     try:
         from mcp.types import ToolAnnotations as _ToolAnnotations
+        from pydantic import Field
 
         ToolAnnotations: Any = _ToolAnnotations
     except ImportError:
@@ -170,6 +255,16 @@ def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT
     )
     async def fleet_overview(include_terminal: bool | None = None) -> dict:
         return await invoke("fleet_overview", {"include_terminal": include_terminal})
+
+    @tool(
+        name="fleet_report_session",
+        annotations=annotations("fleet_report_session"),
+        description='Validate a bounded explicit v2 task report offline by default; publish=true stores unverified task facts with the host node credential. Requires dispatch_enabled. No run, lease, ownership or provider discovery authority. Unknown replies never confirm persistence. Example report: {"version":2,"session_id":"task-example","agent_label":"worker-a","observed_at":"2026-01-01T00:00:00Z","sequence":1,"task":"Check build","reported_state":"running","source":"explicit-metadata","source_scope":"explicit-session"}',
+    )
+    async def fleet_report_session(
+        report: Annotated[dict, Field(json_schema_extra=_REPORT_SCHEMA)], publish: bool = False
+    ) -> dict:
+        return await invoke("fleet_report_session", {"report": report, "publish": publish})
 
     @tool(
         name="fleet_sessions",

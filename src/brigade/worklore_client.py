@@ -43,6 +43,7 @@ __all__ = [
     "get_campaign",
     "get_item",
     "get_ownership",
+    "get_prepared_handoff",
     "ownership_action",
     "new_ownership_nonce",
     "import_batch",
@@ -146,8 +147,9 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
         refusal = json.loads(_read_bounded(exc, limit=MAX_ERROR_RESPONSE_BYTES).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, FleetClientError):
         refusal = {}
+    code = {401: "unauthorized", 403: "forbidden"}.get(exc.code)
     if isinstance(refusal, dict):
-        code = _error_code(refusal.get("code"))
+        code = _error_code(refusal.get("code")) or code
         if code == "hub-unavailable":
             return WorkloreClientError("hub-unavailable", code=code)
         detail = refusal.get("error")
@@ -157,7 +159,7 @@ def _http_error(exc: urllib.error.HTTPError) -> FleetClientError:
                 code=code,
             )
         return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
-    return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}")
+    return WorkloreClientError(f"fleet hub work failed: HTTP {exc.code}", code=code)
 
 
 def _new_idempotency_key() -> str:
@@ -271,6 +273,11 @@ def new_ownership_nonce() -> str:
 def get_ownership(work_id: str) -> dict[str, Any]:
     """Read metadata using the same authentication preference as item reads."""
     return _request("GET", _item_path(work_id, "ownership"), token=_token())
+
+
+def get_prepared_handoff(work_id: str) -> dict[str, Any]:
+    """Read prepared context with the existing node-first credential preference."""
+    return _request("GET", _item_path(work_id, "prepared-handoff"), token=_token())
 
 
 def ownership_action(

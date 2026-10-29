@@ -414,6 +414,83 @@ def test_stats_summary_is_opt_in_and_excludes_identity_or_error_text(tmp_path):
     assert "never-retain" not in json.dumps(summary)
 
 
+def test_stats_summary_includes_pool_usage_counters_without_private_metadata(tmp_path):
+    runner = FakeRunner(
+        relay(),
+        CommandResult(
+            0,
+            json.dumps(
+                {
+                    "pool_usage": {
+                        "requests": 42,
+                        "backend_requests": 30,
+                        "cache_hits": 8,
+                        "saved_github_requests": 9,
+                        "eligible_cache_requests": 35,
+                        "eligible_cache_hit_rate": 0.25,
+                        "service_errors": 2,
+                        "fallbacks": 3,
+                        "errors": 5,
+                        "cache_stale": 1,
+                        "cache_unknown": 2,
+                        "cache_bypass": 0,
+                        "cacheable_requests": 40,
+                        "cache_hit_rate": 0.2,
+                        "cacheable_hit_rate": 0.2,
+                        "bypass_rate": 0,
+                        "avg_duration_ms": 100.0,
+                        "bad_bool": True,
+                        "bad_negative": -1,
+                        "bad_nan": float("nan"),
+                        "bad_infinity": float("inf"),
+                        "token": "never-retain",
+                    },
+                    "cache": {
+                        "total_entries": 9,
+                        "fresh_entries": 3,
+                        "expired_entries": 6,
+                        "body_bytes": 100,
+                        "url": "https://private.example/never-retain",
+                    },
+                    "window": {"seconds": 86400, "label": "24h"},
+                    "clients": [{"identity": "never-retain"}],
+                    "caller_routes": [{"route": "never-retain"}],
+                    "pool": "private",
+                    "generated_at": "2026-10-26T00:00:00Z",
+                }
+            ).encode(),
+        ),
+    )
+    client = reader(tmp_path, runner, visibility="public")
+    client.get(PATH, params={}, max_bytes=100)
+
+    summary = client.observation(refresh_octopool_stats=True)["octopool_stats"]
+
+    assert summary == {
+        "pool_usage": {
+            "requests": 42,
+            "backend_requests": 30,
+            "cache_hits": 8,
+            "saved_github_requests": 9,
+            "eligible_cache_requests": 35,
+            "eligible_cache_hit_rate": 0.25,
+            "service_errors": 2,
+            "fallbacks": 3,
+            "errors": 5,
+            "cache_stale": 1,
+            "cache_unknown": 2,
+            "cache_bypass": 0,
+            "cacheable_requests": 40,
+            "cache_hit_rate": 0.2,
+            "cacheable_hit_rate": 0.2,
+            "bypass_rate": 0,
+            "avg_duration_ms": 100.0,
+        },
+        "cache": {"total_entries": 9, "fresh_entries": 3, "expired_entries": 6, "body_bytes": 100},
+    }
+    assert "never-retain" not in json.dumps(summary)
+
+
 def test_runner_failure_is_counted_without_retaining_exception(tmp_path):
     runner = FakeRunner(RuntimeError("sensitive transport details"))
     client = reader(tmp_path, runner, visibility="private")
@@ -528,10 +605,11 @@ def test_subprocess_reads_clear_inherited_fresh_unless_merge_gating(tmp_path, mo
     # Use a real child without contacting GitHub or reading operator config.
     class EnvironmentRunner(SubprocessRunner):
         def __call__(self, argv, **kwargs):
+            # Binary stdout: Windows text mode would turn each \n into \r\n.
             script = (
                 "import os, sys; "
-                "sys.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n'); "
-                "sys.stdout.write(os.environ.get('OCTOPOOL_FRESH', 'unset'))"
+                "sys.stdout.buffer.write(b'HTTP/2.0 200 OK\\r\\n\\r\\n'); "
+                "sys.stdout.buffer.write(os.environ.get('OCTOPOOL_FRESH', 'unset').encode())"
             )
             return super().__call__([sys.executable, "-c", script], **kwargs)
 

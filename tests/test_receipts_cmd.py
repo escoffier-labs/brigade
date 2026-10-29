@@ -858,7 +858,17 @@ def test_receipts_export_miseledger_keeps_git_metadata_without_non_github_link(t
     assert rows[0]["links"] == []
 
 
-def test_receipts_export_miseledger_malformed_receipt_is_failed_after_partial_export(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "bad_bytes",
+    [
+        b"{not json\n",
+        b'{"value":"\xff"}',
+        b'{"value":' + b"[" * 20000 + b"0" + b"]" * 20000 + b"}",
+        b'{"value":' + b"[" * 129 + b"0" + b"]" * 129 + b"}",
+    ],
+    ids=["invalid-json", "invalid-utf8", "deep-json", "render-depth"],
+)
+def test_receipts_export_miseledger_malformed_receipt_is_failed_after_partial_export(tmp_path, capsys, bad_bytes):
     _write_verify_export_receipt(
         tmp_path,
         "20260708-150000-work-verify-good",
@@ -866,7 +876,7 @@ def test_receipts_export_miseledger_malformed_receipt_is_failed_after_partial_ex
     )
     bad_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "20260708-160000-work-verify-bad"
     bad_dir.mkdir(parents=True)
-    (bad_dir / "receipt.json").write_text("{not json\n")
+    (bad_dir / "receipt.json").write_bytes(bad_bytes)
     out_path = tmp_path / "export.jsonl"
 
     assert (
@@ -895,6 +905,8 @@ def test_receipts_export_miseledger_malformed_receipt_is_failed_after_partial_ex
     assert payload["error_count"] == 1
     assert "warning: skipped malformed receipt" in captured.err
     assert "20260708-160000-work-verify-bad" in captured.err
+
+    assert (bad_dir / "receipt.json").read_bytes() == bad_bytes
 
 
 def test_receipts_export_miseledger_malformed_receipt_fails_non_json_after_partial_export(tmp_path, capsys):

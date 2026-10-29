@@ -50,7 +50,21 @@ _STATS = {
     "unknown",
     "coalesced",
     "eligible_requests",
+    "backend_requests",
+    "saved_github_requests",
+    "eligible_cache_requests",
+    "eligible_cache_hit_rate",
+    "cache_hit_rate",
+    "errors",
+    "cache_stale",
+    "cache_unknown",
+    "cache_bypass",
+    "cacheable_requests",
+    "cacheable_hit_rate",
+    "bypass_rate",
+    "avg_duration_ms",
 }
+_CACHE_STATS = {"total_entries", "fresh_entries", "expired_entries", "body_bytes"}
 _ENVELOPE_OVERHEAD = 65536
 _CACHE_MAX_ENTRIES = 128
 _CACHE_MAX_BYTES = 16 * 1024 * 1024
@@ -148,12 +162,13 @@ def _stats_summary(value: object) -> dict[str, Any]:
     for key, item in value.items():
         if key in _STATS and type(item) in (int, float) and math.isfinite(item) and item >= 0:
             result[key] = item
-        elif key in {"totals", "summary", "cache", "eligible"} and isinstance(item, dict):
+        elif key in {"totals", "summary", "cache", "eligible", "pool_usage"} and isinstance(item, dict):
             # Fixed containers only. Never preserve caller/client/identity keys.
+            allowed = _STATS | _CACHE_STATS if key == "cache" else _STATS
             counters = {
                 name: number
                 for name, number in item.items()
-                if name in _STATS and type(number) in (int, float) and math.isfinite(number) and number >= 0
+                if name in allowed and type(number) in (int, float) and math.isfinite(number) and number >= 0
             }
             if counters:
                 result[key] = counters

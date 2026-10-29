@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from brigade import localio
-from brigade.component_manifest import KNOWN_COMPONENT_IDS, SUPPORTED_PLATFORMS
+from brigade.component_manifest import ACCEPTED_COMPONENT_IDS, SUPPORTED_PLATFORMS, wire_id
 
 SCHEMA_VERSION = 1
 _TOP_LEVEL_KEYS = frozenset(
@@ -96,7 +96,9 @@ def _load_components(value: Any) -> dict[str, InstalledComponentRecord] | None:
         return None
     result: dict[str, InstalledComponentRecord] = {}
     for key, item in value.items():
-        if not isinstance(key, str) or not key.strip() or key not in KNOWN_COMPONENT_IDS:
+        if not isinstance(key, str) or not key.strip() or key not in ACCEPTED_COMPONENT_IDS:
+            return None
+        if wire_id(result, key) is not None:
             return None
         record = _load_record(item)
         if record is None:

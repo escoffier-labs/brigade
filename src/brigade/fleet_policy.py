@@ -29,7 +29,7 @@ import math
 import re
 from typing import Any, Iterable, Mapping
 
-from . import fleet_policy_owners
+from . import fleet_policy_owners, fleet_policy_pr_rules
 from .fleet_model_inventory import DEFAULT_ALLOWED_SOURCES
 from .fleet_model_roster import canonical_json
 
@@ -61,7 +61,7 @@ OPENCODE_MUSE_SPARK_1_3_IDS = frozenset(
 )
 
 TOP_LEVEL_FIELDS = frozenset(
-    {"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing", "owners"}
+    {"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing", "owners", "pr_rules"}
 )
 DEFAULT_TELEMETRY_TTL_SECONDS = 300
 DEFAULT_RESERVATION_TTL_SECONDS = 300
@@ -811,7 +811,7 @@ def parse_document(raw: Any) -> dict[str, Any]:
                 f"fleet policy machine node_id {node_id!r} is mapped to both {previous!r} and {machine_name!r}"
             )
         seen_nodes[str(node_id)] = machine_name
-    document = {
+    document: dict[str, Any] = {
         "schema": POLICY_SCHEMA,
         "defaults": parse_settings(body.get("defaults") or {}, "defaults"),
         "machines": parsed_machines,
@@ -830,6 +830,10 @@ def parse_document(raw: Any) -> dict[str, Any]:
     owners = fleet_policy_owners.parse_owners(body.get("owners"))
     if owners:
         document["owners"] = owners
+    # Same rule for PR rules: absent when empty, so older digests do not move.
+    pr_rules = fleet_policy_pr_rules.parse_pr_rules(body.get("pr_rules"))
+    if pr_rules:
+        document["pr_rules"] = pr_rules
     rendered = canonical_json(document)
     if len(rendered.encode("ascii")) > MAX_DOCUMENT_BYTES:
         raise FleetPolicyError(f"fleet policy document must be at most {MAX_DOCUMENT_BYTES} bytes")
@@ -852,10 +856,17 @@ def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
     return {prefix: value}
 
 
+def _diffable(document: dict[str, Any]) -> dict[str, Any]:
+    """Key PR rules by id so the diff names the rule that changed, not one opaque list."""
+    if "pr_rules" not in document:
+        return document
+    return {**document, "pr_rules": fleet_policy_pr_rules.by_id(document["pr_rules"])}
+
+
 def diff_documents(current: Mapping[str, Any], proposed: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
     """Leaf-level diff of two documents, keyed by dotted path."""
-    before = _flatten(parse_document(current))
-    after = _flatten(parse_document(proposed))
+    before = _flatten(_diffable(parse_document(current)))
+    after = _flatten(_diffable(parse_document(proposed)))
     return {
         "added": [{"path": path, "to": after[path]} for path in sorted(set(after) - set(before))],
         "removed": [{"path": path, "from": before[path]} for path in sorted(set(before) - set(after))],

@@ -40,11 +40,9 @@ def provenance(fact: dict[str, Any]) -> str:
 def render(view: dict[str, Any], *, nonce: str) -> str:
     now = datetime.fromisoformat(view["as_of"].replace("Z", "+00:00"))
     body = [
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>CI board</h1></div>"
-        f'<p class="header-meta">{esc(view["as_of"])}</p></header>'
-        '<p class="station-meta">Exact-head checks and workflow observations. '
-        "GitHub remains authoritative for merge readiness.</p>",
+        '<main class="deck-shell admin-page">'
+        '<div data-audience="agent"><p class="station-meta">Exact-head checks and workflow observations. '
+        "GitHub remains authoritative for merge readiness.</p></div>",
         '<div class="ci-repos">',
     ]
     for repo in view["repositories"]:
@@ -114,7 +112,7 @@ def render(view: dict[str, Any], *, nonce: str) -> str:
         )
     if not view["repositories"]:
         body.append(
-            '<section class="panel"><h2>No CI observations yet</h2><p>Run node reconciliation to populate repository heads, workflows and checks.</p></section>'
+            '<section class="panel"><h2>No CI observations yet</h2><p>Collection has not reported repository heads, workflows or checks. This is not a passing result. Run node reconciliation to populate repository heads, workflows and checks.</p></section>'
         )
     body.append("</div></main>")
     return fleet_command_deck._document(

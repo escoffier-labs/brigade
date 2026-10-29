@@ -485,6 +485,8 @@ def test_cleartext_remote_hub_is_refused_before_the_token_is_sent(monkeypatch, h
         worklore_client.list_items()
     with pytest.raises(worklore_client.FleetClientError, match="must use https"):
         worklore_client.create_item({"title": "Native", "kind": "fleet"})
+    with pytest.raises(worklore_client.FleetClientError, match="must use https"):
+        worklore_client.get_prepared_handoff("wl-1")
 
 
 @pytest.mark.parametrize("hub_url", ["https://hub.example", "http://127.0.0.1:8787", "http://localhost:8787"])
@@ -546,6 +548,8 @@ def test_reads_prefer_the_node_token_and_admin_writes_stay_explicit(monkeypatch)
     worklore_client.list_items()
     assert captured["headers"]["authorization"] == "Bearer node-secret"
     worklore_client.get_item("wl-1")
+    assert captured["headers"]["authorization"] == "Bearer node-secret"
+    worklore_client.get_prepared_handoff("wl-1")
     assert captured["headers"]["authorization"] == "Bearer node-secret"
     worklore_client.burn_queue()
     assert captured["headers"]["authorization"] == "Bearer node-secret"

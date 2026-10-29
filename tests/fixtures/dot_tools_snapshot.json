@@ -355,6 +355,171 @@
       },
       "name": "fleet_recent"
     },
+    "fleet_report_session": {
+      "name": "fleet_report_session",
+      "description": "Validate a bounded explicit v2 task report offline by default; publish=true stores unverified task facts with the host node credential. Requires dispatch_enabled. No run, lease, ownership or provider discovery authority. Unknown replies never confirm persistence. Example report: {\"version\":2,\"session_id\":\"task-example\",\"agent_label\":\"worker-a\",\"observed_at\":\"2026-01-01T00:00:00Z\",\"sequence\":1,\"task\":\"Check build\",\"reported_state\":\"running\",\"source\":\"explicit-metadata\",\"source_scope\":\"explicit-session\"}",
+      "inputSchema": {
+        "properties": {
+          "report": {
+            "additionalProperties": false,
+            "description": "Explicit v2 task facts, at most 16384 UTF-8 JSON bytes. Use safe prose without private paths, credentials or query strings. Evidence is reported-unverified. Omitted progress, blocker, result and evidence_refs clear on the next sequence.",
+            "oneOf": [
+              {
+                "properties": {
+                  "source": {
+                    "const": "explicit-metadata"
+                  },
+                  "source_scope": {
+                    "const": "explicit-session"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "source": {
+                    "const": "cloud_threads"
+                  },
+                  "source_scope": {
+                    "enum": [
+                      "caller-created-tasks",
+                      "authorized-visible-threads"
+                    ]
+                  }
+                }
+              }
+            ],
+            "properties": {
+              "version": {
+                "const": 2,
+                "type": "integer"
+              },
+              "session_id": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "agent_label": {
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "observed_at": {
+                "description": "Timezone-aware observation timestamp. Advance only when observing new activity.",
+                "format": "date-time",
+                "maxLength": 64,
+                "minLength": 1,
+                "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?(?:Z|[+-]\\d{2}:\\d{2})$",
+                "type": "string"
+              },
+              "sequence": {
+                "maximum": 9007199254740991,
+                "minimum": 0,
+                "type": "integer"
+              },
+              "task": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              },
+              "reported_state": {
+                "enum": [
+                  "blocked",
+                  "cancelled",
+                  "completed",
+                  "failed",
+                  "queued",
+                  "running",
+                  "unknown"
+                ],
+                "type": "string"
+              },
+              "source": {
+                "enum": [
+                  "explicit-metadata",
+                  "cloud_threads"
+                ],
+                "type": "string"
+              },
+              "source_scope": {
+                "enum": [
+                  "explicit-session",
+                  "caller-created-tasks",
+                  "authorized-visible-threads"
+                ],
+                "type": "string"
+              },
+              "parent_session_id": {
+                "description": "An explicit parent session, different from session_id.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+                "type": "string"
+              },
+              "repo_identity": {
+                "description": "Canonical host/owner/repository, without scheme or .git suffix.",
+                "maxLength": 512,
+                "minLength": 1,
+                "pattern": "^[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+                "type": "string"
+              },
+              "progress": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              },
+              "blocker": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              },
+              "result": {
+                "maxLength": 400,
+                "minLength": 1,
+                "type": "string"
+              },
+              "evidence_refs": {
+                "description": "Opaque IDs (at most 128 characters) or public HTTPS URLs without query, fragment, user info or private hosts. References are unverified.",
+                "items": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "maxItems": 8,
+                "type": "array"
+              }
+            },
+            "required": [
+              "version",
+              "session_id",
+              "agent_label",
+              "observed_at",
+              "sequence",
+              "task",
+              "reported_state",
+              "source",
+              "source_scope"
+            ],
+            "title": "Report",
+            "type": "object"
+          },
+          "publish": {
+            "default": false,
+            "title": "Publish",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "report"
+        ],
+        "title": "fleet_report_sessionArguments",
+        "type": "object"
+      },
+      "annotations": {
+        "readOnlyHint": false
+      }
+    },
     "fleet_sessions": {
       "annotations": {
         "readOnlyHint": true

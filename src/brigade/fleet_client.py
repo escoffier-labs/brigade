@@ -103,6 +103,7 @@ from .fleet_event_report import report_event_detailed as report_event_detailed
 
 if TYPE_CHECKING:
     from .fleet_session_presence import SessionSnapshot
+    from .fleet_client_cloud import admit_cloud as admit_cloud, bind_cloud as bind_cloud, release_cloud as release_cloud
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
@@ -1378,7 +1379,20 @@ def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None
 
 def publish_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> SessionWriteResult:
     """Refresh one interactive session and return a bounded non-secret status."""
+    if snapshot.cloud_context is not None and snapshot.cloud_context.get("version") == 2:
+        # V2 task persistence always requires strict identity and stored readback.
+        # Endpoint overrides are deliberately unavailable for task reports.
+        if hub_url is not None:
+            return SessionWriteResult(False, "endpoint_override_refused")
+        return publish_task_session(snapshot, expected_node=resolve_node_id())
     return _post_session(snapshot, action="upsert", hub_url=hub_url)
+
+
+def publish_task_session(snapshot: SessionSnapshot, *, expected_node: str) -> SessionWriteResult:
+    """Confirm a v2 readback under one captured host node authority. No retries."""
+    from .fleet_client_task_report import publish_task_session as publish
+
+    return publish(snapshot, expected_node=expected_node)
 
 
 def upsert_session(snapshot: SessionSnapshot, *, hub_url: str | None = None) -> bool:

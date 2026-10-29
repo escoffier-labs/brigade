@@ -423,8 +423,13 @@ def _event_payload(
     health_payload = health(target, profile=profile)
     selected_profile = health_payload.get("profile")
     effective_profile = selected_profile if isinstance(selected_profile, str) else profile
-    argv = list(component_bins.resolve_argv(["agent-notify", "send", *_profile_args(effective_profile)]))
-    return {
+    executable_error = None
+    try:
+        argv = component_bins.resolve_argv(["agent-notify", "send", *_profile_args(effective_profile)])
+    except ValueError as exc:
+        argv = []
+        executable_error = str(exc)
+    payload = {
         "target": str(target),
         "event_id": event_id,
         "event_type": event_type,
@@ -437,12 +442,15 @@ def _event_payload(
         "planned_argv": argv,
         "send_requested": send,
         "configured": bool(health_payload.get("configured")),
-        "installed": bool(health_payload.get("installed")),
+        "installed": executable_error is None and bool(health_payload.get("installed")),
         "selected_channels": health_payload.get("selected_channels") or [],
         "sends_notifications": bool(send),
         "writes_hook_config": False,
         "stores_secrets": False,
     }
+    if executable_error is not None:
+        payload["executable_error"] = executable_error
+    return payload
 
 
 def _canonical_event_bytes(payload: dict[str, Any]) -> bytes:
@@ -495,6 +503,8 @@ def event_plan(
     print("would_write: false")
     print(f"receipt: {payload['receipt_path']}")
     print("planned_argv: " + " ".join(payload["planned_argv"]))
+    if "executable_error" in payload:
+        print(f"executable_error: {payload['executable_error']}")
     return 0
 
 
@@ -560,6 +570,8 @@ def event_record(
     print(f"event_type: {event_type}")
     print(f"receipt: {path}")
     print(f"sent: {payload['sent']}")
+    if "executable_error" in payload:
+        print(f"executable_error: {payload['executable_error']}")
     if send:
         print(f"send_exit_code: {payload['send_exit_code']}")
     return 0 if not send or payload["sent"] else 1

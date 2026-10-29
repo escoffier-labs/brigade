@@ -36,7 +36,12 @@ DOT_OPERATING_INSTRUCTIONS = (
     "Call fleet_policy at the start of every task and before dispatch. Read relevant skills with skill_search and skill_get. On any event wake always call inbox_list first, even if event data is missing; reply to questions with inbox_reply. The control host is the source of truth. "
     + INBOX_TRUST_NOTICE
     + " "
-    "Fleet awareness: at task start and on every event wake also call fleet_overview and fleet_work_next so you see all fleet activity; drill in with fleet_sessions, fleet_work_list, fleet_work_show, fleet_work_burn, fleet_models, fleet_cloud and fleet_hub_policy. These Fleet Hub views are read-only and never reserve, claim or change hub state."
+    "Fleet awareness: at task start and on every event wake also call fleet_overview and fleet_work_next so you see all fleet activity; drill in with fleet_sessions, fleet_work_list, fleet_work_show, fleet_work_burn, fleet_models, fleet_cloud and fleet_hub_policy. These Fleet Hub views are read-only and never reserve, claim or change hub state. "
+    "Use fleet_report_session with a strict v2 report for an explicitly known task at start, material updates, blockers and outcome. "
+    "Publish explicitly and heartbeat with increasing sequence and current observed_at only while observing activity. "
+    "Each session represents one task; updates replace the whole report and omitted dynamic fields clear. "
+    "Coverage is only explicitly reported sessions; reports and evidence are unverified, never managed runs or leases. "
+    "An unknown publication must not be downgraded to v1 or reported as persisted; inspect fleet_sessions before retrying the identical report."
 )
 DUET_OPERATING_INSTRUCTIONS = (
     "Do your work on your own cloud compute. This connector has no dispatch: it cannot start, follow up, "
@@ -51,6 +56,7 @@ DUET_OPERATING_INSTRUCTIONS = (
 # Dispatch and T3 fleet tools a hosted agent must never see: they run work on operator machines.
 DUET_EXCLUDED_TOOLS = frozenset(
     {
+        "fleet_report_session",
         "fleet_submit",
         "fleet_followup",
         "fleet_answer",

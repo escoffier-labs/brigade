@@ -46,6 +46,8 @@ class OverviewChecks(Fixture):
         self.assertEqual(result["status"]["routing"], {"impl": "sol61"})
         self.assertEqual(result["claims"]["count"], 1)
         self.assertNotIn("holder", result["claims"]["claims"][0])
+        self.assertNotIn("cloud_context", result["claims"]["claims"][0])
+        self.assertNotIn("presence_state", result["claims"]["claims"][0])
         self.runner.calls.clear()
         self.call("fleet_overview", include_terminal=True)
         self.assertEqual(self.runner.argvs()[0], [BRIGADE, "fleet", "status", "--json", "--all"])
@@ -173,6 +175,13 @@ class V4Behavior(Fixture):
             }
             for i in range(60)
         ]
+        sessions[-1].update(
+            cloud_context={"version": 2, "task": "Check fixture", "reported_state": "running"},
+            presence_state="active",
+            provider_lifecycle="unobserved",
+            inventory_coverage="explicitly-reported-sessions",
+            evidence_verification="reported-unverified",
+        )
         self.runner.handler = reply(sessions)
         result = self.call("fleet_sessions")
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "sessions", "--json"]])
@@ -180,6 +189,9 @@ class V4Behavior(Fixture):
         self.assertEqual(len(result["sessions"]), 50)
         self.assertEqual(result["sessions"][0]["session_id"], "s59")
         self.assertEqual(result["sessions"][0]["dirty_count"], 59)
+        self.assertEqual(result["sessions"][0]["cloud_context"], sessions[-1]["cloud_context"])
+        self.assertEqual(result["sessions"][0]["presence_state"], "active")
+        self.assertEqual(result["sessions"][0]["evidence_verification"], "reported-unverified")
         self.assertNotIn("dirty_paths", result["sessions"][0])
         self.assertEqual(result["by_node"], {"alpha": 30, "beta": 30})
         self.runner.calls.clear()
@@ -270,6 +282,8 @@ class V4Behavior(Fixture):
         result = self.call("fleet_cloud", include_released=True, limit=2)
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "cloud", "--all", "--json"]])
         self.assertEqual([lease["lease_id"] for lease in result["leases"]], ["l4", "l3"])
+        self.assertNotIn("cloud_context", result["leases"][0])
+        self.assertNotIn("presence_state", result["leases"][0])
         self.assertEqual(result["lease_count"], 5)
 
     @requires_local_state
@@ -323,7 +337,8 @@ class V4Behavior(Fixture):
         self.assertIn("fleet_overview", capabilities["operating_instructions"])
         self.assertTrue(set(V4_TOOLS) <= set(capabilities["tools"]))
         self.assertTrue(set(V4_TOOLS) <= set(capabilities["fleet_hub"]["tools"]))
-        self.assertTrue(capabilities["fleet_hub"]["read_only"])
+        self.assertFalse(capabilities["fleet_hub"]["read_only"])
+        self.assertIn("fleet_report_session", capabilities["fleet_hub"]["report_session"])
 
 
 STATUS = {
@@ -660,3 +675,52 @@ class DigestRoutes(Fixture):
         with self.assertRaisesRegex(DotError, "invalid_request"):
             self.call("fleet_digest", repo="other")
         self.assertEqual(self.runner.calls, [])
+
+
+class ReportChecks(Fixture):
+    @requires_local_state
+    def test_report_gated_strict_and_fixed_stdin(self):
+        from tests.test_fleet_dot import v2_report
+        from brigade.dot.adapter import validate_arguments
+        from brigade.dot.profile import DUET
+        import pytest
+
+        raw = v2_report()
+        self.runner.handler = lambda argv, stdin: CommandResult(0, b'{"status":"dry-run","summaries_persisted":false}')
+        result = self.call("fleet_report_session", report=raw)
+        assert result["status"] == "dry-run"
+        call = self.runner.calls[-1]
+        assert call["argv"] == [BRIGADE, "fleet", "dot", "report", "--expected-node", self.runtime.hub.node_id]
+        assert json.loads(call["stdin"]) == raw
+        assert call["timeout"] <= 60 and call["max_output"] <= 65536
+        self.call("fleet_report_session", report=raw, publish=True)
+        assert self.runner.calls[-1]["argv"] == [*call["argv"], "--publish"]
+        with pytest.raises(DotError, match="dispatch_disabled"):
+            self.make_adapter(False).call(EMAIL, "fleet_report_session", {"report": raw})
+        assert len(self.runner.calls) == 2
+        for extra in ({"node_id": "other"}, {"hub_url": "https://example.test"}, {"holder_file": "x"}):
+            with pytest.raises(DotError):
+                self.call("fleet_report_session", report=raw, **extra)
+        for bad in ({**raw, "token": "short"}, {**raw, "version": 1}, {**raw, "result": "x" * 401}):
+            with pytest.raises(DotError):
+                self.call("fleet_report_session", report=bad)
+        with pytest.raises(DotError):
+            validate_arguments("fleet_report_session", {"report": raw}, tools=DUET.tools)
+        assert TOOL_SCHEMAS["fleet_report_session"].read_only is False
+        with self.state.transaction() as c:
+            rows = c.execute("SELECT arg_summary FROM call_log WHERE tool = 'fleet_report_session'").fetchall()
+        assert all("Check build" not in str(row) for row in rows)
+
+    @requires_local_state
+    def test_report_unknown_child_results_never_claim_persistence(self):
+        from tests.test_fleet_dot import v2_report
+
+        for reply in (
+            CommandResult(None, b"", timed_out=True),
+            CommandResult(0, b"invalid"),
+            CommandResult(0, b"{}"),
+            CommandResult(0, b'{"status":"confirmed","summaries_persisted":true}'),
+        ):
+            self.runner.handler = lambda argv, stdin, reply=reply: reply
+            result = self.call("fleet_report_session", report=v2_report(), publish=True)
+            assert result["status"] == "unknown" and result["summaries_persisted"] is False

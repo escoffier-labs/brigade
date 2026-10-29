@@ -9,6 +9,8 @@ No token, cookie value, or identity is ever rendered.
 
 from __future__ import annotations
 
+from . import fleet_investigation as investigation
+
 import hashlib
 import hmac
 import html
@@ -68,6 +70,15 @@ class CloudRow:
 
 
 @dataclass(frozen=True)
+class PolicySeat:
+    provider: str
+    model: str
+    reasoning: str
+    enabled: bool
+    retired: bool
+
+
+@dataclass(frozen=True)
 class PolicyContext:
     """What the authoritative policy document says about the fields on this page.
 
@@ -84,6 +95,7 @@ class PolicyContext:
     retired_seats: tuple[str, ...] = ()
     consumer_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
     consumer_retired_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    seat_details: dict[str, PolicySeat] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -205,6 +217,16 @@ def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
             for consumer in CONSUMERS
         }
         return PolicyContext(
+            seat_details={
+                name: PolicySeat(
+                    provider=record["provider"],
+                    model=record["model"],
+                    reasoning=record["effort"] or "none",
+                    enabled=record["enabled"],
+                    retired=name in retired_seats,
+                )
+                for name, record in document["seats"].items()
+            },
             revision=int(current["revision"]),
             roles={key: str(value) for key, value in (document["defaults"].get("roles") or {}).items()},
             admission_defaults={
@@ -240,6 +262,8 @@ def _esc(value: object) -> str:
 
 def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bool, binding: str | None = None) -> str:
     """One ``<select>``: ``(unset)`` first, usable seats, then an optgroup of the rest."""
+    if not editable:
+        return f'<span class="setting-value">{_esc(current or "unset")}</span>'
     usable: list[str] = []
     rest: list[str] = []
     retired: set[str] = set()
@@ -268,6 +292,8 @@ def _select(name: str, current: str, seats: tuple[SeatRow, ...], *, editable: bo
 
 
 def _checkbox(name: str, checked: bool, *, editable: bool) -> str:
+    if not editable:
+        return "<span>On</span>" if checked else "<span>Off</span>"
     return (
         f'<input type="checkbox" name="{_esc(name)}" value="1"'
         f"{' checked' if checked else ''}{'' if editable else ' disabled'}>"
@@ -374,18 +400,92 @@ def _authority_banner(activation: fleet_policy_page.Activation) -> str:
     if activation.active:
         return (
             '<p class="banner">Policy authority is <strong>active</strong>: role assignments are owned by the '
-            "fleet policy document, so the dropdowns below now edit that document. Changing one opens a preview "
+            "fleet policy document. Authorized role edits open a preview "
             'on the <a href="/deck/policy">policy page</a>, where the diff is confirmed and written under a '
             "compare-and-swap. This page no longer writes run preference directly.</p>"
         )
     staged = "not activated" if activation.state == "staged" else "unknown"
     return (
-        f'<p class="banner">Policy authority is {_esc(staged)}. The Roles dropdowns below still write the legacy '
+        f'<p class="banner">Policy authority is {_esc(staged)}. Live role assignments use the legacy '
         "run preference, which is what dispatch reads today. The fleet policy document is a "
         "<strong>staged policy</strong> until the migration reports activation; edit it on the "
-        '<a href="/deck/policy">policy page</a> for authoritative roles, seats, consumer overrides, and repository '
+        '<a href="/deck/policy">policy page</a> for staged roles, seats, consumer overrides, and repository '
         "overrides.</p>"
     )
+
+
+def _read_only(view: RosterView, *, nonce: str, now: datetime) -> str:
+    """Use the loaded authority decision, never a second settings store."""
+    from . import fleet_admin_explorer as explorer
+    from .fleet_admin_pages import facts, document
+
+    from . import fleet_live_routing
+
+    routing = fleet_live_routing.project(view)
+    entries = []
+    for role in (*routing.roles, *routing.fallbacks):
+        detail = (
+            explorer.hero(role.label, role.state)
+            + facts(
+                {
+                    "Model": role.model,
+                    "Reasoning": role.reasoning if role.reasoning != "none" else "",
+                    "Seat": role.seat,
+                }
+            )
+            + explorer.agent(
+                facts(
+                    {
+                        "Provider": role.provider,
+                        "Assignment source": routing.source,
+                        "Policy activation": routing.activation,
+                    }
+                )
+                + "<p>Configured assignment; provider availability and sign-in are unverified.</p>"
+            )
+        )
+        if role.problem:
+            detail += investigation.render(
+                role.label,
+                route="/deck/roster",
+                observation=now,
+                facts={
+                    "Assignment": role.seat,
+                    "State": role.state or role.model,
+                    "Source": routing.source,
+                    "Activation": routing.activation,
+                },
+                limits="Page render time; assignment configuration does not establish provider availability or sign-in.",
+            )
+        entries.append(
+            explorer.Entry(role.key, role.label, role.model + (" · " + role.state if role.state else ""), detail)
+        )
+    source = routing.detail
+    content = (
+        explorer.agent(f'<p class="page-sub">{_esc(source)}</p>')
+        + (
+            investigation.render(
+                "Settings activation",
+                route="/deck/roster",
+                observation=now,
+                facts={"State": view.activation.state, "Detail": source},
+                limits="Page render time; current assignment authority is unconfirmed.",
+            )
+            if routing.uncertain
+            else ""
+        )
+        + explorer.render(entries, label="roles")
+        + "<p>Browser access is read-only.</p>"
+    )
+    return document(
+        content, None, now, nonce=nonce, title="Live routing", active="roster", worklore_enabled=_worklore_enabled()
+    )
+
+
+def _worklore_enabled() -> bool:
+    from . import worklore_http
+
+    return worklore_http.enabled()
 
 
 def render(
@@ -406,11 +506,18 @@ def render(
     authority is active, when the role and admission-fallback dropdowns post a
     scoped policy preview instead of a legacy run-preference write.
     """
+    if not editable:
+        return _read_only(view, nonce=nonce, now=now)
     roles = dict(view.preference)
     notes = view.preference.get("notes") or ""
     seats_on = {row.seat for row in view.seats if row.enabled}
     cloud_on = {row.provider for row in view.cloud if row.enabled}
     defaults = dict(view.defaults)
+    if view.activation.active:
+        roles = dict(view.policy.roles) if view.policy.available else dict.fromkeys(ROLES, "unknown")
+        defaults = (
+            dict(view.policy.admission_defaults) if view.policy.available else dict.fromkeys(CONSUMERS, "unknown")
+        )
     if submission is not None:
         roles.update({role: seat for role, seat in submission.roles.items() if seat != KEEP_CURRENT})
         notes = submission.notes
@@ -423,20 +530,31 @@ def render(
     # cannot be read, the controls go read-only rather than write anywhere.
     authoritative = editable and view.activation.active and view.policy.available
     legacy_editable = editable and not view.activation.active
-    parts: list[str] = ['<main class="deck-shell">']
+    parts: list[str] = ['<main class="deck-shell admin-page">']
     parts.append(
-        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck &middot; Roster</h1>'
-        f'<p class="station-meta">revision {view.revision}, updated {_esc(view.revision_updated_at)} by '
+        '<div data-audience="agent"><p class="station-meta">'
+        f"revision {view.revision}, updated {_esc(view.revision_updated_at)} by "
         f"{_esc(view.updated_by or 'unknown')}</p></div>"
-        f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
+    parts.append("<h2>Live routing</h2>")
     parts.append(_authority_banner(view.activation))
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
     if error:
-        parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
+        parts.append(
+            f'<p class="banner banner--error">{_esc(error)}</p>'
+            + investigation.render(
+                "Settings save",
+                route="/deck/roster",
+                observation=now,
+                facts={"Reported error": error, "Revision": view.revision},
+                limits="Rendered validation/conflict message only; submitted configuration and credentials omitted.",
+            )
+        )
     if not editable:
-        parts.append('<p class="banner">read-only: enroll with the fleet token to edit</p>')
+        parts.append(
+            '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'
+        )
     # 1. roles. Under an active authority this panel is its own policy form, so
     # it is emitted before the legacy form opens rather than nested inside it.
     if authoritative:
@@ -456,22 +574,27 @@ def render(
             f"{_select(f'role.{role}', roles.get(role) or '', view.seats, editable=legacy_editable)}</label>"
             for role in ROLES
         )
-        notes_disabled = "" if legacy_editable else " disabled"
+        notes_control = (
+            f'<label>notes<textarea name="notes" maxlength="240" rows="2">{_esc(notes)}</textarea></label>'
+            if legacy_editable
+            else (f"<p>{'Legacy notes' if view.activation.active else 'Notes'}: {_esc(notes)}</p>" if notes else "")
+        )
         unreadable = (
             '<p class="hint">The policy authority is active but its document could not be read, so these '
             "controls are read-only rather than writing a store that no longer owns them.</p>"
-            if view.activation.active
+            if view.activation.active and not view.policy.available
             else ""
         )
+        role_source = "live policy" if view.activation.active else "run preference"
         parts.append(
             '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2></header>'
             f'<div class="roster-grid">{role_cells}</div>'
-            '<p class="hint">These are the run preference roles a dispatch reads when it does not name a seat '
+            f'<p class="hint">These are the {role_source} roles a dispatch reads when it does not name a seat '
             "explicitly. The keys (impl, review, research, scout, security, chef) are what consumers read; the "
             f"names beside them are labels only.</p>{unreadable}"
-            f'<label>notes<textarea name="notes" maxlength="240" rows="2"{notes_disabled}>'
-            f"{_esc(notes)}</textarea></label></section>"
+            f"{notes_control}</section>"
         )
+    parts.append("<details><summary>Seat models, bindings and cloud settings</summary>")
     # 2. seats
     seat_rows = []
     operational_seats = tuple(
@@ -513,12 +636,19 @@ def render(
         for consumer in CONSUMERS
     )
     if not authoritative:
+        default_heading = "Admission fallback seat" if view.activation.active else "Admission fallback seat (legacy)"
+        default_hint = (
+            '<p class="hint">Values from the active policy document. No legacy fallback is inferred when the document is unavailable.</p>'
+            if view.activation.active
+            else ADMISSION_HINT
+        )
         parts.append(
             '<section class="panel" aria-labelledby="defaults"><header>'
-            '<h2 id="defaults">Admission fallback seat (legacy)</h2></header>'
+            f'<h2 id="defaults">{default_heading}</h2></header>'
             f'<div class="roster-grid">{default_cells}</div>'
-            f"{ADMISSION_HINT}</section>"
+            f"{default_hint}</section>"
         )
+    parts.append("</details><details><summary>Retirement history</summary>")
     # 5. retired
     retired_items = "".join(
         f"<li>{_esc(item['provider'])}/{_esc(item['family'])} &middot; "
@@ -539,6 +669,7 @@ def render(
         + retired_seat_history
         + "</section>"
     )
+    parts.append("</details>")
     if editable:
         parts.append('<p class="roster-actions"><button type="submit">Save</button></p>')
     parts.append("</form></main>")

@@ -1,6 +1,7 @@
 """Read-only Fleet Hub projections and concurrent task-start digest."""
 
 from __future__ import annotations
+import json
 from concurrent.futures import ThreadPoolExecutor, wait as futures_wait
 import time
 from typing import Any
@@ -159,6 +160,43 @@ class HubTools:
         summary["links"] = [link.get("display_ref") for link in links[:5] if isinstance(link, dict)]
         return summary
 
+    def fleet_report_session(self, report: dict[str, Any], publish: bool = False) -> dict[str, Any]:
+        """One bounded stdin report, under runtime identity and the actual gate."""
+        from ..fleet_dot import MAX_REPORT_BYTES, report_session
+        from .contracts import require, task_report
+
+        require(self.runtime.dispatch_enabled, "dispatch_disabled")
+        task_report(report)
+        projected = report_session(report)
+        data = json.dumps(report, ensure_ascii=False).encode("utf-8")
+        require(len(data) <= MAX_REPORT_BYTES)
+        argv = [self.runtime.paths.bin.brigade, "fleet", "dot", "report", "--expected-node", self.runtime.hub.node_id]
+        if publish:
+            argv.append("--publish")
+        result = self.commands.run(argv, stdin=data, timeout=BRIGADE_TIMEOUT, max_output=65536, env=self.environment)
+        value = None if result.timed_out or result.overflow else parse_json_bytes(result.stdout)
+        status = value.get("status") if isinstance(value, dict) else None
+        if not publish and result.returncode == 0 and status == "dry-run":
+            return projected
+        projected["mode"] = "publish" if publish else "dry-run"
+        projected["status"] = "unknown"
+        projected["components"]["presence"] = "unknown:publication_unconfirmed"
+        if publish and status == "refused":
+            projected["status"] = "refused"
+            projected["components"]["presence"] = "failed:publication_refused"
+        elif (
+            publish
+            and result.returncode == 0
+            and isinstance(value, dict)
+            and status == "confirmed"
+            and value.get("summaries_persisted") is True
+            and value.get("confirmed_node") == self.runtime.hub.node_id
+            and value.get("presence_payload") == projected["presence_payload"]
+        ):
+            projected.update(status="confirmed", summaries_persisted=True, confirmed_node=self.runtime.hub.node_id)
+            projected["components"]["presence"] = "published"
+        return projected
+
     def fleet_sessions(self, include_ended: bool = False, limit: int = 50) -> dict[str, Any]:
         value, error = self._hub_read(
             ["sessions"] + (["--all"] if include_ended else []),
@@ -183,6 +221,11 @@ class HubTools:
             "heartbeat_at",
             "ended_at",
             "expires_at",
+            "cloud_context",
+            "presence_state",
+            "provider_lifecycle",
+            "inventory_coverage",
+            "evidence_verification",
         )
         shown = []
         for item in sessions[:limit]:

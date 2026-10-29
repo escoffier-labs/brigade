@@ -10,13 +10,16 @@ from __future__ import annotations
 import http.client
 import threading
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_command_deck as deck
+from brigade import fleet_dashboard as board
 from brigade import fleet_hub, fleet_hub_policy, fleet_policy, fleet_policy_page
 from brigade import fleet_repo_policy_page as repos_page
 
@@ -130,7 +133,7 @@ def test_a_repository_with_overrides_shows_policy_and_coordination(conn):
     assert row.eligible_machines == "worker-linux-1"
     assert row.training == "denied"  # the resolver's private-repository constraint
     assert row.policy_revision == str(_policy(conn).revision)
-    assert row.editor_href == f"/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"
+    assert row.editor_href == "/deck/policy"
     assert row.claim_owner and row.claim_ttl == "600s left"
 
     roles = {leaf.path: leaf for leaf in row.roles}
@@ -151,13 +154,13 @@ def test_a_repository_with_overrides_shows_policy_and_coordination(conn):
     assert row.verification == deck.UNKNOWN
 
 
-def test_a_repository_row_renders_its_facts_and_the_scoped_editor_link(conn):
+def test_a_repository_row_renders_its_facts_and_the_saved_assignments_link(conn):
     view = _deck_view(_claim_row("private-tool", OVERRIDDEN))
     rows = repos_page.build_rows(view, _policy(conn))
     html = _render(view, rows, policy_available=True)
 
     assert OVERRIDDEN in html
-    assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"' in html
+    assert 'href="/deck/policy"' in html
     assert "<strong>override</strong>" in html
     assert "inherited" in html
     assert "training denied" in html
@@ -289,7 +292,7 @@ def test_repos_route_serves_the_repository_policy_projection(tmp_path):
         assert status == 200
         assert "Repository policy" in page
         assert OVERRIDDEN in page
-        assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"' in page
+        assert 'href="/deck/policy"' in page
         assert "Claims and live runs" in page
         assert TOKEN not in page
 
@@ -298,8 +301,9 @@ def test_repos_route_keeps_the_deck_navigation(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         status, page = _get(hub, "/deck/repos")
         assert status == 200
-        assert f'<a href="/deck/policy">{NAV_ICONS["policy"]}policy</a>' in page
-        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}roster</a>' in page
+        assert '<nav class="section-tabs" aria-label="Section tabs">' in page
+        assert '<a href="/deck/owners">Ownership</a>' in page
+        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}Settings</a>' in page
 
 
 # --- live-run text ------------------------------------------------------------
@@ -418,14 +422,14 @@ def test_an_explicit_machine_override_keeps_its_own_value(conn):
     assert row.eligible_machines_note == ""
 
 
-def test_the_inherited_machine_note_is_rendered_and_links_to_the_policy_editor(conn):
+def test_the_inherited_machine_note_is_rendered_and_links_to_saved_assignments(conn):
     view = _deck_view(_claim_row("public-tool", PLAIN))
     html = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
 
     assert repos_page.INHERITED_MACHINES in html
     assert "fleet machine policy applies" in html
     assert "seat and workload constraints" in html
-    assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(PLAIN)}"' in html
+    assert 'href="/deck/policy"' in html
 
 
 def test_absent_linkage_stays_unknown_rather_than_inherited(conn):
@@ -467,3 +471,163 @@ def test_repository_free_permission_override_and_rendering(conn):
     assert "free models allowed" in html
     assert "&middot; free denied" in html
     assert "free models denied" in html
+
+
+def test_repository_cards_lead_with_observed_work_and_keep_full_coordination(conn):
+    from tests.test_ui_theme_integration import Markup
+
+    hostile = "repository-" + "x" * 200 + "<script>alert(1)</script>"
+    row = replace(
+        _claim_row(hostile, OVERRIDDEN), live=(_live_run(OVERRIDDEN),), collision=True, interactive_overlap=True
+    )
+    view = _deck_view(row)
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    markup = Markup(page)
+    cards = [
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "article" and attrs.get("class") == "repository-card"
+    ]
+    assert len(cards) == 1
+    card = next(i for i in cards if OVERRIDDEN in markup.text[i])
+    assert "1 reported run" in markup.text[card] and "Claim held" in markup.text[card]
+    assert "parallel activity" in markup.text[card] and "overlap" in markup.text[card]
+    assert not any(markup.tags[i][0] == "details" for i in markup.ancestors[card])
+    table = next(i for i, (tag, _) in enumerate(markup.tags) if tag == "table")
+    assert any(markup.tags[i][1].get("data-audience") == "agent" for i in markup.ancestors[table])
+    assert _folds(page) == []
+    assert "conductor-1" in markup.text[card] and "600s left" in markup.text[card]
+    assert not any(markup.tags[i][1].get("data-audience") == "agent" for i in markup.ancestors[card])
+    assert hostile not in page and "&lt;script&gt;" in page
+    assert "600s left" in page and "drift" in page
+    assert "No active claim" not in markup.text[card]
+    assert PLAIN in page and PLAIN not in markup.text[card]
+    assert "epic" not in markup.text[card].lower() and "progress" not in markup.text[card].lower()
+
+
+def test_repository_cards_use_coordination_when_policy_is_unavailable_and_honest_empty_state():
+    view = _deck_view(_claim_row("unlinked-checkout"))
+    page = _render(view, (), unavailable_reason="not available")
+    assert 'class="repository-card"' in page and "unlinked-checkout" in page
+    assert "Policy linkage unknown" in page and "Claim held" in page
+    empty = _render(_deck_view(), ())
+    assert "No repository observations available" in empty
+    assert 'href="/view/repos"' in empty
+
+
+@pytest.mark.parametrize("stale_only", [False, True], ids=["policy-only", "stale-only"])
+def test_unobserved_policy_repositories_never_become_current_cards(conn, stale_only):
+    from tests.test_ui_theme_integration import Markup
+
+    stale = replace(_live_run(OVERRIDDEN, repo="old-checkout"), bucket="stale", age_seconds=3600)
+    view = deck.build_view(
+        deck.DeckConfig(),
+        live_runs=[stale] if stale_only else [],
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+    )
+    assert not view.repos
+    if stale_only:
+        assert any(item.kind == "stale" for item in view.rail)
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    markup = Markup(page)
+    summaries = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-label") == "Repository summaries")
+    assert markup.descendants(summaries, "article") == []
+    assert "No repository observations available" in markup.text[summaries]
+    assert "0 reported runs" not in markup.text[summaries]
+    assert "No active claim" not in markup.text[summaries]
+    disclosure = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-labelledby") == "repo-policy")
+    assert OVERRIDDEN in markup.text[disclosure] and PLAIN in markup.text[disclosure]
+
+
+@pytest.mark.parametrize("kind", ["two-checkouts", "claim-only", "one-checkout", "unlinked-claim"])
+def test_repository_card_drilldown_retains_observed_targets_at_destination(conn, kind):
+    from tests.test_ui_theme_integration import Markup
+
+    targets = ("checkout-alpha", "checkout-bravo") if kind == "two-checkouts" else ("checkout-alpha",)
+    claim_only = kind in {"claim-only", "unlinked-claim"}
+    identity = "" if kind == "unlinked-claim" else OVERRIDDEN
+    observed = tuple(
+        _claim_row(target, identity) if claim_only else _live_row(target, identity, repo=target) for target in targets
+    )
+    view = _deck_view(*observed)
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    markup = Markup(page)
+    cards = [
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "article" and attrs.get("class") == "repository-card"
+    ]
+    card = next(i for i in cards if (identity or targets[0]) in markup.text[i])
+    (link,) = markup.descendants(card, "a")
+    destination = urlsplit(markup.tags[link][1]["href"])
+    assert destination.path == "/view/repos"
+    destination_page = board.render_page(
+        view="repos",
+        query_string=destination.query,
+        runs=[
+            {
+                "node_id": NODE_A,
+                "run_id": f"run-{target}",
+                "repo": target,
+                "seat": "seat-alpha",
+                "harness": "codex",
+                "state": "run.started",
+                "ts": NOW.isoformat(),
+            }
+            for target in targets
+        ]
+        if not claim_only
+        else [],
+        claims=[
+            {
+                "target": target,
+                "owner_node": NODE_A,
+                "owner_conductor": "conductor-1",
+                "expires_at": "2026-09-05T13:00:00Z",
+            }
+            for target in targets
+        ]
+        if claim_only
+        else [],
+        nodes=[],
+        started_at={},
+        nonce="destination",
+        now=NOW,
+    )
+    destination_markup = Markup(destination_page)
+    tables = [i for i, (_, attrs) in enumerate(destination_markup.tags) if attrs.get("id") == "repo-board"]
+    assert len(tables) == 1, "card destination dropped the observed repository"
+    (table,) = tables
+    (tbody,) = destination_markup.descendants(table, "tbody")
+    actual_targets = {
+        destination_markup.text[destination_markup.descendants(row, "td")[0]]
+        for row in destination_markup.descendants(tbody, "tr")
+    }
+    assert actual_targets == set(targets)
+    if len(targets) > 1:
+        assert parse_qs(destination.query) == {}
+        assert markup.text[link] == "View all runs"
+    else:
+        assert parse_qs(destination.query) == {"repo": [targets[0]]}
+        assert markup.text[link] == "View runs"
+
+
+def _folds(page):
+    """Disclosure folds a human sees: only agent-audience investigation prompts may fold."""
+    from tests.test_ui_theme_integration import Markup
+
+    markup = Markup(page)
+    return [
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "details" and attrs.get("data-audience") != "agent"
+    ]
+
+
+def test_repositories_page_has_no_disclosure_folds_and_keeps_policy_link(conn):
+    view = _deck_view(_claim_row("private-tool", OVERRIDDEN))
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    assert _folds(page) == []
+    assert "View saved assignments" in page
+    unlinked = _render(view, repos_page.build_rows(view, None), policy_available=False)
+    assert _folds(unlinked) == []

@@ -18,8 +18,11 @@ repository editor on ``/deck/policy``, which stays the authoritative editor.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from . import fleet_admin_explorer as explorer, fleet_investigation as investigation
+
+from dataclasses import dataclass, field, replace
 from datetime import datetime
+from urllib.parse import urlencode
 
 from . import fleet_command_deck, fleet_policy_page
 
@@ -100,6 +103,7 @@ class RepoPolicyRow:
     claim_owner: str = ""
     claim_ttl: str = ""
     live: tuple[LiveLine, ...] = ()
+    targets: tuple[str, ...] = ()
     sessions: tuple[SessionLine, ...] = ()
     verification: str = UNKNOWN
     flags: str = ""
@@ -178,6 +182,7 @@ def _coordination(deck_rows: list[fleet_command_deck.RepoRow]) -> dict:
         "claim_owner": fleet_command_deck._owner_text(claim) if claim is not None else "",
         "claim_ttl": f"{claim.ttl_remaining}s left" if claim is not None else "",
         "live": live,
+        "targets": tuple(sorted({row.target for row in deck_rows})),
         "flags": flags,
     }
 
@@ -231,7 +236,7 @@ def build_rows(
                     eligible_machines=", ".join(repo.eligible_machines) or INHERITED_MACHINES,
                     eligible_machines_note=("" if repo.eligible_machines else MACHINE_POLICY_NOTE),
                     policy_revision=str(policy.revision),
-                    editor_href=f"/deck/policy#{fleet_policy_page.repository_anchor(repo.identity)}",
+                    editor_href="/deck/policy",
                     roles=roles,
                     overrides=overrides,
                     denied=tuple(
@@ -241,6 +246,7 @@ def build_rows(
                     claim_owner=coordination["claim_owner"],
                     claim_ttl=coordination["claim_ttl"],
                     live=coordination["live"],
+                    targets=coordination["targets"],
                     sessions=_sessions_for(policy, repo.identity),
                     verification=UNKNOWN,
                     flags=coordination["flags"],
@@ -269,6 +275,7 @@ def build_rows(
                 claim_owner=coordination["claim_owner"],
                 claim_ttl=coordination["claim_ttl"],
                 live=coordination["live"],
+                targets=coordination["targets"],
                 flags=coordination["flags"],
             )
         )
@@ -294,12 +301,14 @@ def _row_html(row: RepoPolicyRow) -> str:
     if not row.linked:
         live = _live_items(row.live)
         return (
-            f"<details><summary>{_esc(row.label)} &middot; policy linkage {UNKNOWN}</summary>"
-            f'<p class="collision">Policy linkage {UNKNOWN}: {_esc(row.linkage_note)}.</p>'
-            f"<p>owner {_esc(row.claim_owner or UNKNOWN)} &middot; ttl {_esc(row.claim_ttl or UNKNOWN)} "
-            f"&middot; flags {_esc(row.flags or 'none')}</p>"
-            + (f'<ul class="attention-list">{live}</ul>' if live else '<p class="empty">No live runs.</p>')
-            + "</details>"
+            f'<article class="repo-policy-row"><h3>{_esc(row.label)} {explorer.pill("Policy linkage " + UNKNOWN)}</h3>'
+            + explorer.agent(
+                f'<p class="collision">Policy linkage {UNKNOWN}: {_esc(row.linkage_note)}.</p>'
+                f"<p>owner {_esc(row.claim_owner or UNKNOWN)} &middot; ttl {_esc(row.claim_ttl or UNKNOWN)} "
+                f"&middot; flags {_esc(row.flags or 'none')}</p>"
+                + (f'<ul class="attention-list">{live}</ul>' if live else '<p class="empty">No live runs.</p>')
+            )
+            + "</article>"
         )
     session_items = "".join(
         f"<li>{_esc(line.session_id)} &middot; {_esc(line.consumer)} &middot; state {_esc(line.state)} &middot; "
@@ -309,9 +318,7 @@ def _row_html(row: RepoPolicyRow) -> str:
     live_items = _live_items(row.live)
     denied_items = "".join(f"<li>{_esc(item)}</li>" for item in row.denied)
     warning_items = "".join(f"<li>{_esc(item)}</li>" for item in row.warnings)
-    return (
-        f"<details><summary>{_esc(row.label)} &middot; {_esc(row.privacy)} &middot; training "
-        f"{_esc(row.training)} &middot; free {_esc(row.free)}</summary>"
+    detail = (
         f"<p>owner {_esc(row.owner)} &middot; free models {_esc(row.free)} &middot; eligible machines {_esc(row.eligible_machines)}"
         + (
             f' (<a href="{_esc(row.editor_href)}">{_esc(row.eligible_machines_note)}</a>)'
@@ -319,7 +326,6 @@ def _row_html(row: RepoPolicyRow) -> str:
             else ""
         )
         + f" &middot; policy revision {_esc(row.policy_revision)} &middot; {_esc(row.linkage_note)}</p>"
-        f'<p><a href="{_esc(row.editor_href)}">edit this repository on the policy page</a></p>'
         "<h3>Claims and runs</h3>"
         f"<p>claim {_esc(row.claim_owner or 'none')} &middot; ttl {_esc(row.claim_ttl or '-')} &middot; "
         f"flags {_esc(row.flags or 'none')}</p>"
@@ -345,7 +351,34 @@ def _row_html(row: RepoPolicyRow) -> str:
             else '<p class="empty">No session receipts for this repository.</p>'
         )
         + f'<p class="station-meta">verification and handoff state: {_esc(row.verification)}. '
-        f"{_esc(NO_TELEMETRY)}.</p></details>"
+        f"{_esc(NO_TELEMETRY)}.</p>"
+    )
+    return (
+        f'<article class="repo-policy-row"><h3>{_esc(row.label)}</h3>'
+        f'<p class="station-meta">{_esc(row.privacy)} &middot; training {_esc(row.training)} '
+        f"&middot; free {_esc(row.free)}</p>"
+        f'<p><a href="{_esc(row.editor_href)}">View saved assignments</a></p>' + explorer.agent(detail) + "</article>"
+    )
+
+
+def _summary_card(row: RepoPolicyRow) -> str:
+    single_target = len(row.targets) == 1
+    href = "/view/repos?" + urlencode({"repo": row.targets[0]}) if single_target else "/view/repos"
+    link_label = "View runs" if single_target else "View all runs"
+    held = (
+        f'<p class="station-meta">{_esc(row.claim_owner)} &middot; {_esc(row.claim_ttl)}</p>'
+        if row.claim_owner
+        else explorer.agent('<p class="station-meta">No active claim</p>')
+    )
+    flags = f'<p class="collision">{_esc(row.flags)}</p>' if row.flags else ""
+    linkage = '<p class="station-meta">Policy linkage unknown</p>' if not row.linked else ""
+    return (
+        '<article class="repository-card"><header>'
+        f'<h2>{_esc(row.label)}</h2><a class="card-link" href="{_esc(href)}">{link_label}</a></header>'
+        f"<p>{len(row.live)} reported run{'s' if len(row.live) != 1 else ''}"
+        + (f" {explorer.pill('Claim held')}" if row.claim_owner else "")
+        + "</p>"
+        f"{held}{flags}{linkage}</article>"
     )
 
 
@@ -358,10 +391,10 @@ def render(
     nonce: str,
     now: datetime,
 ) -> str:
-    """The repos page: policy per repository, then the claim/run coordination table."""
+    """Repository summaries, with complete coordination and policy disclosures."""
     linked = sum(1 for row in rows if row.linked)
     if policy_available:
-        state = (
+        state = explorer.agent(
             f'<p class="station-meta">{linked} repository/repositories joined by canonical identity. '
             "Values come from the policy authority; this page never writes policy.</p>"
         )
@@ -371,20 +404,41 @@ def render(
             + (f": {_esc(unavailable_reason)}" if unavailable_reason else "")
             + ". Claim and run coordination below is unaffected.</p>"
         )
+    if not policy_available:
+        state += investigation.render(
+            "Repository policy",
+            route="/deck/repos",
+            observation=now,
+            facts={
+                "State": UNKNOWN,
+                "Detail": unavailable_reason or "Policy authority unavailable",
+                "Displayed targets": len(rows),
+            },
+            limits="Page render time; policy linkage unknown. Claim and run coordination is unaffected.",
+        )
     blocks = "".join(_row_html(row) for row in rows) or '<p class="empty">No repositories to show.</p>'
+    # Policy can decorate current observations, but cannot create them.
+    linked_identities = {row.identity for row in rows if row.linked}
+    cards = "".join(
+        _summary_card(replace(row, linked=row.identity in linked_identities)) for row in build_rows(view, None)
+    )
+    if not cards:
+        cards = '<p class="empty">No repository observations available. <a href="/view/repos">View run history</a></p>'
     body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Repos</h1></div>"
-        f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
-        '<section class="panel" aria-labelledby="repo-policy"><header>'
-        '<h2 id="repo-policy">Repository policy</h2>'
-        f'<p class="panel-count">{len(rows)} target(s)</p></header>'
-        f"{state}{blocks}</section>"
-        '<section class="repo-panel" aria-label="Repository coordination">'
-        "<h2>Claims and live runs</h2>"
-        + fleet_command_deck.repo_coordination_table(view)
-        + '</section><footer><a href="/view/machines">machines board</a> '
-        '<a href="/view/repos">repos board</a></footer></main>'
+        '<main class="deck-shell admin-page">'
+        '<section aria-label="Repository summaries"><div class="repository-grid">'
+        + cards
+        + "</div></section>"
+        + explorer.agent(
+            '<section aria-label="Claims and live runs"><h2>Claims and live runs</h2>'
+            + fleet_command_deck.repo_coordination_table(view)
+            + "</section>"
+        )
+        + '<section class="panel" aria-labelledby="repo-policy"><header><h2 id="repo-policy">Repository policy</h2>'
+        + explorer.agent(f'<p class="panel-count">{len(rows)} target(s)</p>')
+        + f"</header>{state}{blocks}</section>"
+        '<footer><a href="/view/machines">Runs</a> <a href="/view/repos">Repository board</a> '
+        '<a href="/deck/ci">CI</a> <a href="/deck/owners">Ownership</a></footer></main>'
     )
     # No meta refresh: a 10-second reload would collapse every open repository
     # while an operator is reading it.

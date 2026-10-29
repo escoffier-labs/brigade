@@ -254,6 +254,10 @@ def main(argv=None) -> int:
     if func is None:
         parser.error(f"unknown command: {args.command}")
         return 2
+    if args.command == "fleet" and args.fleet_command == "keys" and args.keys_command in {"init", "show", "rotate"}:
+        # Offline custody must not persist global diagnostics or launch an
+        # update refresh, including after invalid scope or a lost return.
+        return func(args)
     from .. import bug_last_error
 
     command = bug_last_error.command_path(parser, parse_argv)

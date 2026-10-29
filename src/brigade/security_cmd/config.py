@@ -52,6 +52,8 @@ def _parse_toml_value(raw: str) -> object:
         return True
     if value == "false":
         return False
+    if len(value) >= 2 and value[0] == value[-1] == "'" and "'" not in value[1:-1]:
+        return value[1:-1]
     try:
         return ast.literal_eval(value)
     except (SyntaxError, ValueError):

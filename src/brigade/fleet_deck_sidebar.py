@@ -5,87 +5,96 @@ from __future__ import annotations
 from datetime import datetime
 
 from . import __version__, fleet_deck_icons as icons
-from .fleet_command_deck import UNKNOWN, DeckView, StationView, Tile
+from . import fleet_admin_explorer as explorer
+from .fleet_command_deck import DeckView
+from .fleet_machine_label import status_label
 from .fleet_deck_overview import (
-    POLICY_LIMITS,
     _esc,
     format_age,
     is_stale,
     machine_for,
     seconds_since,
-    station_status,
     page_alerts,
+    station_status,
 )
 
 NAV_ITEMS = (
-    ("overview", "/deck", "overview"),
-    ("alerts", "/deck/alerts", "alerts"),
-    ("repos", "/deck/repos", "repos"),
-    ("work", "/deck/work", "work"),
-    ("roster", "/deck/roster", "roster"),
-    ("policy", "/deck/policy", "policy"),
-    ("owners", "/deck/owners", "owners"),
-    ("ci", "/deck/ci", "CI"),
-    ("stats", "/deck/stats", "stats"),
-    ("boards", "/view/machines", "boards"),
+    ("overview", "/deck", "Overview"),
+    ("work", "/deck/activity", "Work"),
+    ("capacity", "/deck/capacity", "Capacity"),
+    ("repos", "/deck/projects", "Projects"),
+    ("roster", "/deck/roster", "Settings"),
 )
 
-
-def _tree_summary(station: StationView, status: str, machine_state: str = UNKNOWN) -> str:
-    if status == "offline":
-        return "not enrolled" if not station.enrolled else "offline"
-    if status == "stale":
-        return "stale"
-    if status == "limited":
-        return machine_state
-    if status == "unknown":
-        return "unknown"
-    return f"{station.busy} busy" if station.busy else "idle"
-
-
-def _tree_run(tile: Tile) -> str:
-    run = tile.run
-    return (
-        f'<li class="tree-run"><span class="tree-run-name">{_esc(run.repo or UNKNOWN)} · {_esc(run.seat or UNKNOWN)}'
-        f'</span><span class="tree-time">{_esc(format_age(run.elapsed_seconds))}</span></li>'
-    )
-
-
-def _machine_tree(view: DeckView) -> str:
-    rows = []
-    for station in view.stations:
-        machine = machine_for(view, station)
-        status = station_status(station, machine)
-        machine_state = POLICY_LIMITS.get(machine.unused_reason, machine.state) if machine is not None else UNKNOWN
-        runs = "".join(_tree_run(tile) for tile in station.tiles)
-        rows.append(
-            f'<li class="tree-row" data-status="{status}" data-filter-row title="{_esc(station.station.node_id)}"><div class="tree-line">'
-            f'<span class="tree-label">{_esc(station.label)}</span>'
-            f'<span class="tree-meta">{_esc(_tree_summary(station, status, machine_state))}</span></div>'
-            + (f'<ul class="tree-children">{runs}</ul>' if runs else "")
-            + "</li>"
-        )
-    body = f'<ul class="tree-list">{"".join(rows)}</ul>' if rows else '<p class="tree-empty">No stations.</p>'
-    return (
-        '<section class="tree" aria-labelledby="tree-machines"><h2 id="tree-machines" class="tree-heading">'
-        f'Machines <span class="nav-count">{len(view.stations)}</span></h2>{body}</section>'
-    )
+SECTION_ROUTES = {
+    "overview": (("overview", "/deck", "Overview"), ("alerts", "/deck/alerts", "Alerts")),
+    "work": (
+        ("activity", "/deck/activity", "Activity"),
+        ("work", "/deck/work", "Stored tasks"),
+        ("boards", "/view/machines", "Run history"),
+    ),
+    "capacity": (
+        ("capacity", "/deck/capacity", "Machines"),
+        ("cloud-details", "/deck/capacity/cloud", "Cloud"),
+        ("github-reads", "/deck/capacity/github", "GitHub reads"),
+    ),
+    "repos": (
+        ("projects", "/deck/projects", "Projects"),
+        ("pulls", "/deck/pulls", "Pull requests"),
+        ("repos", "/deck/repos", "Repositories"),
+        ("repo-board", "/view/repos", "Run history"),
+        ("ci", "/deck/ci", "Checks"),
+        ("owners", "/deck/owners", "Ownership"),
+    ),
+    "roster": (
+        ("roster", "/deck/roster", "Live routing"),
+        ("policy", "/deck/policy", "Saved assignments"),
+        ("skills", "/deck/skills", "Skills"),
+        ("pr-rules", "/deck/pr-rules", "PR rules"),
+        ("stats", "/deck/reporting", "Reporting"),
+    ),
+}
 
 
-def _cloud_tree(view: DeckView) -> str:
-    rows = "".join(
-        '<li class="tree-row" data-filter-row><div class="tree-line">'
-        f'<span class="tree-label">{_esc(worker.provider)}</span>'
-        f'<span class="tree-meta">{worker.used}/{worker.limit}'
-        + ("" if worker.circuit_state == "closed" else f" · {_esc(worker.circuit_state)}")
-        + "</span></div></li>"
-        for worker in view.cloud_workers
-    )
-    body = f'<ul class="tree-list">{rows}</ul>' if rows else '<p class="tree-empty">None configured.</p>'
-    return (
-        '<section class="tree" aria-labelledby="tree-cloud"><h2 id="tree-cloud" class="tree-heading">'
-        f'Cloud <span class="nav-count">{len(view.cloud_workers)}</span></h2>{body}</section>'
-    )
+def section_for(active: str) -> str:
+    return {
+        "alerts": "overview",
+        "activity": "work",
+        "projects": "repos",
+        "pulls": "repos",
+        "boards": "work",
+        "queue": "work",
+        "repo-board": "repos",
+        "policy": "roster",
+        "skills": "roster",
+        "pr-rules": "roster",
+        "stats": "roster",
+        "owners": "repos",
+        "ci": "repos",
+        "github-reads": "capacity",
+        "cloud-details": "capacity",
+    }.get(active, active)
+
+
+def page_title(active: str) -> str:
+    """Browser title: the tab label of *active* plus the product name."""
+    for routes in SECTION_ROUTES.values():
+        for key, _href, label in routes:
+            if key == active:
+                return f"{label} \u00b7 Fleet Hub"
+    return "Fleet Hub"
+
+
+def render_section_tabs(active: str, *, worklore_enabled: bool) -> str:
+    """Ordinary links with an exact current destination; usable without scripts."""
+    routes = SECTION_ROUTES.get(section_for(active), SECTION_ROUTES["overview"])
+    links = []
+    for key, href, label in routes:
+        if key == "work" and not worklore_enabled:
+            continue
+        current = ' aria-current="page"' if key == active else ""
+        links.append(f'<a href="{_esc(href)}"{current}>{_esc(label)}</a>')
+    return '<nav class="section-tabs" aria-label="Section tabs">' + "".join(links) + "</nav>"
 
 
 RESOURCE_LINKS: tuple[tuple[str, str, str], ...] = (
@@ -127,26 +136,68 @@ def _sidebar_meta(view: DeckView | None, now: datetime) -> str:
     return f'<p class="sidebar-meta{modifier}"><span class="mono sidebar-version" title="v{_esc(__version__)}">v{_esc(__version__)}</span>{telemetry}</p>'
 
 
+def _capacity_inventory(view: DeckView | None) -> str:
+    if view is None:
+        return (
+            '<section class="sidebar-capacity-summary" aria-label="Capacity navigation">'
+            '<h2 class="tree-heading">Machines</h2><a class="sidebar-capacity-link" href="/deck/capacity">View machines</a>'
+            '<h2 class="tree-heading">Cloud</h2><a class="sidebar-capacity-link" href="/deck/capacity/cloud">View cloud</a>'
+            "</section>"
+        )
+    machines = "".join(
+        '<li class="tree-line" data-status="'
+        + _esc(status)
+        + '"><a class="tree-label sidebar-capacity-link" href="/deck/capacity#'
+        + explorer.anchor(station.station.node_id)
+        + '">'
+        + _esc(station.label)
+        + '</a><span class="tree-meta">'
+        + _esc(status_label(station, machine_for(view, station), status))
+        + "</span></li>"
+        for station in view.stations
+        for status in (station_status(station, machine_for(view, station)),)
+    )
+    cloud = "".join(
+        '<li class="tree-line"><a class="tree-label sidebar-capacity-link" href="/deck/capacity/cloud#'
+        + explorer.anchor(worker.provider)
+        + '">'
+        + _esc(worker.provider)
+        + '</a><span class="tree-meta">'
+        + _esc(f"{worker.used}/{worker.limit}")
+        + "</span></li>"
+        for worker in view.cloud_workers
+    )
+    machine_rows = machines or '<li class="tree-empty">No machines reported.</li>'
+    cloud_rows = cloud or '<li class="tree-empty">No cloud providers reported.</li>'
+    return (
+        '<section class="sidebar-capacity-summary" aria-label="Machine and cloud capacity">'
+        f'<h2 class="tree-heading">Machines <span>{len(view.stations)}</span></h2>'
+        f'<ul class="tree-list">{machine_rows}</ul>'
+        f'<h2 class="tree-heading">Cloud <span>{len(view.cloud_workers)}</span></h2>'
+        f'<ul class="tree-list">{cloud_rows}</ul>'
+        "</section>"
+    )
+
+
 def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklore_enabled: bool) -> str:
-    """Brand, icon nav, optional trees, Resources, and version and telemetry meta."""
+    """Primary destinations, attention, capacity summaries, Resources, and telemetry age."""
+    section = section_for(active)
     links = []
     for key, href, label in NAV_ITEMS:
-        if key == "work" and not worklore_enabled:
-            continue
-        current = ' aria-current="page"' if key == active else ""
-        count = (
-            f' <span class="nav-count">{len(view.stations)}</span>' if key == "overview" and view is not None else ""
-        )
-        if key == "alerts" and view is not None:
-            alerts = len(page_alerts(view, now))
-            count = f' <span class="nav-count">{alerts}</span>' if alerts else ""
-        links.append(f'<a href="{href}"{current}>{icons.NAV_ICONS[key]}{label}{count}</a>')
-    parts = [
-        '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'
-        '<p class="brand-name">Brigade Fleet Hub</p><p class="brand-sub">self-hosted</p></div>',
-        f'<nav class="deck-nav" aria-label="Command Deck">{"".join(links)}</nav>',
-    ]
-    if view is not None:
-        parts += ['<div class="tree-filter" data-tree-filter></div>', _machine_tree(view), _cloud_tree(view)]
-    parts += [_resources(), _sidebar_meta(view, now), "</aside>"]
-    return "".join(parts)
+        current = ' aria-current="page"' if key == section else ""
+        icon = icons.NAV_ICONS.get(key, icons.NAV_ICONS["boards"])
+        links.append(f'<a href="{href}"{current}>{icon}{label}</a>')
+    alerts = len(page_alerts(view, now)) if view is not None else None
+    alert_count = f' <span class="nav-count">{alerts}</span>' if alerts else ""
+    return "".join(
+        [
+            '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'
+            '<p class="brand-name">Brigade Fleet Hub</p><p class="brand-sub">self-hosted</p></div>',
+            f'<nav class="deck-nav" aria-label="Command Deck">{"".join(links)}</nav>',
+            f'<a class="attention-shortcut" href="/deck/alerts">Alerts{alert_count}</a>',
+            _capacity_inventory(view),
+            _resources(),
+            _sidebar_meta(view, now),
+            "</aside>",
+        ]
+    )

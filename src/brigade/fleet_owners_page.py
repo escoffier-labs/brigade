@@ -129,18 +129,18 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
         else ""
     )
     body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Owners</h1></div>"
-        f'<p class="header-meta">{deck._esc(deck._stamp(now))}</p></header>'
+        '<main class="deck-shell admin-page">'
         + banners
         + '<section class="panel"><h2>Charters</h2><p>Read-only. Each charter is declared in the fleet policy '
         f"document (revision {deck._esc(revision)}) and describes responsibility. It does not block claims, "
         "dispatch, or merges.</p></section>"
         + cards
+        + ("<details><summary>Unmatched holdings (ownership unconfigured)</summary>" if not view.charters else "")
         + '<section class="panel"><h2>Unassigned</h2><p>Live items that no charter matches.</p>'
         + unassigned_note
         + _table(view.unassigned, empty="Nothing unassigned.")
         + "</section>"
+        + ("</details>" if not view.charters else "")
         + '<section class="panel"><h2>Overlaps</h2><p>Items that more than one charter matches. '
         "Edit a charter to resolve one.</p>" + _overlaps(view.overlaps) + "</section></main>"
     )

@@ -28,6 +28,40 @@ def _configured_doctor_result(profile: str = "operator") -> notifications_cmd.pr
     )
 
 
+@pytest.mark.parametrize("operation", ["plan", "record", "send"])
+def test_notifications_invalid_override_keeps_planning_and_recording_without_spawning(
+    monkeypatch, tmp_target, capsys, operation
+):
+    tmp_target.mkdir()
+    monkeypatch.setenv("AGENT_NOTIFY_BIN", str(tmp_target / "missing-agent-notify"))
+
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("invalid executable override must not spawn a process")
+
+    monkeypatch.setattr(notifications_cmd.proc, "run", unexpected_run)
+    if operation == "plan":
+        rc = notifications_cmd.event_plan(
+            target=tmp_target, event_type="verification", title="Synthetic", message="Example", json_output=True
+        )
+    else:
+        rc = notifications_cmd.event_record(
+            target=tmp_target,
+            event_type="verification",
+            title="Synthetic",
+            message="Example",
+            json_output=True,
+            send=operation == "send",
+        )
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == (1 if operation == "send" else 0)
+    assert payload["installed"] is False
+    assert payload["planned_argv"] == []
+    assert "override" in payload["executable_error"]
+    if operation == "send":
+        assert payload["sent"] is False
+        assert payload["send_exit_code"] == 127
+
+
 def test_notifications_status_reports_missing_agent_notify(monkeypatch, tmp_target, capsys):
     monkeypatch.setattr(notifications_cmd.component_bins, "resolve", lambda name, **kw: None)
 

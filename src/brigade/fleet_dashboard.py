@@ -449,11 +449,13 @@ def _controls(query: DashboardQuery) -> str:
     options = "".join(
         f'<option value="{esc(sort)}"{" selected" if sort == query.sort else ""}>{esc(sort)}</option>' for sort in SORTS
     )
-    inputs = "".join(
-        f'<label>{esc(key)} <input type="search" name="{esc(key)}" value="{esc(getattr(query, key))}" '
-        f'placeholder="{esc("contains")}" maxlength="{_MAX_FILTER_LEN}"></label>'
+    inputs = {
+        key: (
+            f'<label>{esc(key)} <input type="search" name="{esc(key)}" value="{esc(getattr(query, key))}" '
+            f'placeholder="{esc("contains")}" maxlength="{_MAX_FILTER_LEN}"></label>'
+        )
         for key in FILTER_KEYS
-    )
+    }
     attention_checked = " checked" if query.attention_only else ""
     all_checked = " checked" if query.include_all else ""
     action = "/" if query.view == DEFAULT_VIEW else f"/view/{query.view}"
@@ -463,13 +465,16 @@ def _controls(query: DashboardQuery) -> str:
     )
     return (
         f'<form class="fleet-controls" method="get" action="{esc(action)}">'
+        f"{inputs['repo']}{inputs['state']}"
+        '<button type="submit">Apply</button>'
+        '<details class="advanced-filters"><summary>Advanced filters</summary><div class="filter-fields">'
         f'<label>sort <select name="sort">{options}</select></label>'
-        f"{inputs}"
-        f'<label><input type="checkbox" name="attention" value="1"{attention_checked}> {esc("needs attention")}</label>'
+        + "".join(value for key, value in inputs.items() if key not in {"repo", "state"})
+        + f'<label><input type="checkbox" name="attention" value="1"{attention_checked}> {esc("needs attention")}</label>'
         f'<label><input type="checkbox" name="all" value="1"{all_checked}> {esc("include finished")}</label>'
         f'<button type="submit">{esc("apply")}</button>'
         f'<span class="fleet-quick">{quick}</span>'
-        f"</form>"
+        f"</div></details></form>"
     )
 
 
@@ -869,22 +874,23 @@ def render_page(
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""
-    heading = "Machines" if query.view != "repos" else "Repos"
+    heading = "Work / Runs by machine" if query.view != "repos" else "Repositories"
     nav = _nav(query)
     body = (
         '<main class="deck-shell fleet-board">'
-        f'<header class="page-head"><div><h1>{esc(heading)} board</h1>'
-        f'<p class="page-sub">Refreshes every {REFRESH_SECONDS}s</p></div>'
+        f'<header class="page-head"><div><h1>{esc(heading)}</h1>'
+        f'<p class="page-sub">Live run evidence, grouped separately from stored tasks. Attention counts cover this board. Refreshes every {REFRESH_SECONDS}s</p></div>'
         f'<p class="header-meta">Updated {esc(stamp)} '
         f'<a class="refresh-link" href="{esc(_href(query))}">Refresh</a></p></header>'
         f"{nav}"
-        f"{_summary(all_rows, node_ids, claim_rows)}{_legend()}{_controls(query)}"
-        f'<label class="fleet-quick-filter">{esc("filter rows")} '
-        f'<input type="search" data-filter-all="1" placeholder="{esc("type to narrow (needs JS)")}"></label>'
+        f"{_summary(all_rows, node_ids, claim_rows)}{_controls(query)}"
+        f"<details><summary>State legend</summary>{_legend()}</details>"
         f"{board}{more}"
         "</main>"
     )
-    return _document(f"{title} - Brigade Fleet", nonce, body, now=current)
+    return _document(
+        f"{title} - Brigade Fleet", nonce, body, now=current, active="repo-board" if query.view == "repos" else "boards"
+    )
 
 
 _BOARD_CSS = """
@@ -892,6 +898,8 @@ _BOARD_CSS = """
 .fleet-board .state-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
 .fleet-board .legend-entry { white-space: nowrap; }
 .fleet-board .fleet-controls { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); align-items: end; margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
+.fleet-board .filter-fields { display: flex; flex-wrap: wrap; gap: var(--space-3); }
+.fleet-board .advanced-filters { margin: 0; }
 .fleet-board .fleet-controls label { display: grid; gap: 6px; min-width: 0; }
 .fleet-board .fleet-controls input, .fleet-board .fleet-controls select { max-width: 100%; min-width: 0; border-radius: var(--radius-control); text-transform: none; }
 .fleet-board .fleet-controls input[type="search"], .fleet-board .fleet-controls select { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
@@ -956,13 +964,13 @@ _SCRIPT = """(function () {
 })();"""
 
 
-def _document(title: str, nonce: str, body: str, *, now: datetime) -> str:
+def _document(title: str, nonce: str, body: str, *, now: datetime, active: str = "boards") -> str:
     return fleet_command_deck._document(
         body,
         title=title,
         nonce=nonce,
         now=now,
-        active="boards",
+        active=active,
         refresh_seconds=REFRESH_SECONDS,
         extra_css=_BOARD_CSS,
         script=_SCRIPT,

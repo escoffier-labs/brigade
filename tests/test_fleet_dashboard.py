@@ -160,7 +160,8 @@ class TestDashboardAuth:
         assert headers["cache-control"] == "no-store"
         assert headers["referrer-policy"] == "no-referrer"
         assert "<!doctype html>" in text
-        assert '<meta http-equiv="refresh" content="10">' in text
+        assert '<noscript><meta http-equiv="refresh" content="10"></noscript>' in text
+        assert 'data-soft-refresh="10"' in text
 
     def test_unknown_view_is_404(self, hub):
         status, _headers, _text = _request(hub, "GET", "/view/nope", headers=_bearer())
@@ -182,7 +183,7 @@ class TestDashboardAuth:
         cookie = _login_cookie(hub)
         status, _headers, text = _request(hub, "GET", "/view/machines", headers={"Cookie": cookie})
         assert status == 200
-        assert "Fleet: Machines" in text
+        assert "<title>Run history \u00b7 Fleet Hub</title>" in text
         status, _headers, _text = _request(hub, "GET", "/view/repos", headers={"Cookie": cookie})
         assert status == 200
         # The cookie is a read-only capability: JSON and write endpoints still need the token.
@@ -317,7 +318,7 @@ class TestBoards:
         _seed(hub)
         status, _headers, text = _request(hub, "GET", "/view/repos", headers=_bearer())
         assert status == 200
-        assert "Fleet: Repos" in text
+        assert "<title>Run history \u00b7 Fleet Hub</title>" in text
         assert 'id="repo-board"' in text
         rows = text.split("<tr")[2:]  # skip head row
         by_repo = {row.split("<td>")[1].split("</td>")[0]: row for row in rows}
@@ -868,7 +869,7 @@ class TestPureRendering:
             view="repos", query_string="", runs=[], claims=[], nodes=[], started_at={}, nonce="abc"
         )
         assert 'nonce="abc"' in page
-        assert "Fleet: Repos" in page
+        assert "<title>Run history \u00b7 Fleet Hub</title>" in page
 
 
 @pytest.mark.parametrize("view", ["machines", "repos"])
@@ -895,13 +896,18 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
     assert _request(hub, "POST", "/events", headers=_bearer(), body=[event])[0] == 200
     status, headers, page = _request(hub, "GET", f"/view/{view}?{urlencode(query)}", headers=_bearer())
     assert status == 200
-    assert '<div class="shell" data-active="boards">' in page
-    assert '<div class="shell-main"><main class="deck-shell fleet-board">' in page
+    assert f'<div class="shell" data-active="{"repo-board" if view == "repos" else "boards"}">' in page
+    assert '<div class="shell-main"><header class="admin-section-head">' in page
+    assert page.index('class="admin-section-head"') < page.index('<nav class="section-tabs"')
+    assert '<nav class="section-tabs" aria-label="Section tabs">' in page
+    assert '<main class="deck-shell fleet-board">' in page
     sidebar = re.search(r'<aside class="shell-sidebar"[^>]*>(.*?)</aside>', page, re.S)
     assert sidebar is not None
     assert page.count('<nav class="deck-nav" aria-label="Command Deck">') == 1
-    assert 'href="/view/machines" aria-current="page"' in sidebar[1]
-    for route in ["/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/deck/owners"]:
+    assert f'href="{"/deck/projects" if view == "repos" else "/deck/activity"}" aria-current="page"' in sidebar[1]
+    tabs = re.search(r'<nav class="section-tabs"[^>]*>(.*?)</nav>', page)[1]
+    assert f'href="/view/{view}" aria-current="page"' in tabs
+    for route in ["/deck", "/deck/projects", "/deck/roster"]:
         assert f'href="{route}"' in sidebar[1]
     for label in ["Resources", "Docs", "Report a bug", "Star on GitHub", 'class="sidebar-meta"', "sidebar-version"]:
         assert label in sidebar[1]
@@ -910,15 +916,17 @@ def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
     assert "--canvas: #0a0a0a;" in page
     assert "prefers-color-scheme: light" in page
     assert '<body class="deck"' in page
-    assert f"<h1>{view.title()} board</h1>" in page
+    assert f"<h1>{'Work / Runs by machine' if view == 'machines' else 'Repositories'}</h1>" in page
     assert '<header class="page-head">' in page
     assert "background: #fff" not in page
     nonce = re.search(r"'nonce-([^']+)'", headers["content-security-policy"])[1]
     for tag in ["style", "script"]:
         assert re.findall(rf"<{tag}([^>]*)>", page) == [f' nonce="{nonce}"']
-    assert '<meta http-equiv="refresh" content="17">' in page
+    assert '<noscript><meta http-equiv="refresh" content="17"></noscript>' in page
+    assert 'data-soft-refresh="17"' in page
     assert "Refreshes every 17s" in page
-    assert "setInterval(tick, 1000)" in page and 'data-filter-all="1"' in page
+    assert "setInterval(tick, 1000)" in page
+    assert "<summary>Advanced filters</summary>" in page
     pivots = re.search(r'<nav class="board-nav" aria-label="Board views">(.*?)</nav>', page)[1]
     for name in ["machines", "repos"]:
         link = re.search(rf'<a href="([^"]+)"([^>]*)>{name} board</a>', pivots)
@@ -1000,10 +1008,15 @@ def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_pa
             conn.close()
         status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
         assert status == 200
-        assert "Reported agent sessions (1)" in deck_body
-        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in deck_body
-        assert "<script>alert(1)</script>" not in deck_body
-        assert "10 unavailable" in deck_body
+        assert "sess-board" not in deck_body
+        status, _headers, activity = _request(hub, "GET", "/deck/activity", headers=_bearer())
+        assert status == 200
+        assert "sess-board" in activity and "Session report" in activity and "Presence only" in activity
+        assert "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
+        assert "<script>alert(1)</script>" not in activity
+        status, _headers, capacity = _request(hub, "GET", "/deck/capacity", headers=_bearer())
+        assert status == 200
+        assert "Use: 0 / 10 slots" in capacity
         status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert "sess-board" not in machines
@@ -1763,7 +1776,7 @@ class TestBoardBounds:
         status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
 
         assert status == 200
-        assert "Fleet: Repos" in page
+        assert "<title>Run history \u00b7 Fleet Hub</title>" in page
         assert calls == []
 
     def test_unread_only_machine_cards_are_bounded_and_paginated(self):

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 import platform as host_platform
 import re
 from dataclasses import dataclass
@@ -27,6 +28,41 @@ KNOWN_COMPONENT_IDS: tuple[str, ...] = (
     "miseledger",
     "sessionfind",
 )
+# Reader aliases only. Keep KNOWN_COMPONENT_IDS stable until release writers cut over.
+COMPONENT_FAMILIES = {
+    "graphtrail": "brigade-code-graph",
+    "graphtrail-mcp": "brigade-code-graph-mcp",
+    "miseledger": "brigade-evidence",
+}
+ACCEPTED_COMPONENT_IDS = (*KNOWN_COMPONENT_IDS, *COMPONENT_FAMILIES.values())
+
+
+def family_id(name: str) -> str:
+    """Return the canonical family without changing any persisted identity."""
+    return COMPONENT_FAMILIES.get(name, name)
+
+
+def family_names(name: str) -> tuple[str, ...]:
+    canonical = family_id(name)
+    for legacy, current in COMPONENT_FAMILIES.items():
+        if current == canonical:
+            return current, legacy
+    return (name,)
+
+
+def wire_id(components: Mapping[str, object], name: str) -> str | None:
+    """Find an actual wire key; reject ambiguous families even for in-memory callers."""
+    found = [key for key in family_names(name) if key in components]
+    if len(found) > 1:
+        raise ValueError(f"duplicate component family {family_id(name)!r}")
+    return found[0] if found else None
+
+
+def manifest_component_ids(manifest: ComponentManifest) -> tuple[str, ...]:
+    """Return one actual manifest key per family in existing component order."""
+    return tuple(key for name in KNOWN_COMPONENT_IDS if (key := wire_id(manifest.components, name)) is not None)
+
+
 # Components registered in KNOWN_COMPONENT_IDS but not yet shipped from a Brigade
 # release. The bundled compatibility manifest carries them with empty assets so
 # the loader accepts the manifest before the first release that publishes them;
@@ -154,16 +190,18 @@ def _load_raw(
     for name, value in sorted(components_raw.items()):
         if not isinstance(name, str) or not name:
             raise ValueError("component manifest components must be named objects")
-        if name not in KNOWN_COMPONENT_IDS:
+        if name not in ACCEPTED_COMPONENT_IDS:
             unknown_ids.append(name)
             continue
+        if wire_id(components, name) is not None:
+            raise ValueError(f"duplicate component family {family_id(name)!r}")
         if not isinstance(value, dict):
             raise ValueError(f"component manifest component {name!r} must be an object")
         components[name] = _parse_known_component(
             name, value, allow_standalone_legacy_revisions=allow_standalone_legacy_revisions
         )
 
-    missing = [component_id for component_id in KNOWN_COMPONENT_IDS if component_id not in components]
+    missing = [component_id for component_id in KNOWN_COMPONENT_IDS if wire_id(components, component_id) is None]
     if missing:
         # The beta handoff downloads the last stable release manifest, which
         # predates any component id added to KNOWN_COMPONENT_IDS on main but
@@ -203,7 +241,8 @@ def _load_raw(
 
 
 def resolve_asset(manifest: ComponentManifest, component_id: str, platform: str) -> ComponentAsset:
-    component = manifest.components.get(component_id)
+    key = wire_id(manifest.components, component_id)
+    component = manifest.components.get(key) if key is not None else None
     if component is None:
         known = ", ".join(KNOWN_COMPONENT_IDS)
         raise ValueError(f"unknown component {component_id!r}; known components: {known}")
@@ -228,9 +267,7 @@ def published_component_ids(manifest: ComponentManifest) -> tuple[str, ...]:
     operate only on components a release actually ships.
     """
     return tuple(
-        component_id
-        for component_id in KNOWN_COMPONENT_IDS
-        if component_id in manifest.components and manifest.components[component_id].assets
+        component_id for component_id in manifest_component_ids(manifest) if manifest.components[component_id].assets
     )
 
 

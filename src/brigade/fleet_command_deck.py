@@ -22,7 +22,7 @@ from brigade.fleet_deck_brands import (
 )
 
 from .fleet_event_freshness import observation_state
-from . import fleet_deck_shell, ui_theme
+from . import fleet_deck_shell, ui_theme, fleet_live_routing
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -50,6 +50,7 @@ FAILURE_STATE_SUFFIXES = (
 )
 ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT, SESSION_LIMIT = 200, 8, 10, 500
 CLOUD_PROVIDER_LIMIT, CLOUD_LEASE_LIMIT = 8, 16
+CLOUD_REPORT_HISTORY_LIMIT = 50
 CLOUD_TEXT_LIMIT = 256
 SESSION_REPO_IDENTITY_LIMIT, SESSION_CHECKOUT_PATH_LIMIT = 512, 1024
 BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "unknown": 2, "stale": 2, "running": 3, "queued": 4}
@@ -199,6 +200,28 @@ class RepoRow:
 
 
 @dataclass(frozen=True)
+class CloudSessionContext:
+    """Validated reported presence, never a provider job or lease."""
+
+    version: int
+    provider: str
+    agent_label: str
+    sequence: int
+    observed_at: str
+    source: str
+    source_scope: str
+    coverage: str
+    parent_session_id: str = ""
+    work_id: str = ""
+    task: str = ""
+    reported_state: str = "unknown"
+    progress: str = ""
+    blocker: str = ""
+    result: str = ""
+    evidence_refs: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class InteractiveSession:
     """One live interactive session. Separate from runs and station capacity."""
 
@@ -212,6 +235,9 @@ class InteractiveSession:
     branch: str | None
     dirty_paths: tuple[str, ...]
     dirty_truncated: bool
+    cloud_context: CloudSessionContext | None = None
+    presence_state: str = "active"
+    observation_age_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -339,6 +365,7 @@ class QueueState:
     queued_count: str = UNKNOWN
     blocked: tuple[Mapping[str, object], ...] = ()
     blocked_known: bool = False
+    complete: bool = False
 
     @property
     def exclusions(self) -> tuple[Mapping[str, object], ...]:
@@ -432,6 +459,22 @@ class ControlPlane:
 
 
 @dataclass(frozen=True)
+class OctopoolObservation:
+    """A supplied capture of shared-pool usage, with no availability verdict."""
+
+    captured_at: str
+    window_seconds: int
+    scope: str = "pool-wide"
+    requests: int | None = None
+    saved_github_requests: int | None = None  # Historical cache-served alias, never upstream savings.
+    cache_served_responses: int | None = None
+    uncached_outcomes: int | None = None
+    fallbacks: int | None = None
+    service_errors: int | None = None
+    eligible_cache_hit_rate: float | None = None
+
+
+@dataclass(frozen=True)
 class DeckView:
     stations: tuple[StationView, ...]
     rail: tuple[RailEntry, ...]
@@ -440,9 +483,11 @@ class DeckView:
     observers: tuple[tuple[str, str], ...]
     cloud_workers: tuple[CloudWorker, ...] = ()
     interactive_sessions: tuple[InteractiveSession, ...] = ()
+    recent_cloud_reports: tuple[InteractiveSession, ...] = ()
     control_plane: ControlPlane | None = None
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
     stale_after_seconds: int = 1800
+    octopool_observation: OctopoolObservation | Mapping[str, object] | None = None
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -936,6 +981,69 @@ def _safe_display_text(value: object, *, limit: int = CLOUD_TEXT_LIMIT) -> str:
     return _strip_controls(value)[:limit] if isinstance(value, str) else ""
 
 
+def octopool_observation_from_snapshot(raw: object) -> OctopoolObservation | None:
+    """Project only bounded capture provenance and allowlisted usage counters."""
+    names = (
+        "requests",
+        "saved_github_requests",
+        "cache_served_responses",
+        "uncached_outcomes",
+        "fallbacks",
+        "service_errors",
+    )
+    if isinstance(raw, OctopoolObservation):
+        raw = {
+            "captured_at": raw.captured_at,
+            "scope": raw.scope,
+            "window": {"seconds": raw.window_seconds},
+            "pool_usage": {
+                name: getattr(raw, name)
+                for name in (*names, "eligible_cache_hit_rate")
+                if getattr(raw, name) is not None
+            },
+        }
+    if not isinstance(raw, Mapping) or raw.get("scope") != "pool-wide":
+        return None
+    stamp, window, usage = raw.get("captured_at"), raw.get("window"), raw.get("pool_usage")
+    if not isinstance(stamp, str) or len(stamp) > 64 or _strip_controls(stamp) != stamp:
+        return None
+    if not isinstance(window, Mapping) or not isinstance(usage, Mapping):
+        return None
+    seconds = window.get("seconds")
+    if type(seconds) is not int or not 0 < seconds <= 2**53 - 1:
+        return None
+    try:
+        captured = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+        if captured.tzinfo is None:
+            return None
+        stamp = captured.astimezone(_UTC).isoformat()
+    except (ValueError, OverflowError):
+        return None
+    usage = dict(usage)
+    if "cache_served_responses" not in usage:
+        usage["cache_served_responses"] = usage.get("saved_github_requests")
+    if "uncached_outcomes" not in usage:
+        usage["uncached_outcomes"] = usage.get("backend_requests")
+    counters = {
+        name: value if type(value) is int and 0 <= value <= 2**53 - 1 else None
+        for name in names
+        for value in (usage.get(name),)
+    }
+    rate = usage.get("eligible_cache_hit_rate")
+    rate = float(rate) if isinstance(rate, (int, float)) and not isinstance(rate, bool) and 0 <= rate <= 1 else None
+    return OctopoolObservation(
+        captured_at=stamp,
+        window_seconds=seconds,
+        requests=counters["requests"],
+        saved_github_requests=counters["saved_github_requests"],
+        cache_served_responses=counters["cache_served_responses"],
+        uncached_outcomes=counters["uncached_outcomes"],
+        fallbacks=counters["fallbacks"],
+        service_errors=counters["service_errors"],
+        eligible_cache_hit_rate=rate,
+    )
+
+
 def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[str, str]:
     ids = sorted(set(node_ids))
     if not ids:
@@ -949,10 +1057,14 @@ def fetch_last_heard(conn: sqlite3.Connection, node_ids: Sequence[str]) -> dict[
 
 
 def fetch_interactive_sessions(conn: sqlite3.Connection, *, now: datetime) -> list[dict[str, object]]:
-    """Active unexpired sessions via the Hub session authority. Capped separately."""
+    """Active presence plus separately bounded v2 stale/terminal task reports."""
     from . import fleet_hub_sessions
 
-    return fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())[:SESSION_LIMIT]
+    active = fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp(), exclude_terminal_cloud_reports=True)[
+        :SESSION_LIMIT
+    ]
+    history = fleet_hub_sessions.list_cloud_reports(conn, now_epoch=now.timestamp(), limit=CLOUD_REPORT_HISTORY_LIMIT)
+    return active + history
 
 
 def fetch_observers(conn: sqlite3.Connection, configured: frozenset[str]) -> list[tuple[str, str]]:
@@ -1009,24 +1121,6 @@ def _display_claim(claim: Claim | None, enrolled_labels: Mapping[str, str]) -> C
         owner_node=_node_label(claim.owner_node, enrolled_labels),
         owner_conductor=claim.owner_conductor,
         ttl_remaining=claim.ttl_remaining,
-    )
-
-
-def _interactive_session(raw: Mapping[str, object]) -> InteractiveSession:
-    dirty = raw.get("dirty_paths")
-    paths = tuple(item for item in dirty if isinstance(item, str)) if isinstance(dirty, (list, tuple)) else ()
-    branch = raw.get("branch")
-    return InteractiveSession(
-        node_id=_safe_display_text(raw.get("node_id")),
-        harness=_safe_display_text(raw.get("harness")),
-        session_id=_safe_display_text(raw.get("session_id")),
-        repo_identity=_safe_display_text(raw.get("repo_identity"), limit=SESSION_REPO_IDENTITY_LIMIT),
-        identity_scope=_safe_display_text(raw.get("identity_scope")) or "fleet",
-        repo_label=_safe_display_text(raw.get("repo_label")),
-        checkout_path=_safe_display_text(raw.get("checkout_path"), limit=SESSION_CHECKOUT_PATH_LIMIT),
-        branch=_safe_display_text(branch) if isinstance(branch, str) else None,
-        dirty_paths=paths,
-        dirty_truncated=bool(raw.get("dirty_truncated")),
     )
 
 
@@ -1155,7 +1249,9 @@ def build_view(
     interactive_sessions: Sequence[Mapping[str, object]] = (),
     control_plane: ControlPlane | None = None,
 ) -> DeckView:
-    del now
+    from .fleet_dot import TERMINAL_STATES
+    from .fleet_deck_activity import interactive_session
+
     active_runs = tuple(
         run for run in live_runs if not is_terminal_state(run.state) and run.bucket not in {"stale", "unknown"}
     )
@@ -1164,7 +1260,20 @@ def build_view(
     parallel_targets = {
         target for target in {run.repo for run in active_runs} if collides(target, active_runs, claims_by_target)
     }
-    session_rows = tuple(_interactive_session(item) for item in interactive_sessions)
+    session_rows_list = []
+    history_rows = []
+    for item in interactive_sessions:
+        session = interactive_session(item, now=now)
+        cloud = session.cloud_context
+        if (
+            cloud is not None
+            and cloud.version == 2
+            and (session.presence_state == "stale" or cloud.reported_state in TERMINAL_STATES)
+        ):
+            history_rows.append(session)
+        elif item.get("presence_state") != "stale":
+            session_rows_list.append(session)
+    session_rows = tuple(session_rows_list[:SESSION_LIMIT])
     overlap_targets = _exact_path_overlap_targets(interactive_sessions)
     stations: list[StationView] = []
     for station in config.stations:
@@ -1264,6 +1373,7 @@ def build_view(
         observers=tuple(observers),
         cloud_workers=tuple(cloud_workers[:CLOUD_PROVIDER_LIMIT]),
         interactive_sessions=session_rows,
+        recent_cloud_reports=tuple(history_rows[:CLOUD_REPORT_HISTORY_LIMIT]),
         control_plane=control_plane,
         observed_work_groups=config.observed_work_groups,
         stale_after_seconds=config.stale_after_seconds,
@@ -1363,6 +1473,7 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
             queued_count=_cp_text(queue_raw.get("queued_count")),
             blocked=blocked,
             blocked_known=queue_raw.get("blocked") is not None,
+            complete=queue_raw.get("complete") is True,
         )
 
     integrations: list[IntegrationState] = []
@@ -1710,12 +1821,13 @@ def render_deck(
     now: datetime,
     worklore_enabled: bool = True,
     action_sources: frozenset[str] = frozenset(),
+    routing: fleet_live_routing.Routing | None = None,
 ) -> str:
     # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview
+    from . import fleet_deck_overview, fleet_admin_explorer
 
     body = fleet_deck_overview.render_overview(
-        view, now, worklore_enabled=worklore_enabled, action_sources=action_sources
+        view, now, worklore_enabled=worklore_enabled, action_sources=action_sources, routing=routing
     )
     return _document(
         body,
@@ -1724,7 +1836,7 @@ def render_deck(
         active="overview",
         view=view,
         worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.OVERVIEW_CSS,
+        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS,
     )
 
 
@@ -1734,8 +1846,8 @@ def repo_coordination_table(view: DeckView) -> str:
     rows = "".join(
         "<tr>"
         f"<td>{_esc(row.target or UNKNOWN)}</td>"
-        f"<td>{_esc(_owner_text(row.claim))}</td>"
-        f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else ''}</td>"
+        f"<td>{_esc(_owner_text(row.claim) or 'No active claim')}</td>"
+        f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else 'No active claim'}</td>"
         f"<td>{_esc(', '.join(f'{labels.get(run.node_id, run.node_id[:12])}:{run.state}' for run in row.live))}</td>"
         f'<td class="{"flag" if row.interactive_overlap else ""}">{_esc(_repo_flags(row))}</td>'
         "</tr>"
@@ -1795,21 +1907,41 @@ def _document(
     ``DeckView`` pass ``None`` and get the navigation only.
     """
     # Imported here because the sidebar imports this module for its types.
-    from . import fleet_deck_sidebar
+    from . import fleet_admin_explorer, fleet_deck_sidebar, fleet_investigation
 
     if worklore_enabled is None:
         from . import worklore_http
 
         worklore_enabled = worklore_http.enabled()
     sidebar = fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+    section = fleet_deck_sidebar.section_for(active)
+    heading = {
+        "overview": "Fleet",
+        "work": "Work",
+        "capacity": "Capacity",
+        "repos": "Projects",
+        "roster": "Settings",
+    }.get(section, title)
+    icon = fleet_deck_sidebar.icons.NAV_ICONS.get(section, "")
+    section_head = f'<header class="admin-section-head"><h1>{icon}{_esc(heading)}</h1>{fleet_admin_explorer.audience_toggle()}</header>'
+
     return fleet_deck_shell.deck_page(
         title,
         active,
         sidebar,
-        body,
+        section_head + fleet_deck_sidebar.render_section_tabs(active, worklore_enabled=worklore_enabled) + body,
         nonce,
         as_of=_stamp(now),
         refresh_seconds=refresh_seconds if refresh else None,
-        extra_css=_STYLE + extra_css,
-        script=script,
+        title_text=fleet_deck_sidebar.page_title(active),
+        extra_css=_STYLE + fleet_admin_explorer.SHELL_CSS + extra_css + fleet_investigation.CSS,
+        script=fleet_admin_explorer.SHELL_SCRIPT
+        + script
+        + (
+            fleet_investigation.COPY_SCRIPT
+            # A refreshing page can gain an investigation panel later; the soft refresh only
+            # reruns registered initializers, so register the copy handler up front.
+            if ("data-copy-target=" in body or refresh) and fleet_investigation.COPY_SCRIPT not in script
+            else ""
+        ),
     )

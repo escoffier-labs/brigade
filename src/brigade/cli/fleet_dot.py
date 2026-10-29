@@ -22,6 +22,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     report.add_argument(
         "--holder-file", type=Path, help="Protected existing Worklore holder file, read only with --publish."
     )
+    report.add_argument("--expected-node", help=argparse.SUPPRESS)
     report.set_defaults(func=dispatch)
 
 
@@ -49,7 +50,9 @@ def dispatch(args: argparse.Namespace) -> int:
                 nonce = load_hub_token_file(args.holder_file)
             except ConfigurationError:
                 raise DotReportError("invalid protected holder-file") from None
-        result = report_session(raw, publish=args.publish, holder_nonce=nonce)
+        result = report_session(
+            raw, publish=args.publish, holder_nonce=nonce, expected_node=getattr(args, "expected_node", None)
+        )
     except (DotReportError, OSError):
         print(json.dumps({"error": "invalid bounded Dot metadata; no publication attempted"}))
         return 2

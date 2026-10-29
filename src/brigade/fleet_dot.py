@@ -61,6 +61,19 @@ _CLOUD_FIELDS = frozenset(
 )
 
 
+_V2_FIELDS = (_FIELDS - {"work_id", "ownership_revision", "generation", "coverage"}) | {"reported_state"}
+_V2_CLOUD_FIELDS = (_CLOUD_FIELDS - {"work_id"}) | {
+    "task",
+    "reported_state",
+    "progress",
+    "blocker",
+    "result",
+    "evidence_refs",
+}
+REPORTED_STATES = frozenset({"unknown", "queued", "running", "blocked", "completed", "failed", "cancelled"})
+TERMINAL_STATES = frozenset({"completed", "failed", "cancelled"})
+
+
 class DotReportError(ValueError):
     """A safe fixed refusal message, never including submitted text."""
 
@@ -130,16 +143,22 @@ def _integer(raw: object, field: str, *, minimum: int = 0) -> int:
 
 def validate_cloud_context(raw: object) -> dict[str, Any]:
     """Shared client/Hub validation for the versioned presence-only envelope."""
-    if not isinstance(raw, Mapping) or set(raw) - _CLOUD_FIELDS:
+    if not isinstance(raw, Mapping):
         raise DotReportError("unsupported cloud context fields")
-    if type(raw.get("version")) is not int or raw["version"] != 1 or raw.get("provider") != "dot":
+    version = raw.get("version")
+    fields = _V2_CLOUD_FIELDS if type(version) is int and version == 2 else _CLOUD_FIELDS
+    if set(raw) - fields:
+        raise DotReportError("unsupported cloud context fields")
+    if type(raw.get("version")) is not int or raw["version"] not in {1, 2} or raw.get("provider") != "dot":
         raise DotReportError("unsupported cloud context version or provider")
     context: dict[str, Any] = {
-        "version": 1,
+        "version": version,
         "provider": "dot",
         "agent_label": _opaque(raw.get("agent_label"), "agent_label"),
         "sequence": _integer(raw.get("sequence"), "sequence"),
     }
+    if version == 2 and not {"source", "source_scope"} <= raw.keys():
+        raise DotReportError("v2 requires explicit source and source_scope")
     source = raw.get("source", "explicit-metadata")
     scope = raw.get("source_scope", "explicit-session")
     scopes = {
@@ -162,6 +181,21 @@ def validate_cloud_context(raw: object) -> dict[str, Any]:
     for field in ("parent_session_id", "work_id"):
         if field in raw:
             context[field] = _opaque(raw[field], field)
+    if version == 2:
+        state = raw.get("reported_state")
+        if not isinstance(state, str) or state not in REPORTED_STATES:
+            raise DotReportError("unsupported reported_state")
+        context["reported_state"] = state
+        context["task"] = _text(raw.get("task"), "task", MAX_SUMMARY_CHARS)
+        for field in ("progress", "blocker", "result"):
+            if field in raw:
+                context[field] = _text(raw[field], field, MAX_SUMMARY_CHARS)
+        context["evidence_refs"] = _evidence_refs(raw.get("evidence_refs", []))
+        try:
+            if len(json.dumps(context, ensure_ascii=False).encode("utf-8")) > MAX_REPORT_BYTES:
+                raise DotReportError("cloud context exceeds byte bound")
+        except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
+            raise DotReportError("cloud context must be bounded JSON metadata") from None
     return context
 
 
@@ -178,7 +212,7 @@ class DotReport:
 
 def parse_report(raw: object) -> DotReport:
     """Strict allowlist and bounds, before any side effect or authentication."""
-    if not isinstance(raw, Mapping) or set(raw) - _FIELDS:
+    if not isinstance(raw, Mapping) or set(raw) - (_V2_FIELDS if raw.get("version") == 2 else _FIELDS):
         raise DotReportError("unsupported report fields")
     try:
         if len(json.dumps(dict(raw), ensure_ascii=False).encode("utf-8")) > MAX_REPORT_BYTES:
@@ -186,7 +220,8 @@ def parse_report(raw: object) -> DotReport:
     except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
         raise DotReportError("report must be bounded JSON metadata") from None
     session_id = _opaque(raw.get("session_id"), "session_id")
-    context = validate_cloud_context({k: v for k, v in raw.items() if k in _CLOUD_FIELDS} | {"provider": "dot"})
+    fields = _V2_CLOUD_FIELDS if raw.get("version") == 2 else _CLOUD_FIELDS
+    context = validate_cloud_context({k: v for k, v in raw.items() if k in fields} | {"provider": "dot"})
     if context.get("parent_session_id") == session_id:
         raise DotReportError("session cannot parent itself")
     repo = ""
@@ -213,24 +248,7 @@ def parse_report(raw: object) -> DotReport:
         for field in ("task", "progress", "blocker", "result")
         if field in raw
     }
-    evidence = raw.get("evidence_refs", [])
-    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE_REFS:
-        raise DotReportError("evidence_refs exceeds entry bound or is not an array")
-    references: list[str] = []
-    for entry in evidence:
-        reference = _text(entry, "evidence_refs", 256, https_reference=True)
-        if reference.startswith("https://"):
-            try:
-                parsed = urlsplit(reference)
-                port = parsed.port
-            except ValueError:
-                raise DotReportError("invalid evidence reference") from None
-            if not parsed.hostname or parsed.username or parsed.password or port not in {None, 443}:
-                raise DotReportError("invalid evidence reference")
-            _public_evidence_host(parsed.hostname)
-        elif _OPAQUE.fullmatch(reference) is None:
-            raise DotReportError("evidence reference requires opaque ID or public HTTPS URL")
-        references.append(reference)
+    references = _evidence_refs(raw.get("evidence_refs", []))
     return DotReport(
         snapshot=SessionSnapshot(
             harness="dot",
@@ -249,6 +267,27 @@ def parse_report(raw: object) -> DotReport:
         ownership_revision=revision,
         generation=generation,
     )
+
+
+def _evidence_refs(evidence: object) -> list[str]:
+    if not isinstance(evidence, list) or len(evidence) > MAX_EVIDENCE_REFS:
+        raise DotReportError("evidence_refs exceeds entry bound or is not an array")
+    references: list[str] = []
+    for entry in evidence:
+        reference = _text(entry, "evidence_refs", 256, https_reference=True)
+        if reference.startswith("https://"):
+            try:
+                parsed = urlsplit(reference)
+                port = parsed.port
+            except ValueError:
+                raise DotReportError("invalid evidence reference") from None
+            if not parsed.hostname or parsed.username or parsed.password or port not in {None, 443}:
+                raise DotReportError("invalid evidence reference")
+            _public_evidence_host(parsed.hostname)
+        elif _OPAQUE.fullmatch(reference) is None:
+            raise DotReportError("evidence reference requires opaque ID or public HTTPS URL")
+        references.append(reference)
+    return references
 
 
 def read_report(data: bytes) -> object:
@@ -270,11 +309,19 @@ def read_report(data: bytes) -> object:
         raise DotReportError("report requires valid bounded JSON") from None
 
 
-def report_session(raw: object, *, publish: bool = False, holder_nonce: str | None = None) -> dict[str, Any]:
+def report_session(
+    raw: object, *, publish: bool = False, holder_nonce: str | None = None, expected_node: str | None = None
+) -> dict[str, Any]:
     """Validate/project, or explicitly publish through supported fleet clients."""
     from . import fleet_client
 
     report = parse_report(raw)
+    if (report.snapshot.cloud_context or {}).get("version") == 2:
+        if holder_nonce is not None:
+            raise DotReportError("v2 does not accept holder authority")
+        return _report_task_session(report, publish=publish, expected_node=expected_node)
+    if expected_node is not None:
+        raise DotReportError("expected-node requires version 2")
     if holder_nonce is not None:
         from .worklore_ownership import nonce_hash, _reject_nonce_echo
 
@@ -333,6 +380,38 @@ def report_session(raw: object, *, publish: bool = False, holder_nonce: str | No
     return result
 
 
+def _report_task_session(report: DotReport, *, publish: bool, expected_node: str | None) -> dict[str, Any]:
+    from . import fleet_client
+
+    result: dict[str, Any] = {
+        "mode": "publish" if publish else "dry-run",
+        "status": "dry-run",
+        "inventory_coverage": "explicitly-reported-sessions",
+        "provider_lifecycle": "unobserved",
+        "evidence_verification": "reported-unverified",
+        "presence_payload": fleet_client._session_request_body(report.snapshot, action="upsert"),
+        "summaries_persisted": False,
+        "components": {"presence": "projected", "work": "not-requested"},
+    }
+    if not publish:
+        return result
+    # CLI callers without an MCP runtime are still fenced to the configured
+    # host identity. Remote MCP arguments never select this identity.
+    node = expected_node if expected_node is not None else fleet_client.resolve_node_id()
+    published = fleet_client.publish_task_session(report.snapshot, expected_node=node)
+    if published.ok:
+        result.update(status="confirmed", summaries_persisted=True, confirmed_node=node)
+        result["components"]["presence"] = "published"
+    else:
+        reason = published.reason or "unconfirmed"
+        refused = reason in {"node_auth_required", "node_identity_mismatch", "hub_unconfigured"} or (
+            reason.startswith("http_status:4")
+        )
+        result["status"] = "refused" if refused else "unknown"
+        result["components"]["presence"] = f"{'failed' if refused else 'unknown'}:{reason}"
+    return result
+
+
 def ownership_report_envelope(report: DotReport) -> dict[str, Any]:
     """Presence sequence is independent from the Worklore ownership revision."""
     envelope = dict(report.snapshot.cloud_context or {})
@@ -351,6 +430,8 @@ def validate_ownership_report(raw: object) -> dict[str, Any]:
         raise DotReportError("unsupported report provider")
     if any(field in raw for field in ("work_id", "ownership_revision", "generation")):
         raise DotReportError("ownership report authority must be outside metadata")
+    if raw.get("version") != 1:
+        raise DotReportError("ownership report requires version 1")
     parsed = parse_report({k: v for k, v in raw.items() if k != "provider"})
     result = ownership_report_envelope(parsed)
     result["evidence_verification"] = "reported-unverified"

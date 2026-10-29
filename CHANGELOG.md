@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Dogfood config round-trips Windows paths while retaining legacy unquoted values.
+- Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
+- `brigade dogfood` reads the TOML literal strings it now writes without applying escapes, so Windows paths in `.brigade/dogfood.toml` keep their backslashes.
+
+- Security TOML literal strings preserve Windows path backslashes while double-quoted strings continue to decode escapes.
+- Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
+- Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
+- Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.
+
+- Claude work-loop hooks no longer treat descriptor duplication (`2>&1`, `>&2`), `/dev/null`, or redirects to files outside the repository as repository writes, so read-only commands stop re-arming the closeout verification gate.
+
 - Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
 
 - Add dormant task launch claims with immutable dispatch bindings, strict task-version checks, and retained consumption through checkpoint recovery and redaction (#2046).
@@ -16,6 +27,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP servers include `resultType: "complete"` in every successful result for protocol 2026-07-28 requests (declared via `params._meta`, the `MCP-Protocol-Version` header, or a stdio `initialize`), so current Claude Code can fetch tools from `memory serve-mcp` and `skills serve-mcp`. Older revisions keep their exact result shape.
 - Reviewed memory evidence operations accept scalar citations and count equivalent evidence references once, while retaining the original citation spellings and excluding unresolved support (#1959, cases 8 and 15).
 - Fleet actions and bug diagnostics launch the installed Brigade package with isolated Python imports, preventing ambient working directories, Python paths, and user-site startup code from selecting another package (#1950).
+- `brigade fleet work handoff show <work-id> [--json]` reads bounded item, ownership, checkpoint, report, and recorded run references from one database snapshot. It exposes context under existing fleet read trust, with attribution and freshness limits, and performs no ownership or execution action.
+
 - `brigade run --require-fleet-claim` and `repo_claim(require_claim=True)` refuse work without a confirmed Hub claim and enforce bounded cancellation on claim loss, including credential rejection. Default local fallback remains available.
 
 - Codex instruction-chain doctor reads a bounded user-base `project_doc_max_bytes`, labels configuration provenance and unresolved overrides, and reports exact bytes with secondary KiB. Invalid configuration remains unevaluated, zero disables inspection, and over-ceiling caps are never clamped (#2088, slice 1).
@@ -42,6 +55,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Add database-backed teammate roles, reciprocal send grants, node grant administration, reduced directory reads, and admin-only audit paging. Grant and revocation audit rows commit with their mutations (#2041).
+- Add offline Fleet key initialization, public inspection and export, and local rotation with explicit scope and fixed diagnostics. These commands perform no publication or trust acceptance.
+
 - Add offline client peer-key acceptance, rotation history, and local trust checks. Bound peer admission, recheck revoked continuity dependencies, and refuse far-future key dates. CLI/MCP encryption remains unfinished.
 
 - Add an internal POSIX Hub identity store with signed history, endpoint bindings, and rollback floors. Preserve primary write failures in identity and trust snapshots. Identity migration and message opening/sealing remain unfinished.
@@ -69,6 +84,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
+- Preserve backslashes in TOML literal strings on Python 3.10, so Windows paths and trailing separators load correctly in local configuration, including arrays and inline tables. Generated TOML strings now round-trip through both supported parsers.
+- Corrupt local verification receipts no longer crash history, planning, or captured verification runs. Both local receipt readers handle encoding and decoder failures and reject JSON deeper than 128 containers; exports still report malformed inputs as failures and preserve the original files.
+
 - Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
 
 - Fleet Hub refuses plaintext replies to retained sealed messages, including retries of pre-upgrade plaintext replies. Exact detached retries remain available after parent expiry, and invalid retries do not reveal whether a foreign message id is retained.
@@ -78,6 +97,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Managed Cursor command hooks with an explicit command type are recognized without duplicate callbacks.
 - Incomplete runs without infrastructure-only attribution score -1 during outcome capture, matching the scoring policy.
 - Skill validation accepts folded and literal YAML block scalars, including chomping and explicit indentation indicators, while continuing to reject unsupported nesting.
+- Fleet Hub moves contextual destinations into section tabs, bounds Overview activity previews with full evidence in disclosures, and leads Repositories with observed work and claim cards.
+
+- Fleet admin pages group navigation into Overview, Work, Capacity, Repositories and Settings. Overview leads with actionable subjects, Alerts keeps evidence ages and repair preparation together, and secondary diagnostics use disclosures. Capacity distinguishes configured slots from unverified usability without collecting new metrics.
+
 - Fleet Machines and Repos boards use the shared Deck sidebar, navigation, and Resources while preserving board filters and pivot query state in dark and light themes. Wide tables scroll within their wrappers, and board refresh timing stays synchronized with its label.
 - Live run controls no longer advertise an unusable Unix socket while starting a loopback TCP transport for long paths or platforms without Unix sockets. Loopback control metadata is published after the endpoint binds (#1767, slice 4).
 

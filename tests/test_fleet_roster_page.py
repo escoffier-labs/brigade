@@ -224,7 +224,7 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
         assert status == 200
         assert headers["cache-control"] == "no-store"
         assert 'http-equiv="refresh"' not in page
-        assert "Roster" in page and 'href="/deck/roster"' in page
+        assert "<title>Live routing \u00b7 Fleet Hub</title>" in page and 'href="/deck/roster"' in page
         # "Consumer defaults" was renamed: the control is the omitted-seat
         # admission fallback, not a default model or a second roster.
         for heading in ("Roles", "Seats", "Cloud lanes", "Admission fallback seat (legacy)", "Retired families"):
@@ -246,7 +246,7 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
 def test_roster_page_deck_nav_links_to_it(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         deck = _request(hub, "GET", "/deck", headers=_bearer())[2]
-        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}roster</a>' in deck
+        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}Settings</a>' in deck
 
 
 def test_retired_seats_leave_the_table_and_legacy_selectors_but_keep_history(tmp_path):
@@ -614,8 +614,9 @@ def test_roster_page_read_only_under_tailscale_identity(tmp_path):
         )
         assert status == 200
         assert "read-only" in page
-        assert "<button" not in page
-        assert page.count("disabled") >= 10
+        assert "<button" not in re.sub(r'<div class="audience-toggle".*?</div>', "", page, flags=re.S)
+        assert "<select" not in page and "<textarea" not in page
+        assert "coder" in page and "data-record-detail" in page
         assert "operator@example.test" not in page
 
 
@@ -890,7 +891,7 @@ def test_staged_policy_is_labelled_and_legacy_writes_still_work(tmp_path):
         _seed(hub)
         page = _page(db, activation=staged)
         assert "staged policy" in page
-        assert "still write the legacy run preference" in page
+        assert "Live role assignments use the legacy run preference" in page
         assert "disabled" not in page.split('name="role.impl"')[1].split("</select>")[0]
 
 

@@ -189,7 +189,8 @@ class DotTools:
                 wait="fleet_wait blocks at most 60 seconds; a timeout leaves the task running.",
             ),
             fleet_hub=dict(
-                read_only=True,
+                read_only=False,
+                report_session="fleet_report_session: gated explicit v2 task reports, dry-run by default, reported-unverified; no lifecycle authority",
                 start_of_task=(
                     "fleet_digest (one call: overview, work_next dry run, inbox, subscriptions, "
                     "open brigade PRs); fleet_overview + fleet_work_next for full detail"

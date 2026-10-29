@@ -933,3 +933,89 @@ def test_compatible_stable_manifest_rejects_unknown_extras(tmp_path):
         "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
     ):
         component_manifest.load(path, allow_compatible_stable_manifest=True)
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("graphtrail", "brigade-code-graph"),
+        ("graphtrail-mcp", "brigade-code-graph-mcp"),
+        ("miseledger", "brigade-evidence"),
+    ],
+)
+def test_family_manifest_preserves_wire_coordinates(tmp_path, old, new):
+    path = _write_manifest(tmp_path)
+    payload = json.loads(path.read_text())
+    record = payload["components"].pop(old)
+    record["executable"] = new
+    for asset in record["assets"].values():
+        asset["asset_name"] = asset["asset_name"].replace(old, new, 1)
+        asset["download_url"] = asset["download_url"].rsplit("/", 1)[0] + "/" + asset["asset_name"]
+    payload["components"][new] = record
+    content = json.dumps(payload).encode()
+    manifest = component_manifest.load_bytes(content, source=path, allow_standalone_legacy_revisions=True)
+    assert old not in manifest.components
+    assert manifest.components[new].executable == new
+    assert (
+        component_manifest.resolve_asset(manifest, old, "linux-amd64").download_url
+        == record["assets"]["linux-amd64"]["download_url"]
+    )
+    assert new in component_manifest.published_component_ids(manifest)
+    payload["components"][old] = record
+    with pytest.raises(ValueError, match="duplicate.*family"):
+        component_manifest.load_bytes(json.dumps(payload).encode(), source=path, allow_standalone_legacy_revisions=True)
+
+
+def test_canonical_id_cannot_disguise_legacy_asset_coordinates(tmp_path):
+    path = _write_manifest(tmp_path)
+    payload = json.loads(path.read_text())
+    payload["components"]["brigade-evidence"] = payload["components"].pop("miseledger")
+    with pytest.raises(ValueError, match="executable"):
+        component_manifest.load_bytes(json.dumps(payload).encode(), source=path, allow_standalone_legacy_revisions=True)
+
+
+@pytest.mark.parametrize("fault", ["revision", "repository", "tag", "url", "platforms", "missing"])
+def test_canonical_family_retains_strict_release_validation(tmp_path, fault):
+    import hashlib
+    from brigade import update_cmd
+    from tests.component_install_helpers import write_release_manifest
+
+    path = tmp_path / "release.json"
+    raw = json.loads(write_release_manifest(path, brigade_version="1.2.3", target_commit="a" * 40))
+    record = raw["components"].pop("miseledger")
+    record["executable"] = "brigade-evidence"
+    for asset in record["assets"].values():
+        asset["asset_name"] = asset["asset_name"].replace("miseledger", "brigade-evidence", 1)
+        asset["download_url"] = asset["download_url"].rsplit("/", 1)[0] + "/" + asset["asset_name"]
+    raw["components"]["brigade-evidence"] = record
+
+    def validate():
+        content = json.dumps(raw).encode()
+        release = update_cmd.ResolvedRelease(
+            1,
+            "v1.2.3",
+            "1.2.3",
+            "a" * 40,
+            "https://example.invalid/manifest.json",
+            len(content),
+            hashlib.sha256(content).hexdigest(),
+            content,
+        )
+        return update_cmd.validate_release_manifest_bytes(release)
+
+    assert validate().components["brigade-evidence"].executable == "brigade-evidence"
+    if fault == "revision":
+        record["component_revision"] = "b" * 40
+    elif fault == "repository":
+        record["source"]["repository"] = "example/other"
+    elif fault == "tag":
+        record["source"]["release_tag"] = "v1.2.2"
+    elif fault == "url":
+        asset = record["assets"]["linux-amd64"]
+        asset["download_url"] = "https://example.invalid/" + asset["asset_name"]
+    elif fault == "platforms":
+        record["assets"].pop("linux-arm64")
+    else:
+        raw["components"].pop("brigade-evidence")
+    with pytest.raises((ValueError, update_cmd.UpdateError)):
+        validate()

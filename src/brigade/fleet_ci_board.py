@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 import sqlite3
+import unicodedata
 from datetime import datetime, timezone, timedelta
 from typing import Any
 
@@ -104,6 +105,60 @@ def normalize_event(raw: Any, *, now: str, source: str = "github-relay") -> dict
     )
 
 
+_COLOR = re.compile(r"[0-9a-fA-F]{6}")
+_LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9\-\[\]_.]{0,63}")
+PULL_EXTRA_KEYS = frozenset({"title", "author", "author_bot", "draft", "labels", "requested_reviewers", "created_at"})
+PR_TITLE_LIMIT = 200
+PR_LABEL_LIMIT = 8
+PR_REVIEWER_LIMIT = 10
+
+
+def _display(value: object, limit: int) -> str | None:
+    """Bounded single-line display text; control characters become spaces."""
+    if not isinstance(value, str):
+        return None
+    text = "".join(" " if unicodedata.category(c).startswith("C") else c for c in value).strip()
+    return text[:limit] or None
+
+
+def _login(value: object) -> str | None:
+    return value if isinstance(value, str) and _LOGIN.fullmatch(value) else None
+
+
+def clean_pull_extras(raw: dict[str, Any]) -> dict[str, Any]:
+    """Validate the optional PR list fields. Absent or invalid fields are omitted, never defaulted."""
+    result: dict[str, Any] = {}
+    if (title := _display(raw.get("title"), PR_TITLE_LIMIT)) is not None:
+        result["title"] = title
+    if (author := _login(raw.get("author"))) is not None:
+        result["author"] = author
+    for key in ("author_bot", "draft"):
+        if type(raw.get(key)) is bool:
+            result[key] = raw[key]
+    labels = raw.get("labels")
+    if isinstance(labels, list):
+        clean = []
+        for label in labels:
+            name = _display(label.get("name"), 50) if isinstance(label, dict) else None
+            if name is None:
+                continue
+            color = label.get("color")
+            clean.append(
+                {"name": name, "color": color.lower() if isinstance(color, str) and _COLOR.fullmatch(color) else None}
+            )
+            if len(clean) == PR_LABEL_LIMIT:
+                break
+        result["labels"] = clean
+    reviewers = raw.get("requested_reviewers")
+    if isinstance(reviewers, list):
+        result["requested_reviewers"] = [r for r in dict.fromkeys(_login(x) for x in reviewers) if r][
+            :PR_REVIEWER_LIMIT
+        ]
+    if (created := _timestamp(raw.get("created_at"))) is not None:
+        result["created_at"] = created
+    return result
+
+
 def validate_snapshot(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("invalid CI repository observation")
@@ -121,7 +176,12 @@ def validate_snapshot(raw: Any) -> dict[str, Any]:
         if not isinstance(pr, dict) or _object_id(pr.get("number")) is None or _head(pr.get("head_sha")) is None:
             raise ValueError("invalid CI PR head")
         clean_pulls.append(
-            {"number": pr["number"], "head_sha": _head(pr["head_sha"]), "updated_at": _timestamp(pr.get("updated_at"))}
+            {
+                "number": pr["number"],
+                "head_sha": _head(pr["head_sha"]),
+                "updated_at": _timestamp(pr.get("updated_at")),
+                **clean_pull_extras(pr),
+            }
         )
     clean_required = []
     for check in required:
@@ -464,8 +524,11 @@ def _pr_event(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
         snapshot.update(pulls_complete=False, complete=False, reason="PR-event-order-unknown")
     pulls = [p for p in snapshot["pulls"] if p["number"] != row["object_id"]]
     if row["action"] != "closed":
+        # Relay events carry no list metadata; keep what the last reconcile observed.
+        kept = {k: v for k, v in (current or {}).items() if k in PULL_EXTRA_KEYS}
         pulls.append(
             {
+                **kept,
                 "number": row["object_id"],
                 "head_sha": row["head_sha"],
                 "source": row["source"],

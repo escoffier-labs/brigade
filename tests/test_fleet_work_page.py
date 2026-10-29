@@ -136,9 +136,9 @@ def test_generic_fields_are_plain_text_and_rendering_is_read_only(tmp_path):
         for field in ("title", "description", "scope", "blocker", "status", "execution_mode", "updated_at", "work_id"):
             assert html.escape(item[field]) in body
         assert "Stored status" in body and "Burn eligible" in body and "Version" in body
-        assert "captured / manual / burn_eligible=false" in body
-        assert "Execution state is not inferred" in body
-        assert "No stored references" in body
+        assert "Recorded task status does not confirm live execution." in body
+        assert "captured / manual / burn_eligible=false" not in body
+        assert "Stored references" not in body
         assert "<form" not in body and 'href="/work/' not in body
     finally:
         conn.close()
@@ -632,17 +632,12 @@ def test_observed_home_shows_snapshot_freshness_without_changing_active_slots(tm
         observers=[],
         now=now,
     )
-    body = deck.render_deck(view, nonce="test", now=now)
-    assert "5 configured observation records" in body and "Retained task observations" in body
-    assert f"Snapshot freshness: {freshness}" in body and "Stale after 300 seconds" in body
-    if stamp is None:
-        assert "unknown (no configured snapshot observation time)" in body
-    else:
-        assert config.observed_work_groups[0].snapshot_observed_at.isoformat() in body
-    assert "Recent observation metadata does not establish live activity" in body
-    assert "of 1 slots" in body and "1 busy, 0 unknown" in body
-    without_group = deck.render_deck(replace(view, observed_work_groups=()), nonce="test", now=now)
-    assert "of 1 slots" in without_group and "1 busy, 0 unknown" in without_group
+    from brigade import fleet_work_page
+
+    page = {"group": config.observed_work_groups[0], "items": [], "unavailable": []}
+    body = fleet_work_page.render_observed_group(page, nonce="p", now=now, stale_after_seconds=300)
+    assert f"Snapshot freshness: {freshness}" in body
+    assert view.stations[0].busy == 1
 
 
 def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch):
@@ -666,7 +661,7 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
         conn.close()
     _group_config(tmp_path, [_group_raw(work_ids=ids)])
     route = "/deck/observed/sample-source"
-    normal_home_routes = ("/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/view/machines", "/view/repos")
+    normal_home_routes = ("/deck", "/deck/projects", "/deck/roster", "/deck/activity", "/view/machines")
     with _hub(tmp_path, deck_config_path=tmp_path / "deck.json", trust_tailscale_identity=True) as (hub, db):
         assert _request(hub, route)[0] == 401
         conn = fleet_hub.open_db(db)
@@ -697,12 +692,14 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
             assert 'href="https://example.test/evidence"' in body
             assert "Omitted reference" not in body and "additional references omitted" in body
             assert "Content-Security-Policy" in headers and headers["Cache-Control"] == "no-store"
-            status, _, home = _request(hub, "/deck", headers=auth)
+            status, _, home = _request(hub, "/deck/activity", headers=auth)
             assert status == 200
             assert f'href="{route}"' in home
             assert 'href="/deck/work"' in home
             for normal_route in normal_home_routes:
                 assert f'href="{normal_route}"' in home
+            settings = _request(hub, "/deck/roster", headers=auth)[2]
+            assert '<a href="/deck/policy">Saved assignments</a>' in settings
             assert _request(hub, route + "?cursor=bad", headers=auth)[0] == 400
             assert _request(hub, "/deck/observed/unknown", headers=auth)[0] == 404
         assert _request(hub, "/work/items", headers=cookie)[0] == 401
@@ -716,7 +713,7 @@ def test_observed_group_http_discovery_auth_and_read_only(tmp_path, monkeypatch)
         monkeypatch.setattr(fleet_work_page, "load_observed_group", forbidden)
         for auth in ({}, _bearer(), cookie):
             assert _request(hub, route, headers=auth)[0] == 404
-        status, _, home = _request(hub, "/deck", headers=_bearer())
+        status, _, home = _request(hub, "/deck/activity", headers=_bearer())
         assert status == 200
         assert route not in home
         assert 'href="/deck/observed/' not in home

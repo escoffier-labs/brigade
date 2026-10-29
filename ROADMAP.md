@@ -1,78 +1,84 @@
-# Brigade Roadmap
+# Brigade Stack Roadmap
 
-Brigade lets agents work autonomously within scopes the operator controls. Receipts and run journals show what happened, while evidence packages and handoffs give the next agent a checkable starting point. The same records connect local work to fleet workers and cloud seats.
+Brigade Stack lets agents work autonomously within scopes the operator controls. Receipts and run journals show what happened, while evidence packages and handoffs give the next agent a checkable starting point. The same records connect local work to fleet workers and cloud seats.
 
-This file is direction-only. The full per-feature completion detail through v0.8.x (every implemented, strengthened, and started bullet) lives in the [roadmap archive](docs/roadmap-archive.md). The generated list of every public command is in [docs/command-inventory.md](docs/command-inventory.md).
+Reconciled **2026-10-28** against current source and linked project records. This file describes direction and acceptance boundaries. Issues and PRs own implementation detail. Historical completion records remain in the [roadmap archive](docs/roadmap-archive.md), and the parser-derived CLI surface lives in the [command inventory](docs/command-inventory.md).
 
-## Vocabulary
+## Vocabulary and compatibility
 
-- **harness**: an AI agent program (Claude Code, Codex, OpenClaw, Hermes, Grok, …).
-- **operator**: you, the human running the agents.
-- **handoff**: a memory note an agent writes to be saved long-term.
-- **ingest**: reading those notes and filing them into permanent memory.
-- **scanner**: an automation that goes looking for useful work.
-- **import / inbox**: a holding queue where found work waits for your review.
-- **receipt**: a local file logging that something happened, kept for audit and proof.
-- **gate**: a checkpoint the operator places where they want approval before work continues.
-- **station**: an optional sidecar tool Brigade installs and health-checks (pantry, tokens, content guard, …) without folding its runtime into the Python package. The Code and Evidence engines are not stations: they ship inside Brigade under `engines/`.
-- **dogfood**: Brigade being used on itself or the maintainer's real setup.
+- **harness**: an AI agent program, such as Claude Code, Codex, OpenClaw or Hermes.
+- **operator**: the human setting policy and authorizing work.
+- **orchestrator**: the agent coordinating admitted work and results.
+- **handoff / ingest**: a durable memory note, and the process that reviews and files it.
+- **scanner / inbox**: automation that discovers candidate work, and its review queue.
+- **receipt / gate**: an audit record, and an operator-defined approval checkpoint.
+- **engine**: Brigade Code Graph or Brigade Evidence, shipped inside Brigade under `engines/` and exposed through `brigade code` or `brigade evidence`.
+- **station**: an optional sidecar Brigade installs and health-checks across a process boundary. Pantry is a station. Code Graph and Evidence are engines.
 
-Execution model: the operator sets policy and starts commands or long-running services. Agents carry out authorized work and leave receipts, journals, and handoffs with evidence. External schedulers can trigger care runbooks. Details: [docs/execution-model.md](docs/execution-model.md).
+The settled public name is **Brigade Stack**, with install slug **`brigadestack`**. Existing `brigade` commands, `.brigade` workspaces, Python imports, stored fields and historical evidence remain compatible. Public wording changes do not migrate data or rewrite receipt identities. The GitHub repository and organization have not been renamed.
+
+Execution remains explicit: the operator sets policy and starts commands or services, agents carry out authorized work, and external schedulers can trigger care runbooks. See the [execution model](docs/execution-model.md).
 
 ## Where things stand
 
-**v0.31.x on main** is the preview line after v0.30.0, which shipped on 2026-10-20 on PyPI and npm with the fleet ownership map, Windows CI coverage, and the npm and npx install route. The v0.28.0 release shipped on 2026-10-18 with the release-integrity fixes for fleet claims, hook session state, and Fleet Hub request bounds. The product core plus the provenance, dashboard, and memory work that closed through early September 2026 shipped in v0.27.0:
+**v0.31.x on main** is unreleased development after stable **v0.30.0**. The [latest stable release](https://github.com/escoffier-labs/brigade/releases/tag/v0.30.0) was published on 2026-10-20. “Brigade Stack v2” names the coordinated refresh milestone. It does not promise a v2.0 release or date.
 
-- Portable setup (`operator quickstart`), handoffs with lint and source coverage, daily operator loop, work inbox, fleet and release receipts, tool catalog, skill registry, research, runbooks, chat sweeps, backup visibility, station manifests.
-- **Receipts and learning**: verify/run receipts with digests and optional HMAC signing, code-graph deltas, outcome capture from verify and run receipts, Wilson ranking, reconcile promote/rollback, git provenance, MiseLedger export/import of receipts.
-- **Evidence loop**: GraphTrail context packs and deltas on runs, MiseLedger evidence briefs into work context, first-class `evidence` and `pantry` station CLIs, mechanical context evals (`brief_hit_rate`), no-op write-task flags, atomic `run.json` writes.
-- **Provenance and evidence trust**: `brigade.provenance-envelope.v1` on Python producers (#582), trust-policy enforcement on briefs, context, citations, and promotion, provenance-hash verification on read surfaces, inter-seat message envelopes (#988 / #585), causal lineage receipts (#989 / #493), origin-scoped ingest redaction (#997 / #498).
-- **Center operator dashboard**: `brigade center serve` is a loopback-bound read-only view over existing `--json` contracts (Status, Runs, Research, Work, Code Graph, Agent Activity). Runs list, detail, and watch use versioned JSON contracts (#958 / #631).
-- **Memory**: stable card IDs (`card-<uuid4>`, #984 / #867), Obsidian vault round trip (`memory project-vault` #953, `memory vault-search` #983 / #943, `memory vault-propose` #993 / #945), memory care, reinforcement dedup on ingest.
-- **Guard and memory tooling**: content-guard vendored as `brigade guard` / `scrub`; memory-doctor folded into `brigade memory`.
-- **Scanner and verifier authority**: receipt and import-proof bytes bind to verifier-owned identity (#949); scanner run authority releases on proof failure and inside the scan loop (#946, #982).
-- **Stop-gate**: the Claude Stop closeout gate no longer treats another session's writes in a shared workspace as this session's unverified work (#987 / #959).
-- **Harness fidelity**: Grok and Hermes MCP adapters, Grok headless approval for write tasks, Codex empty-args fingerprints, url-only MCP import as remote, verify `--argv-json`, skill template metadata shipping.
-- **Model scorecard**: `brigade model scorecard` aggregates per-(cli, model) outcomes from run artifacts (read-only).
-- **Product surfaces**: share / remember / prove / improve framing on the README and brigade.tools hub; station product pages (including content-guard and token-glace); GEO work (compare pages, PyPI URLs, Wikidata, Bing IndexNow + URL submission follow-up).
+| State | Verified scope | Boundary |
+| --- | --- | --- |
+| Published stable | Real `brigadestack` 0.30.0 bridges on [PyPI](https://pypi.org/project/brigadestack/0.30.0/) and [npm](https://www.npmjs.com/package/brigadestack/v/0.30.0), following [#2089](https://github.com/escoffier-labs/brigade/pull/2089). They pin `brigade-cli==0.30.0` and `@escoffier-labs/brigade@0.30.0`. | These are working install aliases for stable behavior. They do not include all changes on main. |
+| Merged, unreleased | Preferred `fleet preference set --orchestrator` alias in [#2096](https://github.com/escoffier-labs/brigade/pull/2096). Public CLI/docs terminology, neutral new starter seats and conditional installed-workflow guidance in [#2107](https://github.com/escoffier-labs/brigade/pull/2107). | Legacy `--chef`, stored `chef` fields and existing rosters remain supported. New starter defaults do not migrate installed fleets. |
+| Draft, held | Engine contributor-guide and Rust contract work in [#2111](https://github.com/escoffier-labs/brigade/pull/2111). | Held from ready/merge pending the expanded internal rename. No native binary aliases or data migration are implied. |
 
-See the [archive](docs/roadmap-archive.md) for shipped-slice closeouts and the pre-v0.21 completion record. Command inventory stays the source of truth for the CLI surface.
+The established core remains: portable setup, handoffs and source coverage, memory care, work inboxes, fleet ownership, verification receipts, outcome capture, tool/skill registries, research and runbooks. Code Graph context and Evidence briefs support those loops. Provenance envelopes, trust checks, stable card IDs, scanner authority, chat scans and backup visibility are historical foundations. The read-only `brigade center serve` dashboard and per-model scorecard remain views over existing contracts. See the [archive](docs/roadmap-archive.md) for earlier closeouts.
 
-## Now: respond to real usage and close the loops we opened
+## Now: complete the coordinated refresh
 
-The proving-ground milestone still holds: the maintainer workspace runs Brigade end to end. After v0.21 the "now" queue is about feedback and finishing the loops that already have bones.
+### Native T3 alignment comes first
 
-- **External signals first.** Issues, install patterns, and Discord/shipper friction beat speculative stations. Nothing ships ahead of a reported need unless it unblocks dogfood.
-- **Honest first contact.** Every release runs the cold-start gate (`docs/runbooks/cold-start-gate.json`). Significant releases re-run agent cold-start scenarios in `docs/cold-start-testing.md`.
-- **Adoption path.** `operator adopt`, `handoff migrate`, and memory-care backfill stay the on-ramp. Friction there outranks new stations.
-- **Work loop must stay fed.** Dogfood runs verification through `brigade work verify run` (or run receipts) and captures outcomes. An installed-but-dormant Brigade is a product failure mode, not a win.
-- **GEO / discoverability.** Prompt-test baseline shows brand queries work and intent queries still do not. Follow Bing crawl of `/compare/*`, retest ChatGPT after index, keep awesome-list submissions to **one server per PR** with Glama where required, and avoid leading with "MCP server" (Brigade is a CLI control plane).
-- **Model scorecard honesty.** Fill the orchestrator-success gap (ok_rate is worker-only today). Headless write adapters for antigravity/kimi (and similar) stay tracked as agent issues, not ignored DNFs.
-- **Station productization.** Keep stations process-boundary: plan, doctor, status, never silent start of pantry source/sink or MiseLedger crawl. Fleet README and marks stay aligned with brigade.tools station pages.
+Before implementing overlapping execution, coordination or notification features, check current native T3 capabilities. Reuse its child execution, threads, isolated worktrees, completion delivery and PR notifications where qualified. Brigade retains ownership, admission, claims, budgets, verification and provenance. Proposed upstream work, merged source, released versions, tools exposed by the selected runtime, and qualified behavior are separate states.
 
-## Next: deepen what already sits on the loop
+- **In progress, owned by [#2046](https://github.com/escoffier-labs/brigade/issues/2046):** connect app-owned child tasks and explicit task batches to Brigade governance, readiness and retained results. Task-targeted controls [#2100](https://github.com/escoffier-labs/brigade/pull/2100) and dormant launch-permission claims [#2105](https://github.com/escoffier-labs/brigade/pull/2105) are merged foundations. Dormant target/lifecycle contracts are open in [#2113](https://github.com/escoffier-labs/brigade/pull/2113), with execution disabled. The adapter, activation, readiness producers and end-to-end qualification remain with that owner. A smoke batch is not performance qualification.
+- **Research complete, implementation proposed:** a daily source-backed native-alignment watch should compare upstream changes with current owned work and flag duplication or breaking contracts. Prefer a bounded extension of existing daily maintenance, with a manual proof first. No watch was installed or scheduled. Reuse the existing ledger and handoff path, with source failures recorded as unknown. No second scheduler or tracking database.
 
-- **Security plugin depth**: richer rule packs for agent workspaces (hooks, MCP configs, prompt-injection patterns), policy packs per audience, optional offline threat-intel enrichment.
-- **Memory care depth**: smarter staleness, contradiction, and evidence checks for cards, with safe gated metadata repairs. Reinforcement dedup shipped in #724 (ingest fingerprints + near-match proposals + gated fingerprint backfill). Standalone-chunk lint for handoffs shipped in #730 / #773.
-- **Retrieval honesty**: memory search stays keyword-first until an eval proves otherwise. The local retrieval harness at `evals/memory-retrieval/` (fixture corpus, plain-grep baseline, precision/recall at K; run with `python -m brigade.memory_retrieval_eval`) gates any semantic upgrade (#722), and a label-free recall signal (a repeat search with disjoint results shortly after the first counts as a miss) feeds memory-care status from real usage (#723).
-- **Scorecard and lane ops**: per-model orchestrator success rate, clearer DNF vs worker-fail, documented probe protocol for new CLI lanes (file write in cwd, never trust reply text alone).
-- **MCP and harness fidelity**: continue adapter round-trips (empty args, url-only remotes, headless approvals) as harnesses change; prefer fix-the-adapter over more docs.
-- **Evidence quality**: raise brief_hit_rate as a second-class signal only (install/rollback still exit-code only); optional MiseLedger import on capture remain fail-open.
-- **Context-aware outcomes**: the content-fingerprint work closed the "score vouches for text that no longer exists" gap for an artifact's own files, but a hash cannot see the runtime harness (executor model, tools, dependencies) a signal was earned under. Phase 1 (shipped) stamps a coarse `context` manifest and `capability_fingerprint` on new outcome records. Phase 2 (shipped) scores the current-capability cohort in `outcome rank` and `outcome explain` with shrinkage toward the pooled rate, an `outcome rank --by-capability` sort, and an `outcome rank --recency` half-life that fades stale credit, ratchet still on the pooled cohort. Remaining: Opus's regression-attribution guard (quarantine a context-isolated regression instead of a global demote), and optional Phase 3 paired attribution runs for real uplift. Design and the three-model rationale: [docs/design/context-blind-spot.md](docs/design/context-blind-spot.md).
+### Finish engine identity before moving existing data
 
-Chat surface scanners and backup visibility already shipped; remaining slices (scheduler spreading, outbound backup notifications) stay in the archive and under Later notifications.
+Use **Brigade Code Graph** and **Brigade Evidence** in current presentation. The next implementation is a coordinated rename of internal code, compiled binaries and build/distribution artifacts, with compatibility readers and installer/rollback acceptance. Canonical source and target spellings remain proposals until that plan is coordinated with [#2111](https://github.com/escoffier-labs/brigade/pull/2111).
 
-## Later: the workspace on top of the bones
+Real existing data-directory migration comes later, with consumer and recovery proof. Preserve legacy reads, published artifact coordinates, schemas and MAC verification. Never rewrite historical receipts or memory, or re-sign old evidence merely to change branding. Source-only rename research does not establish an implemented native alias.
 
-The CLI is the skeleton that carries everything. Every future surface sits on top of an existing command plus its JSON contract, never a parallel implementation.
+### Qualify the owned integration and Hub slices
 
-- A workspace UI that is a view over the CLI: model comparison (scorecard-backed) and a document editor on top of the read-only operator dashboard that already ships as `brigade center serve`.
-- Optional local semantic memory retrieval (on-device embeddings over `memory/cards/`), staying file-first and optional, and landing only after the retrieval harness above shows a real win over the grep baseline.
-- Owner-scoped tool gating so a publicly reachable instance refuses high-risk tools by default.
-- Multi-channel operator notifications beyond the terminal, still opt-in (`agent-notify` and friends).
-- Personal-data surfaces such as calendar and email triage, behind the same privacy and approval gates.
-- Deeper fleet GEO (sibling topics, Show HN only after organic traction, more intent SERP ownership vs chezmoi / sync-agents-settings).
+- **E2EE in progress:** [#2005](https://github.com/escoffier-labs/brigade/issues/2005) owns encrypted message acceptance. Crypto, Hub key-directory/storage and client trust foundations are merged, including offline peer-key acceptance in [#2106](https://github.com/escoffier-labs/brigade/pull/2106). These do not activate encrypted ordinary CLI/MCP messaging. Finish identity/key-management integration, inbox opening, send/reply sealing and sealed operator questions under that owner. Require a verified two-principal round trip, no plaintext subject/body in Hub storage, tamper/wrong-signer rejection, revocation and unchanged operation without the optional extra. The cryptography extra remains optional and the core retains zero mandatory runtime dependencies. Native Windows private-key custody remains unsupported.
+- **Fleet Hub in progress:** [#2058](https://github.com/escoffier-labs/brigade/issues/2058) owns the human admin view. Existing theme and dashboard work is on main. Admin simplification/Capacity [#2108](https://github.com/escoffier-labs/brigade/pull/2108) is open, while searchable pages/Projects/refresh [#2109](https://github.com/escoffier-labs/brigade/pull/2109) and MCP inventory [#2110](https://github.com/escoffier-labs/brigade/pull/2110) are drafts. Agree a bounded launch-readiness subset with the owner, including readable states, dark/light and narrow-screen checks, and safe read contracts. The whole continuing design epic need not end for the refresh to launch.
+
+### Complete workflow guidance adoption
+
+Prefer pinned upstream Superpowers for generic workflow procedures, with thin Brigade verification/ownership guidance. Discover the active harness's installed skills and use Superpowers when installed, as [#2107](https://github.com/escoffier-labs/brigade/pull/2107) specifies. Retain specialist and T3 skills whose responsibilities remain necessary.
+
+Harness adoption follows actual usage with fresh catalog/load/pin acceptance and rollback evidence. Avoid routine maintenance of generic forks.
+
+### Prepare the public site and release acceptance
+
+The functional Brigade Stack site/docs refresh is a held draft. Its draft status does not establish merge, deployment or domain readiness. Keep a functional site live while reviewing the concise homepage, docs, benefits and official marks.
+
+The approved direction is `brigadestack.com` as primary, with `brigadestack.dev` and `brigade.tools` redirecting to matching pages. Domain purchase does not establish DNS or redirect configuration. Release acceptance must verify actual package versions/pins and fresh installs, canonical URLs, path/query redirects and analytics continuity before announcement. Further registry publication, site merge/deployment, DNS changes and announcement remain held pending their explicit release decisions. Repository/organization renaming remains future coordination. The separate organization-site hub design is adjacent work outside refresh launch acceptance.
+
+## Next: close demonstrated product gaps
+
+- **External feedback and adoption:** prioritize real install and workflow friction. Keep `operator adopt`, `handoff migrate` and memory-care backfill usable. Run the [cold-start gate](docs/runbooks/cold-start-gate.json) for releases and [agent cold-start scenarios](docs/cold-start-testing.md) for significant changes.
+- **Verification and scorecard honesty:** keep work flowing through `brigade work verify run` and outcome capture. Audit-only receipts must not become scored artifact evidence. The scorecard's `ok_rate` is still worker-only. Separate orchestrator success, DNF, worker failure and suspected no-op writes, and qualify new lanes with real file-write probes.
+- **Retrieval and memory care:** remain keyword-first until the fixture corpus and grep baseline in `evals/memory-retrieval/` show measured improvement. The retrieval evaluator is `python -m brigade.memory_retrieval_eval`. Preserve recall/miss signals, staleness and contradiction checks, and gated metadata repairs. Build on existing reinforcement dedup and standalone-chunk lint.
+- **Code/Evidence provenance:** improve useful context and `brief_hit_rate` without treating retrieval quality as execution success. Preserve trust-policy and provenance-hash checks. Optional Evidence import on capture remains fail-open. Keep station plan/doctor/status boundaries explicit, with no silent pantry start or evidence crawl.
+- **Context-aware outcomes:** context manifests, capability fingerprints, cohort ranking and recency weighting already exist. Continue evaluating context-isolated regression handling and paired attribution against the [context design](docs/design/context-blind-spot.md), with explicit acceptance before changing promotion policy.
+- **Security and adapter fidelity:** deepen workspace/MCP/hook and prompt-injection rule packs, per-audience policy packs and optional offline threat-intel enrichment where reported needs justify them. Continue empty-argument, remote-URL and headless-approval round trips as harnesses evolve. Executor V2 MCP connector research recommends optional integration first. Deployed compatibility and approval behavior remain unverified.
+- **Discoverability:** update public copy and metadata with the release, then remeasure brand and intent-query discovery. Prior prompt tests and crawl submissions are historical observations, not current ranking evidence or trademark clearance. Keep external submissions bounded and separately authorized.
+
+## Later and non-goals
+
+Future views reuse the CLI and versioned JSON contracts: scorecard-backed comparison, document editing and opt-in operator notifications. Optional local semantic retrieval still needs an eval advantage over grep. Owner-scoped tool gating should refuse high-risk tools by default on publicly reachable instances. Calendar/email triage needs explicit privacy and approval gates. Scheduler spreading, outbound backup notifications and broader discovery remain follow-ups to usage.
+
+The refresh does not authorize a competing T3 manager, a second task database, silent service activation, blanket deletion, historical evidence re-baking, or org-wide product renaming. Native feature availability alone cannot remove Brigade governance. Personal data, credentials, node identities, keys, backups and retained evidence need their own scoped migration or retirement proof.
 
 ## How items move
 
-Roadmap items live here while they are direction. When a slice ships, its detail moves to the [roadmap archive](docs/roadmap-archive.md) with status and closing notes, checked by `brigade roadmap audit` and `brigade roadmap archive`. Command drift between docs and the CLI parser is checked by `brigade roadmap commands --check` in CI.
+Keep direction here and accountable acceptance in linked issues/PRs. Consolidate shipped detail behind the [archive](docs/roadmap-archive.md). Keep the active queue limited to remaining work. `brigade roadmap audit` checks roadmap state, `brigade roadmap archive` reads historical records, and `brigade roadmap commands --check` checks parser-derived command documentation. A merged PR is source evidence. Release, installation, deployment and end-to-end qualification require their own evidence.

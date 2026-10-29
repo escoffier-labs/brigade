@@ -21,7 +21,15 @@ def test_dropped_tools_absent() -> None:
 
 def test_gated_tools() -> None:
     assert c.GATED_TOOLS == frozenset(
-        {"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt", "message_send"}
+        {
+            "fleet_submit",
+            "fleet_followup",
+            "fleet_answer",
+            "fleet_approve",
+            "fleet_interrupt",
+            "fleet_report_session",
+            "message_send",
+        }
     )
 
 

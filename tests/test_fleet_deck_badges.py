@@ -214,7 +214,7 @@ def _station_view(*tiles: deck.Tile) -> deck.DeckView:
 
 def _working_row(tile: deck.Tile) -> str:
     html = overview.render_work_lists(_station_view(tile))
-    match = re.search(r'<li class="row".*?</li>', html, re.DOTALL)
+    match = re.search(r'<li [^>]*data-activity-kind="managed".*?</li>', html, re.DOTALL)
     assert match
     return match.group(0)
 
@@ -271,7 +271,7 @@ def test_row_renders_the_harness_badge_and_keeps_the_model_in_a_tooltip() -> Non
     assert "claude_standby" in html
 
 
-def test_row_snapshot() -> None:
+def test_managed_card_preserves_opencode_identity_link_and_timing() -> None:
     run = deck.LiveRun(
         node_id=NODE_A,
         run_id="run-muse13-1",
@@ -289,15 +289,14 @@ def test_row_snapshot() -> None:
     html = _working_row(deck.Tile(run=run, claim=None, collision=False))
     oc = deck.harness_brand("opencode")
     assert oc.svg != ""
-    assert html == (
-        '<li class="row" title="run-muse13-1">'
-        '<div class="row-body"><p class="row-title">'
-        f'<a href="/view/machines?node={NODE_A}&amp;repo=repo">repo</a></p>'
-        '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">'
+    assert f'<a href="/view/machines?node={NODE_A}&amp;repo=repo">repo</a>' in html
+    assert '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">' in html
+    assert (
         '<span class="badge badge-icon" role="img" title="opencode" aria-label="OpenCode">' + oc.svg + "</span> "
-        "muse13 · Example</p></div>"
-        '<span class="row-time">10s</span></li>'
-    )
+    ) in html
+    assert "muse13 · Example" in html
+    assert "10s elapsed" in html and "evidence 10s ago" in html
+    assert "Run: run-muse13-1" in html
 
 
 def test_cloud_and_session_badges() -> None:
