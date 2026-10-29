@@ -185,6 +185,11 @@ _ITEM_COLUMNS = (
     "archived_at",
 )
 _EVENT_SEQ_SQL = "(SELECT COALESCE(MAX(seq), 0) + 1 FROM work_events)"
+_UNSCOPED_EVENT_PREDICATE = """CASE typeof(event_type)
+ WHEN 'text' THEN substr(event_type, 1, 19) COLLATE BINARY <> 'external-ownership-'
+ WHEN 'blob' THEN substr(event_type, 1, 19) <> X'65787465726e616c2d6f776e6572736869702d'
+ ELSE 1
+END"""
 _EVENT_COLUMNS = (
     "work_id",
     "event_id",
@@ -835,6 +840,11 @@ def _cursor_seq(values: Mapping[str, str]) -> int:
 
 def _event_from_row(row: Any) -> dict[str, Any]:
     values = dict(zip(_EVENT_COLUMNS, row, strict=True))
+    event_type = values["event_type"]
+    if (isinstance(event_type, str) and event_type.startswith("external-ownership-")) or (
+        isinstance(event_type, (bytes, bytearray, memoryview)) and bytes(event_type).startswith(b"external-ownership-")
+    ):
+        raise _field_bound("event is unavailable")
     detail = json.loads(str(values.pop("detail_json") or "{}"))
     return {**values, "detail": detail if isinstance(detail, dict) else {}}
 
@@ -1556,7 +1566,8 @@ def list_events(conn: sqlite3.Connection, work_id: str) -> list[dict[str, Any]]:
     """Return events for one item in insertion order."""
     _pragma_foreign_keys(conn)
     rows = conn.execute(
-        f"SELECT {', '.join(_EVENT_COLUMNS)} FROM work_events WHERE work_id = ? ORDER BY seq ASC",
+        f"SELECT {', '.join(_EVENT_COLUMNS)} FROM work_events WHERE work_id = ? "
+        f"AND {_UNSCOPED_EVENT_PREDICATE} ORDER BY seq ASC",
         (work_id,),
     ).fetchall()
     return [_event_from_row(row) for row in rows]
@@ -1570,7 +1581,8 @@ def recent_events(conn: sqlite3.Connection, work_id: str, *, limit: int = DETAIL
     """
     _pragma_foreign_keys(conn)
     rows = conn.execute(
-        f"SELECT {', '.join(_EVENT_COLUMNS)} FROM work_events WHERE work_id = ? ORDER BY seq DESC LIMIT ?",
+        f"SELECT {', '.join(_EVENT_COLUMNS)} FROM work_events WHERE work_id = ? "
+        f"AND {_UNSCOPED_EVENT_PREDICATE} ORDER BY seq DESC LIMIT ?",
         (work_id, max(int(limit), 0)),
     ).fetchall()
     return [_event_from_row(row) for row in reversed(rows)]
