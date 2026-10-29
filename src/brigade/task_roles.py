@@ -28,7 +28,8 @@ _MECHANICAL = re.compile(
     r"\b(writes? to (?:disk|file|the database|db|cache|log|s3|stdout)|file write|database write|"
     r"write (?:path|lock)|writer|writable|write (?:unit |integration |regression )?tests?|"
     r"pagination|paging|pager|page (?:table|fault|cache)|component (?:test|registry|graph|model)|"
-    r"build (?:tool|tooling|pipeline|script|config)|vite|webpack|esbuild|rollup|bundler|tsconfig|eslint)\b"
+    r"build (?:tool|tooling|pipeline|script|config)|post (?:endpoints?|handlers?|requests?|routes?)|"
+    r"vite|webpack|esbuild|rollup|bundler|tsconfig|eslint)\b"
 )
 # An extra implementation request is required. Topic nouns in prose/UI are insufficient.
 _BACKEND_REQUEST = re.compile(

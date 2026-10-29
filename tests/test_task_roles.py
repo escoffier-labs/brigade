@@ -63,6 +63,7 @@ def test_strict_roster_copies_only_selected_fallback():
         "Draft a blog post about how to add an endpoint",
         "Write a tutorial explaining how to migrate the database",
         "Redesign the login page for the authentication API",
+        "Draft a blog post about the POST endpoint",
     ],
 )
 def test_technical_subject_is_not_an_extra_backend_request(text):
@@ -79,3 +80,8 @@ def test_technical_subject_is_not_an_extra_backend_request(text):
 )
 def test_additional_backend_request_is_ambiguous(text):
     assert task_roles.classify(text).status == "ambiguous"
+
+
+@pytest.mark.parametrize("text", ["Write a POST endpoint", "Edit the POST handler", "Rewrite the POST request"])
+def test_http_post_is_not_audience_prose(text):
+    assert task_roles.classify(text).status == "none"
