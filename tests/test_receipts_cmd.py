@@ -192,7 +192,7 @@ pathlib.Path({str(marker)!r}).write_text(json.dumps({{
     "export_path": str(export_path),
     "input": export_path.read_text(),
 }}))
-print(json.dumps({{"inserted_items": 1, "already_known": 0}}))
+print(json.dumps({{"inserted_items": 1, "already_known": 0, "status": "complete"}}))
 sys.exit({exit_code})
 """
     )
@@ -656,7 +656,7 @@ assert sys.argv[1:3] == ["import", "adapter"]
 export_path = pathlib.Path(sys.argv[3])
 assert sys.argv[4:] == ["--source", "brigade", "--json"]
 (export_path.parent / "import-argv.json").write_text(json.dumps({{"argv": sys.argv[1:], "input": export_path.read_text()}}))
-print(json.dumps({{"inserted_items": 1, "already_known": 0}}))
+print(json.dumps({{"inserted_items": 1, "already_known": 0, "status": "complete"}}))
 """
     )
     fake.chmod(0o755)
@@ -2123,6 +2123,7 @@ def test_receipts_verify_reports_notify_failure_not_verified(tmp_path, monkeypat
         "{}",
         "[]",
         '{"inserted_items":1}',
+        '{"inserted_items":1,"already_known":false,"warnings":null}',
         '{"inserted_items":true,"already_known":false}',
         '{"inserted_items":-1,"already_known":false}',
         '{"inserted_items":0,"already_known":false,"warnings":["line 1: SQLITE_BUSY"]}',
@@ -2207,3 +2208,45 @@ def test_concurrent_cursor_acknowledgements_serialize_read_merge_write(tmp_path,
             release_first.set()
         assert first.result(timeout=5) == second.result(timeout=5) == 0
     assert receipts_cmd._read_miseledger_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        {"error_count": []},
+        {"warning_count": False},
+        {"failed_items": {}},
+        {"error_count": 0.0},
+        {"failed": 0},
+        {"failed": []},
+        {"error": False},
+        {"inserted": 1},
+        {"known_items": 1},
+        {"already_known": True},
+    ],
+)
+def test_index_rejects_malformed_falsey_failure_fields_and_conflicting_aliases(tmp_path, monkeypatch, extra):
+    _write_verify_export_receipt(tmp_path, "malformed-failure-fields", started_at="2026-07-08T12:00:00Z")
+    summary = {"inserted_items": 0, "already_known": False, "status": "complete", **extra}
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(summary), ""),
+    )
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "failed"
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 1
+
+
+def test_index_accepts_known_source_that_restores_pruned_items(tmp_path, monkeypatch):
+    _write_verify_export_receipt(tmp_path, "pruned-items-restored", started_at="2026-07-08T12:00:00Z")
+    summary = {"inserted_items": 1, "already_known": True, "status": "already_known", "warnings": [], "errors": []}
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(summary), ""),
+    )
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "indexed"
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "nothing-new"

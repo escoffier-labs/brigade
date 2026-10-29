@@ -78,12 +78,16 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 			return toolpath.WrapExecErr("sourceharvest", toolpath.HintSourceHarvest, startErr)
 		}
 		imported, importErr := ingest.ImportAdapterReader(db, stdout, "sourceharvest://"+strings.Join(passArgs, " "), "")
-		waitErr := cmd.Wait()
-		if ctx.Err() == context.DeadlineExceeded {
-			return fmt.Errorf("timed out after %s", externalScannerTimeout)
+		if importErr != nil {
+			_ = stdout.Close()
+			cancel()
 		}
+		waitErr := cmd.Wait()
 		if importErr != nil {
 			return importErr
+		}
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("timed out after %s", externalScannerTimeout)
 		}
 		if waitErr != nil {
 			msg := strings.TrimSpace(stderr.String())

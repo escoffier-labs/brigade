@@ -878,3 +878,160 @@ func TestImportWriteFailureRollsBackOpenBatchAndReplays(t *testing.T) {
 		})
 	}
 }
+
+func TestImportEventFailureRollsBackOpenBatchAndReplays(t *testing.T) {
+	for _, committed := range []int{0, importBatchSize} {
+		t.Run(strconv.Itoa(committed), func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/archive.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			// Fail after one successful write in the open batch, without a test-only importer seam.
+			failID := fmt.Sprintf("item:%d", committed+1)
+			if _, err := db.Exec(fmt.Sprintf(`create trigger fail_event before insert on events when (select external_id from items where id = new.item_id) = '%s' begin select raise(abort, 'injected durable write failure'); end`, failID)); err != nil {
+				t.Fatal(err)
+			}
+			var input strings.Builder
+			for i := 0; i < committed+3; i++ {
+				input.WriteString(adapterRecord("failure-test", fmt.Sprintf("item:%d", i), fmt.Sprintf("record %d", i), "fixture.jsonl", i+1))
+			}
+			result, err := ImportAdapterReader(db, strings.NewReader(input.String()), "fixture://failure", "")
+			if err == nil || !strings.Contains(err.Error(), "injected durable write failure") {
+				t.Fatalf("write failure suppressed: result=%+v error=%v", result, err)
+			}
+			wantStatus := "failed"
+			if committed > 0 {
+				wantStatus = "partial"
+			}
+			if result.Status != wantStatus || result.Inserted != committed || len(result.Errors) != 1 {
+				t.Fatalf("failure summary=%+v, want %s with %d durable inserts", result, wantStatus, committed)
+			}
+			var count int
+			if err := db.QueryRow(`select count(*) from items`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != committed {
+				t.Fatalf("items=%d, want only %d committed items", count, committed)
+			}
+			if err := db.QueryRow(`select count(*) from events`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != committed {
+				t.Fatalf("events=%d, want %d committed events", count, committed)
+			}
+
+			if err := db.QueryRow(`select count(*) from imports where completed_at is not null`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != 0 {
+				t.Fatal("failed import marked complete")
+			}
+			if _, err := db.Exec(`drop trigger fail_event`); err != nil {
+				t.Fatal(err)
+			}
+			result, err = ImportAdapterReader(db, strings.NewReader(input.String()), "fixture://failure", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Status != "complete" || result.Inserted != 3 {
+				t.Fatalf("replay inserted=%d, want 3", result.Inserted)
+			}
+			result, err = ImportAdapterReader(db, strings.NewReader(input.String()), "fixture://failure", "")
+			if err != nil || !result.AlreadyKnown || result.Inserted != 0 || result.Status != "already_known" {
+				t.Fatalf("dedup replay: %+v, %v", result, err)
+			}
+			if err := db.QueryRow(`select count(*) from items`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != committed+3 {
+				t.Fatalf("replay items=%d, want %d", count, committed+3)
+			}
+			if err := db.QueryRow(`select count(*) from events`).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != committed+3 {
+				t.Fatalf("replay events=%d, want %d", count, committed+3)
+			}
+
+		})
+	}
+}
+
+func TestKnownReplayRepairsMissingEventWithoutDuplicatingIdentity(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	input := adapterRecord("event-repair", "item:1", "fixture evidence", "fixture.jsonl", 1)
+	if _, err := ImportAdapterReader(db, strings.NewReader(input), "fixture://event-repair", ""); err != nil {
+		t.Fatal(err)
+	}
+	var eventID string
+	if err := db.QueryRow(`select id from events`).Scan(&eventID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`delete from events`); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		result, err := ImportAdapterReader(db, strings.NewReader(input), "fixture://event-repair", "")
+		if err != nil || result.Inserted != 0 || !result.AlreadyKnown {
+			t.Fatalf("known replay=%+v err=%v", result, err)
+		}
+		var count int
+		if err := db.QueryRow(`select count(*) from events where id = ?`, eventID).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("restored original events=%d, want 1", count)
+		}
+		if err := db.QueryRow(`select count(*) from events`).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		if count != 1 {
+			t.Fatalf("events=%d, want no duplicate", count)
+		}
+	}
+}
+
+func TestKnownReplayCanRestorePrunedItems(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/archive.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	input := adapterRecord("prune-replay", "item:1", "fixture evidence", "fixture.jsonl", 1)
+	if _, err := ImportAdapterReader(db, strings.NewReader(input), "fixture://prune-replay", ""); err != nil {
+		t.Fatal(err)
+	}
+	var itemID string
+	if err := db.QueryRow(`select id from items`).Scan(&itemID); err != nil {
+		t.Fatal(err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteItemGraph(tx, itemID); err != nil {
+		_ = tx.Rollback()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := ImportAdapterReader(db, strings.NewReader(input), "fixture://prune-replay", "")
+	if err != nil || result.Inserted != 1 || !result.AlreadyKnown || result.Status != "already_known" {
+		t.Fatalf("prune replay=%+v err=%v", result, err)
+	}
+}

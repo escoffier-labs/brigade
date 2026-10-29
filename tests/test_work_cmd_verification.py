@@ -265,7 +265,7 @@ export_path = pathlib.Path(sys.argv[3])
 assert sys.argv[4:] == ["--source", "brigade", "--json"]
 marker = pathlib.Path({str(marker)!r})
 marker.write_text(export_path.read_text())
-print(json.dumps({{"inserted_items": 1, "already_known": 0}}))
+print(json.dumps({{"inserted_items": 1, "already_known": 0, "status": "complete"}}))
 sys.exit({exit_code})
 """
     )

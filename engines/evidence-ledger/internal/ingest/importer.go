@@ -589,6 +589,9 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 	// artifacts/relations) without minting a duplicate item or provenance event.
 	var known int
 	if err := tx.QueryRow(`select 1 from items where id = ?`, itemID).Scan(&known); err == nil {
+		if err := ensureItemEvent(tx, itemID); err != nil {
+			return false, err
+		}
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
@@ -636,8 +639,14 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 	if err != nil {
 		return false, err
 	}
-	insertedRows, _ := res.RowsAffected()
+	insertedRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read inserted row count: %w", err)
+	}
 	if insertedRows == 0 {
+		if err := ensureItemEvent(tx, itemID); err != nil {
+			return false, err
+		}
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
@@ -646,8 +655,9 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 		}
 		return false, nil
 	}
-	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)
-	_, _ = tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at) values(?,?,?,?,?,?,?)`, eventID, sourceID, collectionID, nullIfEmpty(actorID), itemID, rec.Item.Kind, createdAt)
+	if err := ensureItemEvent(tx, itemID); err != nil {
+		return false, err
+	}
 	if err := replaceItemSideTables(tx, rec, itemID, sourceID, collectionID, capturedAt, raw, body, now, false); err != nil {
 		return false, err
 	}
@@ -655,6 +665,23 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 		return false, err
 	}
 	return true, nil
+}
+
+// ensureItemEvent uses the stored item identity so replay can repair an event
+// omitted by older importers without changing its date or duplicating history.
+func ensureItemEvent(tx *sql.Tx, itemID string) error {
+	var createdAt, kind string
+	if err := tx.QueryRow(`select created_at, kind from items where id = ?`, itemID).Scan(&createdAt, &kind); err != nil {
+		return fmt.Errorf("read event identity: %w", err)
+	}
+	eventID := stableID("event", itemID, createdAt, kind)
+	_, err := tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at)
+select ?, source_id, collection_id, actor_id, id, kind, created_at from items
+where id = ? and not exists (select 1 from events where item_id = ?)`, eventID, itemID, itemID)
+	if err != nil {
+		return fmt.Errorf("insert event: %w", err)
+	}
+	return nil
 }
 
 // softTombstoneSupersededVersions keeps one default-live content version per

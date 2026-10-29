@@ -23,6 +23,7 @@ from . import receipt_json
 from . import receipt_signing
 from . import trust_gate
 from .inbox_lock import held_file_lock
+from .receipts_import_contract import _miseledger_import_summary
 from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
@@ -1477,35 +1478,6 @@ def _temporary_miseledger_export_path(target: Path) -> Path:
         delete=False,
     ) as handle:
         return Path(handle.name)
-
-
-def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
-    """Require an affirmative completion summary before acknowledging receipts.
-
-    Legacy engines omit status and may encode already_known as 0/1. Brigade
-    exports contain valid adapter records, so even parse warnings leave rows
-    unacknowledged and available for replay.
-    """
-    if not isinstance(payload, dict):
-        raise ValueError("import summary must be an object")
-    inserted = payload.get("inserted_items", payload.get("inserted"))
-    known = payload.get("already_known", payload.get("known_items"))
-    if type(inserted) is not int or inserted < 0:
-        raise ValueError("import summary requires a nonnegative inserted_items count")
-    if not isinstance(known, bool) and (type(known) is not int or known not in (0, 1)):
-        raise ValueError("import summary requires already_known")
-    if "status" in payload and payload["status"] not in ("complete", "already_known"):
-        raise ValueError("import summary does not report completion")
-    if payload.get("status") == "already_known" and (not known or inserted != 0):
-        raise ValueError("inconsistent already_known import summary")
-    for field in ("warnings", "errors"):
-        value = payload.get(field)
-        if value is not None and not isinstance(value, list):
-            raise ValueError(f"import summary requires {field} to be an array or null")
-    for field in ("warnings", "errors", "error", "failed_items", "failed", "error_count", "warning_count"):
-        if payload.get(field):
-            raise ValueError(f"import summary reports {field}")
-    return inserted, known
 
 
 def _import_miseledger_file(
