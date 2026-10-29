@@ -10,35 +10,66 @@ from .roster import Roster
 
 TASK_WORKLOADS: tuple[str, ...] = ("writing", "frontend")
 MAX_TASK_CHARS = 8000
-_WRITING_VERB = re.compile(r"\b(draft|write|rewrite|edit|copyedit|proofread|polish|tighten|revise|update)\b")
-_WRITING_OBJECT = re.compile(
-    r"\b(blog(?: post)?|article|essay|newsletter|announcement|post|thread|tweet|email|"
-    r"cover letter|resume|bio|linkedin|tutorial|guide|docs page|prose|readme (?:prose|intro)|"
-    r"pr (?:description|body|message)|pull request (?:description|body)|landing copy|headline|"
-    r"tagline|abstract|proposal|changelog entr(?:y|ies)|release notes|commit message)\b"
+# Recognize requested actions at clause boundaries, rather than incidental nouns.
+_WRITING_VERBS = frozenset(
+    {"draft", "write", "rewrite", "edit", "copyedit", "proofread", "polish", "tighten", "revise", "update"}
 )
-_FRONTEND_VERB = re.compile(r"\b(design|redesign|restyle|restyled|style|mock up|lay out|critique|make it look)\b")
-_FRONTEND_OBJECT = re.compile(
-    r"\b(ui|page|hero|layout|typography|colou?r|palette|spacing|css|tailwind|theme|"
+_VISUAL_VERBS = frozenset(
+    {
+        "design",
+        "redesign",
+        "restyle",
+        "style",
+        "mock up",
+        "lay out",
+        "critique",
+        "improve",
+        "make",
+        "implement",
+        "build",
+    }
+)
+_ACTION_WORDS = (
+    r"draft|write|rewrite|edit|copyedit|proofread|polish|tighten|revise|update|"
+    r"design|redesign|restyle|style|mock up|lay out|critique|improve|make|implement|build|"
+    r"add|fix|create|migrate|alter|remove|refactor|optimize|wire|bump|configure"
+)
+_ACTION = re.compile(r"^\s*(?:(?:please|only)\s+)?(?P<verb>" + _ACTION_WORDS + r")\b")
+_CLAUSE_BOUNDARY = re.compile(
+    r"[.!?;\n]+(?!\w)|(?:,\s*|\s+(?:and|then|also)\s+)(?=(?:please\s+)?(?:" + _ACTION_WORDS + r")\b)"
+)
+_QUOTED = re.compile(r"\"[^\"\n]*\"|(?<!\w)'[^'\n]*'(?!\w)")
+_NEGATED = re.compile(r"^\s*(?:please\s+)?(?:do not|don't|never|avoid)\b")
+_TOPIC = re.compile(r"\b(?:about|explaining|describing|discussing|titled|called|for)\b")
+_HOW_TO = re.compile(r"\bhow to\b")
+_WRITING_OBJECT = re.compile(
+    r"(?<![\w-])(?:blog(?: post)?|article|essay|newsletter|announcement|post|thread|tweet|email|"
+    r"cover letter|resume|bio|linkedin|tutorial|guide|docs page|prose|readme (?:prose|intro)|"
+    r"pr (?:description|body|messages?)|pull request (?:description|body)|landing copy|headline|"
+    r"tagline|abstract|proposal|changelog entr(?:y|ies)|release notes|commit messages?)(?![\w-])"
+)
+_VISUAL_OBJECT = re.compile(
+    r"\b(?:ui|page|hero|layout|typography|colou?r|palette|spacing|css|tailwind|theme|"
     r"dark mode|responsive|mobile view|visual hierarchy|screenshot|animation|navbar|mockup)\b"
 )
-_WRITING_PHRASE = re.compile(r"\b(prose polish|copyedit|proofread)\b")
-_FRONTEND_PHRASE = re.compile(r"\b(visual (?:design|polish|critique)|ui design|frontend design)\b")
-_MECHANICAL = re.compile(
-    r"\b(writes? to (?:disk|file|the database|db|cache|log|s3|stdout)|file write|database write|"
-    r"write (?:path|lock)|writer|writable|write (?:unit |integration |regression )?tests?|"
-    r"pagination|paging|pager|page (?:table|fault|cache)|component (?:test|registry|graph|model)|"
-    r"build (?:tool|tooling|pipeline|script|config)|post (?:endpoints?|handlers?|requests?|routes?)|"
-    r"vite|webpack|esbuild|rollup|bundler|tsconfig|eslint)\b"
+_VISUAL_MAKE = re.compile(r"\blook (?:better|good)|\b(?:spacing|typography|palette|responsive)\b")
+_PHRASE = re.compile(r"^\s*(prose polish|visual design|visual polish|visual critique|ui design|frontend design)\b")
+# Inspect only the bounded action object, before prose topics or audience qualifiers.
+# Categories, never matched text, are the only evidence returned to callers.
+_CODE_OBJECTS = (
+    ("endpoint", re.compile(r"\b(?:endpoints?|handlers?|routes?|requests?)\b|\b(?:get|post|put|patch|delete)\s+/")),
+    ("migration", re.compile(r"\bmigrat(?:e|ion|ions)\b")),
+    ("database", re.compile(r"\b(?:database|tables?|schema|sql|queries|query)\b")),
+    ("api", re.compile(r"\bapi\b")),
+    (
+        "code",
+        re.compile(
+            r"\b(?:functions?|class(?:es)?|logic|parser|hooks?|tests?|cache|scheduler|backend|server|"
+            r"allocator|memory|pool|worker|importer|bug|cron|queue|cli flag|file write|database write|"
+            r"build (?:tool|tooling|pipeline|script|config)|vite|webpack|esbuild|rollup|bundler|tsconfig|eslint)\b"
+        ),
+    ),
 )
-# An extra implementation request is required. Topic nouns in prose/UI are insufficient.
-_BACKEND_REQUEST = re.compile(
-    r"(?:^|[.!?;\n]|\band\b|\bthen\b|\balso\b)\s*(?:please\s+)?"
-    r"(?:add|implement|fix|create|migrate|alter|remove|refactor|optimize)\s+"
-    r"(?:(?:the|a|an|new)\s+)?(?:[\w/-]+\s+){0,3}"
-    r"(?:endpoint|migration|table|sql query|database|backend|server|cron|cli flag|queue|api route)\b"
-)
-_CLAUSES = re.compile(r"[.!?;\n]+(?!\w)")
 
 
 @dataclass(frozen=True)
@@ -65,27 +96,64 @@ def role_for_workload(workload: str) -> str:
     return workload if workload in TASK_WORKLOADS else "impl"
 
 
+def _instruction_clauses(text: str) -> list[str]:
+    clauses = []
+    start = 0
+    for boundary in _CLAUSE_BOUNDARY.finditer(text):
+        context = text[start : boundary.start()]
+        # Conjoined steps can continue a negation or an explicit how-to topic.
+        # Commas, sentences, and "then" still introduce independent actions.
+        if (
+            boundary.group().strip() == "and"
+            and not context.rstrip().endswith(",")
+            and (_NEGATED.match(context) or _HOW_TO.search(context))
+        ):
+            continue
+        clauses.append(context)
+        start = boundary.end()
+    clauses.append(text[start:])
+    return clauses
+
+
 def classify(text: str) -> TaskRoleDecision:
     text = text[:MAX_TASK_CHARS].lower()
     matched: set[str] = set()
     vetoed: set[str] = set()
-    for clause in _CLAUSES.split(text):
-        mechanical = tuple(match.group() for match in _MECHANICAL.finditer(clause))
-        vetoed.update(mechanical)
-        # Veto the mechanical phrase rather than unrelated audience work in the clause.
-        intent = _MECHANICAL.sub("", clause)
-        if _WRITING_PHRASE.search(intent) or (_WRITING_VERB.search(intent) and _WRITING_OBJECT.search(intent)):
+    markers: set[str] = set()
+    if _QUOTED.search(text):
+        vetoed.add("quoted-content")
+    text = _QUOTED.sub("", text)
+    for clause in _instruction_clauses(text):
+        if _NEGATED.search(clause):
+            vetoed.add("negated-action")
+            continue
+        phrase = _PHRASE.match(clause)
+        if phrase is not None:
+            matched.add("writing" if phrase.group(1) == "prose polish" else "frontend")
+            continue
+        action = _ACTION.match(clause)
+        if action is None:
+            continue
+        verb = action.group("verb")
+        # No task text from this context may enter diagnostic or persisted evidence.
+        context = _TOPIC.split(clause[action.end() :], maxsplit=1)[0][:320]
+        code_category = next((category for category, pattern in _CODE_OBJECTS if pattern.search(context)), None)
+        if code_category is not None:
+            vetoed.add("code-context")
+            markers.add(f"backend-request:{code_category}")
+            continue
+        if verb in _WRITING_VERBS and (_WRITING_OBJECT.search(context) or verb in {"copyedit", "proofread"}):
             matched.add("writing")
-        if _FRONTEND_PHRASE.search(intent) or (_FRONTEND_VERB.search(intent) and _FRONTEND_OBJECT.search(intent)):
-            matched.add("frontend")
-    markers = tuple(sorted({match.group() for match in _BACKEND_REQUEST.finditer(text)}))
+        if verb in _VISUAL_VERBS and _VISUAL_OBJECT.search(context):
+            if verb != "make" or _VISUAL_MAKE.search(context):
+                matched.add("frontend")
     ordered = tuple(role for role in TASK_WORKLOADS if role in matched)
     if matched and markers:
-        return TaskRoleDecision("ambiguous", "general", ordered, tuple(sorted(vetoed)), markers)
+        return TaskRoleDecision("ambiguous", "general", ordered, tuple(sorted(vetoed)), tuple(sorted(markers)))
     if matched:
         workload = "frontend" if "frontend" in matched else "writing"
         return TaskRoleDecision("matched", workload, ordered, tuple(sorted(vetoed)))
-    return TaskRoleDecision("none", "general", vetoed=tuple(sorted(vetoed)), markers=markers)
+    return TaskRoleDecision("none", "general", vetoed=tuple(sorted(vetoed)), markers=tuple(sorted(markers)))
 
 
 def strict_roster(roster: Roster, seat: str) -> Roster:

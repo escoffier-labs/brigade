@@ -523,7 +523,9 @@ change.
 `brigade fleet policy classify --task-file PATH --json` classifies the first
 8,000 characters locally. Use `--task-file -` for standard input. Its
 `brigade.task_role.v1` result reports `matched`, `none`, or `ambiguous`, the
-workload, matched roles, mechanical vetoes, and extra implementation requests.
+workload and fixed categorical evidence for matched roles, ignored code/quoted/negated
+contexts, and extra implementation requests. Diagnostic categories never contain
+task fragments, file paths, or matched source text.
 Audience prose includes changelog entries, release notes, and commit/PR
 messages. Technical subject matter alone does not make prose or visual UI work
 ambiguous. A separate backend implementation request does. Split ambiguous
@@ -538,14 +540,19 @@ An explicit eligible seat retains precedence. `general` and `windows-native`
 retain their existing routing. Task-role evidence stays in the stored decision
 JSON. The public route response has no new keys.
 
-Without an explicit `--worker` or a named roster seat in the original task,
-`brigade run` classifies task intent and resolves a matched role through the
-central policy resolver. It dispatches that seat directly under runtime
+With a configured Fleet Hub (`hub_url`), and without an explicit `--worker` or
+a named roster seat in the original task, `brigade run` classifies task intent
+and resolves a matched role through the central policy resolver. Without a
+configured Hub, standalone runs retain their existing ordinary routing and do
+not resolve central task roles. The local classification command still works
+without network access. A detached child already requiring a task role keeps
+that requirement if its Hub configuration disappears. It dispatches that seat directly under runtime
 admission, with its local seat fallback removed. Missing policy, an unavailable
 role, a health failure, or admission refusal stops the run. It never substitutes
 an implementation seat or a planned run for matched work. Ambiguous tasks print
 the evidence and retain ordinary routing until the caller splits or explicitly
-selects a worker. Task evidence uses the existing `seat_routing` payload.
+selects a worker. Task evidence uses the existing `seat_routing` payload and remains alongside
+health decisions on both successful routing and strict health refusal.
 
 The existing T3 fleet consumer forwards a declared workload and launches the
 Hub-selected admitted seat. Legacy deployed controllers do not automatically

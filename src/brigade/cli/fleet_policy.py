@@ -548,8 +548,8 @@ def _dispatch_classify(args: argparse.Namespace) -> int:
             with Path(args.task_file).open(encoding="utf-8") as stream:
                 text = stream.read(task_roles.MAX_TASK_CHARS)
         decision = task_roles.classify(text)
-    except (OSError, UnicodeError) as exc:
-        return _fail(exc)
+    except (OSError, UnicodeError):
+        return _fail(ValueError("task-input-unreadable: task input must be readable UTF-8"))
     if args.json:
         print(json.dumps(decision.payload(), sort_keys=True))
     else:

@@ -508,7 +508,11 @@ def dispatch(args) -> int:
         if classified.status != "matched" or classified.workload != args.task_role_workload:
             print("error: detached task role no longer matches the original task", file=sys.stderr)
             return 2
-    elif args.worker is None and not run_preference._spoken_seat_names(args.task, loaded_roster):
+    elif (
+        args.worker is None
+        and fleet_client.load_fleet_settings().get("hub_url")
+        and not run_preference._spoken_seat_names(args.task, loaded_roster)
+    ):
         classified = task_roles.classify(args.task)
     if classified is not None and classified.status == "ambiguous":
         print(
@@ -540,6 +544,7 @@ def dispatch(args) -> int:
     if classified is not None and classified.status == "matched":
         from .fleet_policy import _canonical_repo
 
+        failure_reason = "policy-unavailable"
         try:
             resolution = fleet_client_policy.resolve_policy(
                 consumer="brigade-run",
@@ -550,20 +555,22 @@ def dispatch(args) -> int:
             role = classified.workload
             selected = resolution.get("effective", {}).get("roles", {}).get(role)
             if not isinstance(selected, str) or not selected:
-                raise ValueError(f"roles.{role} is unset")
+                failure_reason = "role-unset"
+                raise ValueError(failure_reason)
             error = _direct_worker_error(selected, loaded_roster, roster_mod, read_only=args.read_only)
             if error is not None:
-                raise ValueError(error)
+                failure_reason = "seat-unusable"
+                raise ValueError(failure_reason)
             if selected not in loaded_roster.agents:
                 agent, error = _hub_synthesized_agent(selected, loaded_roster)
                 if agent is None or error is not None:
-                    raise ValueError(error or f"unknown worker: {selected}")
+                    failure_reason = "seat-unavailable"
+                    raise ValueError(failure_reason)
                 loaded_roster = replace(loaded_roster, agents={**loaded_roster.agents, selected: agent})
             loaded_roster = task_roles.strict_roster(loaded_roster, selected)
-        except (fleet_client.FleetClientError, OSError, ValueError) as exc:
-            detail = fleet_client_policy._scrub(str(exc))
+        except (fleet_client.FleetClientError, OSError, ValueError):
             print(
-                f"error: task classified {classified.workload}; role seat unavailable: {detail}. "
+                f"error: task classified {classified.workload}; role seat unavailable: {failure_reason}. "
                 "Select --worker explicitly to choose a different seat.",
                 file=sys.stderr,
             )

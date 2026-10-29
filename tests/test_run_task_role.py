@@ -2,7 +2,7 @@
 
 import pytest
 
-from brigade import aboyeur, cli, fleet_client_policy, run_preference
+from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference
 from brigade.cli import run as run_cli
 
 _REAL_RUN = aboyeur.run
@@ -11,6 +11,7 @@ _REAL_RUN = aboyeur.run
 @pytest.fixture
 def run_task(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test"})
     roster = tmp_path / "roster.toml"
     roster.write_text("""orchestrator = "chef"
 [agents.chef]
@@ -131,14 +132,15 @@ def test_detached_role_mismatch_refuses(run_task):
 
 
 @pytest.mark.parametrize("failure", ["admission", "health"])
-def test_classified_role_runtime_refusal_never_launches_fallback(run_task, monkeypatch, tmp_path, failure):
+def test_classified_role_runtime_refusal_never_launches_fallback(run_task, monkeypatch, tmp_path, capsys, failure):
     from brigade import agents, fleet_client, fleet_model_admission
     from tests.test_fleet_model_admission import _versioned_snapshot, _versioned_seat
     from tests.test_aboyeur_orchestrator_health_routing import _install_probe, PerSeatFakeAdapter
     from tests.run_test_helpers import run_aboyeur_guarded
 
     invoke, seen = run_task
-    assert invoke("Draft a blog post") == 0
+    fragment = "/customers/SyntheticOnlyHealth42"
+    assert invoke(f"Draft a blog post about {fragment} endpoint") == 0
     effective = seen[0][1]
     monkeypatch.setattr(aboyeur, "run", _REAL_RUN)
     snapshot = _versioned_snapshot(
@@ -167,5 +169,67 @@ def test_classified_role_runtime_refusal_never_launches_fallback(run_task, monke
     )
     assert rc != 0
     assert launches == []
+    if failure == "health":
+        import json
+
+        payload = json.loads((tmp_path / "runtime" / "run.json").read_text())
+        assert any(item.get("task_role", {}).get("seat") == "author" for item in payload["seat_routing"])
+        assert any(item.get("outcome") == "abort" for item in payload["seat_routing"])
+        assert fragment.lower() not in json.dumps(payload["seat_routing"]).lower()
+        assert fragment.lower() not in capsys.readouterr().err.lower()
     if failure == "admission":
         assert admitted == ["author"]
+
+
+@pytest.mark.parametrize("task", ["Draft a blog post", "Redesign the login page"])
+def test_standalone_classified_task_keeps_existing_routing_without_policy_network(run_task, monkeypatch, task):
+    invoke, seen = run_task
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": ""})
+
+    def no_policy(**kwargs):
+        raise AssertionError("standalone task must not resolve central roles")
+
+    monkeypatch.setattr(fleet_client_policy, "resolve_policy", no_policy)
+    assert invoke(task) == 0
+    assert seen[0][2]["worker"] == "coder"
+    assert seen[0][1].seat_routing == ()
+
+
+def test_detached_required_role_does_not_downgrade_when_hub_configuration_disappears(run_task, monkeypatch):
+    invoke, seen = run_task
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": ""})
+
+    def missing(**kwargs):
+        raise fleet_client_policy.FleetPolicyClientError("network", "no fleet hub configured")
+
+    monkeypatch.setattr(fleet_client_policy, "resolve_policy", missing)
+    assert (
+        invoke("Draft a blog post", "--worker", "author", "--applied-preference", "--task-role-workload", "writing")
+        == 2
+    )
+    assert seen == []
+
+
+def test_ambiguous_run_evidence_omits_task_fragments(run_task, capsys):
+    import json
+
+    invoke, seen = run_task
+    fragment = "/customers/SyntheticOnlyRunFragment42"
+    assert invoke(f"Draft release notes and add {fragment} endpoint") == 0
+    assert fragment.lower() not in capsys.readouterr().err.lower()
+    evidence = seen[0][1].seat_routing
+    assert fragment.lower() not in json.dumps(evidence).lower()
+    assert evidence[0]["task_role"]["markers"] == ["backend-request:endpoint"]
+
+
+def test_role_resolution_error_does_not_echo_arbitrary_diagnostic_text(run_task, monkeypatch, capsys):
+    invoke, seen = run_task
+    fragment = "/customers/SyntheticOnlyErrorPayload19"
+
+    def unavailable(**kwargs):
+        raise fleet_client_policy.FleetPolicyClientError("network", fragment)
+
+    monkeypatch.setattr(fleet_client_policy, "resolve_policy", unavailable)
+    assert invoke("Draft release notes") == 2
+    assert fragment not in capsys.readouterr().err
+    assert seen == []
