@@ -192,7 +192,7 @@ def _dispatch_paired(args) -> int:
         else:
             if args.output_dir is None or args.transcript is None:
                 raise ValueError("offline replay needs --output-dir and --transcript")
-            script = json.loads(args.transcript.read_text())
+            script = json.loads(args.transcript.read_text(encoding="utf-8"))
             result = model_trials.paired_execute(args.manifest, args.output_dir, replay_session(script))
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

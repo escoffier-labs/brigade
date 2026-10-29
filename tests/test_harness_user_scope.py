@@ -109,6 +109,31 @@ def test_sync_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     assert not (home / ".codex").exists()
 
 
+@pytest.mark.parametrize("blocked_state", [False, True])
+@pytest.mark.parametrize("operation", ["sync", "uninstall"])
+def test_user_profile_preflight_does_not_create_workspace_state(
+    tmp_path, monkeypatch, capsys, blocked_state, operation
+):
+    from brigade import cli
+
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    if blocked_state:
+        (workspace / ".brigade").write_text("unrelated workspace file")
+    if operation == "sync":
+        # An unowned managed block must be refused before any mutation.
+        (home / ".codex").mkdir()
+        (home / ".codex/AGENTS.md").write_text(harness_profile_cmd._block(harness_profiles.managed_instruction_text()))
+    before = _tree_snapshot(workspace)
+    argv = _sync_base(workspace) if operation == "sync" else _uninstall_base(workspace)
+    assert cli.main(argv + ["--write", "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)["results"][0]
+    assert result["conflicts"]
+    if operation == "uninstall":
+        assert result["conflicts"][0]["detail"] == "profile receipt is missing"
+    assert _tree_snapshot(workspace) == before
+
+
 def test_sync_dry_run_reports_pending_until_applied(tmp_path, monkeypatch, capsys):
     """Issue #1170: a conflict-free dry run with planned writes is not "current"."""
     from brigade import cli

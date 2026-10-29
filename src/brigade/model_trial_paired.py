@@ -59,7 +59,7 @@ def _packages(manifest_path: Path, manifest: dict[str, Any]) -> dict[str, dict[t
 
 
 def _load(path: Path) -> tuple[dict[str, Any], dict[str, dict[tuple[str, ...], bytes]]]:
-    manifest = json.loads(path.read_text())
+    manifest = json.loads(path.read_text(encoding="utf-8"))
     if manifest.get("schema") not in (SCHEMA, "brigade.paired_trial.v1"):
         raise ValueError(f"paired schema must be {SCHEMA}")
     if not isinstance(manifest.get("model"), str) or not manifest["model"].strip():
@@ -321,6 +321,14 @@ def _execute(
         if not cases or any(c not in available for c in cases):
             raise ValueError("unsupported case selection")
         planned["cells"] = [c for c in planned["cells"] if c["case"] in cases]
+    if adapter["id"] == "brigade.offline-replay.v1":
+        transcript = adapter.get("transcript")
+        needed = {cell["case"] for cell in planned["cells"]}
+        if not isinstance(transcript, dict) or any(
+            not isinstance(transcript.get(case), dict) or not isinstance(transcript[case].get("requests"), list)
+            for case in needed
+        ):
+            raise ValueError("replay transcript must define requests for every selected case")
     # Check all preexisting contents, including digest and unused artifacts,
     # before any write. The collector refuses links and special files.
     inspect_tree(bound)

@@ -171,6 +171,27 @@ def test_invalid_contract_refuses_before_write(tmp_path, capsys, field, value):
 
 
 @pytest.mark.parametrize("action", ["install", "uninstall", "rollback"])
+@pytest.mark.parametrize("source_kind", ["registry", "bundled"])
+def test_reviewed_mutation_succeeds_with_unchanged_binding(tmp_path, action, source_kind):
+    from brigade.skills_cmd.install import _review_binding
+
+    skill_id = "brigade-work" if source_kind == "bundled" else "security-review"
+    if source_kind == "registry":
+        source = _write_skill(tmp_path / "source")
+        assert skills_cmd.import_skill(target=tmp_path, source=source) == 0
+    selector = f"{source_kind}:{skill_id}"
+    assert skills_cmd.install(workspace=tmp_path, skill=selector, harness="mcp") == 0
+    assert skills_cmd.install(workspace=tmp_path, skill=selector, harness="mcp", force=True) == 0
+    binding = _review_binding(tmp_path, skill_id, "mcp", selector)
+    assert binding is not None
+    kwargs = dict(workspace=tmp_path, skill=skill_id, harness="mcp", expected_binding=binding)
+    if action == "install":
+        kwargs.update(skill=selector, force=True)
+    assert getattr(skills_cmd, action)(**kwargs) == 0
+    assert skills_cmd._install_dir(tmp_path, "mcp", skill_id).exists() is (action != "uninstall")
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall", "rollback"])
 def test_mutation_precondition_refuses_changed_copy(tmp_path, capsys, action):
     from brigade.skills_cmd.install import _review_binding
 

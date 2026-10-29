@@ -11,6 +11,65 @@ from brigade import model_trials
 FIXTURE = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work/manifest.json"
 
 
+@pytest.mark.parametrize("cases", [None, ["audit-only"]])
+@pytest.mark.parametrize("scenario", [None, {}, {"requests": {}}])
+def test_replay_refuses_incomplete_transcript_before_writes(tmp_path, cases, scenario):
+    from brigade.model_trial_paired import replay_session
+
+    manifest = json.loads(FIXTURE.read_text())
+    manifest["cases"] = ["audit-only"]
+    for arm in ("baseline", "candidate"):
+        manifest[arm] = str(FIXTURE.parent / arm)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest))
+    output = tmp_path / "output"
+    script = {} if scenario is None else {"audit-only": scenario}
+    with pytest.raises(ValueError, match="transcript.*requests"):
+        model_trials.paired_execute(path, output, replay_session(script), cases=cases)
+    assert not output.exists() or list(output.iterdir()) == []
+
+
+def test_paired_json_inputs_use_utf8_under_non_utf8_default(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    manifest = json.loads(FIXTURE.read_text())
+    manifest["model"] = "example-model-λ"
+    for arm in ("baseline", "candidate"):
+        manifest[arm] = str(FIXTURE.parent / arm)
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+    transcript = tmp_path / "transcript.json"
+    transcript.write_text(json.dumps({"note": "évaluation"}, ensure_ascii=False), encoding="utf-8")
+    original = Path.read_text
+
+    def read_text(self, encoding=None, errors=None):
+        return original(self, encoding=encoding or "cp1252", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    assert model_trials.paired_plan(path)["model"] == manifest["model"]
+    monkeypatch.setattr(
+        model_trials,
+        "paired_execute",
+        lambda manifest, output, session: session.paired_adapter_identity["transcript"],
+    )
+    assert (
+        cli.main(
+            [
+                "model",
+                "trial",
+                "paired-replay",
+                str(path),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--transcript",
+                str(transcript),
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out) == {"note": "évaluation"}
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX ancestor permissions")
 def test_paired_refuses_owned_writable_nonsticky_ancestor(tmp_path):
     ancestor = tmp_path / "unsafe-parent"
