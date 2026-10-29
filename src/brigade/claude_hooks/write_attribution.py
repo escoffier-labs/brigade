@@ -49,10 +49,39 @@ def _git_command(tokens: list[str], cwd: Path) -> tuple[list[str], Path]:
     return [], cwd
 
 
+# Short options whose next token is a value, not a path the command writes
+# (`touch -r REF` only reads REF's times). Long `--opt=value` forms are already
+# dropped as options.
+_OPTION_VALUES = {"touch": "rdt", "truncate": "rs", "mkdir": "m", "mv": "S"}
+
+
+def _without_option_values(name: str, tokens: list[str]) -> list[str] | None:
+    letters = _OPTION_VALUES.get(name, "")
+    kept: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+            continue
+        if token == "--":
+            letters = ""
+        elif letters and token.startswith("-") and not token.startswith("--") and len(token) > 1:
+            if name == "mv" and "t" in token[1:]:
+                return None  # -t names the destination directory; keep the cwd fallback
+            skip = token[-1] in letters
+        elif token in {"--reference", "--date", "--size", "--mode", "--suffix", "--target-directory"}:
+            return None  # a separated long-option value: stay conservative
+        kept.append(token)
+    return kept
+
+
 def _write_operands(tokens: list[str]) -> list[str] | None:
     rt = _rt()
     name = Path(tokens[0]).name
-    args = rt._command_path_arguments(tokens[1:])
+    operand_tokens = _without_option_values(name, tokens[1:])
+    if operand_tokens is None:
+        return None
+    args = rt._command_path_arguments(operand_tokens)
     if name == "sed":
         if not any(arg.startswith("-i") for arg in tokens[1:]):
             return []

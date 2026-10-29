@@ -184,3 +184,39 @@ def test_readonly_command_keeps_worktree_gate_disarmed(worktrees, tmp_path, redi
     event(first, "PreToolUse", **fields)
     event(first, "PostToolUse", **fields)
     assert event(first, "Stop", stop_hook_active=False) is None
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "touch -r {reference} {file}",
+        "touch -cr {reference} {file}",
+        "truncate -r {reference} {file}",
+    ],
+)
+def test_option_values_are_read_not_written(worktrees, command):
+    first, second = worktrees
+    command = command.format(
+        reference=shlex.quote(str(second / "source.py")), file=shlex.quote(str(first / "source.py"))
+    )
+    fields = {"tool_name": "Bash", "tool_input": {"command": command}}
+    event(first, "PreToolUse", **fields)
+    (first / "source.py").write_text("after\n")
+    event(first, "PostToolUse", **fields)
+    stopped = event(first, "Stop", stop_hook_active=False)
+    assert stopped is not None and stopped.get("decision") == "block"
+    assert f"--target {first}" in stopped["reason"]
+    assert f"--target {shlex.quote(str(second))}" not in stopped["reason"]
+    second_state = runtime.read_session_state(second, SESSION)
+    assert second_state is None or second_state.get("write_observed") is not True
+
+
+def test_separated_long_option_value_keeps_the_cwd_gate(worktrees):
+    first, second = worktrees
+    command = f"touch --reference {shlex.quote(str(second / 'source.py'))} source.py"
+    fields = {"tool_name": "Bash", "tool_input": {"command": command}}
+    event(first, "PreToolUse", **fields)
+    event(first, "PostToolUse", **fields)
+    stopped = event(first, "Stop", stop_hook_active=False)
+    assert stopped is not None and stopped.get("decision") == "block"
+    assert f"--target {first}" in stopped["reason"]
