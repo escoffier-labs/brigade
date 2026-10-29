@@ -7,12 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Document native T3 result closeout and recovery of reviewed work notes after a session ends.
 - Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
+- Fleet Hub Overview shows an idle machine's last run report age beside its separately labeled telemetry age, including `never` and `unknown` history.
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Fleet attention expires abandoned unknown and stale runs using the configured history horizon, excludes revoked nodes and expired failures, and compares failure lookback and newer successful runs by elapsed time across timestamp offsets.
+- Add an opt-in telemetry heartbeat for proven-open local Claude Code and interactive Codex sessions, reusing their last published presence while the owning process lives.
+- Add an opt-in telemetry heartbeat for proven-open local Claude Code and interactive Codex sessions, reusing their last published presence while the owning process lives. Repeatable `--worktrees-of` discovery selects wired worktrees with presence sidecars, newest first, within the shared target cap and work budget.
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
+
+- Antigravity seat health runs `agy models` once per probe for both the authentication and model checks, allows it up to 10 seconds inside the per-seat deadline, and reports an expired listing as a timeout. Authentication errors, nonzero exits, empty or incomplete listings, and a missing requested model still fail the seat.
 
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
@@ -214,6 +220,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
+- Dot session trust labels preserve the existing session and report data budget near the response limit.
 
 ## [0.30.0] - 2026-10-20
 
