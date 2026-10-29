@@ -17,6 +17,15 @@ _THEMATIC = re.compile(r"^ {0,3}(?:(?:\* *){3,}|(?:_ *){3,}|(?:- *){3,})$")
 _HEADING = re.compile(r"^ {0,3}#{1,6}(?: |$)")
 _REFERENCE = re.compile(r"^ {0,3}\[[^\]\n]+\]: *(.*)$")
 _TABLE = re.compile(r"^ {0,3}\|? *:?-+:? *(?:\| *:?-+:? *)*\|? *$")
+_RAW_HTML = (
+    (
+        re.compile(r"^ {0,3}<(?:pre|script|style|textarea)(?:[ >]|$)", re.I),
+        re.compile(r"</(?:pre|script|style|textarea)>", re.I),
+    ),
+    (re.compile(r"^ {0,3}<\?"), re.compile(r"\?>")),
+    (re.compile(r"^ {0,3}<!\[CDATA\["), re.compile(r"\]\]>")),
+    (re.compile(r"^ {0,3}<![A-Z]"), re.compile(r">")),
+)
 
 
 @dataclass(frozen=True)
@@ -103,6 +112,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     fence_base = 0
     comment = quote = opaque = table = False
     empty_item = False
+    raw_end: re.Pattern[str] | None = None
     index = 0
 
     def finish() -> None:
@@ -128,6 +138,11 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
                     fence = None
                 index += 1
                 continue
+        if raw_end is not None:
+            if raw_end.search(raw):
+                raw_end = None
+            index += 1
+            continue
         if comment:
             comment = "-->" not in raw
             index += 1
@@ -194,13 +209,19 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             finish()
             index += 1
             continue
+        opened = next((end for opener, end in _RAW_HTML if opener.match(line)), None)
+        if opened is not None:
+            finish()
+            raw_end = None if opened.search(line) else opened
+            index += 1
+            continue
         if "<!--" in line:
             # An inline multiline comment makes the containing paragraph opaque.
             start = None
             comment = "-->" not in line.split("<!--", 1)[1]
             index += 1
             continue
-        if re.match(r"previously\b", line) or line.lstrip().startswith("<"):
+        if (start is None and re.match(r"previously\b", line)) or line.lstrip().startswith("<"):
             finish()
             opaque = True
             index += 1

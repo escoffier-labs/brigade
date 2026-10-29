@@ -254,3 +254,46 @@ def test_empty_list_item_blank_ends_container(markdown, marker):
 def test_empty_item_reset_preserves_content_bearing_containers(markdown, source, expected):
     body = markdown(source)
     assert [b.text for b in delta.blocks(body)] == expected
+
+
+def test_previously_continuation_stays_in_complete_claim(markdown):
+    body = markdown("The cache stays warm and\npreviously cold nodes recover.")
+    assert [b.text for b in delta.blocks(body)] == [body.rstrip("\r\n")]
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.claim_body(anchored) == body
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+    history = markdown("previously Old cache wording.\ncontinued history\n\nAfter.")
+    assert [b.text for b in delta.blocks(history)] == ["After."]
+
+
+@pytest.mark.parametrize(
+    "opener,closer",
+    [
+        ("<pre>", "</pre>"),
+        ("<SCRIPT type='example'>", "</SCRIPT>"),
+        ("<style>", "</style>"),
+        ("<textarea>", "</textarea>"),
+        ("<?example", "?>"),
+        ("<![CDATA[", "]]>"),
+        ("<!DOCTYPE", ">"),
+        ("<script><!--", "</script>"),
+    ],
+)
+def test_delimited_html_preserves_blank_lines_and_literal_tokens(markdown, opener, closer):
+    structure = f"{opener}\ncode\n\nmore ^c-abcdef\n{closer}"
+    body = markdown(structure + "\nAfter.")
+    assert [b.text for b in delta.blocks(body)] == ["After."]
+    assert delta.claim_body(body) == body
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.claim_body(anchored) == body
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+    assert delta.claim_body(body) != delta.claim_body(body.replace("abcdef", "fedcba"))
+    unclosed = markdown(f"{opener}\n\nmore ^c-abcdef")
+    assert delta.blocks(unclosed) == []
+    assert delta.claim_body(unclosed) == unclosed
+
+
+def test_closed_html_on_one_line_leaves_next_claim_addressable(markdown):
+    body = markdown("<pre>literal ^c-abcdef</pre>\nAfter.")
+    assert [b.text for b in delta.blocks(body)] == ["After."]
+    assert delta.claim_body(body) == body
