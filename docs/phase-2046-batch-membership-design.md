@@ -1,6 +1,6 @@
 # Durable descriptor membership for epic #2046
 
-Status: builder-reviewed proposed design awaiting user approval.
+Status: approved by the user after builder review.
 
 The user selected option 1: membership only, represented by one bounded journal fact. That selection authorizes this design. Implementation and native activation have separate gates.
 
@@ -132,7 +132,7 @@ The user selected descriptor-only membership. Adding dependency metadata, full e
 
 This design neither closes #2047's public batch execution requirements nor proves authoritative readiness. Target-side governance, exact source/target enforcement, non-reserving readiness, acceptance lookup/replay and restart delivery remain separate native/backend contract dependencies. Proposed, merged, released, exposed and qualified capabilities remain distinct evidence states. Dated maintenance research is not current runtime qualification.
 
-The builder check returned "nothing important left". The user must approve this design before implementation planning. This reviewed draft is retained at `docs/phase-2046-batch-membership-design.md`, and the approved implementation plan will refer to it. No product source, provider, service, ownership backend or runtime enablement changes are part of writing this draft.
+The builder check returned "nothing important left", and the user approved this design. The implementation plan will refer to `docs/phase-2046-batch-membership-design.md`. No product source, provider, service, ownership backend or runtime enablement changes are part of writing this design.
 
 ## Pinned source references
 
