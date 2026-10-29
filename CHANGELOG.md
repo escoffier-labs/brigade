@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
+- Evidence query commands accept leading engine flags, and code graph commands and search aliases preserve literal `--target` arguments after `--` without changing the selected repository.
 
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
