@@ -148,3 +148,41 @@ def test_release_resume_validates_full_inventory_digests(tmp_path, mutation):
     assert (result.returncode == 0) == (mutation in {"none", "missing-alias"}), result.stderr
     if result.returncode == 0:
         assert missing.read_text().strip() == (alias if mutation == "missing-alias" else "")
+
+
+def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path):
+    assets = tmp_path / "release-assets"
+    assets.mkdir()
+    subjects = native_names() | {"component-manifest-v1.json"}
+    (assets / "checksums.txt").write_text("".join(f"{'a' * 64}  {name}\n" for name in sorted(subjects)))
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import json, os, sys\n"
+        "from pathlib import Path\n"
+        "args = sys.argv[1:]\n"
+        "assert args[:2] == ['attestation', 'verify']\n"
+        "for flag, key in [('--source-digest', 'GITHUB_SHA'), ('--source-ref', 'GITHUB_REF')]:\n"
+        "    assert flag in args, f'missing attestation constraint: {flag}'\n"
+        "    assert args[args.index(flag)+1] == os.environ[key]\n"
+        "with Path(os.environ['ATTEST_LOG']).open('a') as output:\n"
+        "    output.write(json.dumps(args) + '\\n')\n"
+    )
+    step = _workflow_step_section(
+        workflow(), "release-asset-gate", "Redownload, checksum, provenance, and attestation gate"
+    )
+    loop = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("while read -r", 1)[1]
+    script = 'gh() { python3 "$ATTEST_PROBE" "$@"; }\nwhile read -r' + loop
+    log = tmp_path / "attestations.jsonl"
+    env = dict(
+        os.environ,
+        GITHUB_SHA="a" * 40,
+        GITHUB_REF="refs/tags/v1.2.3",
+        GITHUB_REPOSITORY="example/project",
+        ATTEST_PROBE=str(probe),
+        ATTEST_LOG=str(log),
+    )
+    result = subprocess.run(_workflow_bash_command(script, "-e"), cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 41
+    assert {Path(args[2]).name for args in calls} == subjects
