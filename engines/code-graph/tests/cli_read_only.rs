@@ -781,7 +781,7 @@ fn canonical_and_legacy_cli_contracts() {
         assert_eq!(value["symbols"], 2, "{value}");
 
         let missing = invoke(&["--db", "absent.db", "search", "helper", "--json"]);
-        assert!(!missing.status.success(), "{missing:?}");
+        assert_eq!(missing.status.code(), Some(1), "{missing:?}");
         assert!(!dir.path().join("absent.db").exists());
     }
 }

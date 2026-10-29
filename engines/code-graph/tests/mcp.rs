@@ -1164,6 +1164,9 @@ fn canonical_and_legacy_mcp_process_contracts() {
     )
     .unwrap();
     drop(conn);
+    // Explicit and environment cases must not succeed through the default DB.
+    let nondefault_dir = dir.path().join("nondefault");
+    fs::create_dir(&nondefault_dir).unwrap();
     let input = concat!(
         "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
         "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
@@ -1193,7 +1196,11 @@ fn canonical_and_legacy_mcp_process_contracts() {
             let mut command = Command::new(binary);
             command
                 .args(args)
-                .current_dir(dir.path())
+                .current_dir(if env_db.is_some() {
+                    nondefault_dir.as_path()
+                } else {
+                    dir.path()
+                })
                 .env("HOME", dir.path());
             if let Some(path) = env_db {
                 command.env("GRAPHTRAIL_DB", path);
@@ -1224,6 +1231,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
             assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
             assert_eq!(responses[0]["result"]["serverInfo"]["name"], "graphtrail");
             assert_eq!(responses[1]["id"], 2);
+            assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
             assert!(
                 responses[1]["result"]["content"][0]["text"]
                     .as_str()
