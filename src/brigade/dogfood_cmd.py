@@ -72,6 +72,10 @@ def _parse_toml_value(raw: str) -> object:
         return True
     if value == "false":
         return False
+    if len(value) >= 2 and value[0] == value[-1] == "'" and "'" not in value[1:-1]:
+        # TOML literal strings have no escapes; literal_eval would turn the
+        # separators in a Windows path such as D:\a\b into control bytes.
+        return value[1:-1]
     try:
         return ast.literal_eval(value)
     except (SyntaxError, ValueError):
@@ -82,8 +86,14 @@ def _parse_toml_value(raw: str) -> object:
 
 
 def _read_toml_object(path: Path) -> dict[str, object]:
+    text = path.read_text()
+    try:
+        return toml_compat.loads(text)
+    except toml_compat.TOMLDecodeError:
+        # Older dogfood configs also accepted unquoted strings and Python values.
+        pass
     data: dict[str, object] = {}
-    for line_number, raw_line in enumerate(path.read_text().splitlines(), start=1):
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.split("#", 1)[0].strip()
         if not line:
             continue

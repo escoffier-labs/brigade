@@ -1,8 +1,10 @@
 """Small DOM model for exercising shipped filtering scripts without a browser."""
 
 import json
+import os
 import shutil
 import subprocess
+import tempfile
 from html.parser import HTMLParser
 
 
@@ -72,5 +74,10 @@ def run_script(page, script, assertions):
     node = shutil.which("node")
     assert node, "Installed Node must be on PATH; filtering tests must not skip"
     program = DOM.replace("TREE", json.dumps(Tree(page).root)) + "\neval(" + json.dumps(script) + ");\n" + assertions
-    result = subprocess.run([node, "-e", program], capture_output=True, text=True)
+    # A file, not `node -e`: the page script exceeds Windows' command-line limit.
+    with tempfile.TemporaryDirectory() as scratch:
+        path = os.path.join(scratch, "dom_check.js")
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(program)
+        result = subprocess.run([node, path], capture_output=True, text=True)
     assert result.returncode == 0, result.stderr

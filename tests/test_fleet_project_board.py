@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import os
 import re
 import sqlite3
 import subprocess
@@ -177,7 +178,8 @@ def test_minimum_interval_guard(tmp_path):
     assert wait == timedelta(minutes=3)
     assert collect.too_soon(tmp_path, "example-org", 7, NOW + timedelta(minutes=5)) is None
     assert collect.too_soon(tmp_path, "example-org", 8, NOW) is None
-    assert (tmp_path / "projects-board-state.json").stat().st_mode & 0o077 == 0
+    if os.name == "posix":  # Windows has no group/other mode bits to check
+        assert (tmp_path / "projects-board-state.json").stat().st_mode & 0o077 == 0
 
 
 def test_cli_sync_guard_failure_keeps_state_and_dry_run_sends_nothing(tmp_path, monkeypatch, capsys):
