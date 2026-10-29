@@ -6,7 +6,8 @@ import json
 import shlex
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
 
 import pytest
 
@@ -53,6 +54,10 @@ def worktrees(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
     return first, second
 
 
+def replacement(target: Path) -> str:
+    return runtime._verify_replacement(target, "<test>", runtime._session_fingerprint(SESSION))
+
+
 def verify(cwd: Path, target: Path):
     args = ["work", "verify", "run", "--target", str(target), "--argv-json", json.dumps([sys.executable, "-c", "pass"])]
     fields = {"tool_name": "Bash", "tool_input": {"command": shlex.join(["brigade", *args])}}
@@ -87,8 +92,8 @@ def test_sibling_write_accepts_only_sibling_receipt(worktrees, command):
 
     blocked = event(first, "Stop", stop_hook_active=False)
     assert blocked is not None and blocked.get("decision") == "block"
-    assert f"--target {shlex.quote(str(second))}" in blocked["reason"]
-    assert f"--target {first}" not in blocked["reason"]
+    assert replacement(second) in blocked["reason"]
+    assert replacement(first) not in blocked["reason"]
     first_state = runtime.read_session_state(first, SESSION)
     second_state = runtime.read_session_state(second, SESSION)
     assert first_state is not None and first_state["write_observed"] is False
@@ -116,13 +121,13 @@ def test_writes_in_both_worktrees_require_both_receipts(worktrees, change_cwd):
     event(first, "PostToolUse", **fields)
     blocked = event(first, "Stop", stop_hook_active=False)
     assert blocked is not None and blocked.get("decision") == "block"
-    assert f"--target {first}" in blocked["reason"]
-    assert f"--target {shlex.quote(str(second))}" in blocked["reason"]
+    assert replacement(first) in blocked["reason"]
+    assert replacement(second) in blocked["reason"]
     verify(first, second)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {first}" in stopped["reason"]
-    assert f"--target {shlex.quote(str(second))}" not in stopped["reason"]
+    assert replacement(first) in stopped["reason"]
+    assert replacement(second) not in stopped["reason"]
     verify(first, first)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is None or "decision" not in stopped
@@ -139,8 +144,8 @@ def test_metadata_in_cwd_does_not_hide_sibling_write(worktrees):
     event(first, "PostToolUse", **fields)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {shlex.quote(str(second))}" in stopped["reason"]
-    assert f"--target {first}" not in stopped["reason"]
+    assert replacement(second) in stopped["reason"]
+    assert replacement(first) not in stopped["reason"]
     verify(first, second)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is None or "decision" not in stopped
@@ -161,8 +166,8 @@ def test_sibling_receipt_does_not_cover_later_cwd_write(worktrees):
     event(first, "PostToolUse", **fields)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {first}" in stopped["reason"]
-    assert f"--target {shlex.quote(str(second))}" not in stopped["reason"]
+    assert replacement(first) in stopped["reason"]
+    assert replacement(second) not in stopped["reason"]
 
 
 @pytest.mark.parametrize("command", ['touch "$OUTPUT_FILE"', "sed -i 's/before/after/'"])
@@ -173,7 +178,7 @@ def test_unresolved_write_destination_retains_cwd_gate(worktrees, command):
     event(first, "PostToolUse", **fields)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {first}" in stopped["reason"]
+    assert replacement(first) in stopped["reason"]
 
 
 @pytest.mark.parametrize("redirect", ["2>&1", ">&2", "2>/dev/null", "> {outside}"])
@@ -205,8 +210,8 @@ def test_option_values_are_read_not_written(worktrees, command):
     event(first, "PostToolUse", **fields)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {first}" in stopped["reason"]
-    assert f"--target {shlex.quote(str(second))}" not in stopped["reason"]
+    assert replacement(first) in stopped["reason"]
+    assert replacement(second) not in stopped["reason"]
     second_state = runtime.read_session_state(second, SESSION)
     assert second_state is None or second_state.get("write_observed") is not True
 
@@ -219,4 +224,22 @@ def test_separated_long_option_value_keeps_the_cwd_gate(worktrees):
     event(first, "PostToolUse", **fields)
     stopped = event(first, "Stop", stop_hook_active=False)
     assert stopped is not None and stopped.get("decision") == "block"
-    assert f"--target {first}" in stopped["reason"]
+    assert replacement(first) in stopped["reason"]
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("cd {other} && claude -p 'update source.py'", ["cd", "{path}", "&&", "claude", "-p", "update source.py"]),
+        ('printf after > "{path}\\source.py"', ["printf", "after", ">", "{path}\\source.py"]),
+        ("bash -lc {nested}", ["bash", "-lc", "cd {other} && touch source.py"]),
+    ],
+)
+def test_bash_windows_paths_follow_shell_quoting_on_every_host(monkeypatch, command, expected):
+    # Change only the runtime module's platform binding, not pathlib or pytest's
+    # process-wide os.name. This exercises the Windows lexer branch on Linux.
+    monkeypatch.setattr(runtime, "os", SimpleNamespace(name="nt"))
+    path = str(PureWindowsPath("D:/example/second tree"))
+    fields = {"path": path, "other": shlex.quote(path)}
+    fields["nested"] = shlex.quote("cd {other} && touch source.py".format(**fields))
+    assert runtime._shell_path_tokens(command.format(**fields)) == [token.format(**fields) for token in expected]

@@ -1138,7 +1138,8 @@ def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, dept
 
 
 def _shell_lexer(command: str | StringIO) -> shlex.shlex:
-    lexer = shlex.shlex(command, posix=os.name != "nt", punctuation_chars=";&|<>\n")
+    # Bash payloads use POSIX quoting on Windows too (Claude Code uses Git Bash).
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
