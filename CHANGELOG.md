@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
+
 - Add `context handoff --json` for body-free, locally bound Codex instruction accounting, complete source hashes, and selection observations.
 
 - Document native T3 result closeout and recovery of reviewed work notes after a session ends.
