@@ -1066,3 +1066,145 @@ def test_oversized_cited_evidence_list_is_refused_not_skipped(tmp_path):
         create(tmp_path, [op("replace_block", text="Keep the cache cold.")])
     assert path.read_bytes() == before
     assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        "```\nvalue ^c-{ident}\n```",
+        "- > quoted ^c-{ident}\n  lazy text",
+        "-     code ^c-{ident}",
+        "- Title ^c-{ident}\n  =",
+        "-\n\n    code ^c-{ident}",
+        "<pre>\ncode\n\nmore ^c-{ident}\n</pre>",
+    ],
+)
+def test_reviewed_merge_preserves_literal_tokens_in_excluded_structure(tmp_path, structure):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    path.write_text(path.read_text() + "\n\n" + structure.format(ident="abcdef") + "\n")
+    other.write_text(other.read_text() + "\n\n" + structure.format(ident="fedcba") + "\n")
+    before = {p: p.read_bytes() for p in (path, other)}
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    # A reviewed proposal containing another valid delta still cannot publish
+    # the refused merge. This exercises review and apply, not just the helper.
+    proposal = create(
+        tmp_path, [merge, op("add_previously", text="Old cache wording.")], paths=[PATH, "memory/cards/other.md"]
+    )
+    assert len(proposal["dropped_ops"]) == 1
+    assert [operation["type"] for operation in proposal["ops"]] == ["add_previously"]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert other.read_bytes() == before[other]
+    assert structure.format(ident="abcdef") in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_proposal_cannot_edit_code_after_empty_item(tmp_path, kind):
+    path = setup(tmp_path)
+    code = "    code ^c-abcdef"
+    path.write_text(path.read_text() + "\n\n-\n\n" + code + "\n")
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit.update(block_id="c-abcdef", expected_block_hash=hashlib.sha256(code.encode()).hexdigest())
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before
+    proposal = create(tmp_path, [edit, op("add_previously", text="Old cache wording.")])
+    assert [operation["type"] for operation in proposal["ops"]] == ["add_previously"]
+    assert len(proposal["dropped_ops"]) == 1
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert "\n\n-\n\n" + code + "\n" in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_proposal_cannot_edit_raw_html_payload(tmp_path, kind):
+    path = setup(tmp_path)
+    code = "more ^c-abcdef"
+    structure = "<pre>\ncode\n\n" + code + "\n</pre>\n"
+    path.write_text(path.read_text() + "\n\n" + structure)
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit.update(block_id="c-abcdef", expected_block_hash=hashlib.sha256(code.encode()).hexdigest())
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before
+    proposal = create(tmp_path, [edit, op("add_previously", text="Old cache wording.")])
+    assert [operation["type"] for operation in proposal["ops"]] == ["add_previously"]
+    assert len(proposal["dropped_ops"]) == 1
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert structure in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_edit_covers_previously_continuation(tmp_path, kind):
+    path = setup(tmp_path)
+    claim = "The cache stays warm and\npreviously cold nodes recover. ^c-123abc"
+    path.write_text(path.read_text().replace(CLAIM, claim))
+    edit = op(kind, **({"text": "Keep the cache cold."} if kind == "replace_block" else {}))
+    edit["expected_block_hash"] = hashlib.sha256(claim.encode()).hexdigest()
+    proposal = create(tmp_path, [edit])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    after = path.read_text()
+    assert claim not in after
+    assert "previously The cache stays warm and previously cold nodes recover." in after
+    if kind == "replace_block":
+        assert "Keep the cache cold. ^c-123abc" in after
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_reviewed_edit_after_list_raw_html_dedent(tmp_path, kind, nested):
+    path = setup(tmp_path)
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    structure = f"{prefix}<pre>\n{indent}literal ^c-abcdef\n\n"
+    path.write_text(path.read_text().replace(CLAIM, structure + CLAIM + "\n</pre>"))
+    edit = op(kind, **({"text": "Keep the cache cold."} if kind == "replace_block" else {}))
+    proposal = create(tmp_path, [edit])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    after = path.read_text()
+    assert CLAIM not in after
+    assert structure in after
+    if kind == "replace_block":
+        assert "Keep the cache cold. ^c-123abc" in after
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_edit_cannot_target_inline_comment_suffix(tmp_path, kind):
+    path = setup(tmp_path)
+    paragraph = "The cache <!-- note --> stays warm and\ncold nodes recover. ^c-123abc"
+    path.write_text(path.read_text().replace(CLAIM, paragraph))
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit["expected_block_hash"] = hashlib.sha256(b"cold nodes recover. ^c-123abc").hexdigest()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_edit_after_list_comment_dedent(tmp_path, kind):
+    path = setup(tmp_path)
+    payload = "- <!-- note\n  hidden ^c-abcdef\n\n"
+    path.write_text(path.read_text().replace(CLAIM, payload + CLAIM))
+    proposal = create(tmp_path, [op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert payload in path.read_text()
+    assert CLAIM not in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_reviewed_edit_cannot_target_blank_separated_comment_suffix(tmp_path, kind, nested):
+    path = setup(tmp_path)
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    suffix = f"{indent}Same-list claim. ^c-123abc"
+    structure = f"{prefix}<!-- note\n{indent}hidden ^c-abcdef\n\n{indent}-->\n{suffix}"
+    path.write_text(path.read_text().replace(CLAIM, structure))
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit["expected_block_hash"] = hashlib.sha256(suffix.encode()).hexdigest()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before
