@@ -584,11 +584,10 @@ def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
         }
     try:
         from ...fleet_session_heartbeat_state import publish_tracked
-        from ...fleet_session_root import codex_session_root
-        from ...wiring import resolve_wired_target
+        from ...fleet_session_root import codex_session_root, session_repository_root
 
         cwd = codex_session_root(session_id) or Path.cwd()
-        root = resolve_wired_target(str(cwd), harness="codex") or cwd
+        root = session_repository_root(cwd, harness="codex")
         snapshot = presence.build_snapshot(root, harness="codex", session_id=session_id)
         result = publish_tracked(
             snapshot, lambda: fleet_client.publish_session(snapshot), successful=lambda result: result.ok

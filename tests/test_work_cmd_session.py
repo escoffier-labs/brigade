@@ -2368,3 +2368,49 @@ def test_work_brief_fleet_routing_budget_and_unconfigured(tmp_path, monkeypatch,
     monkeypatch.setattr("brigade.fleet_model_admission._load_lkg_record", _no_cache)
     payload = fleet_routing.fleet_routing_for_brief()
     assert payload["source"] == "unavailable"
+
+
+def _wire_codex(target):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    target.mkdir(parents=True, exist_ok=True)
+    write_config(
+        target,
+        Config(version=1, selection=Selection(depth="repo", harnesses=["codex"], owner="this-repo", includes=[])),
+    )
+
+
+def test_work_brief_publishes_session_checkout_beneath_wired_ancestor(tmp_target, monkeypatch, capsys):
+    from brigade import fleet_session_root
+
+    _make_dirty(tmp_target, "src/a.py")
+    _wire_codex(tmp_target)
+    inner = tmp_target / "checkouts" / "inner"
+    inner.mkdir(parents=True)
+    _init_git_repo(inner)
+    (inner / "inner.py").write_text("x\n", encoding="utf-8")
+    monkeypatch.setenv("CODEX_THREAD_ID", "thread-1")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_session_root, "codex_session_root", lambda session_id: inner)
+    published = []
+    monkeypatch.setattr(
+        fleet_client, "publish_session", lambda snap: published.append(snap) or fleet_client.SessionWriteResult(ok=True)
+    )
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: True)
+    monkeypatch.setattr(fleet_client, "fetch_sessions", lambda **_: [])
+    assert briefing.brief(target=tmp_target, json_output=True) == 0
+    capsys.readouterr()
+    assert published and os.path.realpath(published[0].checkout_path) == os.path.realpath(inner)
+
+
+def test_session_repository_root_keeps_wired_project_inside_larger_repo(tmp_path):
+    from brigade import fleet_session_root
+
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    _init_git_repo(outer)
+    project = outer / "proj"
+    _wire_codex(project)
+    (project / "src").mkdir()
+    assert fleet_session_root.session_repository_root(project / "src", harness="codex") == project.resolve()

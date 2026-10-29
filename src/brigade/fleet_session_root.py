@@ -45,3 +45,23 @@ def codex_session_root(session_id: str) -> Path | None:
     except (OSError, ValueError):
         return None
     return None
+
+
+def session_repository_root(cwd: Path, *, harness: str) -> Path:
+    """Publish the session's own checkout, not an arbitrary wired ancestor.
+
+    The nearest Git root at or below the wired workspace wins; a wired project
+    inside a larger repository keeps its own boundary.
+    """
+    from .wiring import resolve_wired_target
+
+    cwd = cwd.resolve()
+    wired = resolve_wired_target(str(cwd), harness=harness)
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".git").exists():
+            if wired is None or candidate == wired or wired in candidate.parents:
+                return candidate
+            break
+        if candidate == wired:
+            break
+    return wired or cwd
