@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `context handoff --json` for body-free, locally bound Codex instruction accounting, complete source hashes, and selection observations.
+
 - Document native T3 result closeout and recovery of reviewed work notes after a session ends.
 - Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
 - Fleet Hub Overview shows an idle machine's last run report age beside its separately labeled telemetry age, including `never` and `unknown` history.

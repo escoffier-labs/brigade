@@ -9,6 +9,7 @@ from __future__ import annotations
 import os
 import stat
 from contextlib import ExitStack
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,10 @@ from .budgets import bootstrap_budget
 SOURCE_COMMIT = "a956835d020762cb2b570053af06f643a11c0ecc"
 RESOURCE_MAX_BYTES = 1024 * 1024  # Brigade ceiling, never a consumer-cap clamp.
 RESOURCE_MAX_LIST_ENTRIES = 64  # Raw counts, before normalization or discovery.
+HANDOFF_MAX_SOURCE_BYTES = 1024 * 1024
+HANDOFF_MAX_TOTAL_BYTES = 8 * 1024 * 1024
+HANDOFF_MAX_SOURCES = 256
+HANDOFF_MAX_DIRECTORIES = 128
 RUST_WHITESPACE = "\t\n\v\f\r \x85\xa0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 
 # Native capabilities are fixed at import, independent of later instrumentation.
@@ -31,6 +36,13 @@ _POSIX_NOFOLLOW_SUPPORTED = (
 _Selection = tuple[int, list[str], tuple[str, os.stat_result] | None]
 _DirectoryBinding = tuple[int | None, str, int]
 _MarkerObservation = tuple[int, str, os.stat_result | None]
+
+
+class _HandoffEvidence:
+    def __init__(self) -> None:
+        self.observations: list[_MarkerObservation] = []
+        self.sources: list[dict[str, Any]] = []
+        self.held_sources: list[tuple[int, os.stat_result]] = []
 
 
 class _Boundary(Exception):
@@ -142,9 +154,13 @@ def _revalidate_markers(observations: list[_MarkerObservation]) -> None:
             raise _Boundary("root_marker_changed")
 
 
-def _candidate(fd: int, names: list[str]) -> tuple[str, os.stat_result] | None:
+def _candidate(
+    fd: int, names: list[str], observations: list[_MarkerObservation] | None = None
+) -> tuple[str, os.stat_result] | None:
     for name in names:
         info = _metadata(fd, name)
+        if observations is not None:
+            observations.append((fd, name, info))
         if info is not None and stat.S_ISREG(info.st_mode):
             return name, info
     return None
@@ -165,7 +181,15 @@ def _revalidate(selections: list[_Selection]) -> None:
             raise _Boundary("selection_changed")
 
 
-def _read(fd: int, name: str, selected: os.stat_result, limit: int) -> bytes:
+def _read(
+    fd: int,
+    name: str,
+    selected: os.stat_result,
+    limit: int,
+    *,
+    stack: ExitStack | None = None,
+    evidence: _HandoffEvidence | None = None,
+) -> bytes:
     held = None
     try:
         held = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
@@ -184,7 +208,17 @@ def _read(fd: int, name: str, selected: os.stat_result, limit: int) -> bytes:
         named = _metadata(fd, name)
         if _fingerprint(before) != _fingerprint(after) or named is None or _fingerprint(named) != _fingerprint(after):
             raise _Boundary("file_changed")
-        return b"".join(chunks)[:limit]
+        raw = b"".join(chunks)
+        if evidence is not None and stack is not None:
+            if len(raw) > limit:
+                raise _Boundary("handoff_resource_limit")
+            if len(raw) != before.st_size:
+                raise _Boundary("file_changed")
+            evidence.held_sources.append((held, before))
+            stack.callback(os.close, held)
+            held = None
+            return raw
+        return raw[:limit]
     except _Boundary:
         raise
     except (TypeError, NotImplementedError):
@@ -240,6 +274,9 @@ def _project(
     markers: list[str],
     names: list[str],
     cap: int,
+    *,
+    stack: ExitStack | None = None,
+    evidence: _HandoffEvidence | None = None,
 ) -> list[_Selection]:
     start = len(directories) - 1
     if markers:
@@ -261,34 +298,52 @@ def _project(
     selections: list[_Selection] = []
     candidates: list[tuple[int, str, os.stat_result, dict[str, Any]]] = []
     for prefix, fd in directories[start:]:
-        selected = _candidate(fd, names)
+        selected = _candidate(fd, names, evidence.observations if evidence is not None else None)
         selections.append((fd, names, selected))
         if selected is None:
             continue
         name, info = selected
         cumulative += info.st_size
+        if evidence is not None and (
+            len(candidates) >= HANDOFF_MAX_SOURCES
+            or info.st_size > HANDOFF_MAX_SOURCE_BYTES
+            or cumulative > HANDOFF_MAX_TOTAL_BYTES
+        ):
+            raise _Boundary("handoff_resource_limit")
         path = f"{prefix}/{name}".lstrip("/")
         row = _row("project", path, info, len(result["files"]) + 1, cumulative)
         result["files"].append(row)
         candidates.append((fd, name, info, row))
     remaining = cap
+    acquired = 0
     for fd, name, info, row in candidates:
-        if remaining == 0:
-            row.update(consumed_raw_bytes=0, rendered_utf8_bytes=0, contribution="cap_exhausted")
-            continue
-        raw = _read(fd, name, info, remaining)
-        text = raw.decode("utf-8", errors="replace")
-        if not text.strip(RUST_WHITESPACE):
-            row.update(consumed_raw_bytes=0, rendered_utf8_bytes=0, contribution="empty")
-            continue
-        row.update(
-            consumed_raw_bytes=len(raw),
-            rendered_utf8_bytes=len(text.encode("utf-8")),
-            contribution="truncated" if info.st_size > remaining else "loaded",
-        )
-        remaining -= len(raw)
+        if evidence is not None:
+            limit = min(HANDOFF_MAX_SOURCE_BYTES, HANDOFF_MAX_TOTAL_BYTES - acquired)
+            raw = _read(fd, name, info, limit, stack=stack, evidence=evidence)
+            acquired += len(raw)
+            evidence.sources.append({"path": row["path"], "info": info, "sha256": sha256(raw).hexdigest()})
+        else:
+            raw = _read(fd, name, info, remaining) if remaining else b""
+        remaining = _account_project(row, raw[:remaining], remaining, info.st_size)
     result["totals"]["project"] = _totals(result["files"], "project")
     return selections
+
+
+def _account_project(row: dict[str, Any], raw: bytes, remaining: int, size: int) -> int:
+    """Account exactly the decoded prefix used by Codex, without trimming it."""
+    if remaining == 0:
+        row.update(consumed_raw_bytes=0, rendered_utf8_bytes=0, contribution="cap_exhausted")
+        return remaining
+    text = raw.decode("utf-8", errors="replace")
+    if not text.strip(RUST_WHITESPACE):
+        row.update(consumed_raw_bytes=0, rendered_utf8_bytes=0, contribution="empty")
+        return remaining
+    row.update(
+        consumed_raw_bytes=len(raw),
+        rendered_utf8_bytes=len(text.encode("utf-8")),
+        contribution="truncated" if size > remaining else "loaded",
+    )
+    return remaining - len(raw)
 
 
 def _global(
