@@ -579,7 +579,7 @@ def _add_question(conn):
 
 
 def test_fresh_database_reaches_schema_45_with_questions_and_paging(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 46
+    assert fleet_hub.SCHEMA_VERSION == 47
     conn = fleet_hub.init_db(tmp_path / "fleet.db")
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
@@ -651,3 +651,41 @@ def test_schema_44_missing_question_objects_are_repaired_at_startup(tmp_path, da
         assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
     finally:
         conn.close()
+
+
+def _teammate_reader(conn):
+    messages.add_principal(conn, {"name": "guest", "may_send_to": ["*"]})
+    conn.execute("UPDATE fleet_message_principals SET role='teammate',person='Example' WHERE name='guest'")
+    conn.commit()
+
+
+def test_teammate_claims_refused_before_cursor_loading(directory):
+    _teammate_reader(directory)
+    with pytest.raises(messages.MessageForbidden) as exc:
+        messages.handle(directory, {"action": "claims", "cursor": "malformed"}, caller="agent:guest")
+    assert exc.value.code == "principal_role_forbidden"
+
+
+def test_role_change_invalidates_privileged_directory_cursor(directory):
+    roster(directory, 3)
+    messages.add_principal(directory, {"name": "guest", "may_send_to": ["*"]})
+    first = messages.handle(directory, {"action": "who", "limit": 1}, caller="agent:guest")[1]
+    directory.execute("UPDATE fleet_message_principals SET role='teammate' WHERE name='guest'")
+    directory.commit()
+    with pytest.raises(messages.MessageError, match="cursor"):
+        messages.handle(directory, {"action": "who", "limit": 1, "cursor": first["next_cursor"]}, caller="agent:guest")
+
+
+def test_teammate_directory_continuation_rechecks_current_grants(directory):
+    from brigade import fleet_hub_message_grants as grants
+
+    roster(directory, 4)
+    _teammate_reader(directory)
+    first = messages.handle(directory, {"action": "who", "limit": 1}, caller="agent:guest")[1]
+    grants.set_grants(directory, {"action": "grants", "name": "guest", "may_send_to": ["node-0003", "agent:peer-0003"]})
+    second = messages.handle(
+        directory, {"action": "who", "limit": 1, "cursor": first["next_cursor"]}, caller="agent:guest"
+    )[1]
+    assert second["nodes"] == [{"node_id": "node-0003"}]
+    assert second["principals"] == [{"principal_id": "agent:peer-0003", "label": "peer-0003"}]
+    assert second["sessions"] == []

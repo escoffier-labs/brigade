@@ -1473,6 +1473,11 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path == "/audit":
+                from .fleet_hub_audit_http import serve_get
+
+                serve_get(self, query, Path(db_path), open_db=open_db)
+                return
             if path in ("/deck/ci", "/ci", "/ci/work"):
                 from .fleet_ci_http import route
 

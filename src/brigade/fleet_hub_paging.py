@@ -49,13 +49,18 @@ _SCHEMA: tuple[tuple[str, str, str], ...] = (
 # Cache each row's current visibility and maintain totals with deltas, so even a
 # narrowed grant can seek past a large forbidden prefix without reading it.
 _VISIBLE_SQL = """(
-    (caller NOT GLOB 'agent:*' OR (recipient != caller AND EXISTS (
-        SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller
-        AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)
-    ))) AND (
+    (
+        (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c
+            WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR
+        (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c
+            WHERE c.principal_id=caller AND c.revoked_at IS NULL
+            AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals'))))
+            AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller
+                AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))
+    ) AND (
         kind='claims' OR
         (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p
-            WHERE p.principal_id=recipient AND p.revoked_at IS NULL)) OR
+            WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR
         (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n
             WHERE n.node_id=recipient AND n.revoked_at IS NULL))
     )
@@ -110,16 +115,22 @@ _SCHEMA += (
     ),
 )
 for _table, _identity, _scope in (
-    ("nodes", "node_id", "kind IN ('nodes','sessions')"),
-    ("fleet_message_principals", "principal_id", "kind='principals'"),
+    ("nodes", "node_id", "1"),
+    ("fleet_message_principals", "principal_id", "1"),
     ("fleet_message_send_grants", "principal_id", "1"),
 ):
     for _event, _refs in (("INSERT", ("NEW",)), ("DELETE", ("OLD",)), ("UPDATE", ("OLD", "NEW"))):
         _name = f"fleet_read_visibility_{_table}_{_event.lower()}"
         _column = "caller" if _table == "fleet_message_send_grants" else "recipient"
         _matches = " OR ".join(f"{_column}={ref}.{_identity}" for ref in _refs)
+        if _table != "fleet_message_send_grants":
+            _matches += " OR " + " OR ".join(f"caller={ref}.{_identity}" for ref in _refs)
         _event_sql = (
-            "UPDATE OF pattern,principal_id" if _table == "fleet_message_send_grants" else "UPDATE OF revoked_at"
+            "UPDATE OF pattern,principal_id"
+            if _table == "fleet_message_send_grants"
+            else "UPDATE OF revoked_at,role"
+            if _table == "fleet_message_principals"
+            else "UPDATE OF revoked_at"
         )
         _SCHEMA += (
             (
@@ -150,6 +161,15 @@ def missing_schema(conn: sqlite3.Connection) -> list[str]:
         for kind, name, ddl in _SCHEMA
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type=? AND name=?", (kind, name)).fetchone() is None
     ]
+    repaired = False
+    for kind, name, ddl in _SCHEMA:
+        if kind == "trigger" and name.startswith("fleet_read_visibility_"):
+            old = conn.execute("SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?", (name,)).fetchone()
+            if old and old[0] != ddl.replace("IF NOT EXISTS ", ""):
+                missing.extend([f"DROP TRIGGER {name}", ddl])
+                repaired = True
+    if repaired:
+        missing.append(f"UPDATE fleet_read_snapshot_rows SET visible={_VISIBLE_SQL}")
     columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_read_snapshots)")}
     if columns and "last_access" not in columns:
         missing.extend(
@@ -174,16 +194,21 @@ def page_limit(raw: dict[str, Any]) -> int:
 
 
 def query_hash(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> str:
-    # Bind to the current credential without putting its fingerprint in the cursor.
+    from .fleet_hub_message_grants import classify_principal
+
+    role = classify_principal(conn, caller)
+    if role is None:
+        raise MessageError("paging caller is not active")
+    # Bind role and credential without exposing either in the cursor.
     statement = (
         "SELECT token_hash FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL"
-        if caller.startswith("agent:")
+        if role != "node"
         else "SELECT token_sha256 FROM nodes WHERE node_id=? AND revoked_at IS NULL"
     )
     credential = conn.execute(statement, (caller,)).fetchone()
     if credential is None:
         raise MessageError("paging caller is not active")
-    query = [raw["action"], raw.get("all", False), raw.get("filter", "").casefold(), credential[0]]
+    query = [raw["action"], raw.get("all", False), raw.get("filter", "").casefold(), credential[0], role]
     return hashlib.sha256(json.dumps(query).encode()).hexdigest()
 
 

@@ -109,7 +109,8 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     revoke.add_argument("--json", action="store_true")
     revoke.set_defaults(func=_principal_revoke)
     grants = principal_sub.add_parser("grants", help="Replace an external principal's send grants.")
-    grants.add_argument("name")
+    grants.add_argument("name", nargs="?")
+    grants.add_argument("--node", dest="node_id")
     grant_options = grants.add_mutually_exclusive_group(required=True)
     grant_options.add_argument("--may-send-to", nargs="+", action="extend")
     grant_options.add_argument("--clear", action="store_true")
@@ -332,7 +333,10 @@ def _principal_grants(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
     return _result(
-        args, lambda: fleet_client_messages.set_principal_grants(args.name, [] if args.clear else args.may_send_to)
+        args,
+        lambda: fleet_client_messages.set_principal_grants(
+            args.name, [] if args.clear else args.may_send_to, node_id=args.node_id
+        ),
     )
 
 

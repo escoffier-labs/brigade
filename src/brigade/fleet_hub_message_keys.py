@@ -159,7 +159,7 @@ def get(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[s
     decode_binary(raw["kid"][3:], 16)
     row = conn.execute(f"SELECT {COLUMNS} FROM fleet_message_keys WHERE kid=?", (raw["kid"],)).fetchone()
     patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
-    if row is None or not grants.permits(patterns, caller, row[0]):
+    if row is None or not grants.permits(conn, patterns, caller, row[0]):
         return None
     return {"key": _entry(row)}
 

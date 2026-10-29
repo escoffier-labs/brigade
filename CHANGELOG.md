@@ -62,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add database-backed teammate roles, reciprocal send grants, node grant administration, reduced directory reads, and admin-only audit paging. Grant and revocation audit rows commit with their mutations (#2041).
 - Add offline Fleet key initialization, public inspection and export, and local rotation with explicit scope and fixed diagnostics. These commands perform no publication or trust acceptance.
 
 - Add offline client peer-key acceptance, rotation history, and local trust checks. Bound peer admission, recheck revoked continuity dependencies, and refuse far-future key dates. CLI/MCP encryption remains unfinished.

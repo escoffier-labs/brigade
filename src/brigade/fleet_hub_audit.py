@@ -26,6 +26,12 @@ Callers must supply public identifiers: no syntax check can distinguish every
 unmarked credential from a same-shaped public identity. Never pass credentials
 as identifiers. The reserved literal ``unknown`` is refused.
 
+Mutation callers may explicitly identify canonical public identities through
+``known_public_identifiers``. Exact listed values may bypass credential markers
+only in subject, principal_id, node_id and nonwildcard grants. Actor and all
+nonidentity fields stay strict. This provenance is never stored or read from
+detail; callers establish it from database targets and validated grant patterns.
+
 Roles are agent or teammate. Grants are at most 64 identifiers or the exact
 wildcards *, node:*, agent:*. Count is an integer in 0..1,000,000 (not bool).
 Nested/free-text fields, arbitrary keys and recognizable credentials are refused
@@ -113,12 +119,23 @@ _CREDENTIAL = re.compile(
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{32,}")
 
 
-def _identifier(value: object, *, principal: bool = False, identity: bool = False, admission: bool = True) -> str:
+def _identifier(
+    value: object,
+    *,
+    principal: bool = False,
+    identity: bool = False,
+    admission: bool = True,
+    known_public_identifiers: frozenset[str] = frozenset(),
+) -> str:
     if (
         not isinstance(value, str)
         or value == "unknown"
         or len(value) > 128
-        or (admission and _CREDENTIAL.search(value))
+        or (
+            admission
+            and (not known_public_identifiers or value not in known_public_identifiers)
+            and _CREDENTIAL.search(value)
+        )
         or (not identity and _OPAQUE.search(value))
     ):
         raise ValueError("invalid audit identifier")
@@ -134,7 +151,9 @@ def _action(value: object) -> Action:
     return cast(Action, value)
 
 
-def _detail(raw: object, *, admission: bool = True) -> AuditDetail:
+def _detail(
+    raw: object, *, admission: bool = True, known_public_identifiers: frozenset[str] = frozenset()
+) -> AuditDetail:
     if not isinstance(raw, dict) or not raw.keys() <= _ID_FIELDS | {"role", "grants", "count"}:
         raise ValueError("invalid audit detail fields")
     result = dict(raw)
@@ -145,6 +164,9 @@ def _detail(raw: object, *, admission: bool = True) -> AuditDetail:
                 principal=field == "principal_id",
                 identity=field in ("principal_id", "node_id"),
                 admission=admission,
+                known_public_identifiers=known_public_identifiers
+                if field in ("principal_id", "node_id")
+                else frozenset(),
             )
         elif field == "role":
             if not isinstance(value, str) or value not in ("agent", "teammate"):
@@ -159,7 +181,13 @@ def _detail(raw: object, *, admission: bool = True) -> AuditDetail:
                 if not isinstance(pattern, str):
                     raise ValueError("invalid audit grant pattern")
                 if pattern not in ("*", "node:*", "agent:*"):
-                    _identifier(pattern, principal=True, identity=True, admission=admission)
+                    _identifier(
+                        pattern,
+                        principal=True,
+                        identity=True,
+                        admission=admission,
+                        known_public_identifiers=known_public_identifiers,
+                    )
             result[field] = list(value)
     return cast(AuditDetail, result)
 
@@ -188,18 +216,45 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         SELECT RAISE(ABORT, 'audit log is append-only'); END""")
 
 
-def append(conn: sqlite3.Connection, *, actor: str, action: Action, subject: str, detail: AuditDetail) -> int:
+def append(
+    conn: sqlite3.Connection,
+    *,
+    actor: str,
+    action: Action,
+    subject: str,
+    detail: AuditDetail,
+    known_public_identifiers: frozenset[str] = frozenset(),
+) -> int:
     """Validate and append in the caller's transaction; return the new row id.
 
     Invalid input raises ValueError without including submitted values or issuing
     a write. SQLite errors propagate. This never commits or rolls back, including
     on failure. An active transaction is required unless legacy transaction control
     with non-None isolation_level lets SQLite open an implicit transaction.
+
+    The optional context is exact-value caller provenance for public identity
+    slots, never raw detail or HTTP input. It does not relax structural checks,
+    actor admission, or nonidentity fields. Every member must occupy an allowed
+    identity slot in this append. Default admission remains strict.
     """
+    if type(known_public_identifiers) is not frozenset or len(known_public_identifiers) > 67:
+        raise ValueError("invalid audit public identifier context")
+    for context_identity in known_public_identifiers:
+        _identifier(context_identity, principal=True, identity=True, admission=False)
     actor = _identifier(actor, principal=True, identity=True)
-    subject = _identifier(subject, principal=True, identity=True)
+    subject = _identifier(subject, principal=True, identity=True, known_public_identifiers=known_public_identifiers)
     action = _action(action)
-    validated = _detail(detail)
+    validated = _detail(detail, known_public_identifiers=known_public_identifiers)
+    allowed_identities = {subject}
+    for field in ("principal_id", "node_id"):
+        value = validated.get(field)
+        if isinstance(value, str):
+            allowed_identities.add(value)
+    allowed_identities.update(
+        pattern for pattern in validated.get("grants", []) if pattern not in ("*", "node:*", "agent:*")
+    )
+    if not known_public_identifiers <= allowed_identities:
+        raise ValueError("invalid audit public identifier context")
     legacy_control = getattr(sqlite3, "LEGACY_TRANSACTION_CONTROL", None)
     implicit_transaction = getattr(conn, "autocommit", None) == legacy_control and conn.isolation_level is not None
     if not conn.in_transaction and not implicit_transaction:
