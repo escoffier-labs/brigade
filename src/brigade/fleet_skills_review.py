@@ -18,8 +18,9 @@ from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from . import __version__, outcome
+from .localio import canonical_json_digest
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_ROWS = 500
 MAX_TEXT = 120
 MAX_REPORT_BYTES = 1024 * 1024
@@ -62,6 +63,7 @@ _COPY_KEYS = {
     "registry_sha256",
     "rollback_available",
     "update_selector",
+    "binding",
 }
 _SCORE_KEYS = {
     "artifact_id",
@@ -174,19 +176,31 @@ def _rows(value: Any, field_name: str) -> list[Any]:
     return value
 
 
+def validate_binding(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    from .skills_cmd.registry import _validate_expected_binding
+
+    try:
+        return _validate_expected_binding(value)
+    except ValueError as exc:
+        raise SkillsReportError(str(exc)) from exc
+
+
 def validate_report(raw: Any) -> dict[str, Any]:
     """Return the normalised report, or raise ``SkillsReportError``."""
     top = _closed(raw, _TOP_KEYS, "report", required=_TOP_KEYS - {"truncated", "registry_revision"})
-    if top["schema_version"] != SCHEMA_VERSION or isinstance(top["schema_version"], bool):
+    if top["schema_version"] not in (1, SCHEMA_VERSION) or isinstance(top["schema_version"], bool):
         raise SkillsReportError(f"schema_version must be {SCHEMA_VERSION}")
     observed = _parse(top["observed_at"])
     if observed is None:
         raise SkillsReportError("observed_at must be an ISO timestamp")
     version = _text(top["brigade_version"], "brigade_version")
     assert version is not None
-    copies = []
+    copies: list[dict[str, Any]] = []
+    copy_keys: set[tuple[str, str]] = set()
     for row in _rows(top["copies"], "copies"):
-        row = _closed(row, _COPY_KEYS, "copy", required=_COPY_KEYS - {"update_selector"})
+        row = _closed(row, _COPY_KEYS, "copy", required=_COPY_KEYS - {"update_selector", "binding"})
         selector = _text(row.get("update_selector"), "update_selector", optional=True)
         copies.append(
             {
@@ -197,8 +211,24 @@ def validate_report(raw: Any) -> dict[str, Any]:
                 "registry_sha256": _sha(row["registry_sha256"], "registry_sha256"),
                 "rollback_available": _flag(row["rollback_available"], "rollback_available"),
                 "update_selector": selector,
+                "binding": validate_binding(row.get("binding")) if top["schema_version"] == 2 else None,
             }
         )
+        copy = copies[-1]
+        key = (copy["skill_id"], copy["harness"])
+        if key in copy_keys:
+            raise SkillsReportError("duplicate skill and harness copy")
+        copy_keys.add(key)
+        binding = copy["binding"]
+        if binding is not None and any(
+            binding[field] != copy[enclosing]
+            for field, enclosing in (
+                ("skill_id", "skill_id"),
+                ("harness", "harness"),
+                ("source_selector", "update_selector"),
+            )
+        ):
+            raise SkillsReportError("copy binding does not match enclosing copy")
     conflicts = []
     for row in _rows(top["conflicts"], "conflicts"):
         row = _closed(row, _CONFLICT_KEYS, "conflict")
@@ -235,7 +265,7 @@ def validate_report(raw: Any) -> dict[str, Any]:
         )
     revision = top.get("registry_revision")
     return {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": top["schema_version"],
         "brigade_version": version,
         "observed_at": _iso(observed),
         "registry_revision": _text(revision, "registry_revision", optional=True),
@@ -249,6 +279,8 @@ def validate_report(raw: Any) -> dict[str, Any]:
 
 def store_report(conn: sqlite3.Connection, node_id: str, raw: Any, *, now: datetime | None = None) -> dict[str, Any]:
     report = validate_report(raw)
+    if any(c.get("binding") is not None and c["binding"]["node"] != node_id for c in report["copies"]):
+        raise SkillsReportError("copy binding node does not match authenticated reporter")
     encoded = json.dumps(report, sort_keys=True, separators=(",", ":"))
     if len(encoded.encode("utf-8")) > MAX_REPORT_BYTES:
         raise SkillsReportError("report exceeds the size limit")
@@ -294,6 +326,7 @@ class Copy:
     rollback_available: bool
     update_selector: str | None
     old_install: bool
+    binding: dict[str, Any] | None = None
 
     @property
     def key(self) -> str:
@@ -434,6 +467,7 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None, hub_vers
                     row["rollback_available"],
                     row["update_selector"],
                     machine.old_install,
+                    row.get("binding"),
                 )
             )
         for row in report["conflicts"]:
@@ -595,8 +629,33 @@ def allowed(skill: Skill, decision: str, copy: Copy | None = None) -> bool:
     return True
 
 
+def review_token(skill: Skill) -> str:
+    """Bind the displayed complete copy set, including absent provenance."""
+    return canonical_json_digest(
+        {
+            "skill": skill.skill_id,
+            "copies": [
+                {
+                    "node": c.node_id,
+                    "harness": c.harness,
+                    "status": c.status,
+                    "selector": c.update_selector,
+                    "binding": c.binding,
+                }
+                for c in sorted(skill.copies, key=lambda c: c.key)
+            ],
+        }
+    )
+
+
 def save_decision(
-    conn: sqlite3.Connection, view: SkillsView, skill_id: str, decision: str, overrides: Mapping[str, str]
+    conn: sqlite3.Connection,
+    view: SkillsView,
+    skill_id: str,
+    decision: str,
+    overrides: Mapping[str, str],
+    *,
+    display_token: str | None = None,
 ) -> None:
     skill = next((item for item in view.skills if item.skill_id == skill_id), None)
     if skill is None:
@@ -604,6 +663,8 @@ def save_decision(
     if not allowed(skill, decision):
         raise DecisionError(f"{DECISION_LABELS.get(decision, decision)} is not available for this skill")
     copies = {copy.key: copy for copy in skill.copies}
+    if len(copies) != len(skill.copies):
+        raise DecisionError("review-stale: duplicate copies require a current report")
     kept: dict[str, str] = {}
     for key, choice in overrides.items():
         if choice == "":
@@ -612,11 +673,22 @@ def save_decision(
         if copy is None or not allowed(skill, choice, copy):
             raise DecisionError("that choice is not available for the selected machine")
         kept[key] = choice
+    token = review_token(skill)
+    if decision != "keep" or kept:
+        if display_token != token:
+            raise DecisionError("review-stale: displayed copies changed; reload and review")
+        if any(c.binding is None for c in skill.copies):
+            raise DecisionError("review-stale: exact package provenance missing; publish a current report")
     draft = load_draft(conn)
     if decision == "keep" and not kept:
         draft.pop(skill_id, None)
     else:
-        draft[skill_id] = {"default": decision, "machines": kept}
+        draft[skill_id] = {
+            "default": decision,
+            "machines": kept,
+            "display_token": token,
+            "copies": {c.key: {"decision": kept.get(c.key) or decision, "binding": c.binding} for c in skill.copies},
+        }
     _write_draft(conn, draft)
 
 
@@ -639,6 +711,7 @@ class PlanItem:
 @dataclass(frozen=True)
 class Plan:
     items: tuple[PlanItem, ...] = field(default_factory=tuple)
+    blockers: tuple[str, ...] = ()
 
     @property
     def count(self) -> int:
@@ -666,20 +739,39 @@ def command_for(action: str, copy: Copy, skill_id: str) -> str:
         argv = ["brigade", "skills", "rollback", skill_id, "--target", copy.harness]
     else:
         raise DecisionError(f"no command for {action}")
+    if copy.binding is None:
+        raise DecisionError("review-stale: exact package provenance missing")
+    argv += ["--expected-binding-json", json.dumps(copy.binding, sort_keys=True, separators=(",", ":"))]
     return shlex.join(argv)
 
 
 def build_plan(view: SkillsView, draft: Mapping[str, Any]) -> Plan:
     items: list[PlanItem] = []
+    blockers: list[str] = []
     for skill in view.skills:
         entry = draft.get(skill.skill_id)
         if not isinstance(entry, dict):
             continue
-        default = entry.get("default", "keep")
-        raw_machines = entry.get("machines")
-        machines: dict[str, Any] = raw_machines if isinstance(raw_machines, dict) else {}
+        if entry.get("display_token") != review_token(skill) or any(c.binding is None for c in skill.copies):
+            blockers.append(f"review-stale: {skill.skill_id}: copies or binding changed or missing")
+            continue
+        approved = entry.get("copies")
+        if (
+            not isinstance(approved, dict)
+            or len(approved) != len(skill.copies)
+            or set(approved) != {c.key for c in skill.copies}
+        ):
+            blockers.append(f"review-stale: {skill.skill_id}: explicit copy approval missing")
+            continue
+        if any(
+            not isinstance(approved.get(copy.key), dict) or approved[copy.key].get("binding") != copy.binding
+            for copy in skill.copies
+        ):
+            blockers.append(f"review-stale: {skill.skill_id}: binding changed")
+            continue
         for copy in skill.copies:
-            action = machines.get(copy.key) or default
+            saved = approved[copy.key]
+            action = saved.get("decision")
             if action not in {"update", "remove", "rollback"} or not allowed(skill, action, copy):
                 continue
             items.append(
@@ -692,8 +784,10 @@ def build_plan(view: SkillsView, draft: Mapping[str, Any]) -> Plan:
                     command_for(action, copy, skill.skill_id),
                 )
             )
+    for skill_id in set(draft) - {skill.skill_id for skill in view.skills}:
+        blockers.append(f"review-stale: {skill_id}: reporting copies missing")
     items.sort(key=lambda i: (i.machine, i.harness, i.skill_id))
-    return Plan(tuple(items))
+    return Plan(tuple(items), tuple(blockers))
 
 
 def plan_summary(plan: Plan) -> dict[str, Any]:

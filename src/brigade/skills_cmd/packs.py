@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -70,6 +72,7 @@ def _skill_pack_payload(target: Path) -> dict[str, Any]:
     return payload
 
 
+@skill_command
 def pack_build(*, target: Path, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
@@ -429,6 +432,7 @@ def _anchored_pack_manifest(anchor: _registry_mod._StateRootAnchor, name: str) -
     return _anchored_pack_manifest_at(anchor, "skills", "packs", name)
 
 
+@skill_command
 def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     archive_root = _registry_mod._skill_packs_archive_root(target)
@@ -577,6 +581,7 @@ def _pack_import_from_dir(
     return 0 if not errors else 1
 
 
+@skill_command
 def pack_import(*, target: Path, pack: Path, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     raw_pack = Path(pack).expanduser()

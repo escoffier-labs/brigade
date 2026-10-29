@@ -77,11 +77,14 @@ def post_form(handler: Any, db_path: Path, token: str) -> None:
     try:
         conn = fleet_hub.open_db(db_path)
         try:
+            conn.execute("BEGIN IMMEDIATE")
             view = review.load_view(conn)
             if action == "save":
                 overrides = {name[3:]: values[0] for name, values in fields.items() if name.startswith("ov:")}
                 try:
-                    review.save_decision(conn, view, one("skill"), one("decision"), overrides)
+                    review.save_decision(
+                        conn, view, one("skill"), one("decision"), overrides, display_token=one("display_token")
+                    )
                 except review.DecisionError as exc:
                     handler._send_html(422, f"{exc}\n", content_type=PLAIN)
                     return

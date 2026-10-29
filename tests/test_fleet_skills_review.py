@@ -31,7 +31,30 @@ NODES = {LINUX1: "worker-linux-1", LINUX2: "worker-linux-2", WINDOWS1: "worker-w
 SLOTS = {"linux1": LINUX1, "linux2": LINUX2, "windows1": WINDOWS1}
 
 
-def seeded(tmp_path, *, only=None):
+def fake_binding(skill_id, harness, selector, node_id=LINUX1):
+    return {
+        "schema_version": 1,
+        "node": node_id,
+        "workspace": "a" * 64,
+        "skill_id": skill_id,
+        "harness": harness,
+        "source_selector": selector,
+        "installed": "b" * 64,
+        "source": "c" * 64,
+        "target": "c" * 64,
+        "rollback": "d" * 64,
+        "contract": None,
+        "evaluation": None,
+    }
+
+
+def save_review(conn, view, name, decision, overrides):
+    return review.save_decision(
+        conn, view, name, decision, overrides, display_token=review.review_token(skill(view, name))
+    )
+
+
+def seeded(tmp_path, *, only=None, bindings=False):
     path = tmp_path / "hub" / "fleet.db"
     path.parent.mkdir(parents=True, exist_ok=True)
     fleet_hub.init_db(path).close()
@@ -41,6 +64,10 @@ def seeded(tmp_path, *, only=None):
         _status, payload = fleet_hub.handle_node_request(conn, {"action": "add", "node_id": node, "label": label})
         tokens[node] = payload["token"]
     for slot, report in fixture.reports(NOW, hub_version=__version__).items():
+        if bindings:
+            report["schema_version"] = 2
+            for row in report["copies"]:
+                row["binding"] = fake_binding(row["skill_id"], row["harness"], row.get("update_selector"), SLOTS[slot])
         if only is None or slot in only:
             review.store_report(conn, SLOTS[slot], report, now=NOW)
     return conn, path, tokens
@@ -196,7 +223,7 @@ def _valid():
     "mutate",
     [
         lambda r: r.update(extra=1),
-        lambda r: r.update(schema_version=2),
+        lambda r: r.update(schema_version=3),
         lambda r: r["copies"][0].update(skill_id="/home/someone/skill"),  # content-guard: allow home-path
         lambda r: r["copies"][0].update(harness="C:\\Users\\someone"),  # content-guard: allow windows-home-path
         lambda r: r["copies"][0].update(status="exploded"),
@@ -387,7 +414,7 @@ def test_no_em_dashes_in_copy(tmp_path):
 
 
 def test_save_decision_enforces_availability_and_overrides(tmp_path):
-    conn, _path, _tokens = seeded(tmp_path)
+    conn, _path, _tokens = seeded(tmp_path, bindings=True)
     view = view_for(conn)
     with pytest.raises(review.DecisionError):
         review.save_decision(conn, view, "sample-format", "rollback", {})
@@ -396,21 +423,21 @@ def test_save_decision_enforces_availability_and_overrides(tmp_path):
     with pytest.raises(review.DecisionError):
         review.save_decision(conn, view, "no-such-skill", "remove", {})
     with pytest.raises(review.DecisionError):
-        review.save_decision(conn, view, "sample-lint", "keep", {"nonsense|claude": "remove"})
-    review.save_decision(conn, view, "sample-lint", "update", {f"{LINUX2}|claude": "remove"})
-    assert review.load_draft(conn) == {"sample-lint": {"default": "update", "machines": {f"{LINUX2}|claude": "remove"}}}
-    review.save_decision(conn, view, "sample-lint", "keep", {})
+        save_review(conn, view, "sample-lint", "keep", {"nonsense|claude": "remove"})
+    save_review(conn, view, "sample-lint", "update", {f"{LINUX2}|claude": "remove"})
+    assert review.load_draft(conn)["sample-lint"]["copies"][f"{LINUX2}|claude"]["decision"] == "remove"
+    save_review(conn, view, "sample-lint", "keep", {})
     assert review.load_draft(conn) == {}
 
 
 def test_plan_groups_commands_and_matches_the_real_cli(tmp_path):
     from brigade.cli import _build_parser
 
-    conn, _path, _tokens = seeded(tmp_path)
+    conn, _path, _tokens = seeded(tmp_path, bindings=True)
     view = view_for(conn)
-    review.save_decision(conn, view, "sample-lint", "update", {f"{LINUX2}|claude": "remove"})
-    review.save_decision(conn, view, "sample-review", "rollback", {})
-    review.save_decision(conn, view, "sample-deploy", "remove", {})
+    save_review(conn, view, "sample-lint", "update", {f"{LINUX2}|claude": "remove"})
+    save_review(conn, view, "sample-review", "rollback", {})
+    save_review(conn, view, "sample-deploy", "remove", {})
     plan = review.build_plan(view, review.load_draft(conn))
     actions = {name: len(items) for name, items in plan.by_action().items()}
     # lint: linux1 update (stale), linux2 remove; review: rollback only where a snapshot exists; deploy: 2 copies removed
@@ -418,7 +445,8 @@ def test_plan_groups_commands_and_matches_the_real_cli(tmp_path):
     assert plan.count == 5
     assert set(plan.by_machine()) == {"worker-linux-1", "worker-linux-2"}
     commands = {item.command for item in plan.items}
-    assert commands == {
+    assert all("--expected-binding-json" in c for c in commands)
+    assert {c.split(" --expected-binding-json")[0] for c in commands} == {
         "brigade skills install registry:sample-lint --target claude --force",
         "brigade skills uninstall sample-lint --target claude",
         "brigade skills rollback sample-review --target claude",
@@ -439,8 +467,9 @@ def test_plan_groups_commands_and_matches_the_real_cli(tmp_path):
 
 def test_shell_metacharacters_in_a_skill_id_are_quoted_in_commands():
     copy_ = review.Copy(LINUX1, "m", "claude", "stale", None, None, False, None, False)
+    copy_ = __import__("dataclasses").replace(copy_, binding=fake_binding("note", "claude", None))
     command = review.command_for("remove", copy_, "a; rm -rf x")
-    assert shlex.split(command) == ["brigade", "skills", "uninstall", "a; rm -rf x", "--target", "claude"]
+    assert shlex.split(command)[:-2] == ["brigade", "skills", "uninstall", "a; rm -rf x", "--target", "claude"]
 
 
 def test_update_needs_a_verified_source_selector():
@@ -450,6 +479,7 @@ def test_update_needs_a_verified_source_selector():
     with pytest.raises(review.DecisionError):
         review.command_for("update", unresolved, "note")
     bundled = review.Copy(LINUX1, "m", "claude", "stale", None, None, False, "bundled:note", False)
+    bundled = __import__("dataclasses").replace(bundled, binding=fake_binding("note", "claude", "bundled:note"))
     assert bundled.updatable
     assert shlex.split(review.command_for("update", bundled, "note"))[3] == "bundled:note"
 
@@ -553,7 +583,8 @@ def test_report_endpoint_requires_a_node_token_and_validates(tmp_path):
 
 
 def test_skills_route_auth_read_only_and_csrf(tmp_path):
-    conn, path, tokens = seeded(tmp_path)
+    conn, path, tokens = seeded(tmp_path, bindings=True)
+    displayed = review.review_token(skill(view_for(conn), "sample-lint"))
     conn.close()
     with Hub(tmp_path, path) as hub:
         assert hub.request("GET", "/deck/skills")[0] == 401
@@ -566,7 +597,14 @@ def test_skills_route_auth_read_only_and_csrf(tmp_path):
         assert hub.request("GET", "/deck/skills/plan", headers={"Cookie": cookie})[0] == 200
 
         csrf = fleet_skills_page.csrf_value(hub.token)
-        fields = {"csrf": csrf, "action": "save", "skill": "sample-lint", "decision": "update", "filter": "needs"}
+        fields = {
+            "display_token": displayed,
+            "csrf": csrf,
+            "action": "save",
+            "skill": "sample-lint",
+            "decision": "update",
+            "filter": "needs",
+        }
         # a read-only cookie identity cannot save, even with a valid token
         assert hub.form(fields, cookie=cookie, admin=False)[0] == 403
         assert hub.form({**fields, "csrf": "wrong"})[0] == 403
@@ -603,7 +641,7 @@ def test_skills_route_auth_read_only_and_csrf(tmp_path):
         assert hub.form({**fields, "decision": "annihilate"})[0] == 422
         assert hub.form({**fields, "action": "explode"})[0] == 400
         verify = fleet_hub.open_db(path)
-        assert review.load_draft(verify) == {"sample-lint": {"default": "update", "machines": {}}}
+        assert review.load_draft(verify)["sample-lint"]["default"] == "update"
         verify.close()
 
         status, _h, page = hub.request("GET", "/deck/skills", headers={"Authorization": f"Bearer {hub.token}"})
