@@ -320,6 +320,158 @@ def test_import_refuses_dangling_destination_run_symlink(tmp_path: Path):
         work_run_archive.import_archive(archive, runs_dir=runs_dir)
 
 
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("relationship", ["same", "ancestor", "descendant"])
+def test_export_refuses_overlapping_trees_without_mutation(tmp_path: Path, force: bool, relationship: str, capsys):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    sibling = _seed_run(tmp_path / "runs" / "20260809-120001-abcdef12")
+    destination = {
+        "same": run_dir,
+        "ancestor": run_dir.parent,
+        "descendant": run_dir / "new" / "archive",
+    }[relationship]
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["runs", "export", str(run_dir), "--output", str(destination), "--json"]
+    if force:
+        args.append("--force")
+
+    assert cli.main(args) == 2
+    assert "directories overlap" in capsys.readouterr().err
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert (sibling / "run.json").is_file()
+    assert not (run_dir / "new").exists()
+    assert not list(tmp_path.rglob("*.staging-*"))
+
+
+@pytest.mark.parametrize("force", [False, True])
+@pytest.mark.parametrize("relationship", ["same", "ancestor", "descendant"])
+def test_import_refuses_overlapping_trees_without_mutation(tmp_path: Path, force: bool, relationship: str, capsys):
+    run_dir = _seed_run(tmp_path / "source" / RUN_ID)
+    destination = tmp_path / "imported" / RUN_ID
+    archive = {
+        "same": destination,
+        "ancestor": destination / "saved-archive",
+        "descendant": tmp_path / "archive",
+    }[relationship]
+    work_run_archive.export_run(run_dir, archive)
+    runs_dir = archive / "new" / "runs" if relationship == "descendant" else destination.parent
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    args = ["runs", "import", str(archive), "--runs-dir", str(runs_dir), "--json"]
+    if force:
+        args.append("--force")
+
+    assert cli.main(args) == 2
+    assert "directories overlap" in capsys.readouterr().err
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+    assert not (archive / "new").exists()
+    assert not list(tmp_path.rglob("*.import-*"))
+    work_run_archive.validate_archive(archive)
+
+
+@pytest.mark.parametrize("operation", ["export", "import"])
+def test_archive_overlap_through_symlinked_parent_is_refused(tmp_path: Path, operation: str):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    alias = tmp_path / "alias"
+    alias.symlink_to(run_dir.parent, target_is_directory=True)
+    if operation == "export":
+        with pytest.raises(WorkRunArchiveError, match="directories overlap"):
+            work_run_archive.export_run(run_dir, alias / RUN_ID, force=True)
+        assert (run_dir / "final.txt").read_text(encoding="utf-8") == "done\n"
+    else:
+        archive = run_dir.parent / "imports" / RUN_ID
+        work_run_archive.export_run(run_dir, archive)
+        with pytest.raises(WorkRunArchiveError, match="directories overlap"):
+            work_run_archive.import_archive(archive, runs_dir=alias / "imports", force=True)
+        work_run_archive.validate_archive(archive)
+
+
+def test_force_archive_replacement_allows_disjoint_sibling_trees(tmp_path: Path):
+    run_dir = _seed_run(tmp_path / "runs" / RUN_ID)
+    archive = run_dir.with_name(f"{RUN_ID}-archive")
+    work_run_archive.export_run(run_dir, archive)
+    work_run_archive.export_run(run_dir, archive, force=True)
+    runs_dir = tmp_path / "imported"
+    work_run_archive.import_archive(archive, runs_dir=runs_dir)
+    work_run_archive.import_archive(archive, runs_dir=runs_dir, force=True)
+    assert (runs_dir / RUN_ID / "final.txt").read_text(encoding="utf-8") == "done\n"
+    assert (run_dir / "final.txt").read_text(encoding="utf-8") == "done\n"
+    work_run_archive.validate_archive(archive)
+
+
+@pytest.mark.parametrize("operation", ["export", "import"])
+@pytest.mark.parametrize("relationship", ["same", "ancestor", "descendant"])
+def test_archive_overlap_with_case_preserving_resolution_is_refused(
+    tmp_path: Path, monkeypatch, operation: str, relationship: str
+):
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(real_root, target_is_directory=True)
+    if operation == "export":
+        source = _seed_run(real_root / "runs" / RUN_ID)
+        input_path = {
+            "same": alias / "runs" / RUN_ID,
+            "ancestor": alias / "runs",
+            "descendant": alias / "runs" / RUN_ID / "new" / "archive",
+        }[relationship]
+    else:
+        run_dir = _seed_run(tmp_path / "source" / RUN_ID)
+        source = {
+            "same": real_root / "runs" / RUN_ID,
+            "ancestor": real_root / "runs" / RUN_ID / "saved-archive",
+            "descendant": real_root / "archive",
+        }[relationship]
+        work_run_archive.export_run(run_dir, source)
+        input_path = alias / "archive" / "new" / "runs" if relationship == "descendant" else alias / "runs"
+    before = {path.relative_to(real_root): path.read_bytes() for path in real_root.rglob("*") if path.is_file()}
+    original_resolve = Path.resolve
+
+    def preserve_alias(path: Path, *args, **kwargs):
+        # Simulate case-preserving POSIX resolve with a real directory alias;
+        # stat() still follows the alias to the actual filesystem identity.
+        return path.absolute() if path == input_path else original_resolve(path, *args, **kwargs)
+
+    def unexpected_copy(*args, **kwargs):
+        pytest.fail("overlapping paths reached the copy step")
+
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+    monkeypatch.setattr(work_run_archive, "_copy_run_tree_refuse_special", unexpected_copy)
+    with pytest.raises(WorkRunArchiveError, match="directories overlap"):
+        if operation == "export":
+            work_run_archive.export_run(source, input_path, force=True)
+        else:
+            work_run_archive.import_archive(source, runs_dir=input_path, force=True)
+    assert {path.relative_to(real_root): path.read_bytes() for path in real_root.rglob("*") if path.is_file()} == before
+    assert not list(real_root.rglob("*.staging-*"))
+    assert not list(real_root.rglob("*.import-*"))
+    assert not list(real_root.rglob("new"))
+
+
+@pytest.mark.parametrize("operation", ["export", "import"])
+def test_archive_path_stat_error_refuses_before_replacement(tmp_path: Path, monkeypatch, operation: str):
+    run_dir = _seed_run(tmp_path / "source" / RUN_ID)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(run_dir, archive)
+    destination = archive if operation == "export" else _seed_run(tmp_path / "runs" / RUN_ID)
+    before = {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    original_stat = Path.stat
+
+    def denied_stat(path: Path, *args, **kwargs):
+        if path == destination:
+            raise PermissionError("cannot inspect test destination")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+    with pytest.raises(WorkRunArchiveError, match="cannot inspect source and destination") as exc:
+        if operation == "export":
+            work_run_archive.export_run(run_dir, destination, force=True)
+        else:
+            work_run_archive.import_archive(archive, runs_dir=destination.parent, force=True)
+    assert exc.value.category == "io"
+    monkeypatch.setattr(Path, "stat", original_stat)
+    assert {path.relative_to(tmp_path): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
 # -- Issue #592: worker-event export/archive boundary -------------------------
 
 _FIXTURES = Path(__file__).resolve().parents[1] / "src" / "brigade" / "fixtures"

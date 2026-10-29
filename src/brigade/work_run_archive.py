@@ -442,6 +442,7 @@ def export_run(
         raise WorkRunArchiveError(f"run directory not found: {run_dir}", category="io")
     if not (run_dir / "run.json").is_file():
         raise WorkRunArchiveError(f"run directory has no run.json: {run_dir}", category="schema")
+    _assert_disjoint_trees(run_dir, destination)
     if destination.exists():
         if not force:
             raise WorkRunArchiveError(f"destination already exists: {destination}", category="io")
@@ -526,6 +527,7 @@ def import_archive(
     run_id = str(manifest["run_id"])
     dest = runs_dir / run_id
     _reject_symlink_final_component(dest, label="destination run")
+    _assert_disjoint_trees(archive_dir, dest)
     if dest.exists():
         if not force:
             raise WorkRunArchiveError(f"destination run already exists: {dest}", category="io")
@@ -881,6 +883,36 @@ def _normalize_user_path(path: Path) -> Path:
     expanded = path.expanduser()
     _reject_symlink_final_component(expanded)
     return expanded.resolve()
+
+
+def _assert_disjoint_trees(source: Path, destination: Path) -> None:
+    """Reject overlapping resolved trees before replacement or staging writes."""
+    message = "source and destination directories overlap; both are left unchanged"
+    if source.is_relative_to(destination) or destination.is_relative_to(source):
+        raise WorkRunArchiveError(message, category="io")
+    # POSIX resolve() can preserve case aliases on case-insensitive volumes.
+    # Compare directory identities too, including ancestors above missing paths.
+    try:
+        checks = [(source.stat(), (destination, *destination.parents))]
+        try:
+            destination_stat = destination.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            checks.append((destination_stat, tuple(source.parents)))
+        for root_stat, candidates in checks:
+            for path in candidates:
+                try:
+                    candidate_stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                if os.path.samestat(root_stat, candidate_stat):
+                    raise WorkRunArchiveError(message, category="io")
+    except OSError as exc:
+        raise WorkRunArchiveError(
+            f"cannot inspect source and destination directories; both are left unchanged: {exc}",
+            category="io",
+        ) from exc
 
 
 def _require_relative_payload_path(value: Any, name: str) -> str:
