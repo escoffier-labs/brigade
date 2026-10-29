@@ -631,7 +631,24 @@ def test_import_counts_unchanged_without_events_and_replays_them(tmp_path):
     )
 
 
-def test_list_keysets_filter_and_page_deterministically(tmp_path):
+@pytest.fixture
+def _advancing_worklore_clock(monkeypatch):
+    from datetime import datetime, timedelta, timezone
+    from itertools import count
+
+    from brigade import worklore_store_operations
+
+    ticks = count()
+    start = datetime(2026, 3, 1, tzinfo=timezone.utc)
+
+    def now():
+        return (start + timedelta(microseconds=next(ticks))).isoformat()
+
+    monkeypatch.setattr(store, "_utc_now", now)
+    monkeypatch.setattr(worklore_store_operations, "_utc_now", now)
+
+
+def test_list_keysets_filter_and_page_deterministically(tmp_path, _advancing_worklore_clock):
     conn = _conn(tmp_path)
     items = [
         store.create_item(conn, {"title": f"Item {index}", "kind": "fleet"}, actor_id="admin") for index in range(3)
@@ -2580,7 +2597,9 @@ def test_newer_tombstone_keeps_the_last_known_external_state(tmp_path):
     assert link["stale_at"] is not None
 
 
-def test_source_acceptance_ignores_newer_url_and_execution_links_after_an_unchanged_resync(tmp_path):
+def test_source_acceptance_ignores_newer_url_and_execution_links_after_an_unchanged_resync(
+    tmp_path, _advancing_worklore_clock
+):
     conn = _conn(tmp_path)
     source = dict(_timed_observation(1, updated_at="2026-02-01T00:00:00+00:00"), acceptance=["source check"])
     work_id = _import(conn, [source], key="A")["items"][0]["work_id"]
