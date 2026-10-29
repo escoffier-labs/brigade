@@ -200,7 +200,11 @@ def _pin_check(
             observed = None
             status = "missing"
         else:
-            status = "ok" if observed == expected and (not expected_path or resolved == expected_path) else "mismatch"
+            status = (
+                "ok"
+                if observed == expected and (not expected_path or Path(expected_path).is_absolute())
+                else "mismatch"
+            )
     check: dict[str, Any] = {
         "command": str(pin.get("command") or ""),
         "expected_path": expected_path or None,
@@ -350,7 +354,7 @@ def _pin_payload_from_runbook(target: Path, payload: dict[str, Any]) -> tuple[li
         except OSError as exc:
             return None, f"runbook step {index} argv[0] could not be hashed: {exc}"
         if command in seen:
-            if seen[command] != resolved:
+            if seen[command] != sha256:
                 return (
                     None,
                     f"runbook steps resolve command {command!r} to different executables; use distinct command names",
@@ -362,7 +366,7 @@ def _pin_payload_from_runbook(target: Path, payload: dict[str, Any]) -> tuple[li
             entry["version_cmd"] = existing["version_cmd"]
             entry["version"] = str(_run_version_cmd(resolved, existing["version_cmd"])["output"])
         pins.append(entry)
-        seen[command] = resolved
+        seen[command] = sha256
     return pins, None
 
 

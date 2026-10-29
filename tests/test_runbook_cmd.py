@@ -1044,7 +1044,7 @@ def test_pin_path_drift_refuses_or_records_actual_selected_tool(tmp_path, monkey
         assert "version_output" not in check
 
 
-def test_pin_path_identity_drifts_even_when_tool_bytes_match(tmp_path, monkeypatch, capsys):
+def test_pin_path_only_drift_keeps_hash_contract_and_actual_evidence(tmp_path, monkeypatch, capsys):
     first, second = tmp_path / "first", tmp_path / "second"
     first.mkdir()
     second.mkdir()
@@ -1057,10 +1057,12 @@ def test_pin_path_identity_drifts_even_when_tool_bytes_match(tmp_path, monkeypat
     assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
     capsys.readouterr()
     monkeypatch.setenv("PATH", str(second))
-    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
     check = json.loads(capsys.readouterr().out)["pin_checks"][0]
     assert check["expected_sha256"] == check["observed_sha256"] == _sha256(b)
-    assert check["status"] == "mismatch" and not marker.exists()
+    assert check["expected_path"] == str(a) and check["resolved_path"] == str(b)
+    assert check["status"] == "ok" and check["override"] is False
+    assert marker.read_text() == "ran"
 
 
 def test_missing_selected_tool_does_not_validate_or_probe_stored_pin(tmp_path, monkeypatch, capsys):
@@ -1115,7 +1117,7 @@ def test_pinning_refuses_distinct_executables_with_same_command_name(tmp_path, c
     first.mkdir()
     second.mkdir()
     _write_tool(first / "tool")
-    _write_tool(second / "tool")
+    _versioned_tool(second / "tool", "different-bytes")
     runbook = tmp_path / "runbook.json"
     original = json.dumps(
         {"steps": [{"run": "./tool marker", "cwd": str(first)}, {"run": "./tool marker", "cwd": str(second)}]}
@@ -1311,3 +1313,33 @@ def test_unused_pin_version_mutation_is_rechecked_before_steps(tmp_path, capsys,
         assert check["override"] is True and "pin mismatch override allowed" in captured.err
     else:
         assert rc == 2 and result["status"] == "pin-check-failed" and not marker.exists()
+
+
+def test_same_command_same_hash_at_distinct_paths_keeps_truthful_step_evidence(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = _write_tool(first / "tool")
+    b = _write_tool(second / "tool", a.read_text())
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"id": "one", "run": "./tool marker", "cwd": str(first)},
+                    {"id": "two", "run": "./tool marker", "cwd": str(second)},
+                ]
+            }
+        )
+    )
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    pins = json.loads(capsys.readouterr().out)["pins"]
+    assert len(pins) == 1 and pins[0]["sha256"] == _sha256(a)
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert [(c["step_id"], c["resolved_path"], c["status"]) for c in receipt["pin_checks"]] == [
+        ("one", str(a), "ok"),
+        ("two", str(b), "ok"),
+    ]
+    assert all(not c["override"] and c["observed_sha256"] == _sha256(a) for c in receipt["pin_checks"])
+    assert (first / "marker").read_text() == (second / "marker").read_text() == "ran"
