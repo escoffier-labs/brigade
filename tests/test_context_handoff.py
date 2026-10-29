@@ -16,8 +16,13 @@ import pytest
 
 from brigade import context_preview as cp
 from brigade.cli import main
+from tests._home import set_home
+from tests._posix import requires_dirfd
 
-pytestmark = pytest.mark.skipif(not cp._POSIX_NOFOLLOW_SUPPORTED, reason="POSIX nofollow contract")
+pytestmark = [
+    requires_dirfd,
+    pytest.mark.skipif(not cp._POSIX_NOFOLLOW_SUPPORTED, reason="POSIX nofollow contract"),
+]
 CORPUS = json.loads(Path("docs/fixtures/codex-context-handoff-v1.json").read_text())
 
 
@@ -599,7 +604,7 @@ def test_no_implicit_home_config_discovery(repo, tmp_path, monkeypatch):
     home.mkdir()
     (home / ".codex").mkdir()
     (home / ".codex" / "config.toml").write_text("project_doc_max_bytes = 0\n")
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("CODEX_HOME", str(home / ".codex"))
     assert export(repo)["baseline"]["consumed_raw_bytes"] == 4
 
