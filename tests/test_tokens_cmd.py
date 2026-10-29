@@ -1,4 +1,4 @@
-"""Tests for the tokens station CLI (Token Glace + usage-tracker)."""
+"""Tests for the tokens station CLI (TokenJuice + usage-tracker)."""
 
 from __future__ import annotations
 
@@ -20,12 +20,13 @@ def test_tokens_status_reports_uninstalled(monkeypatch, tmp_path):
 
 def test_tokens_status_ok_with_token_glace(monkeypatch, tmp_path):
     def which(cmd):
-        return f"/x/{cmd}" if cmd == "token-glace" else None
+        return f"/x/{cmd}" if cmd == "tokenjuice" else None
 
     monkeypatch.setattr(tokens_cmd.proc, "which", which)
+    monkeypatch.setattr(tokens_cmd.managed, "tokenjuice_binary", lambda: "/x/tokenjuice")
 
     def fake_run(args, **kw):
-        if args[:3] == ["/x/token-glace", "doctor", "hooks"]:
+        if args[:3] == ["/x/tokenjuice", "doctor", "hooks"]:
             return tokens_cmd.proc.Result(0, json.dumps({"status": "ok", "integrations": {}}), "")
         raise AssertionError(args)
 
@@ -55,9 +56,10 @@ def test_usage_tracker_status_uses_read_only_summary_surface(monkeypatch, tmp_pa
 
 def test_tokens_doctor_exits_nonzero_on_broken(monkeypatch, tmp_path):
     def which(cmd):
-        return f"/x/{cmd}" if cmd == "token-glace" else None
+        return f"/x/{cmd}" if cmd == "tokenjuice" else None
 
     monkeypatch.setattr(tokens_cmd.proc, "which", which)
+    monkeypatch.setattr(tokens_cmd.managed, "tokenjuice_binary", lambda: "/x/tokenjuice")
     monkeypatch.setattr(
         tokens_cmd.proc,
         "run",
@@ -71,9 +73,9 @@ def test_wire_plan_is_review_only(tmp_path):
     payload = tokens_cmd.wire_plan_payload(target=tmp_path)
     rendered = tokens_cmd.health.render_plan_md("tokens wire plan", payload)
 
-    assert ["token-glace", "install", "claude-code"] in payload["commands"]
-    assert "Token Glace" in payload["boundaries"][0]
-    assert "token-glace install" in rendered
+    assert ["tokenjuice", "install", "claude-code"] in payload["commands"]
+    assert "TokenJuice" in payload["boundaries"][0]
+    assert "tokenjuice install" in rendered
 
 
 def test_wire_plan_write_creates_files(tmp_path):

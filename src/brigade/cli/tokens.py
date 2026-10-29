@@ -9,12 +9,12 @@ from pathlib import Path
 def register(sub: argparse._SubParsersAction) -> None:
     p_tokens = sub.add_parser(
         "tokens",
-        help="Inspect and plan Token Glace + usage-tracker station health.",
+        help="Inspect and plan TokenJuice + usage-tracker station health.",
     )
     tokens_sub = p_tokens.add_subparsers(dest="tokens_command", metavar="<tokens-command>")
     tokens_sub.required = True
 
-    p_status = tokens_sub.add_parser("status", help="Show Token Glace and usage-tracker install health.")
+    p_status = tokens_sub.add_parser("status", help="Show TokenJuice and usage-tracker install health.")
     p_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
@@ -25,10 +25,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_doctor.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_doctor.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
-    p_wire = tokens_sub.add_parser("wire", help="Plan token-glace install without executing it.")
+    p_wire = tokens_sub.add_parser("wire", help="Plan tokenjuice install without executing it.")
     wire_sub = p_wire.add_subparsers(dest="tokens_wire_command", metavar="<wire-command>")
     wire_sub.required = True
-    p_wire_plan = wire_sub.add_parser("plan", help="Plan token-glace host hooks and optional usage export.")
+    p_wire_plan = wire_sub.add_parser("plan", help="Plan tokenjuice host hooks and optional usage export.")
     p_wire_plan.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace for plan paths and --write."
     )

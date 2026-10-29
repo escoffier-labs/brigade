@@ -81,8 +81,8 @@ A trusted sync can pull those files into a staging inbox on the owner.
 That keeps agents informed without creating multiple canonical memories.
 
 Token-heavy terminal work gets the same treatment.
-Make the wrapper explicit, make the escape hatch obvious, and tell every harness what is happening.
-The Token Glace starter card documents Claude Code's PreToolUse wrapper path, Codex's hook setup, and the savings model.
+Make the selected compactor route explicit and document the raw-output escape hatch.
+The TokenJuice starter card describes host qualification, recovery, rollback and the new statistics epoch.
 
 ## What you get
 
@@ -2022,7 +2022,7 @@ Tools are never imported in process; Brigade Stack shells out to each CLI, so th
 ```bash
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
 brigade add guard    # embedded scrub path + optional plating
-brigade add tokens   # token-glace (+ optional usage-tracker)
+brigade add tokens   # tokenjuice (+ optional usage-tracker)
 brigade add skills   # built-in skills; optional Skillet installer remains available
 brigade add pantry   # agentpantry (extras surface)
 brigade add notifications   # agent-notify (extras surface)
@@ -2071,7 +2071,9 @@ Crawl defaults to 900 seconds and can be changed with the positive finite numeri
 
 `code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code <verb> <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. The full verb set is `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, and `diff` (`init` stays behind `sync`; `watch` needs a streaming relay and is not exposed yet). Every verb accepts Brigade Stack's standard `--target <dir>`, which runs the engine from that directory so its default `.graphtrail/graphtrail.db` and repo-relative file arguments resolve against that repo; all other arguments pass through unchanged. Engine `Usage: graphtrail ...` lines are rewritten to `Usage: brigade code ...` before display so errors point at the command the user typed. Sync and evaluate default to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS` and `BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS`; the query verbs remain at 30 seconds. An invalid timeout value reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 
-`tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
+`tokens` selects upstream TokenJuice and optional usage-tracker spend export.
+Adding the station does not activate host hooks. Preserve legacy Glace artifacts
+and review the host cutover plan before enabling one qualified compactor route.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
 
 `plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
@@ -2142,7 +2144,7 @@ The current managed tools:
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
 | `guard` | embedded Content Guard | policy-driven content scanning through `brigade scrub` |
 | `guard` | `plating` | optional demo render, leak scan, and recorded-output verify |
-| `tokens` | `token-glace` | output compaction via host hooks (TokenJuice was the old name) |
+| `tokens` | `tokenjuice` | output compaction via host hooks (upstream vincentkoc/tokenjuice) |
 | `tokens` | `usage-tracker` | optional local usage/spend export summary |
 | `search` | `graphtrail` | local code graph, context briefs, structural diffs |
 | `search` | `code-search-api` | optional local semantic search service |

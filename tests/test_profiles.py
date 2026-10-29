@@ -48,8 +48,8 @@ def test_stations_list_marks_selected_and_optional_for_repo(capsys):
     assert rows["pantry"]["selection"] == "optional"
     assert set(rows["skills"]["built_in_skills"]) == {"brigade-work", "ultra-work-scout"}
     token_tools = {tool["name"]: tool for tool in rows["tokens"]["tools"]}
-    assert set(token_tools) == {"token-glace", "usage-tracker"}
-    token_surfaces = {surface["kind"] for surface in token_tools["token-glace"]["surfaces"]}
+    assert set(token_tools) == {"tokenjuice", "usage-tracker"}
+    token_surfaces = {surface["kind"] for surface in token_tools["tokenjuice"]["surfaces"]}
     assert {"doctor-json", "summary-json", "verify-exit"} <= token_surfaces
     usage_surfaces = {surface["kind"] for surface in token_tools["usage-tracker"]["surfaces"]}
     assert usage_surfaces == {"summary-json"}

@@ -96,12 +96,12 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "tokens":
-        print("tokens station wires Token Glace (+ optional usage-tracker; process boundary):")
+        print("tokens station wires TokenJuice (+ optional usage-tracker; process boundary):")
         print("  brigade tokens wire plan")
         print("  brigade tokens doctor")
-        print("  token-glace install claude-code")
-        print("  token-glace install codex")
-        print("Brigade does not install host hooks from add unless you re-run wire on an installed tool.")
+        print("  tokenjuice install claude-code")
+        print("  tokenjuice install codex")
+        print("Brigade leaves host activation to the operator; add never installs TokenJuice hooks.")
         print()
 
     if single_tool is not None and single_tool.name == "plating":

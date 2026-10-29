@@ -12,7 +12,7 @@ EXPECTED_NAMES = {
     "graphtrail",
     "miseledger",
     "skillet",
-    "token-glace",
+    "tokenjuice",
 }
 
 
@@ -33,7 +33,7 @@ def test_bundled_snapshot_covers_first_class_sidecars():
     assert content_guard_source["observed_revision"] == "d93468ba05485635e252c0fd4129063c750e2cce"
     assert "revision" not in content_guard_source
     assert records_by_name["agentpantry"]["source"]["revision"] == ("9d904c3777f116c3a62d5ab2e7e20849d02c114a")
-    assert records_by_name["token-glace"]["source"]["revision"] == ("efb7c8544014d1bdd0df436c741d9d0ef20a090e")
+    assert records_by_name["tokenjuice"]["source"]["observed_revision"] == ("001d5975184ea33f49441ed8724714472e4fca26")
     assert records_by_name["skillet"]["source"]["revision"] == "1f871dd44be70b0e912f832d448436a4a0fcc7b3"
     assert records_by_name["graphtrail"]["source"]["revision"] == ("e2c7868c8fe0471469f66e90b020845fb56a7ca6")
     assert by_name["skillet"]["tools"][0]["kind"] == "skill-roster"
@@ -42,7 +42,7 @@ def test_bundled_snapshot_covers_first_class_sidecars():
 
 def test_bundled_executable_contracts_drive_managed_catalog():
     contracts = managed_snapshot.executable_contracts()
-    assert set(contracts) == {"agentpantry", "graphtrail", "miseledger", "token-glace"}
+    assert set(contracts) == {"agentpantry", "graphtrail", "miseledger", "tokenjuice"}
 
     for name, contract in contracts.items():
         tool = managed.resolve(name)

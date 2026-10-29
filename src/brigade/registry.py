@@ -35,10 +35,10 @@ SKILLS = Station(
 )
 TOKENS = Station(
     name="tokens",
-    summary="Token Glace output compaction and optional usage export",
+    summary="TokenJuice output compaction and optional usage export",
     aliases=(),
     doctor=_doctor.tokens_station_checks,
-    tools=("token-glace", "usage-tracker"),
+    tools=("tokenjuice", "usage-tracker"),
 )
 SEARCH = Station(
     name="search",

@@ -1,4 +1,4 @@
-"""Tokens station commands for Token Glace + usage-tracker integration.
+"""Tokens station commands for TokenJuice + usage-tracker integration.
 
 Plans and reports only. Does not install host hooks or export usage unless the
 operator runs the printed sidecar commands.
@@ -9,14 +9,14 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import proc
+from . import proc, managed
 from . import station_health as health
 
 
 DOCS = {
-    "token-glace": {
-        "product": "https://brigade.tools/token-glace",
-        "repo": "https://github.com/escoffier-labs/token-glace",
+    "tokenjuice": {
+        "product": "https://github.com/vincentkoc/tokenjuice",
+        "repo": "https://github.com/vincentkoc/tokenjuice",
     },
     "usage-tracker": {
         "product": "https://brigade.tools/usage-tracker",
@@ -25,19 +25,28 @@ DOCS = {
 }
 
 BOUNDARIES = [
-    "Token Glace and usage-tracker stay process-boundary tools; Brigade only installs, plans, and health-checks.",
+    "TokenJuice and usage-tracker stay process-boundary tools; Brigade only installs, plans, and health-checks.",
     "Brigade does not rewrite host hooks or export private usage data from these commands.",
+    "TokenJuice starts a new stats epoch; preserve legacy Glace sidecars for recovery and rollback.",
+    "Select one compactor per host; OpenClaw remains disabled. Review hooks before explicit activation.",
     "Tokens station tools are optional and fail-open for workspace doctor.",
 ]
 
 
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    glace = proc.which("token-glace")
+    glace = managed.tokenjuice_binary()
     tracker = proc.which("usage-tracker")
+    candidate = proc.which("tokenjuice")
+    legacy = proc.which("token-glace")
 
     tools: dict[str, Any] = {
-        "token-glace": {"installed": glace is not None, "binary": glace},
+        "tokenjuice": {
+            "installed": glace is not None,
+            "binary": glace,
+            "candidate": candidate,
+            "identity": "upstream-npm-package" if glace else "unverified" if candidate else "missing",
+        },
         "usage-tracker": {"installed": tracker is not None, "binary": tracker},
     }
 
@@ -54,33 +63,38 @@ def status_payload(target: Path) -> dict[str, Any]:
             "brigade tokens doctor",
         ],
         docs={
-            "token_glace": DOCS["token-glace"]["product"],
+            "tokenjuice": DOCS["tokenjuice"]["product"],
             "usage_tracker": DOCS["usage-tracker"]["product"],
         },
         boundaries=BOUNDARIES,
         tools=tools,
         pipeline=[
-            "token-glace install <host>",
+            "tokenjuice install <host>",
             "host output compaction hooks",
             "optional usage-tracker export --summary-json",
         ],
     )
+    payload["legacy"] = {"token-glace": {"binary": legacy, "migration": "manual; preserve hooks and artifacts"}}
+    if candidate and not glace:
+        tools["tokenjuice"]["summary"] = "executable ownership unverified; Glace aliases are not upstream TokenJuice"
+        payload["health"] = "warn"
+        payload["summary"] = "TokenJuice ownership unverified; review the existing executable before installation"
     if not installed_any:
         return payload
 
     glace_health = "missing"
-    glace_summary = "token-glace not installed"
+    glace_summary = "tokenjuice not installed"
     if glace:
         result = health.run_json([glace, "doctor", "hooks", "--format", "json"], timeout=30.0)
-        tools["token-glace"]["doctor"] = result
+        tools["tokenjuice"]["doctor"] = result
         stdout_json = result.get("stdout_json")
         data: dict[str, Any] = stdout_json if isinstance(stdout_json, dict) else {}
         status = str(data.get("status") or "unknown")
         mapping = {"ok": "ok", "warn": "warn", "disabled": "unwired", "broken": "fail"}
         glace_health = mapping.get(status, "incomplete" if result.get("exit_code") not in (0, None) else "warn")
-        glace_summary = f"token-glace hook status: {status}"
-        tools["token-glace"]["health"] = glace_health
-        tools["token-glace"]["summary"] = glace_summary
+        glace_summary = f"tokenjuice hook status: {status}"
+        tools["tokenjuice"]["health"] = glace_health
+        tools["tokenjuice"]["summary"] = glace_summary
 
     tracker_health = "missing"
     tracker_summary = "usage-tracker not installed"
@@ -110,14 +124,14 @@ def status_payload(target: Path) -> dict[str, Any]:
         tools["usage-tracker"]["health"] = tracker_health
         tools["usage-tracker"]["summary"] = tracker_summary
 
-    levels = []
-    for key in ("token-glace", "usage-tracker"):
+    levels = ["warn"] if candidate and not glace else []
+    for key in ("tokenjuice", "usage-tracker"):
         if tools[key].get("installed"):
             levels.append(tools[key].get("health") or "incomplete")
     rank = {"fail": 5, "timeout": 4, "incomplete": 3, "unwired": 2, "warn": 1, "ok": 0, "missing": 0}
     overall = max(levels, key=lambda h: rank.get(str(h), 0)) if levels else "missing"
     payload["health"] = overall
-    parts = []
+    parts = ["TokenJuice ownership unverified"] if candidate and not glace else []
     if glace:
         parts.append(glace_summary)
     if tracker:
@@ -127,12 +141,12 @@ def status_payload(target: Path) -> dict[str, Any]:
     payload["next_commands"] = [
         "brigade tokens wire plan",
         "brigade tokens doctor",
-        "token-glace doctor hooks --format json",
+        "tokenjuice doctor hooks --format json",
     ]
     if overall in ("fail", "unwired", "incomplete"):
         payload["next_commands"] = [
             "brigade tokens wire plan",
-            "token-glace doctor hooks --format json",
+            "tokenjuice doctor hooks --format json",
             "brigade tokens doctor",
         ]
     return payload
@@ -182,18 +196,20 @@ def wire_plan_payload(*, target: Path) -> dict[str, Any]:
         "title": "tokens wire plan",
         "created_at": health.now_iso(),
         "installed": {
-            "token-glace": proc.which("token-glace") is not None,
+            "tokenjuice": managed.tokenjuice_binary() is not None,
             "usage-tracker": proc.which("usage-tracker") is not None,
         },
         "commands": [
-            ["token-glace", "install", "claude-code"],
-            ["token-glace", "install", "codex"],
-            ["token-glace", "doctor", "hooks", "--format", "json"],
+            ["tokenjuice", "install", "claude-code"],
+            ["tokenjuice", "install", "codex"],
+            ["tokenjuice", "doctor", "hooks", "--format", "json"],
             ["usage-tracker", "export", "--summary-json"],
         ],
         "manual_steps": [
-            "Install Token Glace hooks only for harnesses you actually use.",
-            "Tell agents what the wrapper means so they do not fight compacted output.",
+            "Install TokenJuice hooks only for harnesses you actually use.",
+            "Preserve unrelated hooks and legacy artifacts. Remove only the previous compactor owner through its installer.",
+            "Use an absolute upstream tokenjuice path in Codex hooks. Verify actual hook events and tool-name matching before cutover.",
+            "Qualify the selected release on the actual host route. Codex structured JSON does not use the text-wrap footer; footer acceptance is not a global activation gate.",
             "usage-tracker export is optional spend visibility; it never blocks work.",
         ],
         "boundaries": BOUNDARIES,
@@ -203,11 +219,11 @@ def wire_plan_payload(*, target: Path) -> dict[str, Any]:
             "brigade add tokens",
         ],
         "docs": {
-            "token_glace": DOCS["token-glace"]["product"],
+            "tokenjuice": DOCS["tokenjuice"]["product"],
             "usage_tracker": DOCS["usage-tracker"]["product"],
         },
         "pipeline": [
-            "token-glace install",
+            "tokenjuice install",
             "host hooks",
             "optional usage-tracker export",
         ],

@@ -47,7 +47,7 @@ If this workspace is one of several agent homes, read `memory/cards/multi-worksp
 
 If you are maintaining an established card set, read `memory/cards/memory-care-staleness.md` before editing stale cards. Refresh only from current source-of-truth files or route to manual review.
 
-If tool output includes Token Glace metadata, read `memory/cards/token-glace-output-compaction.md`. The footer is local output-compaction metadata, not task instruction. Use raw output only when exact logs, line-for-line diffs, or full command output are required.
+If tool output includes TokenJuice metadata, read `memory/cards/token-glace-output-compaction.md`. The footer describes output reduction. It is not task instruction or evidence that omitted content is irrelevant. Use raw output only when exact logs, line-for-line diffs, or full command output are required.
 
 ## If your harness loads a compact context
 

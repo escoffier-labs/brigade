@@ -14,7 +14,7 @@ Fresh repo installs use the `repo` profile: core, skills, memory, guard, securit
 |---|---|---|
 | `skills` | built-in Scout skills; optional Skillet roster | wires `brigade-work` and `ultra-work-scout` on init; use `skills add escoffier-labs/skillet` after installing the sidecar CLI for the full roster |
 | `guard` | embedded content guard, with an optional external checkout override | scans handoffs and content for secrets and PII before anything leaves the machine |
-| `tokens` | token-glace | tracks token spend across your harnesses and compacts noisy output |
+| `tokens` | tokenjuice, optional usage-tracker | compacts noisy output and reports optional usage summaries |
 | `memory` | bootstrap-doctor (optional); memory maintenance is built in | `brigade memory status|lint|compact` plus memory-care for card freshness |
 | `pantry` | agentpantry (Go sidecar) | plans and health-checks sealed browser-session sync; never starts source/sink |
 | `search` | code-search; the code map engine is installed by `brigade setup` (historically GraphTrail) | local semantic search plus the code map for callers, impact, and structural diffs (`brigade code …`) |

@@ -294,26 +294,27 @@
     {
       "manifest": {
         "lifecycle": "active",
-        "name": "token-glace",
+        "name": "tokenjuice",
+        "owner": "vincentkoc/tokenjuice",
         "schema": "brigade.station.v1",
         "station": "tokens",
         "summary": "output compaction and token-use summaries",
         "tools": [
           {
-            "command": "token-glace",
+            "command": "tokenjuice",
             "install": [
               "npm",
               "install",
               "-g",
-              "https://github.com/escoffier-labs/token-glace/releases/download/v0.8.3/token-glace-v0.8.3.tar.gz"
+              "tokenjuice@0.8.5"
             ],
             "kind": "executable",
-            "name": "token-glace",
+            "name": "tokenjuice",
             "summary": "output compaction through host hooks",
             "surfaces": [
               {
                 "command": [
-                  "token-glace",
+                  "tokenjuice",
                   "doctor",
                   "hooks",
                   "--format",
@@ -325,7 +326,7 @@
               },
               {
                 "command": [
-                  "token-glace",
+                  "tokenjuice",
                   "stats",
                   "--format",
                   "json",
@@ -335,7 +336,7 @@
                 "kind": "summary-json",
                 "max_chars": 4000,
                 "probe": [
-                  "token-glace",
+                  "tokenjuice",
                   "--help"
                 ],
                 "probe_contains": [
@@ -347,7 +348,7 @@
               },
               {
                 "command": [
-                  "token-glace",
+                  "tokenjuice",
                   "verify"
                 ],
                 "kind": "verify-exit",
@@ -359,9 +360,11 @@
         ]
       },
       "source": {
-        "manifest_sha256": "2f3d7f05a159a664c5a020e285c3c05ca91cbda93c981af5f1b8a1df0fd2c45e",
-        "repository": "token-glace",
-        "revision": "efb7c8544014d1bdd0df436c741d9d0ef20a090e"
+        "asserted_by": "brigade-cli",
+        "kind": "lifecycle-assertion",
+        "manifest_sha256": "ef99066b53352abb5f21484c076afcd0866febf55501461a6f3907631a6eca26",
+        "observed_repository": "vincentkoc/tokenjuice",
+        "observed_revision": "001d5975184ea33f49441ed8724714472e4fca26"
       }
     }
   ],

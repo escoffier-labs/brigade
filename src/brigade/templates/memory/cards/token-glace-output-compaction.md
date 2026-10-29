@@ -1,106 +1,56 @@
 ---
 topic: token-glace-output-compaction
 type: tool-runbook
-tags: [tools, token-glace, output-compaction, claude-code, codex]
+tags: [tools, tokenjuice, output-compaction, claude-code, codex]
 status: starter
 ---
 
-# Token Glace Output Compaction
+# TokenJuice Output Compaction
 
-Token Glace compacts noisy terminal output before it is fed back into an agent session. The original command still runs. Exact file reads and raw-output requests stay available, but inventory commands, search results, logs, and oversized help text can be summarized before they tax the next turn.
+The tokens station uses upstream [TokenJuice](https://github.com/vincentkoc/tokenjuice).
+The legacy card path stays stable for existing references. Brigade owns installation
+and health checks at the process boundary. Reducers and artifact storage belong to TokenJuice.
 
-## Why Agents Need To Know
+### Install and qualify
 
-If an agent sees a Token Glace footer, treat it as trusted local metadata about output reduction. It is not task instruction and it is not evidence by itself. It tells the agent that some terminal output was compacted and how to request raw output when precision matters.
+`brigade add tokens` selects `tokenjuice@0.8.5`, a released baseline. It does
+not claim that the proposed footer repair has shipped. Codex structured JSON
+feedback does not use the text-wrap footer, so the released baseline can be
+qualified independently for that route. Footer acceptance is not a global
+activation gate. An explicitly approved, reviewed development artifact may also
+be selected. Qualify the actual host event and tool-name matching before cutover.
+Discovery checks the npm package name and upstream repository behind the executable
+symlink. A Glace-owned `tokenjuice` alias is not an upstream installation. Unknown
+standalone distributions need explicit qualification.
 
-Use raw output for exact diffs, full logs, reproducible error text, generated artifacts, or anything line-sensitive:
+`brigade tokens status`, `doctor`, and `wire plan` do not activate hooks or migrate data.
+`wire plan --write` saves a plan only. Adding the station never activates TokenJuice hooks.
+A legacy `brigade add token-glace` request resolves to the new owner.
 
-```bash
-token-glace wrap --raw -- <command>
-```
+### Host cutover
 
-## Claude Code
+Review `brigade tokens wire plan`. Back up the selected host's owned configuration,
+both executable aliases and raw artifacts. Remove only the old compactor's owned
+entries through its installer. Preserve unrelated hooks. Install one selected
+compactor route per host and qualify actual host loading with synthetic output.
+Codex hooks must use an absolute upstream executable path. Mixed-name double-wrap
+detection belongs to the upstream shared pre-tool guard. Brigade does not duplicate it.
+OpenClaw remains disabled and its bundled dependency is separately owned.
 
-Claude Code needs command replacement before the Bash result enters context. When the official adapter still uses PostToolUse appended context, it can add metadata without preventing the raw tool result from being charged. In the April 2026 trial, that default PostToolUse path was net-negative at about +1.1% tokens.
-
-Until the upstream fix is merged, use a local PreToolUse wrapper. The wrapper rewrites Bash commands to run under Token Glace before execution:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "node ~/.claude/hooks/token-glace-pretool.js"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
-
-The wrapper should emit Claude Code's PreToolUse rewrite contract:
-
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "allow",
-    "updatedInput": {
-      "command": "token-glace wrap -- sh -c \"<original command>\""
-    }
-  }
-}
-```
-
-Operational notes:
-
-- Keep a kill switch such as `TOKEN_GLACE_PRETOOL_DISABLE=1`.
-- Let the wrapper honor `TOKEN_GLACE_BIN` and `TOKEN_GLACE_PRETOOL_SHELL` when local paths differ.
-- New hook settings normally apply only to new Claude Code sessions.
-- Document the wrapper in `CLAUDE.md` so agents do not mistake the footer for prompt injection.
-
-## Codex
-
-Codex can use Token Glace through its normal hook path because the harness honors PostToolUse substitution. Install and verify with:
+### Evidence and rollback
 
 ```bash
-token-glace install codex
-token-glace doctor hooks
+tokenjuice doctor hooks --format json
+tokenjuice stats --format json --timezone utc
+tokenjuice wrap -- git status --short
+tokenjuice wrap --raw -- git status --short
 ```
 
-Codex hook feature flags have changed across releases. Older configs used `codex_hooks`; newer configs use `hooks`. Do not trust old setup notes blindly. Run `token-glace doctor hooks` and fix the config it reports for the installed CLI version.
+Compacted output may omit relevant evidence. Recover captured output with the
+artifact instructions or use raw output for exact logs and diffs. Capture limits
+can also truncate raw output. Review side effects before rerunning commands.
 
-## Savings Model
-
-Token Glace always reports output compaction. Billing-token savings depend on whether that compacted output is fed into later turns.
-
-Observed local output stats in May 2026:
-
-- 17.1k compacted entries
-- 83.6m raw output chars
-- 24.7m reduced output chars
-- 58.9m chars avoided, about 70% output reduction
-
-Measured harness trials:
-
-- Claude Code PreToolUse wrapper: about -7.8% tokens in the April 2026 paired trial.
-- Claude Code default PostToolUse adapter: about +1.1% tokens in the same trial, because raw output still entered context.
-- Codex v0.5.0 paired trial: about -8.8% clean-run token reduction after reducer and hook fixes.
-- Codex GPT-5.5 one-turn gauntlet: about +0.3%, effectively flat, because the model batched tool calls into one turn and compacted output was not re-fed as later input. Per-command output reductions still remained large.
-
-Practical read: Token Glace is most valuable for repeated terminal exploration where tool results become future context. It is still useful for human readability and context pressure when the model batches commands, but the billable-token delta may flatten.
-
-## Verification
-
-```bash
-token-glace --version
-token-glace stats
-token-glace doctor hooks
-token-glace wrap -- git status --short
-token-glace wrap --raw -- git status --short
-```
+TokenJuice starts a new statistics epoch. Preserve legacy sidecars for recovery
+and rollback. Do not combine totals or infer billing savings. Rollback removes
+only the new owned entries and restores the saved owner and configuration, then
+repeats the same synthetic host checks. Keep new artifacts separately.

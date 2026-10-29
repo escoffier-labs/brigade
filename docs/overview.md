@@ -358,7 +358,7 @@ flowchart TB
         GUARD["Content Guard"]
         PANTRY["Agent Pantry"]
         NOTIFY["agent-notify"]
-        TOKEN["token-glace"]
+        TOKEN["tokenjuice"]
         SEARCH["code-search"]
     end
 
@@ -391,7 +391,7 @@ Safety and operations tools:
 - Content Guard is embedded in Brigade Stack and powers `brigade scrub`, publish checks, and the seeded pre-push hook. `CONTENT_GUARD_DIR` remains an explicit compatibility override for older standalone checkouts.
 - [Agent Pantry](https://github.com/escoffier-labs/agentpantry): encrypted browser session, cookie, and secret sync for agent machines.
 - [agent-notify](https://github.com/escoffier-labs/brigade/tree/main/stations/notify) (`stations/notify/` in this monorepo): optional notification hooks for long-running agent work. Released installs resolve the pinned managed `agent-notify` binary through `brigade setup` once a stable manifest publishes its assets. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
-- [Token Glace](https://github.com/escoffier-labs/token-glace): output compaction for terminal-heavy agent workflows.
+- [TokenJuice](https://github.com/vincentkoc/tokenjuice): output compaction for terminal-heavy agent workflows.
 - Built-in Scout skills: Brigade Stack wires `brigade-work` and `ultra-work-scout` during `brigade init`. Install upstream [Superpowers](https://github.com/obra/superpowers) separately for general workflow guidance. Retain Brigade Stack and T3 specialist skills where needed. `brigade init` does not bundle Superpowers. The optional Skillet installer remains a separate integration.
 
 Evidence log and code map (built in):

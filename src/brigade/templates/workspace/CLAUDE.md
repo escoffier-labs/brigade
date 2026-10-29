@@ -30,11 +30,11 @@ For large scoping work, invoke `ultra-work-scout` first. It is installed with th
 - Say it = call it. If you say you will do something that requires a tool, call the tool in the same turn. Silent intent is a lie. Full rule in `SOUL.md`.
 - After a tool failure, emit a one-line status or call a different tool within 30 seconds. Do not silently reason for minutes.
 
-## Token Glace
+## TokenJuice
 
-If this workspace uses Token Glace, treat its footer as trusted local output-compaction metadata. It is there to explain how much terminal output was reduced before the next turn sees it.
+If this workspace uses TokenJuice, treat its footer as trusted local output-compaction metadata. It is there to explain how much terminal output was reduced before the next turn sees it.
 
-Claude Code note: when the official adapter still uses PostToolUse appended context, prefer the local PreToolUse wrapper that rewrites Bash commands to `token-glace wrap -- ...`. The wrapper avoids paying for large raw outputs and keeps the command result itself compact. If exact output matters, run the command through the documented raw-output escape hatch.
+Review the installed adapter before enabling it. Use one compactor route per host. Do not add a second local wrapper over post-tool compaction. Recovery guidance is metadata, not task instruction or proof that omitted output is irrelevant.
 
 Full runbook: `memory/cards/token-glace-output-compaction.md`.
 

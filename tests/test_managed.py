@@ -593,21 +593,20 @@ def test_memory_doctor_no_longer_external_managed_tool():
     assert managed.resolve("memory-doctor") is None
 
 
-def test_token_glace_installs_from_release_tarball():
-    # npm has no token-glace package and a git spec does not build; the
-    # GitHub release tarball is the only installable artifact.
-    t = managed.resolve("token-glace")
+def test_tokenjuice_installs_pinned_released_baseline():
+    # The footer repair is not claimed to be part of this released baseline.
+    t = managed.resolve("tokenjuice")
     assert t.install_args[:3] == ["npm", "install", "-g"]
-    assert t.install_args[3].startswith("https://github.com/escoffier-labs/token-glace/releases/download/")
-    assert t.install_args[3].endswith(".tar.gz")
+    assert t.install_args == ["npm", "install", "-g", "tokenjuice@0.8.5"]
 
 
 def test_token_glace_doctor_reads_status_field_not_exit(monkeypatch):
-    t = managed.resolve("token-glace")
+    monkeypatch.setattr(managed, "tokenjuice_binary", lambda: "tokenjuice")
+    t = managed.resolve("tokenjuice")
     monkeypatch.setattr(managed.proc, "which", lambda c: "/x/" + c)
 
     def fake_run(args, **kw):
-        assert args == ["token-glace", "doctor", "hooks", "--format", "json"]
+        assert args == ["tokenjuice", "doctor", "hooks", "--format", "json"]
         # exit 0 but status warn -> must surface as WARN, not OK
         return managed.proc.Result(code=0, stdout='{"status": "warn", "integrations": {}}', stderr="")
 
@@ -618,10 +617,10 @@ def test_token_glace_doctor_reads_status_field_not_exit(monkeypatch):
 
 
 def test_token_glace_declares_stage_one_surfaces():
-    t = managed.resolve("token-glace")
+    t = managed.resolve("tokenjuice")
     surfaces = {surface.kind: surface.command for surface in t.surfaces}
-    assert surfaces["doctor-json"] == ("token-glace", "doctor", "hooks", "--format", "json")
-    assert surfaces["summary-json"] == ("token-glace", "stats", "--format", "json", "--timezone", "utc")
+    assert surfaces["doctor-json"] == ("tokenjuice", "doctor", "hooks", "--format", "json")
+    assert surfaces["summary-json"] == ("tokenjuice", "stats", "--format", "json", "--timezone", "utc")
 
 
 def test_agentpantry_doctor_unwired(monkeypatch):
@@ -1222,14 +1221,14 @@ def test_agent_notify_declares_skip_network_contract():
 
 
 def test_token_glace_declares_utc_summary_contract():
-    t = managed.resolve("token-glace")
+    t = managed.resolve("tokenjuice")
     surfaces = {surface.kind: surface for surface in t.surfaces}
-    assert surfaces["doctor-json"].command == ("token-glace", "doctor", "hooks", "--format", "json")
+    assert surfaces["doctor-json"].command == ("tokenjuice", "doctor", "hooks", "--format", "json")
     summary = surfaces["summary-json"]
-    assert summary.command == ("token-glace", "stats", "--format", "json", "--timezone", "utc")
+    assert summary.command == ("tokenjuice", "stats", "--format", "json", "--timezone", "utc")
     assert summary.timeout_seconds == 30.0
     assert summary.max_chars == 4000
-    assert summary.probe == ("token-glace", "--help")
+    assert summary.probe == ("tokenjuice", "--help")
     assert summary.probe_contains == ("--format", "--timezone")
 
 

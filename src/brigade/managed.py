@@ -12,6 +12,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from . import component_bins, managed_snapshot, proc
@@ -47,6 +48,8 @@ class ManagedTool:
     install_resolver: Optional[Callable[[], List[str]]] = None
 
     def detect(self) -> bool:
+        if self.name == "tokenjuice":
+            return tokenjuice_binary() is not None
         return component_bins.resolve(self.command) is not None
 
     def install_command(self) -> List[str]:
@@ -232,16 +235,52 @@ def _bootstrap_doctor_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [status_row, _bootstrap_doctor_lint_row(lint)]
 
 
-def _token_glace_doctor(ctx: DoctorContext) -> List[CheckResult]:
-    r = proc.run(["token-glace", "doctor", "hooks", "--format", "json"])
+def tokenjuice_binary() -> Optional[str]:
+    """Accept the upstream npm package, including an approved local dev build.
+
+    Glace also exports a tokenjuice alias. Do not execute it just to discover
+    ownership. Read the nearest package metadata behind the resolved symlink.
+    Unknown standalone distributions require explicit qualification first.
+    """
+    binary = proc.which("tokenjuice")
+    if not binary:
+        return None
+    try:
+        executable = Path(binary).resolve(strict=True)
+        for parent in executable.parents:
+            manifest = parent / "package.json"
+            if not manifest.is_file():
+                continue
+            data = json.loads(manifest.read_text())
+            if not isinstance(data, dict):
+                return None
+            repository = data.get("repository")
+            url = repository.get("url") if isinstance(repository, dict) else repository
+            if data.get("name") == "tokenjuice" and url in (
+                "https://github.com/vincentkoc/tokenjuice",
+                "https://github.com/vincentkoc/tokenjuice.git",
+                "git+https://github.com/vincentkoc/tokenjuice.git",
+            ):
+                return binary
+            return None
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return None
+
+
+def _tokenjuice_doctor(ctx: DoctorContext) -> List[CheckResult]:
+    binary = tokenjuice_binary()
+    if binary is None:
+        return [(MANUAL, "tokenjuice", "upstream package not found; legacy aliases are not upstream ownership")]
+    r = proc.run([binary, "doctor", "hooks", "--format", "json"])
     data = r.json()
     if data is None:
-        return [(WARN, "token-glace", f"installed but doctor output unreadable (exit {r.code})")]
+        return [(WARN, "tokenjuice", f"installed but doctor output unreadable (exit {r.code})")]
     if not isinstance(data, dict):
-        return [(WARN, "token-glace", f"installed but doctor output unreadable (exit {r.code})")]
+        return [(WARN, "tokenjuice", f"installed but doctor output unreadable (exit {r.code})")]
     status = data.get("status", "unknown")
     mapping = {"ok": OK, "warn": WARN, "disabled": MANUAL, "broken": FAIL}
-    return [(mapping.get(status, WARN), "token-glace", f"hook status: {status}")]
+    return [(mapping.get(status, WARN), "tokenjuice", f"hook status: {status}")]
 
 
 def _code_search_url() -> str:
@@ -499,21 +538,10 @@ def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
     return [(status, name, f"{len(checks)} check(s) passed")]
 
 
-def _token_glace_wire(ctx: DoctorContext) -> List[CheckResult]:
-    # Wiring installs a host hook; which host depends on the workspace's harnesses.
-    hosts = [h for h in ctx.harnesses if h in ("claude", "codex", "cursor")]
-    if not hosts:
-        return [
-            (MANUAL, "token-glace: wire", "no hookable harness selected; run `token-glace install <host>` manually")
-        ]
-    notes: List[CheckResult] = []
-    for h in hosts:
-        host = "claude-code" if h == "claude" else h
-        r = proc.run(["token-glace", "install", host])
-        notes.append(
-            (OK if r.code == 0 else WARN, f"token-glace: install {host}", r.stderr.strip()[:80] or "installed")
-        )
-    return notes
+def _tokenjuice_wire(ctx: DoctorContext) -> List[CheckResult]:
+    return [
+        (MANUAL, "tokenjuice: wire", "review `brigade tokens wire plan`; activate only qualified host hooks explicitly")
+    ]
 
 
 # ---- registry -------------------------------------------------------------
@@ -534,32 +562,25 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         ),
     ),
     ManagedTool(
-        name="token-glace",
+        name="tokenjuice",
         station="tokens",
-        command="token-glace",
+        command="tokenjuice",
         summary="output compaction via host hooks",
-        # No npm registry package exists under this name, and a git spec does
-        # not build (pnpm-native repo, no prepare hook); the GitHub release
-        # tarball is the reviewed installable artifact.
-        install_args=[
-            "npm",
-            "install",
-            "-g",
-            "https://github.com/escoffier-labs/token-glace/releases/download/v0.8.3/token-glace-v0.8.3.tar.gz",
-        ],
-        wire=_token_glace_wire,
-        doctor=_token_glace_doctor,
+        # Released baseline only, not a claim that the footer repair has shipped.
+        install_args=["npm", "install", "-g", "tokenjuice@0.8.5"],
+        wire=_tokenjuice_wire,
+        doctor=_tokenjuice_doctor,
         surfaces=(
-            _surface("doctor-json", ("token-glace", "doctor", "hooks", "--format", "json"), timeout_seconds=30.0),
+            _surface("doctor-json", ("tokenjuice", "doctor", "hooks", "--format", "json"), timeout_seconds=30.0),
             _surface(
                 "summary-json",
-                ("token-glace", "stats", "--format", "json", "--timezone", "utc"),
+                ("tokenjuice", "stats", "--format", "json", "--timezone", "utc"),
                 timeout_seconds=30.0,
                 max_chars=4000,
-                probe=("token-glace", "--help"),
+                probe=("tokenjuice", "--help"),
                 probe_contains=("--format", "--timezone"),
             ),
-            _surface("verify-exit", ("token-glace", "verify"), timeout_seconds=60.0),
+            _surface("verify-exit", ("tokenjuice", "verify"), timeout_seconds=60.0),
         ),
     ),
     ManagedTool(
@@ -700,7 +721,7 @@ _TOOLS: Tuple[ManagedTool, ...] = (
         name="usage-tracker",
         station="tokens",
         command="usage-tracker",
-        summary="local model usage export with spend and Token Glace savings summaries",
+        summary="local model usage export with spend and TokenJuice savings summaries",
         install_args=["pipx", "install", "git+https://github.com/escoffier-labs/usage-tracker"],
         wire=_noop_wire,
         doctor=_usage_tracker_doctor,
@@ -748,6 +769,8 @@ def for_station(station: str) -> Tuple[ManagedTool, ...]:
 
 
 def resolve(name: str) -> Optional[ManagedTool]:
+    if name == "token-glace":  # Existing managed-tool requests follow the new owner.
+        name = "tokenjuice"
     for t in _TOOLS:
         if t.name == name:
             return t
