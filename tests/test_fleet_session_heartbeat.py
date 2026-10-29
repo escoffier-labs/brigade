@@ -533,7 +533,12 @@ def worktrees(setup, monkeypatch):
             saved = replace(snapshot, checkout_path=str(path), session_id=name, harness="codex")
             _remember(saved)
             record = path / ".brigade/work/claude-hooks/sessions" / state.record_name("codex", name)
-            os.utime(record, ns=(mtime, mtime))
+            # Whole seconds survive Windows FILETIME's 100 ns resolution.
+            stamp_ns = mtime * 1_000_000_000
+            os.utime(record, ns=(stamp_ns, stamp_ns))
+            with anchored_io.session_directory(path) as anchor:
+                with anchor.open_file(record.name, os.O_RDONLY) as fd:
+                    assert os.fstat(fd).st_mtime_ns == stamp_ns
         entries.append("\0".join([f"worktree {path}", "HEAD abcdef", *flags]) + "\0\0")
         return path
 
@@ -542,7 +547,16 @@ def worktrees(setup, monkeypatch):
     return target, add, entries, processes, sent
 
 
-def test_worktree_discovery_selects_only_wired_present_targets_newest_first(worktrees):
+@pytest.mark.parametrize("timestamp_resolution_ns", [1, 100], ids=["nanoseconds", "windows-filetime"])
+def test_worktree_discovery_selects_only_wired_present_targets_newest_first(
+    worktrees, monkeypatch, timestamp_resolution_ns
+):
+    real_utime = os.utime
+
+    def quantized_utime(path, *, ns):
+        real_utime(path, ns=tuple(value // timestamp_resolution_ns * timestamp_resolution_ns for value in ns))
+
+    monkeypatch.setattr(os, "utime", quantized_utime)
     target, add, entries, processes, sent = worktrees
     oldest = add("oldest", mtime=10)
     newest = add("newest", mtime=30)
@@ -563,6 +577,32 @@ def test_worktree_discovery_selects_only_wired_present_targets_newest_first(work
     assert [s.checkout_path for s in sent] == [str(newest), str(middle), str(oldest)]
     assert report["discovery_errors"] == 0
     assert str(target) not in json.dumps(report)
+
+
+@pytest.mark.parametrize("newest_mtime", [20, 30], ids=["equal-mtimes", "newest-sidecar"])
+def test_discovery_uses_newest_sidecar_and_stable_path_ties(worktrees, newest_mtime):
+    import time
+
+    target, add, entries, _, _ = worktrees
+    first = add("first", mtime=10)
+    second = add("second", mtime=20)
+    # Git enumeration and directory mtimes both favor the other checkout.
+    entries.reverse()
+    first_sessions = first / ".brigade/work/claude-hooks/sessions"
+    extra = first_sessions / ("newer" + state.SUFFIX)
+    extra.write_text("{}")
+    stamp_ns = newest_mtime * 1_000_000_000
+    os.utime(extra, ns=(stamp_ns, stamp_ns))
+    second_sessions = second / ".brigade/work/claude-hooks/sessions"
+    for path, stamp in ((first, 100), (second, 200), (first_sessions, 100), (second_sessions, 200)):
+        os.utime(path, ns=(stamp * 1_000_000_000, stamp * 1_000_000_000))
+
+    discovered, errors, truncated = heartbeat._discover_worktrees(
+        [target], time.monotonic() + heartbeat.OBSERVATION_BUDGET_SECONDS
+    )
+
+    assert discovered == [first, second]
+    assert errors == 0 and not truncated
 
 
 def test_discovery_combines_explicit_targets_and_deduplicates_before_cap(worktrees, monkeypatch):
