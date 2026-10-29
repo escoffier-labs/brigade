@@ -233,9 +233,9 @@ class Authority:
 
     @staticmethod
     def bounded(attempt):
-        if not isinstance(attempt, Attempt) or not isinstance(attempt.artifact, Artifact):
+        if type(attempt) is not Attempt or type(attempt.artifact) is not Artifact:
             return False
-        if not isinstance(attempt.bundle, str) or type(attempt.signatures) is not int:
+        if type(attempt.bundle) is not str or type(attempt.signatures) is not int:
             return False
         artifact = attempt.artifact
         texts = (
@@ -251,16 +251,16 @@ class Authority:
             artifact.mutation,
         )
         numbers = (attempt.head, attempt.fence, attempt.epoch, artifact.epoch, artifact.policy)
-        if not all(isinstance(text, str) for text in texts):
+        if not all(type(text) is str for text in texts):
             return False
         if not all(type(number) is int and number >= 0 for number in numbers):
             return False
-        if attempt.review is not None and not isinstance(attempt.review, str):
+        if attempt.review is not None and type(attempt.review) is not str:
             return False
-        if not isinstance(artifact.sources, tuple) or not all(isinstance(source, str) for source in artifact.sources):
+        if type(artifact.sources) is not tuple or not all(type(source) is str for source in artifact.sources):
             return False
         recipients = attempt.artifact.recipients
-        if not isinstance(recipients, tuple) or not all(isinstance(device, str) for device in recipients):
+        if type(recipients) is not tuple or not all(type(device) is str for device in recipients):
             return False
         return (
             len(repr(attempt).encode()) <= 4096
@@ -388,7 +388,7 @@ class Authority:
             return REFUSAL.copy()
         expected = self.checkpoints[-1]
         # Check the retained snapshot floor before executing any fixture dump SQL.
-        if not isinstance(backup, str) or sha256(backup.encode()).hexdigest() != expected[1]:
+        if type(backup) is not str or sha256(backup.encode()).hexdigest() != expected[1]:
             return REFUSAL.copy()
         with sqlite3.connect(":memory:") as candidate:
             try:

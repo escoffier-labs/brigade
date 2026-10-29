@@ -25,6 +25,7 @@ from tests._memory_contract_proof import (
     TrustedClient,
     AdapterA,
     AdapterB,
+    Artifact,
     publisher_core,
     request_digest,
 )
@@ -637,3 +638,65 @@ def test_signed_owner_cannot_be_replaced_by_another_granted_publisher(proof):
     assert authority.commit(other, attempt) == REFUSAL
     assert authority.verifier.calls[-2:] == [("review", True), ("publisher", True)]
     assert counts(authority) == (3, 0, 0)
+
+
+@pytest.mark.parametrize("subclass_kind", ["short-repr", "equal-artifact"])
+def test_hostile_subclasses_refuse_before_admission(proof, subclass_kind):
+    authority, _ = proof
+
+    class ShortRepr(str):
+        def __repr__(self):
+            return "'x'"
+
+    class AlwaysEqualArtifact(Artifact):
+        def __eq__(self, other):
+            return True
+
+    original = prepare(authority)
+    if subclass_kind == "short-repr":
+        artifact = replace(original.artifact, handle=ShortRepr("x" * 100_000))
+        review = authority.review(REVIEWER, artifact)
+    else:
+        artifact = AlwaysEqualArtifact(**{**vars(original.artifact), "handle": "opaque-substituted"})
+        review = original.review
+    attempt = authority.authorize(PUBLISHER, "subclass", artifact, review)
+    authority.trace.clear()
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert "BEGIN IMMEDIATE" not in authority.trace
+    assert counts(authority) == (3, 0, 0)
+
+
+def test_backup_subclass_cannot_forge_hash_input(proof, tmp_path):
+    authority, _ = proof
+    original = authority.backup()
+    outside = tmp_path / "outside.sqlite"
+    quoted = str(outside).replace("'", "''")
+
+    class ForgedEncoding(str):
+        def encode(self, *args, **kwargs):
+            return original.encode(*args, **kwargs)
+
+    hostile = ForgedEncoding(original + f"\nATTACH DATABASE '{quoted}' AS outside; CREATE TABLE outside.data(value);")
+    assert authority.restore(RECOVERY, hostile) == REFUSAL
+    assert not outside.exists()
+
+
+def test_checkpoint_gap_remains_after_successful_issuance(proof):
+    authority, _ = proof
+    authority.revoke(CHECKPOINT)
+    assert authority.checkpoint_gap
+    before = len(authority.checkpoints)
+    authority.db.execute("UPDATE grants SET active=1 WHERE principal=? AND device=?", CHECKPOINT)
+    authority.advance("fence")
+    assert len(authority.checkpoints) == before + 1
+    assert authority.checkpoint_gap
+    assert authority.restore(RECOVERY, authority.backup()) == REFUSAL
+
+
+@pytest.mark.parametrize("value", [-1, False])
+def test_negative_or_boolean_sequence_refuses_before_lock(proof, value):
+    authority, _ = proof
+    attempt = resign(authority, replace(prepare(authority), head=value))
+    authority.trace.clear()
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert "BEGIN IMMEDIATE" not in authority.trace
