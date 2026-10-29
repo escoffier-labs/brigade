@@ -113,6 +113,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     comment = quote = opaque = table = False
     empty_item = False
     raw_end: re.Pattern[str] | None = None
+    raw_base = 0
     index = 0
 
     def finish() -> None:
@@ -139,10 +140,15 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
                 index += 1
                 continue
         if raw_end is not None:
-            if raw_end.search(raw):
+            if raw.strip() and indent < raw_base:
+                # A raw block cannot outlive its list container. Reprocess the
+                # dedented line so outer claims retain their original spans.
                 raw_end = None
-            index += 1
-            continue
+            else:
+                if raw_end.search(raw):
+                    raw_end = None
+                index += 1
+                continue
         if comment:
             comment = "-->" not in raw
             index += 1
@@ -213,6 +219,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
         if opened is not None:
             finish()
             raw_end = None if opened.search(line) else opened
+            raw_base = base
             index += 1
             continue
         if "<!--" in line:

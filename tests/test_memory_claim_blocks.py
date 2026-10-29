@@ -297,3 +297,22 @@ def test_closed_html_on_one_line_leaves_next_claim_addressable(markdown):
     body = markdown("<pre>literal ^c-abcdef</pre>\nAfter.")
     assert [b.text for b in delta.blocks(body)] == ["After."]
     assert delta.claim_body(body) == body
+
+
+@pytest.mark.parametrize(
+    "opener,closer", [("<pre>", "</pre>"), ("<?example", "?>"), ("<![CDATA[", "]]>"), ("<!DOCTYPE", ">")]
+)
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("closed", [False, True])
+def test_list_raw_html_ends_at_nonblank_dedent(markdown, opener, closer, nested, closed):
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    structure = f"{prefix}{opener}\n{indent}literal ^c-abcdef\n\n"
+    ending = f"\n\n<!-- {closer} -->\n" if closed else "\n"
+    body = markdown(structure + "Outer claim. ^c-fedcba" + ending + "\nAfter.")
+    expected = (["- Parent."] if nested else []) + ["Outer claim. ^c-fedcba", "After."]
+    assert [b.text for b in delta.blocks(body)] == expected
+    assert delta.claim_body(body) == body.replace("Outer claim. ^c-fedcba", "Outer claim.")
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
+    assert delta.claim_body(anchored) == delta.claim_body(body)
+    assert "literal ^c-abcdef" in delta.claim_body(anchored)

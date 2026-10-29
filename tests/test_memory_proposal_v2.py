@@ -1151,3 +1151,20 @@ def test_reviewed_edit_covers_previously_continuation(tmp_path, kind):
     assert "previously The cache stays warm and previously cold nodes recover." in after
     if kind == "replace_block":
         assert "Keep the cache cold. ^c-123abc" in after
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_reviewed_edit_after_list_raw_html_dedent(tmp_path, kind, nested):
+    path = setup(tmp_path)
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    structure = f"{prefix}<pre>\n{indent}literal ^c-abcdef\n\n"
+    path.write_text(path.read_text().replace(CLAIM, structure + CLAIM + "\n</pre>"))
+    edit = op(kind, **({"text": "Keep the cache cold."} if kind == "replace_block" else {}))
+    proposal = create(tmp_path, [edit])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    after = path.read_text()
+    assert CLAIM not in after
+    assert structure in after
+    if kind == "replace_block":
+        assert "Keep the cache cold. ^c-123abc" in after
