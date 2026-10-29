@@ -526,12 +526,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Serve MCP Events (events/list, events/subscribe, events/unsubscribe); the hub must enable them too.",
     )
+    from .cli.fleet_mcp_report import register as register_report
+
+    register_report(parser)
+    # The bare command still serves MCP, so the command inventory keeps listing it beside `report`.
     parser.set_defaults(
+        _brigade_command_contract_leaf=True,
         func=lambda args: serve_mcp(
             http=args.http,
             host=args.host,
             port=args.port,
             token_file=args.principal_token_file,
             events=args.events,
-        )
+        ),
     )

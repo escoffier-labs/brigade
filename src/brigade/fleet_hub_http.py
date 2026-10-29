@@ -25,6 +25,7 @@ from . import (
     fleet_admin_stats_http,
     fleet_skills_http,
     fleet_pr_rules_http,
+    fleet_mcp_inventory_http,
     fleet_project_board_http,
 )
 from . import (
@@ -1532,6 +1533,9 @@ def make_handler(
             if path == "/deck/pr-rules":
                 fleet_pr_rules_http.serve(self, Path(db_path), token, query)
                 return
+            if path == "/deck/mcp":
+                fleet_mcp_inventory_http.serve(self, Path(db_path), query)
+                return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)
                 return
@@ -1734,6 +1738,9 @@ def make_handler(
                 return
             if path == "/skills/report":
                 fleet_skills_http.post_report(self, Path(db_path), query)
+                return
+            if path == "/mcp/report":
+                fleet_mcp_inventory_http.post_report(self, Path(db_path), query)
                 return
             if path == "/projects/board":
                 fleet_project_board_http.post_snapshot(self, Path(db_path), query)
