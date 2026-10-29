@@ -72,6 +72,10 @@ def _parse_toml_value(raw: str) -> object:
         return True
     if value == "false":
         return False
+    if len(value) >= 2 and value[0] == value[-1] == "'" and "'" not in value[1:-1]:
+        # TOML literal strings have no escapes; literal_eval would turn the
+        # separators in a Windows path such as D:\a\b into control bytes.
+        return value[1:-1]
     try:
         return ast.literal_eval(value)
     except (SyntaxError, ValueError):
