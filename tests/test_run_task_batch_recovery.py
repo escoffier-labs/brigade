@@ -457,3 +457,59 @@ def test_batch_replay_does_not_regrant_terminal_claim(task_run, monkeypatch):
     )
     assert terminal.outcome == "terminal" and terminal.task == acknowledged
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("operation", ["read", "replay", "new"])
+def test_later_pair_cannot_hide_batch_without_preceding_checkpoint(task_run, operation):
+    run_dir, workspace = task_run
+    _accept(task_run)
+    tasks.accept_task(
+        run_dir,
+        workspace=workspace,
+        request_id="unrelated",
+        spec=tasks.TaskSpec("unrelated", "worker", "b" * 64),
+    )
+    path = run_dir / "events/lifecycle.jsonl"
+    envelopes = [json.loads(line) for line in path.read_bytes().splitlines()]
+    index = next(i for i, e in enumerate(envelopes) if e["event_type"] == "task.batch-accepted")
+    assert envelopes[index - 1]["event_type"] == run_checkpoint.CHECKPOINT_EVENT_TYPE
+    del envelopes[index - 1]
+    previous = None
+    rebuilt = []
+    for sequence, envelope in enumerate(envelopes, 1):
+        event = run_events.build_event(
+            run_id=run_dir.name,
+            sequence=sequence,
+            event_type=envelope["event_type"],
+            payload=envelope["payload"],
+            idempotency_key=envelope["idempotency_key"],
+            recorded_at=envelope["recorded_at"],
+            previous_digest=previous,
+        )
+        rebuilt.append(run_events.canonical_bytes(event) + b"\n")
+        previous = event["event_digest"]
+    path.write_bytes(b"".join(rebuilt))
+    report = run_journal.read_journal_bounded(path)
+    assert not report.chain_errors and report.partial_tail is None
+    # Every envelope and the latest unrelated pair remain valid. Only the
+    # historical aggregate's missing predecessor makes these APIs refuse.
+    checkpoint = run_checkpoint.latest_checkpoint_event(list(report.events))
+    body = json.loads(run_checkpoint.validate_checkpoint(run_dir, checkpoint))
+    run_checkpoint._verify_coverage(list(report.events), checkpoint, body)
+    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    directories = {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()}
+    with pytest.raises(tasks.TaskJournalError, match="incomplete-pair") as error:
+        if operation == "read":
+            tasks.read_task_batch(run_dir, request_id="batch-one")
+        elif operation == "replay":
+            _accept(task_run)
+        else:
+            tasks.accept_task_batch(
+                run_dir,
+                workspace=workspace,
+                request_id="fresh-batch",
+                specs=(tasks.TaskSpec("fresh", "worker", "c" * 64),),
+            )
+    assert len(str(error.value)) <= run_events.MAX_DIAGNOSTIC_LEN
+    assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories

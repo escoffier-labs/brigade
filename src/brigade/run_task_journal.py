@@ -165,6 +165,39 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
             raise run_events.CanonicalizationError("nonterminal task cannot publish an artifact")
 
 
+def validate_pairs(events: Sequence[run_journal.RunEvent]) -> None:
+    """Require both halves of every task checkpoint/fact pair in history."""
+    for index, event in enumerate(events):
+        if event.event_type in TASK_FIELDS:
+            preceding = events[index - 1] if index else None
+            if (
+                preceding is None
+                or preceding.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE
+                or preceding.run_id != event.run_id
+                or preceding.sequence + 1 != event.sequence
+                or preceding.payload.get("paired_event_type") != event.event_type
+                or preceding.payload.get("pairing_key") != event.request_digest
+            ):
+                raise TaskJournalError("task checkpoint refused: incomplete-pair")
+        if event.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE:
+            continue
+        paired_type = event.payload.get("paired_event_type")
+        if paired_type not in TASK_FIELDS:
+            continue
+        key = event.payload.get("pairing_key")
+        if key is None:
+            raise TaskJournalError("task checkpoint refused: pairing")
+        following = events[index + 1] if index + 1 < len(events) else None
+        if (
+            following is None
+            or following.run_id != event.run_id
+            or following.sequence != event.sequence + 1
+            or following.event_type != paired_type
+            or following.request_digest != key
+        ):
+            raise TaskJournalError("task checkpoint refused: incomplete-pair")
+
+
 def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
     path = run_lifecycle._journal_path(run_dir)
     if not run_journal.bound_is_file(path):
@@ -180,24 +213,7 @@ def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
     checkpoints = [e for e in events if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     if not checkpoints:
         raise TaskJournalError("task journal has no recovery checkpoint")
-    # A later unrelated pair cannot erase a checkpoint-only task crash.
-    for index, checkpoint in enumerate(events):
-        if checkpoint.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE:
-            continue
-        paired_type = checkpoint.payload.get("paired_event_type")
-        if paired_type not in TASK_FIELDS:
-            continue
-        key = checkpoint.payload.get("pairing_key")
-        if key is None:
-            raise TaskJournalError("task checkpoint refused: pairing")
-        following = events[index + 1] if index + 1 < len(events) else None
-        if (
-            following is None
-            or following.sequence != checkpoint.sequence + 1
-            or following.event_type != paired_type
-            or following.request_digest != key
-        ):
-            raise TaskJournalError("task checkpoint refused: incomplete-pair")
+    validate_pairs(events)
     latest = checkpoints[-1]
     body = json.loads(run_checkpoint.validate_checkpoint(run_dir, latest))
     run_checkpoint._verify_coverage(events, latest, body)

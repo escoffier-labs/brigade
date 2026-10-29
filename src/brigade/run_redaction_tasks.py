@@ -34,6 +34,7 @@ def validate_history(events: Sequence[run_journal.RunEvent], *, error_type: type
     if not events:
         return
     try:
+        run_task_journal.validate_pairs(events)
         tasks._fold(events[0].run_id, list(events))
     except tasks.TaskJournalError as exc:
         raise error_type("task history verification failed") from exc

@@ -648,3 +648,33 @@ def test_unselected_control_alias_guard_refuses_before_publication(closed_batche
         )
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
     assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories
+
+
+@requires_secure_transactions
+def test_unpaired_historical_batch_redaction_refuses_before_publication(closed_batches):
+    run_dir = closed_batches
+    events = _events(run_dir)
+    index = next(i for i, e in enumerate(events) if e.event_type == "task.batch-accepted")
+    assert events[index - 1].event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+    del events[index - 1]
+    _publish(run_dir, events)
+    report = run_journal.read_journal_bounded(run_dir / "events/lifecycle.jsonl")
+    assert not report.chain_errors and report.partial_tail is None
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    selected = next(e for e in report.events if e.event_type == "task.batch-accepted")
+    latest = run_checkpoint.latest_checkpoint_event(list(report.events))
+    run_checkpoint._verify_coverage(
+        list(report.events), latest, json.loads(run_checkpoint.validate_checkpoint(run_dir, latest))
+    )
+    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    directories = {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()}
+    with pytest.raises(run_redaction.RedactionError, match="task history verification failed"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=selected.sequence,
+            sequence_end=selected.sequence,
+            reason="credential-exposure",
+            operator_confirmed=True,
+        )
+    assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories

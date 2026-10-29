@@ -368,7 +368,6 @@ def _validate_checkpoint_artifacts(
     snapshot: Mapping[str, Any],
     events: Sequence[run_journal.RunEvent],
 ) -> None:
-    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     checkpoint_events = [event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     latest = run_checkpoint.latest_checkpoint_event(list(events))
     if latest is None or not checkpoint_events:
@@ -398,6 +397,8 @@ def _validate_checkpoint_artifacts(
         raise
     except run_checkpoint.CheckpointError as exc:
         raise RedactionError("checkpoint verification failed") from exc
+    # Retain checkpoint diagnostics before validating the complete task pairs.
+    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     if (
         latest.payload.get("body_kind") != "base-stripped"
         or checkpoint_obj.get("run_journal_authority_requested") is not True
