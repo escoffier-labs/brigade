@@ -185,6 +185,16 @@ def _presence_id(native_id: str) -> str:
         return "t3-" + hashlib.sha256(native_id.encode("utf-8")).hexdigest()
 
 
+def _optional_link(link: object) -> dict[str, str] | None:
+    """Return a valid provider link, or None: bad enrichment never drops the session."""
+    if not isinstance(link, dict) or link.get("harness") not in ("claude", "codex"):
+        return None
+    try:
+        return {"harness": link["harness"], "session_id": _opaque_id(link.get("session_id"))}
+    except ObservationError:
+        return None
+
+
 def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
     if not isinstance(payload, dict) or type(payload.get("schemaVersion")) is not int or payload["schemaVersion"] != 2:
         raise ObservationError("native_metadata_invalid")
@@ -253,11 +263,7 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
                 if project_id not in roots:
                     raise ObservationError("native_metadata_invalid")
                 raw = roots[project_id]
-            link = row.get("provider_link")
-            if link is not None:
-                if not isinstance(link, dict) or link.get("harness") not in ("claude", "codex"):
-                    raise ObservationError("native_metadata_invalid")
-                link = {"harness": link["harness"], "session_id": _opaque_id(link.get("session_id"))}
+            link = _optional_link(row.get("provider_link"))
             active.append(RecentSession(session_id, _absolute_workspace(raw), now_ms, link))
         except ObservationError:
             invalid += 1

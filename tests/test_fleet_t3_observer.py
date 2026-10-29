@@ -600,3 +600,34 @@ def test_slow_shell_read_skips_detail_waits_past_the_budget(native_t3, capsys, m
     capsys.readouterr()
     assert len(published) == 1
     assert published[0].provider_link is None
+
+
+@pytest.mark.parametrize("native_id", [None, "", "has space", "x" * 300])
+def test_invalid_optional_link_still_publishes_the_session(native_t3, capsys, native_id):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": native_id, "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["invalid_rows"] == 0
+    assert len(published) == 1
+    assert published[0].provider_link is None
