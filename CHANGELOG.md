@@ -202,6 +202,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reviewed memory proposals preserve Markdown structures when anchoring claims, including list-contained quotations, code and headings. Exact duplicate comparison retains literal anchor tokens in excluded blocks.
 - Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
 
+- Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
 ## [0.30.0] - 2026-10-20
 
