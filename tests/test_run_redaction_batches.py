@@ -558,3 +558,93 @@ def test_nested_affected_value_check_refuses_semantically_valid_leak_before_publ
         )
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
     assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("alias", ["task", "result"])
+@pytest.mark.parametrize("target", ["standalone", "member-1-0", None])
+def test_selected_batch_alias_in_unrelated_control_is_removed(closed_batches, alias, target):
+    run_dir = closed_batches
+    batch = tasks.read_task_batch(run_dir, request_id="private-batch-0")
+    first = batch.members[0]
+    old = first.handle.spec.task_id if alias == "task" else first.result_id
+    unrelated = {
+        t.handle.spec.task_id: t
+        for t in tasks.read_tasks(run_dir)
+        if t.handle.spec.task_id != first.handle.spec.task_id
+    }
+    events = _events(run_dir)
+    for i, event in enumerate(events):
+        if event.event_type.startswith("control."):
+            payload = {k: v for k, v in event.payload.items() if k not in {"task_id", "attempt_id"}}
+            payload["turn_id"] = old
+            if target is not None:
+                payload["task_id"] = target
+                payload["attempt_id"] = unrelated[target].handle.attempt_id
+            else:
+                payload["worker"] = "unrelated-worker"
+            events[i] = replace(event, payload=payload)
+    _publish(run_dir, events)
+    selected = next(e for e in _events(run_dir) if e.event_type == "task.batch-accepted")
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=selected.sequence,
+        sequence_end=selected.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    assert old not in (run_dir / "events/lifecycle.jsonl").read_text()
+    controls = [e for e in _events(run_dir) if e.event_type.startswith("control.")]
+    assert len(controls) == 2
+    assert controls[0].payload["request_id"] == controls[1].payload["request_id"]
+    assert controls[0].payload["turn_id"] == controls[1].payload["turn_id"]
+    assert all(e.payload.get("task_id") == target for e in controls)
+    current = {t.handle.spec.task_id: t for t in tasks.read_tasks(run_dir)}
+    for task_id in ("standalone", "member-1-0", "member-1-1"):
+        assert current[task_id].handle == unrelated[task_id].handle
+        assert current[task_id].result_id == unrelated[task_id].result_id
+        assert current[task_id].launch_claim == unrelated[task_id].launch_claim
+        assert current[task_id].acknowledged
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("alias", ["task", "result"])
+def test_unselected_control_alias_guard_refuses_before_publication(closed_batches, monkeypatch, alias):
+    run_dir = closed_batches
+    first = tasks.read_task_batch(run_dir, request_id="private-batch-0").members[0]
+    unrelated = next(t for t in tasks.read_tasks(run_dir) if t.handle.spec.task_id == "standalone")
+    old = first.handle.spec.task_id if alias == "task" else first.result_id
+    events = _events(run_dir)
+    for i, event in enumerate(events):
+        if event.event_type.startswith("control."):
+            events[i] = replace(
+                event, payload={**event.payload, "task_id": "standalone", "attempt_id": unrelated.handle.attempt_id}
+            )
+    _publish(run_dir, events)
+    prepare = run_redaction.run_redaction_tasks.prepare_requests
+
+    def retain_control_alias(events, requests, **kwargs):
+        prepare(events, requests, **kwargs)
+        for i, event in enumerate(events):
+            if event.event_type.startswith("control."):
+                payload, key = requests[i]
+                requests[i] = ({**payload, "turn_id": old}, key)
+        # This fault retains a private alias in otherwise coherent control and task history.
+        rebuilt, _ = run_redaction_rewrite.rewrite_events(events, requests, error_type=RuntimeError)
+        tasks._fold(run_dir.name, rebuilt)
+        run_checkpoint._verify_control_suffix(rebuilt, [e for e in rebuilt if e.event_type.startswith("control.")])
+
+    monkeypatch.setattr(run_redaction.run_redaction_tasks, "prepare_requests", retain_control_alias)
+    selected = next(e for e in _events(run_dir) if e.event_type == "task.batch-accepted")
+    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    directories = {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()}
+    with pytest.raises(run_redaction.RedactionError, match="rewritten journal still contains affected private values"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=selected.sequence,
+            sequence_end=selected.sequence,
+            reason="credential-exposure",
+            operator_confirmed=True,
+        )
+    assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories

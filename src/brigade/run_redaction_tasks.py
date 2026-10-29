@@ -158,7 +158,7 @@ def prepare_requests(
         # One private string can name a token and a digest. Derived token
         # aliases must still satisfy the destination's closed scalar type.
         if field.endswith("digest") and replacement != value and not run_task_journal.digest(replacement):
-            substitute(task_id, field, value, descriptors[task_id])
+            substitute(task_id, field, value, descriptors.get(task_id, 0))
             return substitutions[(task_id, field, value)]
         return replacement
 
@@ -286,13 +286,25 @@ def prepare_requests(
         raise error_type("task redaction alias closure did not converge")
 
     affected_task_ids = set(selected_values)
+    related_request_ids = {
+        event.payload["request_id"]
+        for event in events
+        if event.event_type in control_types
+        and (
+            event.payload.get("task_id") in affected_task_ids
+            or any(
+                field not in CONTROL_STRUCTURAL_FIELDS and (value in sensitive or value in aliases)
+                for field, value in private_scalars(event)
+            )
+        )
+    }
     related_controls = [
         event
         for event in events
-        if event.event_type in control_types and event.payload.get("task_id") in affected_task_ids
+        if event.event_type in control_types and event.payload["request_id"] in related_request_ids
     ]
-    # Check complete request pairs only when their task identity will change.
-    # Unrelated legacy controls may already have generic redaction identities.
+    # Check both halves when either contains an affected identity, even if its
+    # target task is unchanged. Unrelated legacy controls stay untouched.
     try:
         run_checkpoint._verify_control_suffix(list(events), related_controls)
     except run_checkpoint.CheckpointError as exc:
@@ -309,7 +321,9 @@ def prepare_requests(
         if event.event_type == "task.attempt-prepared"
     }
     for event in related_controls:
-        task_id = event.payload["task_id"]
+        task_id = event.payload.get("task_id")
+        if task_id is None:
+            continue
         if task_id not in accepted or (
             "attempt_id" in event.payload and (task_id, event.payload["attempt_id"]) not in known_attempts
         ):
@@ -317,24 +331,23 @@ def prepare_requests(
     # Controls are status-neutral facts, but their selectors participate in the
     # same task identity graph. Rewrite both halves even across checkpoints.
     control_requests: dict[str, str] = {}
-    for event in events:
-        if event.event_type in control_types and event.payload.get("task_id") in selected_values:
-            old = event.payload
-            task_id = old["task_id"]
-            if event.event_type == "control.requested":
-                substitute(task_id, "control_request_id", old["request_id"], event.sequence)
-                control_requests[old["request_id"]] = substitutions[(task_id, "control_request_id", old["request_id"])]
-            if event.sequence in selected_controls:
-                for field, value in old.items():
-                    if isinstance(value, str) and field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
-                        substitute(task_id, field, value, event.sequence)
+    for event in related_controls:
+        old = event.payload
+        task_id = old.get("task_id", f"control:{old['request_id']}")
+        if event.event_type == "control.requested":
+            substitute(task_id, "control_request_id", old["request_id"], event.sequence)
+            control_requests[old["request_id"]] = substitutions[(task_id, "control_request_id", old["request_id"])]
+        if event.sequence in selected_controls:
+            for field, value in old.items():
+                if isinstance(value, str) and field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
+                    substitute(task_id, field, value, event.sequence)
     for index, event in enumerate(events):
         if event.event_type not in control_types:
             continue
         old = event.payload
-        task_id = old.get("task_id")
-        if task_id not in selected_values:
+        if old["request_id"] not in related_request_ids:
             continue
+        task_id = old.get("task_id", f"control:{old['request_id']}")
         payload = dict(old)
         for field, value in old.items():
             if field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
@@ -342,6 +355,6 @@ def prepare_requests(
                     substitute(task_id, field, value, event.sequence)
                 payload[field] = mapped(task_id, field, value)
         if old.get("attempt_id") is not None:
-            payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
+            payload["attempt_id"] = attempts.get((task_id, old["attempt_id"]), old["attempt_id"])
         payload["request_id"] = control_requests[old["request_id"]]
         requests[index] = (payload, f"{event.event_type}:{payload['request_id']}")

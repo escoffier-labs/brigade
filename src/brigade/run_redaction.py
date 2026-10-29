@@ -2005,11 +2005,34 @@ def _assert_affected_values_removed(
         for field, value in run_redaction_tasks.private_scalars(event)
         if field not in run_redaction_tasks.STRUCTURAL_FIELDS | run_redaction_tasks.CONTROL_STRUCTURAL_FIELDS
     }
-    # A later member/control selection can reach an unselected aggregate.
-    # Check its nested references too, before any replacement publication.
+    # Derived task identities can change outside the selected range too.
+    # Every retained task/control alias must lose both selected references and
+    # identities rebuilt by the task rewrite, irrespective of target task.
+    for prior, current in zip(original, rewritten, strict=True):
+        if prior.event_type in run_events._TASK_EVENT_TYPES:
+            prior_rows = [prior.payload]
+            current_rows = [current.payload]
+            if prior.event_type == "task.batch-accepted":
+                prior_rows += prior.payload["members"]
+                current_rows += current.payload["members"]
+            for old_row, new_row in zip(prior_rows, current_rows, strict=True):
+                selected_references.update(
+                    value
+                    for field, value in old_row.items()
+                    if isinstance(value, str)
+                    and field not in run_redaction_tasks.STRUCTURAL_FIELDS
+                    and value != new_row.get(field)
+                )
     for event in rewritten:
-        if event.event_type == "task.batch-accepted" and any(
-            value in selected_references for _, value in run_redaction_tasks.private_scalars(event)
+        if event.event_type in run_events._TASK_EVENT_TYPES:
+            structural = run_redaction_tasks.STRUCTURAL_FIELDS
+        elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
+            structural = run_redaction_tasks.CONTROL_STRUCTURAL_FIELDS
+        else:
+            continue
+        if any(
+            field not in structural and value in selected_references
+            for field, value in run_redaction_tasks.private_scalars(event)
         ):
             raise RedactionError("rewritten journal still contains affected private values")
     for prior, current in zip(original, rewritten, strict=True):
