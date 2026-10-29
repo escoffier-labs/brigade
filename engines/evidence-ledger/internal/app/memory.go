@@ -214,6 +214,7 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		return ingest.RecordSourceScans(db, sourceKind, generatedHash, []sources.FileScan{file}, true)
 	}
 	result, importErr := ingest.ImportNativeReaderProgress(db, pr, workspace, ingest.MemorySourceKind, nil, recordScan)
+	_ = pr.CloseWithError(importErr)
 	gen := <-done
 	if importErr != nil || gen.err != nil {
 		errMsg := importErr

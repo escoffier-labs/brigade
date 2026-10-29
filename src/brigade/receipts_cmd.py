@@ -22,6 +22,8 @@ from . import provenance
 from . import receipt_json
 from . import receipt_signing
 from . import trust_gate
+from .inbox_lock import held_file_lock
+from .receipts_import_contract import _miseledger_import_summary
 from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
@@ -1478,14 +1480,6 @@ def _temporary_miseledger_export_path(target: Path) -> Path:
         return Path(handle.name)
 
 
-def _miseledger_import_summary(payload: object) -> tuple[object, object]:
-    if not isinstance(payload, dict):
-        return "unknown", "unknown"
-    inserted = payload.get("inserted_items", payload.get("inserted", "unknown"))
-    known = payload.get("already_known", payload.get("known_items", "unknown"))
-    return inserted, known
-
-
 def _import_miseledger_file(
     path: Path, *, strict: bool = False, quiet: bool = False, failed_on_error: bool | None = None
 ) -> tuple[bool, bool]:
@@ -1537,10 +1531,12 @@ def _import_miseledger_file(
         print(f"warning: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
         return True, False
     try:
-        payload = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    inserted, known = _miseledger_import_summary(payload)
+        payload = json.loads(result.stdout)
+        inserted, known = _miseledger_import_summary(payload)
+    except (ValueError, TypeError) as exc:
+        prefix = "error" if strict else "warning"
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
+        return True, True
     if not quiet:
         print(f"miseledger import: inserted_items={inserted} already_known={known}")
     return True, False
@@ -1653,7 +1649,12 @@ def _advance_miseledger_cursor(target: Path, cursor_hashes: set[str], written_ha
     if not written_hashes:
         return 0
     try:
-        _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
+        # All cursor acknowledgements use this shared writer lock. Re-read
+        # inside it because another export may have completed since snapshot.
+        cursor_path = _miseledger_cursor_path(target)
+        with held_file_lock(cursor_path.with_suffix(".lock"), deadline_seconds=5):
+            current = _read_miseledger_cursor_hashes(target)
+            _write_miseledger_cursor_hashes(target, current | cursor_hashes | set(written_hashes))
     except OSError as exc:
         print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
         return 1

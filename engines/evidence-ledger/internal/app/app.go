@@ -1262,6 +1262,13 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		fmt.Fprint(errw, "\r\033[K")
 	}
 	if err != nil {
+		if bools["json"] {
+			if result.Status == "" {
+				result.Status = "failed"
+				result.Errors = []string{err.Error()}
+			}
+			writeJSON(out, result)
+		}
 		return fatalf(errw, "import: %s", err)
 	}
 	if bools["json"] {
@@ -1611,12 +1618,16 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 		return ingest.AdapterResult{}, stationTrailSummary{}, toolpath.WrapExecErr("stationtrail", toolpath.HintStationTrail, err)
 	}
 	result, importErr := ingest.ImportAdapterReader(db, stdout, "stationtrail://"+sourceKind+"/"+sourcePath, sourceKind)
-	waitErr := cmd.Wait()
-	if ctx.Err() == context.DeadlineExceeded {
-		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
+	if importErr != nil {
+		_ = stdout.Close()
+		cancel()
 	}
+	waitErr := cmd.Wait()
 	if importErr != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, importErr
+	}
+	if ctx.Err() == context.DeadlineExceeded {
+		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())
@@ -1803,6 +1814,8 @@ func runNativeImportOpts(db *sql.DB, name string, generator sources.Generator, p
 		}
 	}
 	result, err := ingest.ImportNativeReaderProgress(db, pr, path, name, progressFn, recordScan)
+	// Stop a blocked producer before joining it when ingestion exits early.
+	_ = pr.CloseWithError(err)
 	if progress != nil && result.Inserted >= 1000 {
 		fmt.Fprintf(progress, "\rimport %s: %d records committed.\n", name, result.Inserted)
 	}

@@ -1,6 +1,6 @@
-# MiseLedger Adapter Contract
+# Brigade Evidence Ledger Adapter Contract
 
-`miseledger.adapter.v1` is a JSONL contract for source tools that want to feed MiseLedger without knowing the database schema.
+`miseledger.adapter.v1` is a JSONL contract for source tools that want to feed the evidence ledger without knowing the database schema.
 
 Each line is one JSON object. Unknown fields are tolerated and preserved in `items.raw_json`.
 
@@ -39,7 +39,7 @@ If a source lacks stable IDs, adapters should create deterministic external IDs 
 
 ## Native Adapter Generators
 
-MiseLedger includes conservative native generators for local agent-session JSON and JSONL:
+the evidence ledger includes conservative native generators for local agent-session JSON and JSONL:
 
 ```bash
 miseledger adapter codex <path-or-dir> --out <file|->
@@ -83,7 +83,7 @@ Scanner rules:
 
 Claude support targets `~/.claude/projects/**/*.jsonl` style project logs. The MVP scanner imports ordinary project session JSONL and does not special-case subagents yet. Subagent lines are treated as normal agent-session evidence unless a future fixture shows a safer split.
 
-Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. MiseLedger does not parse Hermes `state.db` directly.
+Hermes support targets `~/.hermes/sessions/session_*.json` snapshots and trajectory JSONL. the evidence ledger does not parse Hermes `state.db` directly.
 
 Grok support targets `~/.grok/sessions/**/summary.json` and `chat_history.jsonl`. Cursor support targets the current read-only `User/globalStorage/conversation-search.db` search database and retains the older prompt-history and chat-metadata JSON layout.
 
@@ -99,7 +99,7 @@ target object:
 Fields:
 
 - `target.source`: target `sources.kind`
-- `target.collection`: target `collections.external_id` (optional; when empty any collection in that source may match)
+- `target.collection`: target `collections.external_id` (optional: when empty any collection in that source may match)
 - `target.external_id`: target `items.external_id`
 
 Legacy adapters that only set `target_external_id` remain valid. Those relations
@@ -167,7 +167,7 @@ Completed-scan reconciliation:
   the active namespace collection.
 - Live identity for a card is the latest non-tombstoned item for
   `(source, collection, external_id)`. Content-addressed edits mint a new item
-  id; latest selection uses the database-monotonic `items.ingest_seq` (not
+  id. Latest selection uses the database-monotonic `items.ingest_seq` (not
   wall-clock `updated_at` or content-hash id order) so relation resolution and
   live/unresolved health pick the current version even when clocks are equal or
   move backward. Existing archives upgraded to schema v3 backfill `ingest_seq`
@@ -185,7 +185,7 @@ Completed-scan reconciliation:
   snapshot for that namespace stale.
 - `--rebuild` validates/walks first, then detaches the live namespace collection
   aside and imports into a fresh collection. Success finalizes by dropping the
-  backup; failure aborts by deleting the partial import and restoring the backup
+  backup. Failure aborts by deleting the partial import and restoring the backup
   collection name so prior live ids/hashes, inbound and outbound relations,
   item_metadata, events, artifacts, and the completed-scan record remain intact
   while health is marked stale or partial.
@@ -209,7 +209,7 @@ Size bounds:
 
 ## Built-In Crawlers
 
-MiseLedger's user-facing crawlers generate the same `miseledger.adapter.v1` records internally and stream them through normal ingest:
+the evidence ledger's user-facing crawlers generate the same `miseledger.adapter.v1` records internally and stream them through normal ingest:
 
 ```bash
 miseledger crawl sessions --json
@@ -230,7 +230,7 @@ miseledger crawl json export.json --source export --collection export:records --
 miseledger crawl jsonl export.jsonl --source notes --collection notes:local --json
 ```
 
-External crawler binaries can emit adapter JSONL directly or run through MiseLedger domain wrappers:
+External crawler binaries can emit adapter JSONL directly or run through the evidence ledger domain wrappers:
 
 ```bash
 miseledger crawl discord --limit 100 --json
@@ -240,13 +240,13 @@ miseledger crawl slack --workspace T123 --json
 miseledger crawl granola --json
 miseledger crawl notion --json
 miseledger crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:miseledger" --json
-miseledger crawl telegram --chat "MiseLedger" --json
+miseledger crawl telegram --chat "the evidence ledger" --json
 miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
-The Discord, Slack, Granola, and Notion wrappers consume adapter JSONL from `export adapter`. Gmail uses `mailcrawl gmail export`. GitHub is a current-Gitcrawl compatibility route: MiseLedger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: MiseLedger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
+The Discord, Slack, Granola, and Notion wrappers consume adapter JSONL from `export adapter`. Gmail uses `mailcrawl gmail export`. GitHub is a current-Gitcrawl compatibility route: the evidence ledger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: the evidence ledger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
 
-The archived StationTrail and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
+The archived `stationtrail` and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
 
 Scan manifests can be compared without reading transcript content into output:
 
@@ -256,3 +256,32 @@ miseledger scans changed --json
 ```
 
 Crawler and native-import scan manifests contain path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. They do not contain harvested text.
+
+## Import completion and replay
+
+`import adapter --json` reports `status` as `complete`, `already_known`,
+`partial`, or `failed`. A persistence, input-read, or commit error during
+adapter ingestion returns a nonzero exit code and an `errors` array. On error, `inserted_items` counts only
+inserts in committed batches. The open batch rolls back. Earlier batches stay
+durable. Replaying the original input uses idempotent upserts to finish the
+remaining records without duplicating committed items. A completed import
+marker is written only after the full input and final transaction succeed.
+
+Malformed adapter lines remain skippable parse warnings for compatibility.
+`complete` means the importer finished, so consumers requiring every row must
+also check `warnings`. Brigade receipt indexing requires a valid completion
+summary with no warnings or failures before advancing its export cursor.
+Status-less legacy summaries are rejected.
+Malformed, partial, or failure-bearing summaries leave receipts
+pending and preserve the export for replay. Concurrent cursor acknowledgements
+merge the latest hashes under the existing shared file-lock primitive.
+
+
+A completed `already_known` import identifies a previously imported source hash.
+Its `inserted_items` count can be positive when replay restores pruned items.
+Receipt clients validate count and flag types, require consistent aliases, and
+reject nonzero failure counts or malformed failure fields before acknowledgement.
+Known-item replay also restores an absent primary event using the stored item
+identity. Event-write failures roll back the open batch and prevent completion.
+
+Cursor-bearing receipt imports require an explicit `complete` or `already_known` status. A status-less result from an older binary leaves the export pending for replay with a repaired importer. A legacy binary exiting zero does not establish persistence.

@@ -20,6 +20,8 @@ import (
 )
 
 type AdapterResult struct {
+	Status       string   `json:"status"`
+	Errors       []string `json:"errors,omitempty"`
 	ImportID     string   `json:"import_id"`
 	SourceKind   string   `json:"source_kind"`
 	SourcePath   string   `json:"source_path"`
@@ -107,18 +109,36 @@ func ImportNativeReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverr
 	return importAdapterReaderProgress(db, r, sourcePath, sourceOverride, progress, recordScan)
 }
 
-func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int), recordScan ScanRecorder) (AdapterResult, error) {
+func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOverride string, progress func(inserted int), recordScan ScanRecorder) (result AdapterResult, retErr error) {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	sourceKind := sourceOverride
 
-	result := AdapterResult{SourceKind: sourceKind, SourcePath: sourcePath}
+	result = AdapterResult{SourceKind: sourceKind, SourcePath: sourcePath}
+	// Only committed inserts may be reported as durable after an error. Earlier
+	// batches remain available and replay uses the existing idempotent upsert.
+	durableInserted := 0
+	defer func() {
+		if retErr != nil {
+			result.Inserted = durableInserted
+			result.AlreadyKnown = false
+			result.Status = "failed"
+			if durableInserted > 0 {
+				result.Status = "partial"
+			}
+			result.Errors = []string{retErr.Error()}
+		} else if result.AlreadyKnown {
+			result.Status = "already_known"
+		} else {
+			result.Status = "complete"
+		}
+	}()
 	h := sha256.New()
 	ordinal := int64(0)
 	warnedOverrideKinds := map[string]bool{}
 
 	tx, err := db.Begin()
 	if err != nil {
-		return AdapterResult{}, err
+		return result, err
 	}
 	committed := false
 	defer func() {
@@ -131,6 +151,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		durableInserted = result.Inserted
 		if report && progress != nil {
 			progress(result.Inserted)
 		}
@@ -191,8 +212,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		}
 		inserted, err := upsertRecord(tx, rec, sourcePath, ordinal, line)
 		if err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: %s", ordinal, err))
-			return nil
+			return fmt.Errorf("line %d: persist adapter record: %w", ordinal, err)
 		}
 		if inserted {
 			result.Inserted++
@@ -206,7 +226,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		return nil
 	})
 	if scanErr != nil {
-		return AdapterResult{}, scanErr
+		return result, scanErr
 	}
 	sourceHash := "sha256:" + hex.EncodeToString(h.Sum(nil))
 	if sourceKind == "" {
@@ -220,7 +240,7 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 	var exists int
 	err = tx.QueryRow("select count(*) from imports where source_kind = ? and source_hash = ? and completed_at is not null", sourceKind, sourceHash).Scan(&exists)
 	if err != nil {
-		return AdapterResult{}, err
+		return result, err
 	}
 	if exists > 0 {
 		// Same content already fully imported. Batches above may still have
@@ -228,28 +248,36 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		// resolve relations before returning without writing a duplicate import
 		// row or minting items/events.
 		if _, err := resolveRelations(tx); err != nil {
-			return AdapterResult{}, err
+			return result, err
 		}
 		result.AlreadyKnown = true
+		if err := tx.Commit(); err != nil {
+			return result, err
+		}
 		committed = true
-		return result, tx.Commit()
+		durableInserted = result.Inserted
+		return result, nil
 	}
 	if _, err := tx.Exec(`insert or ignore into imports(id, source_kind, source_path, source_hash, started_at) values(?,?,?,?,?)`, importID, sourceKind, sourcePath, sourceHash, now); err != nil {
-		return AdapterResult{}, err
+		return result, err
 	}
 	for i, warning := range result.Warnings {
 		if _, err := tx.Exec(`insert or replace into import_warnings(import_id, ordinal, warning) values(?,?,?)`, importID, i+1, warning); err != nil {
-			return AdapterResult{}, err
+			return result, err
 		}
 	}
 	if _, err := resolveRelations(tx); err != nil {
-		return AdapterResult{}, err
+		return result, err
 	}
 	if _, err := tx.Exec(`update imports set completed_at = ?, item_count = ?, warning_count = ? where id = ?`, now, result.Inserted, len(result.Warnings), importID); err != nil {
-		return AdapterResult{}, err
+		return result, err
+	}
+	if err := tx.Commit(); err != nil {
+		return result, err
 	}
 	committed = true
-	return result, tx.Commit()
+	durableInserted = result.Inserted
+	return result, nil
 }
 
 func parseSourceScanSentinel(line []byte) (sources.FileScan, bool, error) {
@@ -561,6 +589,9 @@ func upsertRecord(tx *sql.Tx, rec adapter.Record, sourcePath string, ordinal int
 	// artifacts/relations) without minting a duplicate item or provenance event.
 	var known int
 	if err := tx.QueryRow(`select 1 from items where id = ?`, itemID).Scan(&known); err == nil {
+		if err := ensureItemEvent(tx, itemID); err != nil {
+			return false, err
+		}
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
@@ -608,8 +639,14 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 	if err != nil {
 		return false, err
 	}
-	insertedRows, _ := res.RowsAffected()
+	insertedRows, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("read inserted row count: %w", err)
+	}
 	if insertedRows == 0 {
+		if err := ensureItemEvent(tx, itemID); err != nil {
+			return false, err
+		}
 		if err := reconcileKnownItem(tx, rec, itemID, sourceID, collectionID, actorID, contentHash, rawHash, rawPath, rawOrdinal, raw, body, now); err != nil {
 			return false, err
 		}
@@ -618,8 +655,9 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 		}
 		return false, nil
 	}
-	eventID := stableID("event", itemID, createdAt, rec.Item.Kind)
-	_, _ = tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at) values(?,?,?,?,?,?,?)`, eventID, sourceID, collectionID, nullIfEmpty(actorID), itemID, rec.Item.Kind, createdAt)
+	if err := ensureItemEvent(tx, itemID); err != nil {
+		return false, err
+	}
 	if err := replaceItemSideTables(tx, rec, itemID, sourceID, collectionID, capturedAt, raw, body, now, false); err != nil {
 		return false, err
 	}
@@ -627,6 +665,23 @@ values(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, itemID, sourceID, collectionID, null
 		return false, err
 	}
 	return true, nil
+}
+
+// ensureItemEvent uses the stored item identity so replay can repair an event
+// omitted by older importers without changing its date or duplicating history.
+func ensureItemEvent(tx *sql.Tx, itemID string) error {
+	var createdAt, kind string
+	if err := tx.QueryRow(`select created_at, kind from items where id = ?`, itemID).Scan(&createdAt, &kind); err != nil {
+		return fmt.Errorf("read event identity: %w", err)
+	}
+	eventID := stableID("event", itemID, createdAt, kind)
+	_, err := tx.Exec(`insert or ignore into events(id, source_id, collection_id, actor_id, item_id, kind, occurred_at)
+select ?, source_id, collection_id, actor_id, id, kind, created_at from items
+where id = ? and not exists (select 1 from events where item_id = ?)`, eventID, itemID, itemID)
+	if err != nil {
+		return fmt.Errorf("insert event: %w", err)
+	}
+	return nil
 }
 
 // softTombstoneSupersededVersions keeps one default-live content version per
