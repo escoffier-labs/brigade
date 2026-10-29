@@ -224,7 +224,7 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
         assert status == 200
         assert headers["cache-control"] == "no-store"
         assert 'http-equiv="refresh"' not in page
-        assert "Roster" in page and 'href="/deck/roster"' in page
+        assert "<title>Live routing \u00b7 Fleet Hub</title>" in page and 'href="/deck/roster"' in page
         # "Consumer defaults" was renamed: the control is the omitted-seat
         # admission fallback, not a default model or a second roster.
         for heading in ("Roles", "Seats", "Cloud lanes", "Admission fallback seat (legacy)", "Retired families"):
@@ -614,9 +614,9 @@ def test_roster_page_read_only_under_tailscale_identity(tmp_path):
         )
         assert status == 200
         assert "read-only" in page
-        assert "<button" not in page
+        assert "<button" not in re.sub(r'<div class="audience-toggle".*?</div>', "", page, flags=re.S)
         assert "<select" not in page and "<textarea" not in page
-        assert "coder" in page and "setting-value" in page
+        assert "coder" in page and "data-record-detail" in page
         assert "operator@example.test" not in page
 
 

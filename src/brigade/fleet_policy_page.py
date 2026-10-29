@@ -26,6 +26,8 @@ same-origin checks, and body limits.
 
 from __future__ import annotations
 
+from . import fleet_investigation as investigation
+
 import hashlib
 import hmac
 import json
@@ -35,6 +37,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from . import fleet_admin_explorer as explorer
 from . import fleet_command_deck, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError
 from .fleet_policy_form import ACTIONS as ACTIONS
@@ -68,8 +71,12 @@ UNKNOWN_TEXT = fleet_command_deck.UNKNOWN
 
 _POLICY_CSS = """
 .policy-page .policy-access { margin: var(--space-3) 0; color: var(--muted); font-size: 12px; }
-.policy-page .policy-status { margin: var(--space-4) 0; border-left: 3px solid var(--signal); }
-.policy-page .policy-status h2 { margin-bottom: var(--space-2); }
+.policy-page .policy-status { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: 0 0 var(--space-4); padding: 0; border: 0; background: none; }
+.policy-page .policy-status h2 { margin: 0; font-size: 13px; font-weight: 600; }
+.policy-page .policy-status > p { margin: 0; color: var(--muted); font-size: 13px; }
+.policy-page .policy-status > a { margin-left: auto; color: var(--muted); font-size: 13px; text-decoration: none; }
+.policy-page .policy-status > a:hover { color: var(--ink); }
+.policy-page .policy-status > .investigation { flex-basis: 100%; }
 .policy-page .policy-role-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); gap: var(--space-3); }
 .policy-page .policy-role { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface-raised); }
 .policy-page .policy-role h3 { margin: 0 0 var(--space-2); color: var(--muted); font-size: 12px; font-weight: 500; }
@@ -1073,7 +1080,16 @@ def _actions(reason: str) -> str:
     )
 
 
-def _confirm_form(draft: Submission | None, token: str | None) -> str:
+_CONFIRM_HINT = (
+    "Saves exactly the document previewed above. The revision check and the provider "
+    "inventory check both run again at this point; if either has moved, the save is refused rather than "
+    "applied."
+)
+
+
+def _confirm_form(
+    draft: Submission | None, token: str | None, *, action: str = "/deck/policy", hint: str = _CONFIRM_HINT
+) -> str:
     """Re-post exactly what was previewed, plus the token that vouches for it."""
     if draft is None or not token:
         return ""
@@ -1091,12 +1107,10 @@ def _confirm_form(draft: Submission | None, token: str | None) -> str:
         for name, value in sorted(draft.fields.items())
     )
     return (
-        '<form method="post" action="/deck/policy" class="roster-form confirm-save">'
+        f'<form method="post" action="{_esc(action)}" class="roster-form confirm-save">'
         + "".join(hidden)
         + '<p class="roster-actions"><button type="submit">Confirm save</button>'
-        '<span class="hint">Saves exactly the document previewed above. The revision check and the provider '
-        "inventory check both run again at this point; if either has moved, the save is refused rather than "
-        "applied.</span></p></form>"
+        f'<span class="hint">{_esc(hint)}</span></p></form>'
     )
 
 
@@ -1157,10 +1171,10 @@ def _provider_scope_rows(inventory: Inventory) -> str:
     if not rows:
         return ""
     return (
-        '<div class="table-wrap"><table class="roster-table"><thead><tr><th>Provider</th><th>Snapshot state</th>'
+        '<div class="table-wrap" data-audience="agent"><table class="roster-table"><thead><tr><th>Provider</th><th>Snapshot state</th>'
         "<th>Inventory scope</th><th>Observed at</th><th>CLI auth</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>"
-        '<p class="hint">Inventory scope is what the snapshot covered (for example a browser or cloud listing '
+        '<p class="hint" data-audience="agent">Inventory scope is what the snapshot covered (for example a browser or cloud listing '
         "versus a native CLI listing); where the snapshot does not state it, it reads as unknown rather than "
         "being assumed. CLI auth is a separate fact from availability: a signed-out CLI is not evidence that a "
         "model is gone, and a signed-in CLI is not evidence that one exists.</p>"
@@ -1171,7 +1185,7 @@ def _inventory_note(inventory: Inventory) -> str:
     """Say what the provider snapshot actually is, including when there is none."""
     if inventory.usable:
         return (
-            f'<p class="hint">Model identities are checked against the <code>{_esc(inventory.source)}</code> '
+            f'<p class="hint" data-audience="agent">Model identities are checked against the <code>{_esc(inventory.source)}</code> '
             f"snapshot supplied by the server, observed {_esc(inventory.captured_at or UNKNOWN_TEXT)}. "
             "The page never probes a provider and never reads a credential. "
             "To refresh catalog information, trigger a server inventory refresh and reload the page.</p>"
@@ -1187,6 +1201,13 @@ def _inventory_note(inventory: Inventory) -> str:
         "and existing configured fields remain editable. "
         "Refresh provider inventory on the server and reload this page to update. "
         "Unavailable is not the same as missing.</p>"
+        + investigation.render(
+            "Provider inventory",
+            route="/deck/policy",
+            observation=inventory.captured_at,
+            facts={"State": "unavailable", "Reason": inventory.reason, "Source": inventory.source},
+            limits="Server inventory projection only; no provider probe or credentials included.",
+        )
     )
 
 
@@ -1205,9 +1226,21 @@ def _activation_panel(view: PolicyView) -> str:
         headline = "Activation status unknown"
         detail = "These are saved settings. This page cannot confirm whether they control new work."
     return (
-        '<section class="panel policy-status" aria-labelledby="activation">'
+        '<section class="policy-status" aria-labelledby="activation">'
         f'<h2 id="activation">{headline}</h2><p>{detail}</p>'
-        '<a href="/deck/roster">View current routing</a></section>'
+        '<a href="/deck/roster">View current routing</a>'
+        + (
+            investigation.render(
+                "Policy activation",
+                route="/deck/policy",
+                observation="unknown (activation projection)",
+                facts={"State": activation.state, "Detail": activation.detail, "Source": activation.source},
+                limits="Saved settings do not confirm current activation.",
+            )
+            if activation.state == "unknown"
+            else ""
+        )
+        + "</section>"
     )
 
 
@@ -1242,7 +1275,7 @@ def _assignment_summary(view: PolicyView) -> str:
         '<section class="panel" aria-labelledby="policy-roles"><header>'
         '<h2 id="policy-roles">Models by role</h2></header>'
         f"<p>{scope} Consumer, repository and session overrides can change an assignment.</p>"
-        '<p class="hint">Assignments record configured models; they do not confirm availability or provider sign-in.</p>'
+        '<p class="hint" data-audience="agent">Assignments record configured models; they do not confirm availability or provider sign-in.</p>'
         f'<div class="policy-role-grid">{"".join(cards)}</div></section>'
     )
 
@@ -1314,7 +1347,25 @@ def _plan_panel(
     return (
         '<section class="panel" aria-labelledby="plan"><header><h2 id="plan">Proposed change</h2>'
         f'<p class="panel-count">revision {plan.current_revision} &rarr; {plan.next_revision}</p></header>'
-        + (f'<ul class="attention-list">{error_items}</ul>' if error_items else "")
+        + (
+            f'<ul class="attention-list">{error_items}</ul>'
+            + investigation.render(
+                "Policy preview",
+                route="/deck/policy",
+                observation="unknown (validation preview)",
+                facts={
+                    "Current revision": plan.current_revision,
+                    "Proposed revision": plan.next_revision,
+                    "Reported errors": "; ".join(
+                        str(error.get("code")) + ": " + str(error.get("seat") or error.get("detail") or "")
+                        for error in plan.errors
+                    ),
+                },
+                limits="Preview only; not applied. Configuration diff and credentials omitted.",
+            )
+            if error_items
+            else ""
+        )
         + (f'<ul class="attention-list">{diff_items}</ul>' if diff_items else '<p class="empty">No leaf changes.</p>')
         + f"<p>affected consumers: {_scope(affected.get('consumers'))} &middot; "
         f"repositories: {_scope(affected.get('repositories'))} &middot; "
@@ -1824,14 +1875,40 @@ def render(
     ``review`` is the server-minted token for the previewed document; it is
     what turns the proposed-change panel into a confirm-save control.
     """
-    parts: list[str] = ['<main class="deck-shell policy-page">']
-    parts.append(
-        '<header class="masthead"><div><p class="eyebrow">Settings</p><h1>Model assignments</h1></div></header>'
+    error_prompt = (
+        investigation.render(
+            "Policy validation",
+            route="/deck/policy",
+            observation=now,
+            facts={"Reported error": error, "Revision": view.revision},
+            limits="Rendered error only; submitted document and credentials omitted.",
+        )
+        if error
+        else ""
     )
+    if not editable:
+        return fleet_command_deck._document(
+            '<main class="deck-shell admin-page policy-page">'
+            '<p class="policy-access">Access: read-only. You can inspect saved settings; editing requires an authorized admin request.</p>'
+            + (f'<p class="banner">{_esc(banner)}</p>' if banner else "")
+            + (f'<p class="banner banner--error">{_esc(error)}</p>' if error else "")
+            + error_prompt
+            + _activation_panel(view)
+            + _assignment_summary(view)
+            + _inventory_note(view.inventory)
+            + "</main>",
+            nonce=nonce,
+            now=now,
+            title="Saved assignments",
+            refresh=False,
+            active="policy",
+            extra_css=_POLICY_CSS,
+        )
+    parts: list[str] = ['<main class="deck-shell admin-page policy-page">']
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
     if error:
-        parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
+        parts.append(f'<p class="banner banner--error">{_esc(error)}</p>' + error_prompt)
     if not editable:
         parts.append(
             '<p class="policy-access">Access: read-only. You can inspect saved settings; editing requires an authorized admin request.</p>'
@@ -1843,7 +1920,7 @@ def render(
     draft_scope = draft.scope if editable and draft is not None else None
     opened = " open" if draft_scope is not None else ""
     parts.append(f'<details id="policy-advanced"{opened}><summary>Advanced details</summary>')
-    parts.append("<details><summary>Document identity and inventory</summary>" + _identity_panel(view) + "</details>")
+    parts.append(explorer.agent("<h3>Document identity and inventory</h3>" + _identity_panel(view)))
     if editable:
         opened = " open" if draft_scope == "defaults" else ""
         parts.append(

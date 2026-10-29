@@ -133,7 +133,7 @@ def test_a_repository_with_overrides_shows_policy_and_coordination(conn):
     assert row.eligible_machines == "worker-linux-1"
     assert row.training == "denied"  # the resolver's private-repository constraint
     assert row.policy_revision == str(_policy(conn).revision)
-    assert row.editor_href == f"/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"
+    assert row.editor_href == "/deck/policy"
     assert row.claim_owner and row.claim_ttl == "600s left"
 
     roles = {leaf.path: leaf for leaf in row.roles}
@@ -154,13 +154,13 @@ def test_a_repository_with_overrides_shows_policy_and_coordination(conn):
     assert row.verification == deck.UNKNOWN
 
 
-def test_a_repository_row_renders_its_facts_and_the_scoped_editor_link(conn):
+def test_a_repository_row_renders_its_facts_and_the_saved_assignments_link(conn):
     view = _deck_view(_claim_row("private-tool", OVERRIDDEN))
     rows = repos_page.build_rows(view, _policy(conn))
     html = _render(view, rows, policy_available=True)
 
     assert OVERRIDDEN in html
-    assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"' in html
+    assert 'href="/deck/policy"' in html
     assert "<strong>override</strong>" in html
     assert "inherited" in html
     assert "training denied" in html
@@ -292,7 +292,7 @@ def test_repos_route_serves_the_repository_policy_projection(tmp_path):
         assert status == 200
         assert "Repository policy" in page
         assert OVERRIDDEN in page
-        assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(OVERRIDDEN)}"' in page
+        assert 'href="/deck/policy"' in page
         assert "Claims and live runs" in page
         assert TOKEN not in page
 
@@ -422,14 +422,14 @@ def test_an_explicit_machine_override_keeps_its_own_value(conn):
     assert row.eligible_machines_note == ""
 
 
-def test_the_inherited_machine_note_is_rendered_and_links_to_the_policy_editor(conn):
+def test_the_inherited_machine_note_is_rendered_and_links_to_saved_assignments(conn):
     view = _deck_view(_claim_row("public-tool", PLAIN))
     html = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
 
     assert repos_page.INHERITED_MACHINES in html
     assert "fleet machine policy applies" in html
     assert "seat and workload constraints" in html
-    assert f'href="/deck/policy#{fleet_policy_page.repository_anchor(PLAIN)}"' in html
+    assert 'href="/deck/policy"' in html
 
 
 def test_absent_linkage_stays_unknown_rather_than_inherited(conn):
@@ -492,11 +492,10 @@ def test_repository_cards_lead_with_observed_work_and_keep_full_coordination(con
     assert "parallel activity" in markup.text[card] and "overlap" in markup.text[card]
     assert not any(markup.tags[i][0] == "details" for i in markup.ancestors[card])
     table = next(i for i, (tag, _) in enumerate(markup.tags) if tag == "table")
-    assert any(
-        markup.tags[i][0] == "details" and markup.text[i].startswith("Claims and live runs")
-        for i in markup.ancestors[table]
-    )
-    assert "<summary>Repository policy and metadata</summary>" in page
+    assert any(markup.tags[i][1].get("data-audience") == "agent" for i in markup.ancestors[table])
+    assert _folds(page) == []
+    assert "conductor-1" in markup.text[card] and "600s left" in markup.text[card]
+    assert not any(markup.tags[i][1].get("data-audience") == "agent" for i in markup.ancestors[card])
     assert hostile not in page and "&lt;script&gt;" in page
     assert "600s left" in page and "drift" in page
     assert "No active claim" not in markup.text[card]
@@ -540,11 +539,7 @@ def test_unobserved_policy_repositories_never_become_current_cards(conn, stale_o
     assert "No repository observations available" in markup.text[summaries]
     assert "0 reported runs" not in markup.text[summaries]
     assert "No active claim" not in markup.text[summaries]
-    disclosure = next(
-        i
-        for i, (tag, _) in enumerate(markup.tags)
-        if tag == "details" and markup.text[i].startswith("Repository policy and metadata")
-    )
+    disclosure = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-labelledby") == "repo-policy")
     assert OVERRIDDEN in markup.text[disclosure] and PLAIN in markup.text[disclosure]
 
 
@@ -617,3 +612,22 @@ def test_repository_card_drilldown_retains_observed_targets_at_destination(conn,
     else:
         assert parse_qs(destination.query) == {"repo": [targets[0]]}
         assert markup.text[link] == "View runs"
+
+
+def _folds(page):
+    """Disclosure folds a human sees: only agent-audience investigation prompts may fold."""
+    from tests.test_ui_theme_integration import Markup
+
+    markup = Markup(page)
+    return [
+        i for i, (tag, attrs) in enumerate(markup.tags) if tag == "details" and attrs.get("data-audience") != "agent"
+    ]
+
+
+def test_repositories_page_has_no_disclosure_folds_and_keeps_policy_link(conn):
+    view = _deck_view(_claim_row("private-tool", OVERRIDDEN))
+    page = _render(view, repos_page.build_rows(view, _policy(conn)), policy_available=True)
+    assert _folds(page) == []
+    assert "View saved assignments" in page
+    unlinked = _render(view, repos_page.build_rows(view, None), policy_available=False)
+    assert _folds(unlinked) == []

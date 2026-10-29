@@ -15,9 +15,9 @@ from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlencode
 
-from . import fleet_action_sources, fleet_command_deck as deck, ui_theme
+from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
-from . import fleet_deck_activity as activity
+from . import fleet_deck_activity as activity, fleet_live_routing
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
 
 _esc = deck._esc
@@ -678,40 +678,61 @@ def render_observers(view: DeckView, now: datetime) -> str:
 
 
 def render_overview(
-    view: DeckView, now: datetime, *, worklore_enabled: bool, action_sources: frozenset[str] = frozenset()
+    view: DeckView,
+    now: datetime,
+    *,
+    worklore_enabled: bool,
+    action_sources: frozenset[str] = frozenset(),
+    routing: fleet_live_routing.Routing | None = None,
 ) -> str:
-    """The whole main column for ``/deck``."""
-    parts = [
-        '<main class="deck-shell overview">',
-        render_header(view, now),
-        '<div class="overview-grid">',
-        render_attention(view, now, action_sources=action_sources, worklore_enabled=worklore_enabled),
-        render_work_lists(view, worklore_enabled=worklore_enabled, include_queue=False),
-        render_machine_table(view, now, include_context=True),
-        render_ready_queue(view, worklore_enabled=worklore_enabled),
-        "</div>",
-        "<details><summary>Fleet details</summary>",
-        "<details><summary>Reported session presence</summary><p>Sessions report presence and may be idle or overlap managed jobs.</p>"
-        + render_sessions(view)
-        + "</details>",
-        activity.render_cloud_report_history(view),
-        "<details><summary>Cloud diagnostics</summary>" + render_cloud_workers(view) + "</details>",
-        "<details><summary>Recent outcomes</summary>" + render_outcomes(view) + "</details>",
-        "<details><summary>Control plane details</summary>"
-        + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
-        + "</details>",
-    ]
-    if worklore_enabled and view.observed_work_groups:
-        parts.append(render_observed_groups(view, now))
-    parts.extend(
-        [
-            render_observers(view, now),
-            "</details>",
-            '<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer>',
-            "</main>",
-        ]
+    """A short operational scan with three intentional destinations."""
+    from . import fleet_admin_pages as pages
+
+    attention = pages.overview_attention(view, now)
+    entries = pages.activity_entries(view)
+    current = [entry for entry in entries if entry.status.startswith(("Managed run", "Reported task"))]
+    reported = [entry for entry in current if entry.status.startswith("Reported task")]
+    shown = ([reported[0]] + [entry for entry in current if entry != reported[0]][:2]) if reported else current[:3]
+    from .fleet_admin_explorer import anchor, pill as explorer_pill
+
+    work = (
+        "".join(
+            f'<li><div><a href="/deck/activity#{anchor(entry.key)}">{_esc(entry.title[:120])}</a>'
+            f'<div class="row-sub" data-audience="agent">{_esc(entry.status)}</div></div>'
+            + explorer_pill(entry.status.rsplit(" · ", 1)[-1])
+            + "</li>"
+            for entry in shown
+        )
+        or "<li>No current work reported.</li>"
     )
-    return "\n".join(parts)
+    queue = view.control_plane.queue if view.control_plane and "queue" in view.control_plane.present else None
+    ready = UNKNOWN
+    if queue:
+        if queue.complete:
+            ready = queue.eligible_count
+        elif queue.eligible_count not in (UNKNOWN, "0"):
+            ready = queue.eligible_count + " reported (partial queue)"
+    source = "reported queue" if queue else "queue report unavailable"
+    ready_link = f'<p>Ready to run: {_esc(ready)} <small data-audience="agent">Source: {source}</small></p>'
+    if worklore_enabled:
+        ready_link = f'<p><a href="/deck/work">Ready to run: {_esc(ready)}</a></p>'
+
+    def card(identifier: str, title: str, href: str, content: str) -> str:
+        return (
+            f'<section class="admin-card" aria-labelledby="{identifier}"><header>'
+            f'<h2 id="{identifier}">{title}</h2><a class="card-link" href="{href}">View all</a>'
+            f"</header>{content}</section>"
+        )
+
+    return (
+        '<main class="deck-shell admin-page overview">'
+        + pages.render_overview_machines(view, now)
+        + (fleet_live_routing.render_overview(routing, now) if routing is not None else "")
+        + '<div class="admin-cards">'
+        + card("attention-title", "Needs attention", "/deck/alerts", "<ul>" + attention + "</ul>")
+        + card("working-title", "Work", "/deck/activity", "<ul>" + work + "</ul>" + ready_link)
+        + "</div></main>"
+    )
 
 
 def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklore_enabled: bool) -> str:
@@ -722,24 +743,7 @@ def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklor
 
 
 def render_capacity_page(view: DeckView, now: datetime, *, nonce: str, worklore_enabled: bool) -> str:
-    """Existing frozen Deck projection, with no extra collection or admission."""
-    body = (
-        '<main class="deck-shell overview capacity-page"><header class="page-head"><div><h1>Capacity</h1>'
-        '<p class="page-sub">Configured capacity and reported observations</p></div></header>'
-        + render_machine_table(view, now)
-        + activity.render_octopool_observation(view)
-        + '<details id="cloud-details"><summary>Advanced resource details</summary><p>Usable for selected work: unknown. Configured slots are not verified usable workers. Authentication, provider readiness, repository policy eligibility and shared quota may limit dispatch. Local and cloud pools may overlap and are not added together.</p>'
-        + render_cloud_workers(view)
-        + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
-        + "</details></main>"
-    )
-    return deck._document(
-        body,
-        nonce=nonce,
-        now=now,
-        title="Capacity",
-        active="capacity",
-        view=view,
-        worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.OVERVIEW_CSS,
-    )
+    """Compatibility entry point for the Machines tab."""
+    from .fleet_admin_pages import render_capacity
+
+    return render_capacity(view, now, nonce=nonce, worklore_enabled=worklore_enabled)

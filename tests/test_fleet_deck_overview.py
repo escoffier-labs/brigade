@@ -11,6 +11,7 @@ from brigade.fleet_deck_icons import NAV_ICONS
 
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
+from brigade.fleet_machine_label import status_label
 from brigade import fleet_deck_shell, ui_theme
 from brigade.fleet_deck_alerts import render_alerts_page
 
@@ -325,25 +326,9 @@ def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(i
     assert [(item.kind, item.title) for item in alerts] == expected_alerts
     if actionable:
         assert alerts[-1].detail == reason
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
-    assert html.count('class="alert-row"') == count
-    assert 'class="alert-line"' not in html
+    html = overview.render_ready_queue(view, worklore_enabled=True)
     summary = "3 excluded from ready queue" if actionable else "3 not ready"
     assert f"<details><summary>{summary}</summary>" in html and 'href="/deck/work"' in html
-    readable = {"not-ready": "not ready", "blocker": "blocked", "attempt-limit": "reached the attempt limit"}[reason]
-    assert f"<li>3 {readable}</li>" in html
-    assert "observed scan" not in html
-    if actionable:
-        alerts_html = render_alerts_page(view, NOW, nonce="n", worklore_enabled=True)
-        assert f'class="alert-detail">{readable}<' in alerts_html
-    assert 'class="row-title">unknown<' not in html
-    assert "none blocked" not in html
-    details = deck.render_control_plane(plane)
-    assert f"<li>3 {readable}</li>" in details
-    assert "No blocked reasons reported" not in details
-    assert f"unknown &middot; {reason}" not in details
-    if not identified:
-        assert "first observed unknown" not in html
 
 
 @pytest.mark.parametrize("count", [True, False, None, "3", 0, -1, 1.5])
@@ -395,9 +380,9 @@ def _render_alerts(view, now, **kwargs):
 
 def test_alert_section_renders_cards_count_and_empty_state():
     html = _render_alerts(_alert_view(), NOW)
-    assert 'class="deck-shell alerts-page"' in html and "7 open" in html
-    assert html.count('class="alert-row"') == 7
-    assert 'class="attention-kind">collision</span>' in html
+    assert 'class="deck-shell admin-page alerts-page"' in html and "7 open" in html
+    assert html.count("data-record-detail tabindex=") == 7
+    assert ">collision</span>" in html and 'class="pill' in html
     assert "held by linux-a, live on shared" in html
     assert "first observed 2h 0m ago" in html
     assert "</section>" not in html.split("<section", 1)[1].rsplit("</section>", 1)[0]
@@ -781,7 +766,7 @@ def test_a_draining_machine_is_unavailable_and_counts_toward_neither_card():
     assert "4 unavailable" in row and ' idle"' not in row and "seg--free" not in row
     assert row.count("seg--off") == 4
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert "tree-meta" not in sidebar
+    assert 'data-status="limited"' in sidebar and ">draining</span>" in sidebar and ">limited</span>" not in sidebar
     assert 'class="tag">draining<' in row and 'data-status="limited"' in row
 
 
@@ -849,7 +834,7 @@ def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
     assert idle == 8 and _card_value(summary, "idle") == str(idle)
     assert _card_value(summary, "offline") == "0"
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert "tree-meta" not in sidebar
+    assert 'data-status="unknown"' in sidebar and "unknown" in sidebar
     assert 'data-status="unknown"' in unmatched and "no telemetry" in unmatched
 
 
@@ -953,32 +938,22 @@ def test_observed_groups_and_observers_fold_away():
 
 def test_overview_body_orders_sections_and_folds_control_plane_details():
     html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
-    order = [
-        'class="page-head"',
-        'aria-labelledby="attention-title"',
-        'aria-labelledby="working-title"',
-        'id="machines-table"',
-        'aria-label="Fleet summary"',
-        'aria-labelledby="queued-title"',
-        "<summary>Fleet details</summary>",
-        'id="interactive-sessions"',
-        'id="cloud-workers"',
-        'id="timeline"',
-        "<summary>Control plane details</summary>",
-        "<summary>Other observers (0)</summary>",
-        "<footer>",
-    ]
-    positions = [html.index(marker) for marker in order]
-    assert positions == sorted(positions)
-    assert html.count("<main") == 1 and "<nav" not in html
-    assert "Observed work groups" not in html
+    order = ["overview-machines-title", "attention-title", "working-title"]
+    assert [html.index(marker) for marker in order] == sorted(html.index(marker) for marker in order)
+    assert html.count("<section ") == 3
+    assert 'id="fleet-title"' not in html
+    assert "<details" not in html and "<table" not in html
+    assert html.count("<main") == 1
 
 
 def test_observed_groups_hidden_when_worklore_is_off():
+    from brigade import fleet_admin_pages
+
     group = deck.ObservedWorkGroup("g", "Group", "c", "s", "p", "q", ("w-1",))
     view = _view(observed_work_groups=(group,))
-    assert "Observed work groups" in overview.render_overview(view, NOW, worklore_enabled=True)
-    assert "Observed work groups" not in overview.render_overview(view, NOW, worklore_enabled=False)
+    assert "/deck/observed/g" in fleet_admin_pages.render_activity(view, NOW, nonce="p", worklore_enabled=True)
+    assert "/deck/observed/g" not in fleet_admin_pages.render_activity(view, NOW, nonce="p", worklore_enabled=False)
+    assert "/deck/observed/g" not in overview.render_overview(view, NOW, worklore_enabled=True)
 
 
 # --- sidebar and shell -------------------------------------------------------------------------
@@ -988,31 +963,43 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     view = _mixed_view()
     html = overview.render_sidebar(view, "repos", NOW, worklore_enabled=False)
     assert '<nav class="deck-nav" aria-label="Command Deck">' in html
-    assert f'<a href="/deck/repos" aria-current="page">{NAV_ICONS["repos"]}Repositories</a>' in html
+    assert f'<a href="/deck/projects" aria-current="page">{NAV_ICONS["repos"]}Projects</a>' in html
     assert f'<a href="/deck">{NAV_ICONS["overview"]}Overview</a>' in html
     assert html.count("aria-current") == 1
     assert "/deck/work" not in html
-    for href in ("/deck/roster", "/view/machines"):
+    for href in ("/deck/roster", "/deck/activity"):
         assert f'href="{href}"' in html
     assert 'href="/deck/work"' not in overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
 
 
-def test_sidebar_omits_inventories_and_capacity_retains_machine_and_cloud_evidence():
+def test_sidebar_shows_compact_machine_and_cloud_destinations_and_capacity_keeps_evidence():
+    from brigade import fleet_admin_explorer, fleet_admin_pages
+
     cloud = (deck.CloudWorker("claude", 0, 4, "closed", ()), deck.CloudWorker("cursor", 1, 3, "open", ()))
     view = _view(_mixed_view().stations, plane=_mixed_view().control_plane, cloud_workers=cloud)
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert "data-tree-filter" not in sidebar and "tree-list" not in sidebar
-    assert 'class="mono sidebar-telemetry">telemetry 1m<' in sidebar
+    assert "data-tree-filter" not in sidebar
+    assert "telemetry 1m" in sidebar
+    assert f"/deck/capacity#{fleet_admin_explorer.anchor(NODE_A)}" in sidebar
+    assert f"/deck/capacity/cloud#{fleet_admin_explorer.anchor('claude')}" in sidebar
+    assert "0/4" in sidebar and "1/3" in sidebar
+    assert sidebar.index("linux-a") < sidebar.index("claude") < sidebar.index("Resources")
+    assert 'data-status="stale"' in sidebar and 'data-status="offline"' in sidebar
     html = overview.render_capacity_page(view, NOW, nonce="n", worklore_enabled=True)
-    assert "Machines (3)" in html and "2 busy, 8 idle" in html
-    assert 'data-status="stale"' in html and "not enrolled" in html
-    assert "0/4" in html and "1/3" in html and "circuit: open" in html
+    assert "Capacity: 10 configured slots" in html and "Use: 2 / 10 slots" in html
+    assert "stale-telemetry" in html and "win-a" in html
     assert "Usable for selected work: unknown" in html
+    cloud_page = fleet_admin_pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True, tab="cloud-details")
+    assert "claude" in cloud_page and "cursor" in cloud_page and "open" in cloud_page
 
 
 def test_sidebar_without_a_view_is_navigation_only():
     html = overview.render_sidebar(None, "roster", NOW, worklore_enabled=False)
     assert "tree-list" not in html and "data-tree-filter" not in html and "sidebar-telemetry" not in html
+    assert 'href="/deck/capacity">View machines</a>' in html
+    assert 'href="/deck/capacity/cloud">View cloud</a>' in html
+    assert ">0<" not in html and "0/0" not in html
+    assert html.index("Machines") < html.index("Cloud") < html.index("Resources")
     assert f'<a href="/deck/roster" aria-current="page">{NAV_ICONS["roster"]}Settings</a>' in html
     assert f'<a href="/deck">{NAV_ICONS["overview"]}Overview</a>' in html
 
@@ -1021,6 +1008,8 @@ def test_sidebar_footer_says_unknown_without_telemetry_and_escapes_labels():
     html = overview.render_sidebar(_view([_station(NODE_A, HOSTILE, 2)]), "overview", NOW, worklore_enabled=True)
     assert "telemetry unknown" in html
     assert HOSTILE not in html
+    assert "&lt;script&gt;" in html
+    assert 'data-status="unknown"' in html
     table = overview.render_machine_table(_view([_station(NODE_A, HOSTILE, 2)]), NOW)
     assert HOSTILE not in table and "&lt;script&gt;" in table
 
@@ -1038,7 +1027,7 @@ def test_shell_wraps_sidebar_and_body_and_ships_a_constant_filter_script():
     assert '<div class="shell" data-active="roster"><aside class="shell-sidebar">side</aside>' in page
     assert '<div class="shell-main"><main>body</main></div></div>' in page
     assert 'http-equiv="refresh"' not in page
-    assert f'<script nonce="n0nce">{fleet_deck_shell.FILTER_SCRIPT}</script>' in page
+    assert f'<script nonce="n0nce">{fleet_deck_shell.INIT_SCRIPT}{fleet_deck_shell.FILTER_SCRIPT}</script>' in page
     script = fleet_deck_shell.FILTER_SCRIPT
     for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(", "location", "fetch("):
         assert banned not in script, banned
@@ -1052,7 +1041,8 @@ def test_filter_script_waits_for_the_body_and_keeps_focus_across_refresh():
     for banned in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
         assert banned not in script, banned
     refreshed = fleet_deck_shell.deck_page("t", "overview", "", "", "n", as_of="x")
-    assert '<meta http-equiv="refresh" content="10">' in refreshed
+    assert '<noscript><meta http-equiv="refresh" content="10"></noscript>' in refreshed
+    assert fleet_deck_shell.soft_refresh_script(10) in refreshed
     hostile = fleet_deck_shell.deck_page("t", '"><x>', "", "", "n", as_of="x")
     assert 'data-active="&quot;&gt;&lt;x&gt;"' in hostile
 
@@ -1169,16 +1159,10 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
         replace(session, session_id="another-session"),
     )
     view = replace(_mixed_view(), interactive_sessions=sessions)
-    html = overview.render_overview(view, NOW, worklore_enabled=True)
-    activity = html.split('aria-labelledby="working-title"', 1)[1]
-    assert ">Activity<" in activity
-    assert "2 managed jobs reported" in activity
+    html = overview.render_sessions(view)
+    activity = html
     assert "Reported agent sessions (4)" in activity
-    assert "may be idle" in activity
-    assert f"{name} · " in activity and "current presence" in activity
-    assert "unexpired report" in activity
-    assert html.count('id="interactive-sessions"') == 1
-    assert html.index('aria-labelledby="working-title"') < html.index('id="machines-table"')
+    assert f"{name} · " in activity
     assert "one, two" in activity
     assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
     assert HOSTILE not in activity
@@ -1194,7 +1178,7 @@ def test_activity_bounds_visible_sessions_and_discloses_possible_membership_cap(
     )
     sessions = tuple(replace(session, session_id=f"session-{index}") for index in range(memberships - 1))
     sessions += (replace(session, repo_identity="example/two", repo_label="two", checkout_path="/tmp/two"),)
-    html = overview.render_overview(replace(_mixed_view(), interactive_sessions=sessions), NOW, worklore_enabled=True)
+    html = overview.render_sessions(replace(_mixed_view(), interactive_sessions=sessions))
     # One session has two memberships: count identities, and retain both checkouts.
     assert f"Reported agent sessions ({memberships - 1})" in html
     assert "one, two" in html and "/tmp/two" in html
@@ -1267,12 +1251,14 @@ def test_sidebar_meta_shows_version_and_uses_hub_stale_verdict(reason):
     machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(720), unused_reason=reason)
     view = _view([_station(NODE_A, "linux-a", 8)], plane=_plane([machine]))
     html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert 'data-status="stale"' in html
     assert "sidebar-meta--stale" in html and "telemetry stale 12m" in html
     assert f"v{brigade.__version__}" in html
     fresh_view = replace(
         view, stale_after_seconds=60, control_plane=_plane([replace(machine, unused_reason="idle-capacity")])
     )
     fresh = overview.render_sidebar(fresh_view, "overview", NOW, worklore_enabled=True)
+    assert 'data-status="idle"' in fresh
     assert "sidebar-meta--stale" not in fresh and "telemetry 12m" in fresh
 
 
@@ -1390,9 +1376,8 @@ def test_card_links_point_only_at_existing_routes():
     for enabled in (True, False):
         html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=enabled)
         assert html.count('class="card-link"') == 3
-        assert html.count('class="card-link" href="/view/machines"') == 2
-        assert 'class="card-link" href="/deck/capacity"' in html
-        assert 'class="card-link" href="/deck/work"' not in html
+        for route in ("/deck/alerts", "/deck/activity", "/deck/capacity"):
+            assert f'class="card-link" href="{route}"' in html
     rule = re.search(r"\.card-link::after \{[^}]*\}", ui_theme.BASE_CSS).group(0)
     assert 'content: "\\2192"' in rule
 
@@ -1439,19 +1424,11 @@ def test_overview_attention_uses_one_destination_and_preserves_counted_subjects(
     assert len(overview.page_alerts(single, NOW)) == 1
     assert overview.render_attention(single, NOW, action_sources=frozenset()).count('class="alert-row"') == 1
     page = overview.render_overview(view, NOW, worklore_enabled=True)
-    assert page.count('class="alert-row"') == 3 and "external.failed" in page
-    assert "5 more alerts" in page
+    attention_card = page.split('aria-labelledby="attention-title"', 1)[1].split("</section>", 1)[0]
+    assert attention_card.count("<li>") == 3 and "external.failed" not in page
     full = render_alerts_page(view, NOW, nonce="p", worklore_enabled=True)
-    assert full.count('class="alert-row"') == 8 and "external.failed" in full
-    markers = [
-        'class="page-head"',
-        'aria-labelledby="attention-title"',
-        'aria-labelledby="working-title"',
-        'id="machines-table"',
-        'aria-label="Fleet summary"',
-        'aria-labelledby="queued-title"',
-    ]
-    assert [page.index(marker) for marker in markers] == sorted(page.index(marker) for marker in markers)
+    assert full.count("data-record-detail tabindex=") == 8 and "external.failed" in full
+    assert "<details" not in page
 
 
 @pytest.mark.parametrize("claims, columns", [("0", 4), ("1", 5)])
@@ -1483,14 +1460,14 @@ def test_activity_counts_are_concise_and_verdict_is_sentence_case():
 def test_sidebar_state_words_replace_dots_on_the_whole_deck_and_version_has_title():
     import brigade
 
-    page = deck.render_deck(_mixed_view(), nonce="n", now=NOW)
+    page = overview.render_capacity_page(_mixed_view(), NOW, nonce="n", worklore_enabled=True)
     assert 'class="dot' not in page
     sidebar = page.split("<aside", 1)[1].split("</aside>", 1)[0]
     machines = page.split('id="machines-table"', 1)[1]
     for status in ("working", "stale", "offline"):
-        assert f'data-status="{status}"' in machines
+        assert status in machines
     assert f'<span class="mono sidebar-version" title="v{brigade.__version__}">v{brigade.__version__}</span>' in sidebar
-    assert "tree-meta" not in sidebar
+    assert all(f">{status}</span>" in sidebar for status in ("working", "stale", "offline"))
     assert "stale" in machines and "not enrolled" in machines
 
 
@@ -1519,7 +1496,6 @@ def test_managed_activity_card_exposes_status_and_folds_supplied_run_metadata():
 
 def test_overview_bounds_activity_and_keeps_every_task_and_diagnostic_in_native_details():
     from html import escape
-    from tests.test_ui_theme_integration import Markup
 
     title = "x" * 220 + HOSTILE
     runs = [_run(NODE_A, f"managed-{i}", f"repo-{i}-{title}") for i in range(5)]
@@ -1562,24 +1538,53 @@ def test_overview_bounds_activity_and_keeps_every_task_and_diagnostic_in_native_
         outcomes=(_run(NODE_A, "finished", "old-repo", state="run.completed"),),
     )
     page = overview.render_overview(view, NOW, worklore_enabled=True)
-    markup = Markup(page)
-    visible_cards = [
-        attrs.get("data-activity-kind")
-        for i, (_, attrs) in enumerate(markup.tags)
-        if attrs.get("data-activity-kind")
-        and not any(markup.tags[parent][0] == "details" for parent in markup.ancestors[i])
-    ]
-    assert visible_cards.count("managed") == visible_cards.count("reported") == 3
-    assert "<summary>More managed jobs (2)</summary>" in page
-    assert "<summary>More reported tasks (2)</summary>" in page
-    assert "<summary>Fleet details</summary>" in page and "<summary>About reports</summary>" in page
-    for marker in ("interactive-sessions", "timeline", "cloud-workers", "control-plane"):
-        index = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("id") == marker)
-        parents = markup.ancestors[index]
-        assert any(markup.tags[i][0] == "details" and markup.text[i].startswith("Fleet details") for i in parents)
-    assert HOSTILE not in page
+    from brigade import fleet_admin_pages
+
+    work = page.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
+    assert work.count("<li>") == 3 and "Reported" in work
+    assert "<details" not in page and HOSTILE not in page
+    full = fleet_admin_pages.render_activity(view, NOW, nonce="p", worklore_enabled=True)
     for i in range(5):
-        assert escape(f"repo-{i}-{title}") in page and escape(f"task-{i}-{title}") in page
-        assert f"evidence-{i}" in page and f"blocker-{i}" in page
-    assert "Reported blocked · stale" in page and "reported-provider · lifecycle unobserved" in page
-    assert "Self-reported task state; provider execution unverified." in page
+        assert escape(f"repo-{i}-{title}") in full and escape(f"task-{i}-{title}") in full
+        assert f"blocker-{i}" in full and f"evidence-{i}" in full
+    assert "historical" in full and HOSTILE not in full
+
+
+def test_limited_display_label_names_the_reason_and_leaves_station_status_alone():
+    station = _station(NODE_A, "linux-a", 4)
+    for state, reason, word in (
+        ("available", "machine-disabled", "disabled"),
+        ("available", "machine-draining", "draining"),
+        ("available", "routing-disabled", "routing off"),
+        ("draining", "idle-capacity", "draining"),
+        ("busy", "", "busy"),
+        ("unavailable", "", "unavailable"),
+    ):
+        machine = _machine("linux-a", NODE_A, state=state, unused_reason=reason, available_slots="0")
+        assert overview.station_status(station, machine) == "limited"
+        assert status_label(station, machine) == word
+    fresh = _machine("linux-a", NODE_A, state="available")
+    assert status_label(station, fresh) == overview.station_status(station, fresh)
+    assert status_label(station, None) == "unknown"
+
+
+def test_limited_machines_show_the_specific_reason_everywhere_with_the_code_in_agent_data():
+    from brigade import fleet_admin_pages as pages
+
+    machine = _machine("linux-a", NODE_A, state="available", unused_reason="machine-draining", available_slots="0")
+    station = _station(NODE_A, "linux-a", 4)
+    view = _view([station], plane=_plane([machine]))
+    sidebar = fleet_deck_shell_sidebar(view)
+    assert ">draining</span>" in sidebar and ">limited</span>" not in sidebar
+    card = pages.render_overview_machines(view, NOW)
+    assert "pill--warn" in card and ">draining<" in card and ">limited<" not in card
+    page = pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True)
+    visible = page.split("<main", 1)[1]
+    assert "<span>draining &middot;" in visible.replace("\u00b7", "&middot;") or "draining \u00b7" in visible
+    assert 'class="pill pill--warn">draining<' in visible
+    assert 'data-status="limited"' in sidebar
+    assert "Status code" in visible and "limited" in visible  # raw code stays in agent data
+
+
+def fleet_deck_shell_sidebar(view):
+    return overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)

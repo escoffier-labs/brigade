@@ -138,6 +138,7 @@ _TAILSCALE_IDENTITY_MAX_LEN = 256
 # basename only (no traversal).
 _ASSET_NAMES = frozenset(
     {
+        "favicon.svg",
         "favicon.ico",
         "favicon-32x32.png",
         "apple-touch-icon.png",
@@ -147,6 +148,7 @@ _ASSET_NAMES = frozenset(
     }
 )
 _ASSET_CONTENT_TYPES: dict[str, str] = {
+    "favicon.svg": "image/svg+xml",
     "favicon.ico": "image/x-icon",
     "favicon-32x32.png": "image/png",
     "apple-touch-icon.png": "image/png",

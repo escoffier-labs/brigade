@@ -227,7 +227,7 @@ def test_hub_network_denied_ingest_read_and_admin_refresh(tmp_path, monkeypatch)
     h, out, _ = handler(tmp_path, "/deck/ci", "example-admin")
     h.do_GET()
     assert out[0][0] == 200
-    assert "CI board" in out[0][1]
+    assert "<title>Checks \u00b7 Fleet Hub</title>" in out[0][1]
     assert "/deck/ci" in out[0][1]
     assert "<form" not in out[0][1]
     for route in ("/ci", "/ci/work"):

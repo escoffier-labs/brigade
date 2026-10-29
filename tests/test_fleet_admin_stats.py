@@ -349,10 +349,10 @@ def test_stats_page_uses_settings_context_with_worklore_on_or_off(monkeypatch, e
 
     monkeypatch.setattr(worklore_http, "enabled", lambda: enabled)
     html = page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
-    assert 'href="/view/machines"' in html
+    assert 'href="/deck/activity"' in html
     assert 'href="/deck/work"' not in html
-    assert '<a href="/deck/policy">Model assignments</a>' in html
-    assert '<a href="/deck/stats" aria-current="page">Reporting</a>' in html
+    assert '<a href="/deck/policy">Saved assignments</a>' in html
+    assert '<a href="/deck/reporting" aria-current="page">Reporting</a>' in html
 
 
 @pytest.mark.parametrize(

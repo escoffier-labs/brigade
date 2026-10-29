@@ -254,7 +254,13 @@ def test_page_requires_dashboard_access_and_is_read_only(tmp_path):
             assert "Content-Security-Policy" in response_headers
             assert response_headers["Cache-Control"] == "no-store"
             assert "No charters declared" in body
-            assert not {"form", "input", "button"} & set(_Tags(body).tags)
+            # The Admin/Agent display switch is client-only presentation, not a write control.
+            from brigade import fleet_admin_explorer
+
+            assert body.count(fleet_admin_explorer.audience_toggle()) == 1
+            assert not {"form", "input", "button"} & set(
+                _Tags(body.replace(fleet_admin_explorer.audience_toggle(), "")).tags
+            )
         assert _request(hub, "/deck/owners?cursor=1", headers=_bearer())[0] == 400
 
 
@@ -411,11 +417,13 @@ def test_ownership_is_discoverable_through_repositories_from_every_deck_page_and
         ):
             status, _, body = _request(hub, path, headers=_bearer())
             assert status == 200, path
-            assert 'href="/deck/repos"' in body, path
+            # The sidebar Projects entry opens the section whose tabs include Repositories.
+            assert 'href="/deck/repos"' in body or 'href="/deck/projects"' in body, path
             if path in ("/deck/repos", "/deck/owners", "/view/repos"):
                 assert 'href="/deck/owners"' in body, path
             else:
                 assert 'href="/deck/owners"' not in body, path
+        assert 'href="/deck/repos"' in _request(hub, "/deck/projects", headers=_bearer())[2]
         _, _, body = _request(hub, "/deck/owners", headers=_bearer())
-        assert '<a href="/deck/repos" aria-current="page">' in body
+        assert '<a href="/deck/projects" aria-current="page">' in body  # sidebar Projects entry
         assert '<a href="/deck" aria-current="page">' not in body
