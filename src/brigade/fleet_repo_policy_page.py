@@ -25,8 +25,10 @@ from datetime import datetime
 from urllib.parse import urlencode
 
 from . import fleet_command_deck, fleet_policy_page
+from .ui_theme import empty_state
 
 UNKNOWN = fleet_command_deck.UNKNOWN
+_LIVE_HINT = "Runs appear here while a node works in this repository."
 _esc = fleet_command_deck._esc
 
 NO_TELEMETRY = (
@@ -306,7 +308,7 @@ def _row_html(row: RepoPolicyRow) -> str:
                 f'<p class="collision">Policy linkage {UNKNOWN}: {_esc(row.linkage_note)}.</p>'
                 f"<p>owner {_esc(row.claim_owner or UNKNOWN)} &middot; ttl {_esc(row.claim_ttl or UNKNOWN)} "
                 f"&middot; flags {_esc(row.flags or 'none')}</p>"
-                + (f'<ul class="attention-list">{live}</ul>' if live else '<p class="empty">No live runs.</p>')
+                + (f'<ul class="attention-list">{live}</ul>' if live else empty_state("No live runs", _LIVE_HINT))
             )
             + "</article>"
         )
@@ -329,18 +331,20 @@ def _row_html(row: RepoPolicyRow) -> str:
         "<h3>Claims and runs</h3>"
         f"<p>claim {_esc(row.claim_owner or 'none')} &middot; ttl {_esc(row.claim_ttl or '-')} &middot; "
         f"flags {_esc(row.flags or 'none')}</p>"
-        + (f'<ul class="attention-list">{live_items}</ul>' if live_items else '<p class="empty">No live runs.</p>')
+        + (f'<ul class="attention-list">{live_items}</ul>' if live_items else empty_state("No live runs", _LIVE_HINT))
         + "<h3>Effective roles</h3>"
         + (
             f'<ul class="attention-list">{_leaf_items(row.roles)}</ul>'
             if row.roles
-            else '<p class="empty">No role is resolved for this repository.</p>'
+            else empty_state("No role is resolved", "A role appears once policy assigns one to this repository.")
         )
         + "<h3>Resolved settings</h3>"
         + (
             f'<ul class="attention-list">{_leaf_items(row.overrides)}</ul>'
             if row.overrides
-            else '<p class="empty">No resolved settings.</p>'
+            else empty_state(
+                "No resolved settings", "Settings appear here when policy overrides a default for this repository."
+            )
         )
         + (f'<h3>Refused overrides</h3><ul class="attention-list">{denied_items}</ul>' if denied_items else "")
         + (f'<h3>Warnings</h3><ul class="attention-list">{warning_items}</ul>' if warning_items else "")
@@ -348,7 +352,9 @@ def _row_html(row: RepoPolicyRow) -> str:
         + (
             f'<ul class="attention-list">{session_items}</ul>'
             if session_items
-            else '<p class="empty">No session receipts for this repository.</p>'
+            else empty_state(
+                "No session receipts", "Receipts appear here when a live session loads policy for this repository."
+            )
         )
         + f'<p class="station-meta">verification and handoff state: {_esc(row.verification)}. '
         f"{_esc(NO_TELEMETRY)}.</p>"
@@ -416,14 +422,20 @@ def render(
             },
             limits="Page render time; policy linkage unknown. Claim and run coordination is unaffected.",
         )
-    blocks = "".join(_row_html(row) for row in rows) or '<p class="empty">No repositories to show.</p>'
+    blocks = "".join(_row_html(row) for row in rows) or empty_state(
+        "No repositories to show", "Repositories appear here once policy or an observed run names one."
+    )
     # Policy can decorate current observations, but cannot create them.
     linked_identities = {row.identity for row in rows if row.linked}
     cards = "".join(
         _summary_card(replace(row, linked=row.identity in linked_identities)) for row in build_rows(view, None)
     )
     if not cards:
-        cards = '<p class="empty">No repository observations available. <a href="/view/repos">View run history</a></p>'
+        cards = (
+            '<p class="empty"><span class="empty-title">No repository observations available</span>'
+            '<span class="empty-hint">Observed runs fill this page, and <a href="/view/repos">run history</a> '
+            "shows what has been reported.</span></p>"
+        )
     body = (
         '<main class="deck-shell admin-page">'
         '<section aria-label="Repository summaries"><div class="repository-grid">'

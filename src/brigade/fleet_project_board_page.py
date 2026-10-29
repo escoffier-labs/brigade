@@ -18,7 +18,9 @@ from urllib.parse import urlencode
 from . import fleet_admin_explorer as explorer
 from . import fleet_project_board as store
 from . import fleet_projects_prs as prs
+from .ui_theme import empty_state
 
+_NO_ISSUES_HINT = "Issues appear here once they are added to the GitHub Project."
 VIEWS = ("board", "epics", "list")
 ROUTE = "/deck/projects"
 _ACTIVE = frozenset({"in progress", "review", "merge queue"})
@@ -258,7 +260,9 @@ def render(
         body = (
             strip.replace('class="bd-epics"', 'class="bd-epics bd-epics--page"', 1)
             if epics
-            else '<p class="empty">No epics on this board.</p>'
+            else empty_state(
+                "No epics on this board", "Epics are issues with sub-issues, and none on this board have any."
+            )
         )
         body += none
     elif view == "list":
@@ -271,13 +275,13 @@ def render(
                     + "".join(_row(i, now) for i in _newest(members))
                     + "</ul></section>"
                 )
-        body = "".join(sections) + none if sections else '<p class="empty">No issues on this board.</p>'
+        body = "".join(sections) + none if sections else empty_state("No issues on this board", _NO_ISSUES_HINT)
     else:
         if all_items:
             columns = "".join(_column(name, members, checks) for name, members in columns_of(board, items))
             board_html = f'<div class="bd-columns">{columns}</div>' + none
         else:
-            board_html = '<p class="empty">No issues on this board.</p>'
+            board_html = empty_state("No issues on this board", _NO_ISSUES_HINT)
         body = strip + chip + board_html
     if view != "board":
         body = chip + body

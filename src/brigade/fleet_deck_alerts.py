@@ -10,6 +10,8 @@ from typing import Sequence
 from . import fleet_action_page, fleet_command_deck as deck, fleet_deck_activity as activity, ui_theme
 from .fleet_deck_overview import Alert, _esc, page_alerts
 
+_NO_ALERTS_HINT = "Alerts appear here when the control plane reports something that needs attention."
+
 
 @dataclass(frozen=True)
 class _Guidance:
@@ -162,7 +164,7 @@ def render_alerts_page(
         entries.append(explorer.Entry(entry_key(alert), alert.title, alert.kind, detail))
     body = (
         f'<main class="deck-shell admin-page alerts-page"><p class="page-sub">{len(alerts)} open</p>'
-        + explorer.render(entries, label="alerts", empty="No active alerts")
+        + explorer.render(entries, label="alerts", empty="No active alerts", empty_hint=_NO_ALERTS_HINT)
         + "</main>"
     )
     return deck._document(
@@ -227,4 +229,8 @@ def render_alert_rows(
             + "</div>"
             f'<div class="alert-action">{action}</div>' + ("" if compact else evidence) + "</li>"
         )
-    return '<ul class="alert-rows">' + "".join(rows) + "</ul>" if rows else '<p class="empty">No active alerts</p>'
+    return (
+        '<ul class="alert-rows">' + "".join(rows) + "</ul>"
+        if rows
+        else ui_theme.empty_state("No active alerts", _NO_ALERTS_HINT)
+    )

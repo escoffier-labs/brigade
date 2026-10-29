@@ -40,6 +40,7 @@ from typing import Any
 from . import fleet_admin_explorer as explorer
 from . import fleet_command_deck, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError
+from .ui_theme import empty_state
 from .fleet_policy_form import ACTIONS as ACTIONS
 from .fleet_policy_form import ADMISSION_ROLE as ADMISSION_ROLE
 from .fleet_policy_form import POLICY_ROLES as POLICY_ROLES
@@ -1366,7 +1367,13 @@ def _plan_panel(
             if error_items
             else ""
         )
-        + (f'<ul class="attention-list">{diff_items}</ul>' if diff_items else '<p class="empty">No leaf changes.</p>')
+        + (
+            f'<ul class="attention-list">{diff_items}</ul>'
+            if diff_items
+            else empty_state(
+                "No leaf changes", "The draft matches the current policy, so saving it would change nothing."
+            )
+        )
         + f"<p>affected consumers: {_scope(affected.get('consumers'))} &middot; "
         f"repositories: {_scope(affected.get('repositories'))} &middot; "
         f"sessions: {_scope(affected.get('sessions'))}</p>"
@@ -1382,7 +1389,7 @@ def _plan_panel(
         + (
             f'<ul class="attention-list">{impact_items}</ul>'
             if impact_items
-            else '<p class="empty">No live sessions.</p>'
+            else empty_state("No live sessions", "No live session is affected by this change.")
         )
         + _confirm_form(draft, review)
         + "</section>"
@@ -1698,7 +1705,10 @@ def _consumer_section(view: PolicyView, *, editable: bool, csrf: str, draft: Sub
     return (
         '<section class="panel" aria-labelledby="consumers"><header><h2 id="consumers">Consumers</h2>'
         f'<p class="panel-count">{len(view.consumers)} consumer(s)</p></header>'
-        + ("".join(blocks) or '<p class="empty">No consumers registered.</p>')
+        + (
+            "".join(blocks)
+            or empty_state("No consumers registered", "Consumers appear here once the policy declares one.")
+        )
         + "</section>"
     )
 
@@ -1840,7 +1850,12 @@ def _repository_section(view: PolicyView, *, editable: bool, csrf: str, draft: S
         '<p class="hint">This is the authoritative sparse editor: only the leaves written here belong to a '
         "repository. The operational view of the same repositories - claims, live runs, sessions - is on the "
         '<a href="/deck/repos">repos page</a>.</p>'
-        + ("".join(blocks) or '<p class="empty">No repositories in policy.</p>')
+        + (
+            "".join(blocks)
+            or empty_state(
+                "No repositories in policy", "Repositories appear here once a repository policy entry is written."
+            )
+        )
         + "</section>"
     )
 

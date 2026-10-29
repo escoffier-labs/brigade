@@ -8,6 +8,7 @@ from typing import Any
 
 from . import fleet_command_deck as deck
 from .fleet_owners import Holding, Overlap, OwnersView, charter_only
+from .ui_theme import empty_state
 
 DISPLAY_LIMIT = 50
 
@@ -18,9 +19,9 @@ def _items(values: Sequence[str]) -> str:
     return '<ul class="observer-list">' + "".join(f"<li>{deck._esc(value)}</li>" for value in values) + "</ul>"
 
 
-def _table(items: Sequence[Holding], *, empty: str) -> str:
+def _table(items: Sequence[Holding], *, empty: str, hint: str) -> str:
     if not items:
-        return f'<p class="empty">{deck._esc(empty)}</p>'
+        return empty_state(empty, hint)
     rows = "".join(
         "<tr>"
         + "".join(
@@ -59,9 +60,15 @@ def _holdings(view: OwnersView, name: str, match: Mapping[str, Any]) -> str:
     if holding_gaps:
         sources = ", ".join(holding_gaps)
         return f'<p class="station-meta">Holdings unknown: could not read {deck._esc(sources)}.</p>' + _table(
-            view.by_owner.get(name, ()), empty="No holdings from the sources that could be read."
+            view.by_owner.get(name, ()),
+            empty="No holdings from the sources that could be read",
+            hint="Holdings appear here once every source is readable, so an empty list is not proof that nothing is held.",
         )
-    return _table(view.by_owner.get(name, ()), empty="Nothing held right now.")
+    return _table(
+        view.by_owner.get(name, ()),
+        empty="Nothing held right now",
+        hint="Live claims and runs that match this charter appear here.",
+    )
 
 
 def _card(view: OwnersView, name: str) -> str:
@@ -88,7 +95,7 @@ def _card(view: OwnersView, name: str) -> str:
 
 def _overlaps(overlaps: Sequence[Overlap]) -> str:
     if not overlaps:
-        return '<p class="empty">No overlaps.</p>'
+        return empty_state("No overlaps", "No item is matched by more than one charter.")
     entries = "".join(
         f"<li>{deck._esc(overlap.item.kind)} {deck._esc(overlap.item.ref)}: "
         + deck._esc(", ".join(overlap.owners))
@@ -116,8 +123,13 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
     cards = "".join(_card(view, name) for name in sorted(view.charters))
     if not cards and not view.policy_error:
         cards = (
-            '<section class="panel"><p class="empty">No charters declared. Save an owners section in the fleet '
-            "policy document with <code>brigade fleet policy save</code> to populate this page.</p></section>"
+            '<section class="panel">'
+            + empty_state(
+                "No charters declared",
+                "Save an owners section in the fleet policy document with `brigade fleet policy save` to populate "
+                "this page.",
+            )
+            + "</section>"
         )
     unassigned_note = (
         f'<p class="station-meta">Could not read: {deck._esc(", ".join(view.unknown_sources))}.</p>'
@@ -138,7 +150,11 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
         + ("<details><summary>Unmatched holdings (ownership unconfigured)</summary>" if not view.charters else "")
         + '<section class="panel"><h2>Unassigned</h2><p>Live items that no charter matches.</p>'
         + unassigned_note
-        + _table(view.unassigned, empty="Nothing unassigned.")
+        + _table(
+            view.unassigned,
+            empty="Nothing unassigned",
+            hint="Every live item that was read matches at least one charter.",
+        )
         + "</section>"
         + ("</details>" if not view.charters else "")
         + '<section class="panel"><h2>Overlaps</h2><p>Items that more than one charter matches. '

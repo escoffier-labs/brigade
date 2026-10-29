@@ -7,6 +7,8 @@ import html
 from dataclasses import dataclass
 from typing import Mapping, Sequence
 
+from .ui_theme import empty_state
+
 
 @dataclass(frozen=True)
 class Entry:
@@ -110,8 +112,17 @@ def search_box(label: str, extra_class: str = "") -> str:
     )
 
 
-def render(entries: Sequence[Entry], *, label: str, empty: str = "No records reported.", toolbar: str = "") -> str:
-    """*toolbar* is trusted, already-escaped HTML shown under the list header (filter chips, notes)."""
+def render(
+    entries: Sequence[Entry],
+    *,
+    label: str,
+    empty: str = "No records reported.",
+    empty_hint: str = "",
+    toolbar: str = "",
+) -> str:
+    """*toolbar* is trusted, already-escaped HTML shown under the list header (filter chips, notes).
+
+    *empty* is the empty-state title and *empty_hint* its one-line guidance, both plain text."""
     esc = html.escape
     links, details = [], []
     for entry, identifier in zip(entries, identifiers([entry.key for entry in entries]), strict=True):
@@ -134,7 +145,7 @@ def render(entries: Sequence[Entry], *, label: str, empty: str = "No records rep
         f'<nav aria-label="{esc(label, quote=True)}">{"".join(links)}</nav></aside>'
         '<div class="explorer-details">'
         + "".join(details)
-        + f'<p class="empty" data-explorer-empty{" hidden" if entries else ""}>{esc(empty)}</p>'
+        + empty_state(empty, empty_hint, attrs="data-explorer-empty" + (" hidden" if entries else ""))
         + "</div></section>"
     )
 
@@ -160,6 +171,7 @@ function start() {
   });
   var input = root.querySelector('input');
   var empty = root.querySelector('[data-explorer-empty]');
+  var emptyHtml = empty.innerHTML;
   var chosen = '';
   function apply(preferred) {
    var query = input.value.trim().toLowerCase();
@@ -177,7 +189,9 @@ function start() {
    var count = root.querySelector('[data-explorer-count]');
    if (count) { count.textContent = String(visible.length); }
    empty.hidden = !!selected;
-   if (!selected) { empty.textContent = query ? 'No matching records.' : 'No records reported.'; }
+   if (!selected) {
+    if (query) { empty.textContent = 'No matching records.'; } else { empty.innerHTML = emptyHtml; }
+   }
   }
   links.forEach(function(link) {
    link.addEventListener('click', function(event) {

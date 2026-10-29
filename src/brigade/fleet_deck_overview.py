@@ -17,7 +17,8 @@ from urllib.parse import urlencode
 
 from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
-from . import fleet_deck_activity as activity, fleet_live_routing
+from .fleet_deck_empty_copy import COPY
+from . import fleet_deck_activity as activity, fleet_live_routing, ui_theme
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
 
 _esc = deck._esc
@@ -366,7 +367,7 @@ def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *,
 
 def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> str:
     if plane is None or "queue" not in plane.present:
-        return '<p class="empty">Queue unknown: the control-plane snapshot has no queue section.</p>'
+        return ui_theme.empty_state(*COPY["queue_unknown"])
     queue = plane.queue
     rows = "".join(
         '<li class="row"><div class="row-body">'
@@ -376,7 +377,7 @@ def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> s
     )
     reasons = f'<ul class="rows">{rows}</ul>' if rows else ""
     if not queue.blocked_known:
-        reasons += '<p class="empty">Blocked reasons unknown.</p>'
+        reasons += ui_theme.empty_state(*COPY["blocked_unknown"])
     return (
         f'<p class="station-meta">{_esc(queue.eligible_count)} ready to run · Not ready: {_esc(_not_ready(queue))}</p>'
         "<details><summary>Queue counts and reasons</summary>"
@@ -411,7 +412,7 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True, include_
             + "</ul>"
         )
 
-    working = rows(jobs[:3]) if jobs else '<p class="empty">No managed jobs reported.</p>'
+    working = rows(jobs[:3]) if jobs else ui_theme.empty_state(*COPY["no_jobs"])
     if len(jobs) > 3:
         working += f"<details><summary>More managed jobs ({len(jobs) - 3})</summary>{rows(jobs[3:])}</details>"
     running = sum(tile.run.bucket == "running" for _, tile in jobs)
@@ -558,12 +559,7 @@ def render_machine_table(view: DeckView, now: datetime, *, include_context: bool
         else ""
     )
     if not view.stations:
-        return (
-            header
-            + '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p>'
-            + context
-            + "</section>"
-        )
+        return header + ui_theme.empty_state(*COPY["no_stations"]) + context + "</section>"
     show_notes = any(
         machine_notes(station, machine_for(view, station), station_status(station, machine_for(view, station)))
         for station in view.stations
@@ -596,7 +592,7 @@ def _cloud_worker_html(worker: deck.CloudWorker) -> str:
         + (
             f'<ul class="cloud-lease-list">{lease_items}</ul>'
             if lease_items
-            else '<p class="empty">No active leases.</p>'
+            else ui_theme.empty_state(*COPY["no_leases"])
         )
         + "</article>"
     )
@@ -609,11 +605,7 @@ def render_cloud_workers(view: DeckView) -> str:
         + activity.render_provider_leases(view)
         + f"<details><summary>Provider details ({len(view.cloud_workers)})</summary>"
         '<p class="station-meta">Lease inventory does not cover reported agent presence.</p>'
-        + (
-            f'<div class="cloud-workers">{cards}</div>'
-            if cards
-            else '<p class="empty">No cloud providers configured.</p>'
-        )
+        + (f'<div class="cloud-workers">{cards}</div>' if cards else ui_theme.empty_state(*COPY["no_clouds"]))
         + "</details></section>"
     )
 
@@ -638,7 +630,11 @@ def render_outcomes(view: DeckView) -> str:
     return (
         '<section class="panel" aria-labelledby="timeline"><header><h2 id="timeline">Recent outcomes</h2>'
         f'<p class="panel-count">{len(view.outcomes)} shown</p></header>'
-        + (f'<ul class="timeline">{items}</ul>' if items else '<p class="empty">No recent outcomes.</p>')
+        + (
+            f'<ul class="timeline">{items}</ul>'
+            if items
+            else ui_theme.empty_state("No recent outcomes", "Outcomes are listed here as runs finish.")
+        )
         + "</section>"
     )
 

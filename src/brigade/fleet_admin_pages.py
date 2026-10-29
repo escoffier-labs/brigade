@@ -20,6 +20,8 @@ from .fleet_machine_label import status_label
 from . import worklore_campaigns as campaigns
 from .fleet_campaign import MAX_MEMBERS
 from .fleet_work_page import _reference_url
+from .fleet_deck_empty_copy import COPY
+from .ui_theme import empty_state
 from .worklore_store import WorkloreNotFound
 
 _esc = deck._esc
@@ -300,9 +302,12 @@ def render_activity(view: deck.DeckView, now: datetime, *, nonce: str, worklore_
         if worklore_enabled
         else ""
     )
-    content = explorer.render(entries, label="activity", empty="No work activity reported.") + (
-        f'<div class="explorer-actions explorer-footer">{groups}</div>' if groups else ""
-    )
+    content = explorer.render(
+        entries,
+        label="activity",
+        empty="No work activity reported",
+        empty_hint="Entries appear here as stations report runs and queued work.",
+    ) + (f'<div class="explorer-actions explorer-footer">{groups}</div>' if groups else "")
     return document(
         content, view, now, nonce=nonce, title="Activity", active="activity", worklore_enabled=worklore_enabled
     )
@@ -382,7 +387,9 @@ def render_capacity(
             )
             for worker in view.cloud_workers
         ]
-        content = explorer.render(entries, label="cloud providers", empty="No cloud providers configured.")
+        content = explorer.render(
+            entries, label="cloud providers", empty=COPY["no_clouds"][0], empty_hint=COPY["no_clouds"][1]
+        )
     else:
         entries = []
         for station in view.stations:
@@ -468,7 +475,9 @@ def render_capacity(
             )
         content = (
             '<div id="machines-table">'
-            + explorer.render(entries, label="machines", empty="No stations configured.")
+            + explorer.render(
+                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1]
+            )
             + "</div>"
         )
     return document(content, view, now, nonce=nonce, title="Capacity", active=tab, worklore_enabled=worklore_enabled)
@@ -632,18 +641,22 @@ def render_projects(
 ) -> str:
     state = page["state"]
     messages = {
-        "disabled": "Projects not connected. Worklore is disabled.",
-        "unavailable": "Project goals unavailable. Campaign storage is not available.",
+        "disabled": ("Projects not connected", "Project goals need Worklore, which is disabled on this hub."),
+        "unavailable": (
+            "Project goals unavailable",
+            "Campaign storage is not available, so recorded goals cannot be read.",
+        ),
     }
     if state == "empty":
         # Projects are goals only. Open pull requests live on their own page.
         content = (
-            '<p class="empty project-empty">No projects yet. GitHub Projects boards will appear here once connected. '
-            '<a href="/deck/pulls">View open pull requests</a></p>'
+            '<p class="empty project-empty"><span class="empty-title">No projects yet</span>'
+            '<span class="empty-hint">Boards from GitHub Projects appear here once connected. '
+            '<a href="/deck/pulls">View open pull requests</a></span></p>'
             f'<p class="project-empty project-sync">Sync a board from a node with the read:project scope: <code>{_esc(project_board_store.SYNC_COMMAND)}</code></p>'
         )
     elif state != "ready":
-        content = f'<p class="empty">{messages[state]}</p>'
+        content = empty_state(*messages[state])
         if state in {"disabled", "unavailable"}:
             content += investigation.render(
                 "Project goals",
@@ -708,10 +721,10 @@ def render_projects(
             + '<section class="admin-explorer project-explorer"><aside class="explorer-list">'
             f'<div class="explorer-head"><span class="explorer-title">Projects</span><span class="explorer-count">{len(page["campaigns"])}</span></div>'
             + explorer.search_box("projects", " project-search")
-            + f'<nav aria-label="Projects">{links}</nav><p class="empty" data-project-empty hidden>No matching projects.</p></aside>'
-            '<div class="explorer-details"><p class="empty" data-project-select hidden>'
-            "Select a matching project to view its details.</p>"
-            f'<article><div class="detail-bar"><span>{_esc(str(campaign["title"])[:120])}</span></div><div class="detail-body">{detail}</div></article></div></section>'
+            + f'<nav aria-label="Projects">{links}</nav>{empty_state("No matching projects", attrs="data-project-empty hidden")}</aside>'
+            '<div class="explorer-details">'
+            + empty_state("Select a matching project to view its details.", attrs="data-project-select hidden")
+            + f'<article><div class="detail-bar"><span>{_esc(str(campaign["title"])[:120])}</span></div><div class="detail-body">{detail}</div></article></div></section>'
         )
     board_css = board_script = ""
     if board is not None:
@@ -746,7 +759,7 @@ def render_pulls(
 ) -> str:
     """Open pull requests from the stored CI projection, on their own page."""
     if ci_view is None:
-        content = '<p class="empty">Pull requests unavailable. The CI projection could not be read.</p>'
+        content = empty_state("Pull requests unavailable", "The CI projection could not be read.")
         pr_css = script = ""
     else:
         content, pr_css = pull_requests.render(ci_view, now)
@@ -770,9 +783,13 @@ def render_reporting(
 ) -> str:
     latest = page.get("latest")
     if page.get("unavailable"):
-        content = '<p class="empty">Reporting observations unavailable.</p>'
+        content = empty_state(
+            "Reporting observations unavailable", "The adoption report could not be read from the hub."
+        )
     elif not latest and not page.get("weeks"):
-        content = '<p class="empty">No adoption observations available. Collection may be unconfigured or not yet reported.</p>'
+        content = empty_state(
+            "No adoption observations available", "Collection may be unconfigured or not yet reported."
+        )
     else:
         content = (
             "<h2>Reported observations</h2>"

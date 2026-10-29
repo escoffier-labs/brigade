@@ -13,6 +13,8 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Mapping
 
+from .ui_theme import empty_state
+
 
 _REPO = re.compile(r"[A-Za-z0-9_.-]{1,100}/[A-Za-z0-9_.-]{1,100}")
 _COLOR = re.compile(r"[0-9a-f]{6}")
@@ -258,11 +260,11 @@ def render(ci_view: Mapping[str, Any] | None, now: datetime) -> tuple[str, str]:
     meta = "".join(f'<p class="pr-note">{note}</p>' for note in notes)
     if not rows:
         hint = (
-            ""
+            "Repositories with CI snapshots currently have no open pull requests."
             if data["repositories"]
-            else " No repositories have CI snapshots yet. Run <code>brigade fleet ci reconcile</code> on a node to populate them."
+            else "No repositories have CI snapshots yet, and `brigade fleet ci reconcile` on a node populates them."
         )
-        empty = f'<p class="empty pr-empty-static">No open pull requests observed.{hint}</p>'
+        empty = empty_state("No open pull requests observed", hint, classes="pr-empty-static")
         body = empty
     else:
         sections = []
