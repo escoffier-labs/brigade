@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
 - Fleet Hub Overview shows an idle machine's last run report age beside its separately labeled telemetry age, including `never` and `unknown` history.
 - The tokens station now selects upstream TokenJuice, rejects Glace-owned aliases during discovery, and leaves host activation explicit. Legacy managed-tool requests still resolve, and legacy statistics remain a separate epoch.
+- The tokens station now selects upstream TokenJuice, rejects Glace-owned aliases during discovery, and leaves host activation explicit. Legacy managed-tool requests still resolve, and legacy statistics remain a separate epoch. JSON consumers should use `tools.tokenjuice`, `docs.tokenjuice` and `installed.tokenjuice` instead of the former Glace keys. Legacy executable state is reported separately under `legacy`.
 
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Fleet attention expires abandoned unknown and stale runs using the configured history horizon, excludes revoked nodes and expired failures, and compares failure lookback and newer successful runs by elapsed time across timestamp offsets.

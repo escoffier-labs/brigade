@@ -7,6 +7,7 @@ operator runs the printed sidecar commands.
 from __future__ import annotations
 
 from pathlib import Path
+import shlex
 from typing import Any
 
 from . import proc, managed
@@ -45,7 +46,8 @@ def status_payload(target: Path) -> dict[str, Any]:
             "installed": glace is not None,
             "binary": glace,
             "candidate": candidate,
-            "identity": "upstream-npm-package" if glace else "unverified" if candidate else "missing",
+            "identity": "package-metadata-match" if glace else "unverified" if candidate else "missing",
+            "provenance": "unverified",
         },
         "usage-tracker": {"installed": tracker is not None, "binary": tracker},
     }
@@ -138,15 +140,16 @@ def status_payload(target: Path) -> dict[str, Any]:
         parts.append(tracker_summary)
     payload["summary"] = "; ".join(parts) if parts else payload["summary"]
 
+    qualified_doctor = [shlex.join([glace, "doctor", "hooks", "--format", "json"])] if glace else []
     payload["next_commands"] = [
         "brigade tokens wire plan",
         "brigade tokens doctor",
-        "tokenjuice doctor hooks --format json",
+        *qualified_doctor,
     ]
     if overall in ("fail", "unwired", "incomplete"):
         payload["next_commands"] = [
             "brigade tokens wire plan",
-            "tokenjuice doctor hooks --format json",
+            *qualified_doctor,
             "brigade tokens doctor",
         ]
     return payload
@@ -189,6 +192,24 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 
 def wire_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
+    verified = managed.tokenjuice_binary()
+    commands = (
+        [
+            [verified, "install", "claude-code"],
+            [verified, "install", "codex"],
+            [verified, "doctor", "hooks", "--format", "json"],
+        ]
+        if verified
+        else []
+    )
+    qualification_steps = (
+        []
+        if verified
+        else [
+            "No qualified TokenJuice executable is available. Review the prior owner and its hooks, "
+            "complete the manual migration, then regenerate this plan before activation."
+        ]
+    )
     return {
         "target": str(target),
         "station": "tokens",
@@ -196,16 +217,12 @@ def wire_plan_payload(*, target: Path) -> dict[str, Any]:
         "title": "tokens wire plan",
         "created_at": health.now_iso(),
         "installed": {
-            "tokenjuice": managed.tokenjuice_binary() is not None,
+            "tokenjuice": verified is not None,
             "usage-tracker": proc.which("usage-tracker") is not None,
         },
-        "commands": [
-            ["tokenjuice", "install", "claude-code"],
-            ["tokenjuice", "install", "codex"],
-            ["tokenjuice", "doctor", "hooks", "--format", "json"],
-            ["usage-tracker", "export", "--summary-json"],
-        ],
+        "commands": [*commands, ["usage-tracker", "export", "--summary-json"]],
         "manual_steps": [
+            *qualification_steps,
             "Install TokenJuice hooks only for harnesses you actually use.",
             "Preserve unrelated hooks and legacy artifacts. Remove only the previous compactor owner through its installer.",
             "Use an absolute upstream tokenjuice path in Codex hooks. Verify actual hook events and tool-name matching before cutover.",

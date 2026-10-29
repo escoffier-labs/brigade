@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
@@ -242,11 +243,16 @@ def tokenjuice_binary() -> Optional[str]:
     ownership. Read the nearest package metadata behind the resolved symlink.
     Unknown standalone distributions require explicit qualification first.
     """
+    if sys.platform == "win32":
+        # npm shims need a separately qualified node/entrypoint launch contract.
+        return None
     binary = proc.which("tokenjuice")
     if not binary:
         return None
     try:
         executable = Path(binary).resolve(strict=True)
+        if not executable.is_file():
+            return None
         for parent in executable.parents:
             manifest = parent / "package.json"
             if not manifest.is_file():
@@ -261,10 +267,22 @@ def tokenjuice_binary() -> Optional[str]:
                 "https://github.com/vincentkoc/tokenjuice.git",
                 "git+https://github.com/vincentkoc/tokenjuice.git",
             ):
-                return binary
+                return str(executable)
             return None
     except (OSError, ValueError, RuntimeError):
         return None
+    return None
+
+
+def tokenjuice_install_blocker() -> Optional[str]:
+    """Keep package installation from silently changing an existing hook owner."""
+    if sys.platform == "win32":
+        return "Windows npm-shim installation is not qualified; TokenJuice requires manual platform qualification"
+    if proc.which("tokenjuice") or proc.which("token-glace"):
+        return (
+            "existing compactor ownership requires manual migration before installation; "
+            "preserve hooks and artifacts, qualify the new owner, and keep a rollback copy"
+        )
     return None
 
 

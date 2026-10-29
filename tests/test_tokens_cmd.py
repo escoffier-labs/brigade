@@ -69,11 +69,12 @@ def test_tokens_doctor_exits_nonzero_on_broken(monkeypatch, tmp_path):
     assert tokens_cmd.doctor(target=tmp_path) == 1
 
 
-def test_wire_plan_is_review_only(tmp_path):
+def test_wire_plan_is_review_only(tmp_path, monkeypatch):
+    monkeypatch.setattr(tokens_cmd.managed, "tokenjuice_binary", lambda: "/x/tokenjuice")
     payload = tokens_cmd.wire_plan_payload(target=tmp_path)
     rendered = tokens_cmd.health.render_plan_md("tokens wire plan", payload)
 
-    assert ["tokenjuice", "install", "claude-code"] in payload["commands"]
+    assert ["/x/tokenjuice", "install", "claude-code"] in payload["commands"]
     assert "TokenJuice" in payload["boundaries"][0]
     assert "tokenjuice install" in rendered
 

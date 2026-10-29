@@ -99,8 +99,6 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print("tokens station wires TokenJuice (+ optional usage-tracker; process boundary):")
         print("  brigade tokens wire plan")
         print("  brigade tokens doctor")
-        print("  tokenjuice install claude-code")
-        print("  tokenjuice install codex")
         print("Brigade leaves host activation to the operator; add never installs TokenJuice hooks.")
         print()
 
@@ -111,6 +109,13 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print("  plating scan <cast> --policy public-repo")
         print("Optional; not required for scrub or content-guard.")
         print()
+
+    for tool in tools:
+        if tool.name == "tokenjuice" and not tool.detect():
+            blocker = managed.tokenjuice_install_blocker()
+            if blocker:
+                print(f"error: {blocker}", file=sys.stderr)
+                return 1
 
     ctx = _doctor.build_context(target)
     rc = 0
@@ -123,6 +128,10 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
             r = managed.proc.run(install_command, timeout=300)
             if r.code != 0:
                 print(f"  [fail] {tool.name} install exited {r.code}: {r.stderr.strip()[:120]}", file=sys.stderr)
+                rc = 1
+                continue
+            if tool.name == "tokenjuice" and not tool.detect():
+                print("  [fail] tokenjuice post-install package qualification failed", file=sys.stderr)
                 rc = 1
                 continue
         for status, name, detail in tool.wire(ctx):
