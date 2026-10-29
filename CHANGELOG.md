@@ -94,6 +94,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 
 - Native source builds add `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` entry points over the existing engines. Legacy commands, archive locations, protocol identities, and release assets remain compatible.
+- Native release bundles include canonical engine executables alongside legacy assets. Default setup retains legacy identities, with complete checksums and source-bound attestation checks.
 
 ### Fixed
 
