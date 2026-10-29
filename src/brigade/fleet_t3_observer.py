@@ -11,21 +11,25 @@ import hashlib
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Sequence, cast
 
-from . import proc
+from . import fleet_client, proc
 from .fleet_openclaw_observer import (
     OBSERVATION_BUDGET_SECONDS,
+    PUBLISH_LIMIT,
     TTL_SECONDS,
     ObservationError,
     RecentSession,
+    _PublicationBatch,
     _absolute_workspace,
     _bounded_json,
     _opaque_id,
     _publish_recent,
     _remaining,
     _require_node_auth,
+    _select_publication_batch,
 )
 
 NATIVE_TIMEOUT_SECONDS = 8
@@ -35,7 +39,8 @@ MAX_PROJECTS = 2_000
 MAX_METADATA_BYTES = 262_144
 _ACTIVE = frozenset({"queued", "preparing", "starting", "running", "waiting"})
 _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolled_back"})
-# Constant program, never interpolated with user input. The installed read client
+# Constant program, prefixed only with budgets and validated, quoted native IDs.
+# The installed read client
 # bounds shell and detail responses to 16 MiB. No messages, provider turns,
 # target store or raw shell data are serialized here. Native auth may issue its
 # own local grant; no grant values are exposed by this helper.
@@ -79,10 +84,11 @@ try:
             continue
         if status in active_states or run_id is not None or activity is not None or bool(pending) or bool(background):
             active.append(row)
-    # Bounded detail reads expose only a strong native resume ID, never messages.
-    # Rotate the lookup window so large fleets eventually link every thread.
-    linked = sorted((row for row in active if isinstance(row.get("id"), str)), key=lambda r: r["id"])
-    offset = (int(time.time()) // 60) % len(linked) if linked else 0
+    # Small fleets resolve in this call. Large fleets first return metadata so
+    # the parent can select the persisted publication window before details.
+    if DETAIL_THREAD_IDS is not None:
+        active = [row for row in active if row.get("id") in DETAIL_THREAD_IDS]
+    linked = active if DETAIL_THREAD_IDS is not None or len(active) <= PUBLISH_LIMIT else []
     def provider_link(row):
         active_provider = row.get("activeProviderThreadId")
         if not active_provider:
@@ -102,7 +108,7 @@ try:
     # Optional links get at most 4s, and never the slack reserved to print the snapshot.
     detail_wait = min(4.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))
     pool = ThreadPoolExecutor(max_workers=8)
-    window = (linked[offset:] + linked[:offset])[:50] if detail_wait > 0 else []
+    window = linked[:50] if detail_wait > 0 else []
     futures = {pool.submit(provider_link, row): row for row in window}
     done, _ = wait(futures, timeout=max(detail_wait, 0)) if futures else (set(), set())
     for future in done:
@@ -132,12 +138,21 @@ os._exit(0)
 """
 
 
-def _native_metadata(interpreter: str, deadline: float) -> object:
+def _native_metadata(interpreter: str, deadline: float, *, detail_thread_ids: list[str] | None = None) -> object:
     path = Path(interpreter)
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
         raise ObservationError("t3_python_unavailable")
-    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS)
-    program = f"BUDGET_SECONDS = {float(timeout)!r}\nRESERVE_SECONDS = {DETAIL_RESERVE_SECONDS!r}\n" + _NATIVE_PROGRAM
+    if detail_thread_ids is not None:
+        if len(detail_thread_ids) > PUBLISH_LIMIT:
+            raise ObservationError("native_metadata_invalid")
+        detail_thread_ids = [_native_id(value) for value in detail_thread_ids]
+    # A failed optional phase must leave time to publish the metadata batch.
+    reserve = fleet_client.REPORT_TIMEOUT_SECONDS + DETAIL_RESERVE_SECONDS if detail_thread_ids is not None else 0
+    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS, reserve=reserve)
+    program = (
+        f"BUDGET_SECONDS = {float(timeout)!r}\nRESERVE_SECONDS = {DETAIL_RESERVE_SECONDS!r}\n"
+        f"PUBLISH_LIMIT = {PUBLISH_LIMIT!r}\nDETAIL_THREAD_IDS = {detail_thread_ids!r}\n" + _NATIVE_PROGRAM
+    )
     result = proc.run(
         [str(path), "-c", program],
         cwd=path.parent,
@@ -249,11 +264,38 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
     return active, total, invalid
 
 
+def _link_publication_batch(
+    batch: _PublicationBatch, payload: object, *, interpreter: str, deadline: float
+) -> _PublicationBatch:
+    if batch.error or not batch.selected:
+        return batch
+    try:
+        wanted = {s.session_id for s in batch.selected}
+        native_ids = []
+        for row in cast(dict[str, list[dict[str, object]]], payload)["threads"]:
+            try:
+                native_id = _native_id(row.get("id"))
+            except ObservationError:
+                continue
+            if _presence_id(native_id) in wanted:
+                native_ids.append(native_id)
+        details, _, _ = _active_threads(_native_metadata(interpreter, deadline, detail_thread_ids=native_ids))
+        links = {(s.session_id, s.workspace): s.provider_link for s in details}
+        return replace(
+            batch,
+            selected=[replace(s, provider_link=links.get((s.session_id, s.workspace))) for s in batch.selected],
+        )
+    except Exception:
+        # Native details are optional. Keep the already validated shell batch.
+        return batch
+
+
 def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
     deadline = time.monotonic() + OBSERVATION_BUDGET_SECONDS
     if publish:
         _require_node_auth()
-    recent, total, invalid = _active_threads(_native_metadata(t3_python, deadline))
+    payload = _native_metadata(t3_python, deadline)
+    recent, total, invalid = _active_threads(payload)
     _remaining(deadline, cap=1)
     report: dict[str, object] = {
         "ok": not invalid,
@@ -270,7 +312,10 @@ def observe(*, t3_python: str, publish: bool = False) -> dict[str, object]:
         "budget_seconds": OBSERVATION_BUDGET_SECONDS,
     }
     if publish:
-        report.update(_publish_recent(recent, harness="t3", deadline=deadline))
+        batch = _select_publication_batch(recent, harness="t3", deadline=deadline)
+        if len(cast(dict[str, list[object]], payload)["threads"]) > PUBLISH_LIMIT:
+            batch = _link_publication_batch(batch, payload, interpreter=t3_python, deadline=deadline)
+        report.update(_publish_recent(recent, harness="t3", deadline=deadline, batch=batch))
         report["skipped"] = cast(int, report["skipped"]) + invalid
         report["ok"] = not (report["truncated"] or invalid or report.get("error"))
     return report

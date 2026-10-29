@@ -100,6 +100,20 @@ def test_provider_link_roundtrips_through_client():
     assert fleet_client._session_request_body(snapshot, action="upsert")["provider_link"] == snapshot.provider_link
 
 
+def test_provider_link_survives_missing_lookup_and_accepts_replacement(monkeypatch):
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW)
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    first = {"harness": "codex", "session_id": "first-session"}
+    second = {"harness": "claude", "session_id": "second-session"}
+    for link in (first, None, second):
+        _, result = fleet_hub_sessions.handle_session(
+            conn, body("t3", "app-thread", provider_link=link), caller_node=NODE
+        )
+        assert result["session"]["provider_link"] == (first if link is None else link)
+    conn.close()
+
+
 @pytest.mark.parametrize(
     "tool,tool_input",
     [

@@ -260,29 +260,47 @@ def _save_rotation(path: Path, offset: int) -> None:
             os.close(dir_fd)
 
 
-def _publish_recent(recent: list[RecentSession], *, harness: str, deadline: float) -> dict[str, object]:
-    published = 0
-    error = None
-    cache: dict[Path, SessionSnapshot] = {}
+@dataclass(frozen=True)
+class _PublicationBatch:
+    selected: list[RecentSession]
+    cursor_path: Path | None
+    start: int
+    error: str | None = None
+
+
+def _select_publication_batch(recent: list[RecentSession], *, harness: str, deadline: float) -> _PublicationBatch:
+    """Freeze the cursor window so optional enrichment and publication agree."""
     ordered = sorted(recent, key=lambda s: s.session_id)
     cursor_path = None
     start = 0
-    attempted = 0
     if ordered:
         try:
             _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
             cursor_path, offset = _rotation_state(harness)
             start = offset % len(ordered)
         except Exception as exc:
-            return {
-                "published": 0,
-                "skipped": len(recent),
-                "publish_limit": PUBLISH_LIMIT,
-                "truncated": True,
-                "error": str(exc) if isinstance(exc, ObservationError) else "rotation_state_unavailable",
-            }
-    selected = (ordered[start:] + ordered[:start])[:PUBLISH_LIMIT]
-    for session in selected:
+            error = str(exc) if isinstance(exc, ObservationError) else "rotation_state_unavailable"
+            return _PublicationBatch([], None, 0, error)
+    return _PublicationBatch((ordered[start:] + ordered[:start])[:PUBLISH_LIMIT], cursor_path, start)
+
+
+def _publish_recent(
+    recent: list[RecentSession], *, harness: str, deadline: float, batch: _PublicationBatch | None = None
+) -> dict[str, object]:
+    published = 0
+    error = None
+    cache: dict[Path, SessionSnapshot] = {}
+    batch = batch if batch is not None else _select_publication_batch(recent, harness=harness, deadline=deadline)
+    if batch.error:
+        return {
+            "published": 0,
+            "skipped": len(recent),
+            "publish_limit": PUBLISH_LIMIT,
+            "truncated": True,
+            "error": batch.error,
+        }
+    attempted = 0
+    for session in batch.selected:
         try:
             _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
             attempted += 1
@@ -301,9 +319,9 @@ def _publish_recent(recent: list[RecentSession], *, harness: str, deadline: floa
                 break
         except Exception:
             error = "publication_failed"
-    if cursor_path is not None and attempted:
+    if batch.cursor_path is not None and attempted:
         try:
-            _save_rotation(cursor_path, (start + attempted) % len(ordered))
+            _save_rotation(batch.cursor_path, (batch.start + attempted) % len(recent))
         except Exception:
             error = "rotation_state_unavailable"
     result: dict[str, object] = {

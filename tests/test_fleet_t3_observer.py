@@ -26,12 +26,20 @@ def native_t3(tmp_path, monkeypatch):
     (package / "__init__.py").write_text("")
     (package / "agent.py").write_text(
         "import json, os, time\nfrom pathlib import Path\n"
+        "if os.environ.get('FIXTURE_NATIVE_TIME'): time.time = lambda: float(os.environ['FIXTURE_NATIVE_TIME'])\n"
+        "def record(event):\n"
+        " with Path(os.environ['FIXTURE_CALLS_PATH']).open('a') as stream: stream.write(json.dumps(event) + '\\n')\n"
         "class Client:\n"
         " def shell_snapshot(self):\n"
+        "  record('shell')\n"
+        "  calls = Path(os.environ['FIXTURE_CALLS_PATH']).read_text().count('\\\"shell\\\"')\n"
+        "  if calls > 1 and os.environ.get('FIXTURE_PHASE_FAILURE') == 'error': raise RuntimeError()\n"
+        "  if calls > 1 and os.environ.get('FIXTURE_PHASE_FAILURE') == 'timeout': time.sleep(30)\n"
         "  if os.environ.get('FIXTURE_MODE') == 'sleep': time.sleep(30)\n"
         "  time.sleep(float(os.environ.get('FIXTURE_SHELL_DELAY', '0')))\n"
         "  return json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
         " def thread_snapshot(self, thread_id):\n"
+        "  record(thread_id)\n"
         "  time.sleep(float(os.environ.get('FIXTURE_DETAIL_DELAY', '0')))\n"
         "  shell = json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
         "  return {'thread': next(r for r in shell['threads'] if r['id'] == thread_id)}\n"
@@ -42,6 +50,7 @@ def native_t3(tmp_path, monkeypatch):
         "def _build_agent(environ): return Agent()\n"
     )
     monkeypatch.setenv("PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("FIXTURE_CALLS_PATH", str(tmp_path / "calls.jsonl"))
     published = []
     monkeypatch.setattr(
         fleet_client, "load_fleet_settings", lambda: {"node_token": "test-only", "hub_url": "https://hub.example"}
@@ -465,6 +474,67 @@ def test_observer_links_a_batch_within_the_native_budget(native_t3, capsys, monk
     capsys.readouterr()
     assert len(published) == 50
     assert all(s.provider_link is not None for s in published)
+    from pathlib import Path
+
+    calls = [json.loads(line) for line in Path(os.environ["FIXTURE_CALLS_PATH"]).read_text().splitlines()]
+    assert calls.count("shell") == 1 and len(calls) == 51
+
+
+@pytest.mark.parametrize("cursor", [0, 73])
+@pytest.mark.parametrize("failure", [None, "error", "timeout"])
+def test_large_fleet_resolves_only_the_publication_batch(native_t3, capsys, monkeypatch, cursor, failure):
+    import hashlib
+    from pathlib import Path
+
+    from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
+
+    configure, published, _, _ = native_t3
+    # The old wall-clock detail window starts at 50, independently of the cursor.
+    monkeypatch.setenv("FIXTURE_NATIVE_TIME", "3000")
+    if failure:
+        monkeypatch.setenv("FIXTURE_PHASE_FAILURE", failure)
+        monkeypatch.setattr(observer, "NATIVE_TIMEOUT_SECONDS", 1)
+    rows = [
+        {
+            "id": f"app/thread-{i:02d}",
+            "projectId": "p",
+            "status": "running",
+            "activeRunId": "run",
+            "worktreePath": None,
+            "activeProviderThreadId": f"provider-{i}",
+            "providerThreads": [
+                {
+                    "id": f"provider-{i}",
+                    "driver": "codex",
+                    "nativeThreadRef": {"driver": "codex", "nativeId": f"native-{i}", "strength": "strong"},
+                }
+            ],
+        }
+        for i in range(100)
+    ]
+    configure(rows)
+    cursor_path, _ = shared._rotation_state("t3")
+    shared._save_rotation(cursor_path, cursor)
+    identities = sorted(("t3-" + hashlib.sha256(row["id"].encode()).hexdigest(), row) for row in rows)
+    expected = (identities[cursor:] + identities[:cursor])[:50]
+    assert observer.main(["--t3-python", sys.executable, "--publish"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["published"] == report["skipped"] == 50
+    assert report["active_threads"] == 100 and "error" not in report
+    assert [s.session_id for s in published] == [identity for identity, _ in expected]
+    calls = [json.loads(line) for line in Path(os.environ["FIXTURE_CALLS_PATH"]).read_text().splitlines()]
+    assert calls.count("shell") == 2
+    if failure:
+        assert calls == ["shell", "shell"]
+        assert all(s.provider_link is None for s in published)
+    else:
+        assert calls[0:2] == ["shell", "shell"]
+        assert sorted(calls[2:]) == sorted(row["id"] for _, row in expected)
+        assert [s.provider_link for s in published] == [
+            {"harness": "codex", "session_id": row["providerThreads"][0]["nativeThreadRef"]["nativeId"]}
+            for _, row in expected
+        ]
+    assert json.loads(cursor_path.read_text())["offset"] == (cursor + 50) % 100
 
 
 def test_stalled_detail_read_does_not_block_publication(native_t3, capsys, monkeypatch):

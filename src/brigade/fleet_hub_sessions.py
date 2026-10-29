@@ -517,7 +517,7 @@ def _upsert_session(
         "ttl_seconds = excluded.ttl_seconds, "
         "expires_at = excluded.expires_at, "
         "cloud_context_json = excluded.cloud_context_json, "
-        "provider_link_json = excluded.provider_link_json",
+        "provider_link_json = COALESCE(excluded.provider_link_json, interactive_sessions.provider_link_json)",
         (
             request["node_id"],
             request["harness"],
