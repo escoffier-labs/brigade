@@ -76,7 +76,7 @@ def _hostile_workspace(ws):
         "servers": {
             "sample-remote": {
                 "transport": "http",
-                "url": "https://SECRETUSER:SECRETPASS@Mcp.Sample.Example:8443/path/SECRETQUERY?token=SECRETQUERY",
+                "url": "https://SECRETUSER:SECRETPASS@Mcp.Sample.Example:8443/path/SECRETQUERY?token=SECRETQUERY",  # content-guard: allow email
                 "headers": {"Authorization": {"literal": "Bearer SECRETHEADER"}},
             },
             "sample-local": {
@@ -93,7 +93,7 @@ def _hostile_workspace(ws):
         "mcpServers": {
             "sample-local": {"command": "run-sample-SECRETCMD", "args": ["--key=SECRETARG", "--edited"]},
             "sample-native": {
-                "url": "https://SECRETUSER:SECRETPASS@native.sample.example:9000/x?token=SECRETQUERY",
+                "url": "https://SECRETUSER:SECRETPASS@native.sample.example:9000/x?token=SECRETQUERY",  # content-guard: allow email
                 "headers": {"Authorization": "Bearer SECRETHEADER"},
             },
         }
@@ -196,14 +196,14 @@ def test_remote_host_is_a_bare_hostname_or_nothing(url, host):
         lambda r: r["servers"][0].update(url="https://host.example/path?token=x"),
         lambda r: r["servers"][0].update(args=["--key=x"]),
         lambda r: r["servers"][0].update(remote_host="host.example/path"),
-        lambda r: r["servers"][0].update(remote_host="user@host.example"),
+        lambda r: r["servers"][0].update(remote_host="user@host.example"),  # content-guard: allow email
         lambda r: r["servers"][0].update(remote_host="host.example:8443"),
         lambda r: r["servers"][0].update(remote_host="https://host.example"),
         lambda r: r["servers"][0].update(transport="stdio", remote_host="host.example"),
         lambda r: r["servers"][0].update(status="exploded"),
         lambda r: r["servers"][0].update(transport="carrier-pigeon"),
         lambda r: r["servers"][0].update(scope="global"),
-        lambda r: r["servers"][0].update(name="/home/someone/server"),
+        lambda r: r["servers"][0].update(name="/home/someone/server"),  # content-guard: allow home-path
         lambda r: r["servers"][0].update(name=""),
         lambda r: r["servers"][0].update(name="x" * 500),
         lambda r: r["servers"][0].update(name="line\nbreak"),
@@ -213,7 +213,7 @@ def test_remote_host_is_a_bare_hostname_or_nothing(url, host):
         lambda r: r["servers"].__imul__(100),
         lambda r: r["harnesses"].append(dict(r["harnesses"][0])),
         lambda r: r["harnesses"][0].update(readable="yes"),
-        lambda r: r["harnesses"][0].update(path="/home/someone"),
+        lambda r: r["harnesses"][0].update(path="/home/someone"),  # content-guard: allow home-path
         lambda r: r.update(schema_version=2),
         lambda r: r.update(schema_version=True),
         lambda r: r.update(observed_at="yesterday"),
@@ -473,7 +473,7 @@ def test_report_endpoint_requires_a_node_token_and_validates(tmp_path):
         for mutate in (
             lambda b: b["servers"][0].update(remote_host="host.example/path?token=x"),
             lambda b: b["servers"][0].update(env={"KEY": "value"}),
-            lambda b: b["servers"][0].update(name="/home/someone/private"),
+            lambda b: b["servers"][0].update(name="/home/someone/private"),  # content-guard: allow home-path
             lambda b: b["servers"].__imul__(100),
             lambda b: b.update(extra="field"),
         ):
@@ -769,3 +769,30 @@ def test_matrix_fits_its_box_and_group_switch_has_no_floating_label(tmp_path):
     assert '<table class="mcp-matrix">' in page
     assert "table-layout:fixed" in page
     assert "<span>Group by</span>" not in page and 'aria-label="Group by"' in page
+
+
+def test_transport_and_host_come_from_the_native_entry_when_it_drifts(workspace):
+    catalog = {"version": 1, "servers": {"sample-drift": {"transport": "stdio", "command": "run-drift"}}}
+    (workspace / ".brigade" / "mcp.json").write_text(json.dumps(catalog))
+    native = {"mcpServers": {"sample-drift": {"url": "https://drift.sample.example/mcp"}}}
+    (workspace / ".mcp.json").write_text(json.dumps(native))
+    report = fleet_mcp_report.build_report(workspace, now=NOW)
+    row = next(r for r in report["servers"] if r["name"] == "sample-drift" and r["harness"] == "claude")
+    assert (row["transport"], row["remote_host"]) == ("http", "drift.sample.example")
+    inventory.validate_report(report)  # the Hub accepts it
+
+
+def test_existing_config_outside_the_selected_harnesses_is_still_inventoried(workspace):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    write_config(workspace, Config(version=1, selection=Selection(depth="repo", harnesses=["claude"])))
+    catalog = {"version": 1, "servers": {"sample-local": {"transport": "stdio", "command": "run-sample"}}}
+    (workspace / ".brigade" / "mcp.json").write_text(json.dumps(catalog))
+    (workspace / ".cursor").mkdir()
+    (workspace / ".cursor" / "mcp.json").write_text(json.dumps({"mcpServers": {"sample-cursor": {"command": "run-c"}}}))
+    report = fleet_mcp_report.build_report(workspace, now=NOW)
+    cursor_rows = [r for r in report["servers"] if (r["harness"], r["scope"]) == ("cursor", "project")]
+    assert [(r["name"], r["status"], r["managed"]) for r in cursor_rows] == [("sample-cursor", "unmanaged", False)]
+    cursor = next(h for h in report["harnesses"] if (h["harness"], h["scope"]) == ("cursor", "project"))
+    assert cursor["config_found"] is True and cursor["readable"] is True

@@ -78,7 +78,16 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
     catalog_present = not errors
     state = mcp_cmd._load_state(target)
     project, _notes = mcp_cmd.active_targets(target, harness=None, user_scope=False)
-    names = list(project) + [n for n, a in mcp_adapters.ADAPTERS.items() if a.user_scope and n not in project]
+    # Sync targets decide where Brigade writes, not what exists: a project config
+    # outside them is still inventoried, without catalog-derived missing rows.
+    inventory_only = {
+        n
+        for n, a in mcp_adapters.ADAPTERS.items()
+        if n not in project and not a.user_scope and mcp_adapters.resolve_path(a, target).is_file()
+    }
+    names = list(project) + [
+        n for n, a in mcp_adapters.ADAPTERS.items() if n not in project and (a.user_scope or n in inventory_only)
+    ]
     rows: dict[tuple[str, str, str], dict[str, Any]] = {}
     harnesses: dict[tuple[str, str], dict[str, Any]] = {}
     for adapter_name in names:
@@ -99,7 +108,11 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
         slot["readable"] = slot["readable"] and readable
         if not readable:
             continue
-        items = mcp_cmd._plan_for_harness(target, adapter_name, servers, state, force=False, prune=False, adopt=False)
+        items = (
+            []
+            if adapter_name in inventory_only
+            else mcp_cmd._plan_for_harness(target, adapter_name, servers, state, force=False, prune=False, adopt=False)
+        )
         if len(items) == 1 and items[0]["server"] == "*":  # the plan could not read the file either
             slot["readable"] = False
             continue
@@ -109,18 +122,23 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
             seen.add(name)
             catalog = servers.get(name)
             native = _native_row(adapter, name, live[name]) if name in live else None
-            url = catalog.url if catalog is not None else None
+            # Transport and host come from one source, so a stdio catalog entry
+            # never pairs with the host of a same-named native HTTP server.
+            if native is not None and native["transport"]:
+                transport, host = native["transport"], native["host"]
+            else:
+                transport = catalog.transport if catalog is not None else None
+                host = remote_host(catalog.url) if catalog is not None and catalog.url else None
             rows[(name, harness, scope)] = {
                 "name": _text(name),
                 "harness": harness,
                 "scope": scope,
-                "transport": (catalog.transport if catalog is not None else (native or {}).get("transport"))
-                or "unknown",
+                "transport": transport or "unknown",
                 "enabled": bool(native["enabled"]) if native else True,
                 "status": _text(item["status"]),
                 "managed": catalog is not None
                 or name in state.get("ownership", {}).get(adapter_name, {}).get(adapter.path, {}),
-                "remote_host": (native or {}).get("host") or remote_host(url),
+                "remote_host": host,
             }
         for name, raw in sorted(live.items()):
             if name in seen:
@@ -137,6 +155,8 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
                 "remote_host": native["host"],
             }
         for name, catalog in sorted(servers.items()):
+            if adapter_name in inventory_only:
+                break
             if catalog.enabled or (name, harness, scope) in rows:
                 continue
             if not mcp_cmd._server_targets_harness(catalog, adapter_name):
