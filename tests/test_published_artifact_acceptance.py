@@ -746,7 +746,7 @@ def test_assert_go_unavailable_passes_when_go_is_not_on_path(acceptance_module, 
 
 
 def test_assert_go_unavailable_fails_when_go_resolves_from_path(acceptance_module, tmp_path):
-    go = tmp_path / "go"
+    go = tmp_path / ("go.exe" if os.name == "nt" else "go")
     go.write_text("#!/bin/sh\nexit 1\n")
     go.chmod(go.stat().st_mode | stat.S_IXUSR)
 
@@ -783,12 +783,14 @@ def test_build_go_free_path_drops_directories_containing_go_but_keeps_system_dir
 def test_build_go_free_path_drops_go_symlink_directory(acceptance_module, tmp_path):
     go_dir = tmp_path / "go-bin"
     go_dir.mkdir()
-    (go_dir / "go").symlink_to("/usr/bin/true")
+    target = tmp_path / "real-go"
+    target.write_text("fixture target")
+    (go_dir / "go").symlink_to(target)
     poison_dir = tmp_path / "poison-bin"
     poison_dir.mkdir()
     pipx_bin = tmp_path / "pipx-bin"
     pipx_bin.mkdir()
-    original = os.pathsep.join((str(go_dir), "/usr/bin"))
+    original = os.pathsep.join((str(go_dir), str(tmp_path / "other-bin")))
 
     path = acceptance_module.build_go_free_path(original, poison_dir, pipx_bin, tmp_path / "go-free")
 
@@ -800,7 +802,7 @@ def test_build_go_free_path_keeps_other_tools_from_a_go_directory(acceptance_mod
     system = tmp_path / "usr-bin"
     system.mkdir()
     for name in ("go", "gofmt", "git"):
-        tool = system / name
+        tool = system / (name + ".exe" if os.name == "nt" else name)
         tool.write_text("#!/bin/sh\nexit 0\n")
         tool.chmod(tool.stat().st_mode | stat.S_IXUSR)
     poison_dir = tmp_path / "poison-bin"
@@ -814,7 +816,7 @@ def test_build_go_free_path_keeps_other_tools_from_a_go_directory(acceptance_mod
     assert shutil.which("go", path=path) is None
     assert shutil.which("gofmt", path=path) is None
     git = shutil.which("git", path=path)
-    assert git is not None and Path(git).resolve() == (system / "git").resolve()
+    assert git is not None and Path(git).resolve() == (system / ("git.exe" if os.name == "nt" else "git")).resolve()
 
 
 def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke(acceptance_module):

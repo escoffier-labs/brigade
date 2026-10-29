@@ -2365,6 +2365,11 @@ def test_ci_gate_requires_classification_even_when_every_job_succeeded(flag):
     assert result.returncode == (0 if flag == "false" else 1), result.stdout + result.stderr
 
 
+def _powershell_runtime_env() -> dict[str, str]:
+    # Let each engine discover its own modules instead of inheriting PowerShell 7's paths.
+    return {key: value for key, value in os.environ.items() if key.upper() != "PSMODULEPATH"}
+
+
 @pytest.mark.parametrize("engine", ["pwsh", "powershell"])
 @pytest.mark.parametrize("case", ["legacy", "additive", "partial", "corrupt", "extra", "duplicate"])
 def test_windows_release_asset_validation_runtime(tmp_path, case, engine):
@@ -2406,7 +2411,9 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine):
         + f"$manifest = Assert-ReleaseManifestAndAssets -Version '1.2.3' -Destination '{(tmp_path / 'out').as_posix()}' -PythonExe '{python_exe}'\n"
         + "if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw 'legacy return changed' }\n"
     )
-    result = subprocess.run([pwsh, "-NoProfile", "-File", str(harness)], text=True, capture_output=True)
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(harness)], text=True, capture_output=True, env=_powershell_runtime_env()
+    )
     if case in {"legacy", "additive"}:
         assert result.returncode == 0, result.stdout + result.stderr
         assert len(list((tmp_path / "out").iterdir())) == (27 if case == "legacy" else 42)
@@ -2495,7 +2502,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
             else ""
         )
     )
-    result = subprocess.run([shell, "-NoProfile", "-File", str(harness)], capture_output=True, text=True)
+    result = subprocess.run(
+        [shell, "-NoProfile", "-File", str(harness)], capture_output=True, text=True, env=_powershell_runtime_env()
+    )
     output = result.stdout + result.stderr
     if case in {"ok", "legacy"}:
         assert result.returncode == 0, output
@@ -2555,6 +2564,7 @@ class Stub {
         capture_output=True,
         text=True,
         timeout=60,
+        env=_powershell_runtime_env(),
     )
     assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
     _, bodies, checksums = _release_fixture(additive=case != "legacy")
@@ -2605,7 +2615,7 @@ class Stub {
         text=True,
         timeout=60,
         env=dict(
-            os.environ,
+            _powershell_runtime_env(),
             FIXTURE_LOG=str(log),
             FIXTURE_SMOKE=str(smoke),
             FIXTURE_REJECT="yes" if case == "rejected" else "no",

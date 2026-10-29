@@ -759,7 +759,7 @@ GO_TOOLS = frozenset({"go", "gofmt"})
 
 
 def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path, mirror_root: Path) -> str:
-    """Build a Unix PATH that keeps the poison and pipx entries plus every system
+    """Build a PATH that keeps the poison and pipx entries plus every system
     directory from ``original_path`` while making ``go`` unreachable. Managed setup
     must download release assets instead of building the Go components from source,
     so the toolchain has to be unreachable.
@@ -768,18 +768,20 @@ def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path, mir
     links every other entry. Runner images that install Go into ``/usr/bin`` still
     need ``git`` and the rest of that directory.
     """
+    suffixes = ("", ".exe", ".cmd", ".bat", ".com") if os.name == "nt" else ("",)
+    tool_names = {name + suffix for name in GO_TOOLS for suffix in suffixes}
     entries: list[str] = [str(poison_dir), str(pipx_bin)]
     for index, entry in enumerate(original_path.split(os.pathsep)):
         if not entry or entry in entries:
             continue
         directory = Path(entry)
-        if not (directory / "go").exists():
+        if not any((directory / ("go" + suffix)).exists() for suffix in suffixes):
             entries.append(entry)
             continue
         mirror = mirror_root / f"path-{index}"
         mirror.mkdir(parents=True, exist_ok=True)
         for child in directory.iterdir():
-            if child.name in GO_TOOLS:
+            if (child.name.casefold() if os.name == "nt" else child.name) in tool_names:
                 continue
             link = mirror / child.name
             if not link.exists() and not link.is_symlink():

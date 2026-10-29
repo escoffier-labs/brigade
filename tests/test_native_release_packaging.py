@@ -154,7 +154,7 @@ def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path)
     assets = tmp_path / "release-assets"
     assets.mkdir()
     subjects = native_names() | {"component-manifest-v1.json"}
-    (assets / "checksums.txt").write_text("".join(f"{'a' * 64}  {name}\n" for name in sorted(subjects)))
+    (assets / "checksums.txt").write_text("".join(f"{'a' * 64}  {name}\n" for name in sorted(subjects)), newline="\n")
     probe = tmp_path / "probe.py"
     probe.write_text(
         "import json, os, sys\n"
