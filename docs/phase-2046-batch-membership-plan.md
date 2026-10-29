@@ -10,7 +10,7 @@
 
 **Spec:** [Approved descriptor-membership design](phase-2046-batch-membership-design.md).
 
-Status: implementation plan awaiting user review. The user has already selected parallel Codex workers, with Sol building and Astra providing architectural and final opinions. Preserve that method after plan review.
+Status: approved by the user for implementation. Execution routing must satisfy the preconditions below. The user has already selected parallel Codex workers, with Sol building and Astra providing architectural and final opinions. Preserve that method after plan review.
 
 ## Global Constraints
 
