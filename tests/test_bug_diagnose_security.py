@@ -51,7 +51,9 @@ def project(tmp_path, monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", denied)
     monkeypatch.setattr(socket.socket, "connect_ex", denied)
     monkeypatch.setattr(socket, "getaddrinfo", denied)
-    monkeypatch.setattr(subprocess, "Popen", denied)
+    # Windows asyncio subclasses Popen during lazy imports. Keep its class
+    # identity while refusing every attempted process construction.
+    monkeypatch.setattr(subprocess.Popen, "__init__", denied)
     return target
 
 

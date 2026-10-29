@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, dirfd, mcp_adapters, mcp_cmd
-from .bug_redaction import Redactor, assert_clean, assert_terminal_safe
+from .bug_redaction import Redactor, ReportBlocked, assert_clean, assert_terminal_safe
 
 _CAP = 64 * 1024
 _LIMIT = 100
@@ -311,6 +311,16 @@ def _export(path: Path, text: str) -> None:
 def diagnose(args: argparse.Namespace) -> int:
     try:
         result = _compare(args)
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
+        result = {
+            "status": "unavailable",
+            "verification": "not-run",
+            "runtime": "unknown",
+            "text": "Diagnosis unavailable: selected project evidence is unsupported, unsafe, malformed or exceeds limits. Review the selected configuration locally; no runtime check was run.",
+        }
+        print(json.dumps(result) if args.json else result["text"])
+        return 2
+    try:
         if args.save_finding:
             _export(args.save_finding, result["text"])
         if args.prepare_report:
@@ -352,12 +362,19 @@ def diagnose(args: argparse.Namespace) -> int:
                     report_id=directory.name,
                 )
             )
-    except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
+    except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError) as exc:
+        # Output errors do not invalidate the already compared evidence. Keep
+        # exception data private, including destination paths and scan details.
+        message = (
+            "Bug report blocked: review the diagnosis locally. Report security concerns privately using SECURITY.md."
+            if isinstance(exc, ReportBlocked)
+            else "Output unavailable: the destination exists, is unsafe or could not be written. Review the diagnosis without output options, then choose a new destination or check local permissions."
+        )
         result = {
             "status": "unavailable",
             "verification": "not-run",
             "runtime": "unknown",
-            "text": "Diagnosis unavailable: selected project evidence is unsupported, unsafe, malformed or exceeds limits. Review the selected configuration locally; no runtime check was run.",
+            "text": message,
         }
         print(json.dumps(result) if args.json else result["text"])
         return 2

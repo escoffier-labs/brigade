@@ -209,6 +209,30 @@ def test_export_validates_imports_pending_and_is_exclusive(tmp_path, capsys):
     assert path.read_bytes() == before
 
 
+@pytest.mark.parametrize("structured", [False, True])
+@pytest.mark.parametrize("output", ["finding", "security-report"])
+def test_output_refusal_is_distinct_from_evidence_failure(tmp_path, capsys, monkeypatch, structured, output):
+    target = seed(tmp_path)
+    data = tmp_path / "data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    destination = tmp_path / "finding.jsonl"
+    destination.write_text("preserve existing finding\n")
+    args = ["bug", "diagnose", "--target", str(target), "--harness", "codex", "--summary"]
+    if output == "finding":
+        args += ["Missing selected server", "--save-finding", str(destination)]
+    else:
+        args += ["Suspected security vulnerability", "--prepare-report"]
+    if structured:
+        args.append("--json")
+    assert cli.main(args) == 2
+    rendered = capsys.readouterr().out
+    message = json.loads(rendered)["text"] if structured else rendered
+    assert "evidence is unsupported" not in message
+    assert ("SECURITY.md" if output == "security-report" else "destination") in message
+    assert destination.read_text() == "preserve existing finding\n"
+    assert not data.exists()
+
+
 def test_redaction_of_all_output_inputs(tmp_path, capsys, monkeypatch):
     target = seed(tmp_path)
     token = "ghp_" + "a" * 36
