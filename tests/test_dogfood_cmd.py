@@ -1,6 +1,8 @@
 import json
 from contextlib import nullcontext
 
+import pytest
+
 from brigade import aboyeur
 from brigade import agents
 from brigade import cli
@@ -8,6 +10,29 @@ from brigade import dogfood_cmd
 from brigade import localio
 from brigade import runguard
 from brigade import runs_cmd
+from brigade import toml_compat
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "target = 'C:\\agent\\build\\task'\n",
+        'target = "C:\\\\agent\\\\build\\\\task"\n',
+    ],
+)
+def test_dogfood_config_reads_windows_paths_without_python_escape_rules(tmp_path, monkeypatch, fallback, text):
+    if fallback:
+        monkeypatch.setattr(toml_compat, "_stdlib_tomllib", None)
+    path = tmp_path / "dogfood.toml"
+    path.write_text(text)
+    assert dogfood_cmd._read_toml_object(path)["target"] == r"C:\agent\build\task"
+
+
+def test_dogfood_config_keeps_legacy_unquoted_values(tmp_path):
+    path = tmp_path / "dogfood.toml"
+    path.write_text("agent_cli = codex\nhandoff = false\ntimeout_seconds = 12\n")
+    assert dogfood_cmd._read_toml_object(path) == {"agent_cli": "codex", "handoff": False, "timeout_seconds": 12}
 
 
 def _write_json(path, payload):
