@@ -207,7 +207,7 @@ If command output deviates from the expected structure, parsers raise
 ### Unverified Harnesses
 
 Harnesses lacking a verified live inventory command (`claudecode`, `codex`,
-`jules`, `grokbot`) immediately return an error payload with reason
+`grokbot`) immediately return an error payload with reason
 `unsupported-harness-no-verified-live-model-list`. They are never probed via
 speculative commands.
 

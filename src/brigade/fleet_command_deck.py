@@ -97,7 +97,6 @@ def default_cloud_config() -> CloudConfig:
             "cursor": CloudProviderConfig(limit=3),
             "codex": CloudProviderConfig(limit=2),
             "claude": CloudProviderConfig(limit=0, enabled=False),
-            "jules": CloudProviderConfig(limit=15),
             # Grok Bot is tracked but has no hosted-subscription admission cost.
             "grok-bot": CloudProviderConfig(limit=64, hosted=False),
         },
@@ -618,6 +617,8 @@ def _cloud_config(raw: object) -> CloudConfig:
     for name, item in configured.items():
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
             raise DeckConfigError("cloud provider name is invalid")
+        if name not in defaults.providers:
+            continue
         if not isinstance(item, Mapping):
             raise DeckConfigError("cloud provider must be a JSON object")
         previous = providers.get(name, CloudProviderConfig(limit=0, enabled=False))

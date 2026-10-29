@@ -32,7 +32,7 @@ from .fleet_client_policy import FleetPolicyClientError
 
 CONSUMER_BRIGADE_RUN = "brigade-run"
 LAUNCHER_HARNESSES = frozenset({"codex", "claude", "opencode"})
-UNSUPPORTED_CLOUD_PREFIXES = ("codex-cloud", "cursor-cloud", "jules-cloud")
+UNSUPPORTED_CLOUD_PREFIXES = ("codex-cloud", "cursor-cloud")
 RECEIPT_SCHEMA = "brigade.fleet_session_policy.v1"
 MAX_RECEIPT_BYTES = 64 * 1024
 _RESERVED_LAUNCHER_FLAGS = frozenset(

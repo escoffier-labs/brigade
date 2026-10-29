@@ -16,7 +16,7 @@ operator's real routing policy is still spoken to each session:
 - research only on the Codex luna seat, no other Codex seat
 - Cursor only through the Other Models pool, never the Cursor Models pool
 - security scans on the Daybreak Blue seat
-- cloud work on Jules and Grok Bot
+- cloud work on Grok Bot
 
 The hub cannot express "security goes here" or "research goes here", and no
 interactive session reads the pin at start.
@@ -52,7 +52,7 @@ interactive session reads the pin at start.
   Rejected by the operator.
 - **JSON API plus a browser script.** The deck convention is "works with
   JavaScript disabled" and the CSP allows only nonce scripts. Rejected.
-- **Cloud lanes as a role slot (`cloud = jules`).** Cloud providers are not
+- **Cloud lanes as a role slot (`cloud = cursor`).** Cloud providers are not
   roster seats; a role naming a provider would need a second resolver.
   Rejected in favor of the existing cloud policy toggles.
 
@@ -216,7 +216,7 @@ New keys in the text output, after `latest_run`:
 fleet_routing: impl=agy_flash review=claude_standby chef=chef research=researcher security=daybreak scout=cursor_scout
 fleet_routing_notes: <notes or (none)>
 fleet_disabled_seats: coder, cursor_composer, cursor_grok, reviewer
-fleet_cloud_lanes: jules=on grok-bot=on codex=off cursor=off claude=off
+fleet_cloud_lanes: grok-bot=on codex=off cursor=off claude=off
 fleet_routing_source: hub revision 16, cache age 42s
 ```
 

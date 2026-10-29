@@ -504,7 +504,7 @@ that receipt or report the gate as externally occupied.
 The single completion run `20260829-185326-work-verify-043f4f` reached 90%
 before the 3,600-second bound expired. Its three recorded failures were
 diagnosed separately: one unrelated harness test passed unchanged, and two
-Cloud Tracker tests were polluted by the operator host's live Jules key. The
+Cloud Tracker tests were polluted by the operator host's live provider key. The
 fixture isolation repair passed in focused receipt
 `20260829-195709-work-verify-85a7f2`. The full gate was not retried.
 

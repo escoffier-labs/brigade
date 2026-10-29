@@ -1600,6 +1600,8 @@ def handle_cloud(
     action, lease_id, node, holder = request["action"], request["lease_id"], request["node_id"], request["holder"]
     now = _now_epoch()
     now_iso = _epoch_to_iso(now)
+    if action == "admit" and request["provider"] not in config.cloud.providers:
+        return 409, {"admitted": False, "error": "unsupported cloud provider"}
     if action == "admit" and request["provider"] == "grok-bot":
         raise FleetHubForbidden("grok-bot cloud leases are reserved for the Grok Bot hub path")
     existing = _fetch_cloud_lease(conn, lease_id)
@@ -1716,7 +1718,11 @@ def cloud_snapshot(
     include_grokbot: bool = True,
 ) -> dict[str, Any]:
     policy = _cloud_policy(conn, config)
-    leases = list_cloud_leases(conn, include_all=include_all)
+    leases = [
+        lease
+        for lease in list_cloud_leases(conn, include_all=include_all)
+        if lease["provider"] in config.cloud.providers
+    ]
     if not include_grokbot:
         leases = [lease for lease in leases if lease.get("provider") != "grok-bot"]
     counts: dict[str, int] = {}
@@ -1724,7 +1730,7 @@ def cloud_snapshot(
         if lease["released_at"] is None and not lease["expired"]:
             counts[lease["provider"]] = counts.get(lease["provider"], 0) + 1
     providers = []
-    for name in sorted(policy["providers"]):
+    for name in sorted(config.cloud.providers):
         item = dict(policy["providers"][name])
         item["used"] = counts.get(name, 0)
         providers.append(item)

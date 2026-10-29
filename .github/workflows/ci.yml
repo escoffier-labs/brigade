@@ -1137,7 +1137,7 @@ jobs:
       - name: Native two-process journal lock regressions
         shell: pwsh
         run: |
-          foreach ($key in @("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY", "JULES_API_KEY")) {
+          foreach ($key in @("CURSOR_API_KEY", "CURSOR_CLOUD_API_KEY", "BG_AGENT_API_KEY")) {
             Remove-Item "Env:$key" -ErrorAction SilentlyContinue
           }
           $venv = Join-Path $env:RUNNER_TEMP "journal-lock-venv"
