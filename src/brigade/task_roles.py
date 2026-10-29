@@ -36,21 +36,36 @@ _ACTION_WORDS = (
 )
 _ACTION = re.compile(r"^\s*(?:(?:please|only)\s+)?(?P<verb>" + _ACTION_WORDS + r")\b")
 _CLAUSE_BOUNDARY = re.compile(
-    r"[.!?;\n]+(?!\w)|(?:,\s*|\s+(?:and|then|also)\s+)(?=(?:please\s+)?(?:" + _ACTION_WORDS + r")\b)"
+    r"[.!?;\n]+(?!\w)|(?:,\s*(?:(?:and(?:\s+also)?|then|also|plus|but)\s+)?|\s+(?:and(?:\s+also)?|then|also|plus|but)\s+)"
+    r"(?=(?:please\s+)?(?:(?:do not|don't|never|avoid)\b|(?:" + _ACTION_WORDS + r")\b))"
 )
 _QUOTED = re.compile(r"\"[^\"\n]*\"|(?<!\w)'[^'\n]*'(?!\w)")
 _NEGATED = re.compile(r"^\s*(?:please\s+)?(?:do not|don't|never|avoid)\b")
-_TOPIC = re.compile(r"\b(?:about|explaining|describing|discussing|titled|called|for)\b")
+_TOPIC = re.compile(
+    r"\b(?:about|explaining|describing|discussing|titled|called|for|on|of|covering|announcing|with|in|to)\b"
+)
 _HOW_TO = re.compile(r"\bhow to\b")
 _WRITING_OBJECT = re.compile(
     r"(?<![\w-])(?:blog(?: post)?|article|essay|newsletter|announcement|post|thread|tweet|email|"
-    r"cover letter|resume|bio|linkedin|tutorial|guide|docs page|prose|readme (?:prose|intro)|"
+    r"cover letter|resume|bio|linkedin(?: post| summary)?|paragraph|tutorial|guide|docs page|prose|readme (?:prose|intro)|"
     r"pr (?:description|body|messages?)|pull request (?:description|body)|landing copy|headline|"
     r"tagline|abstract|proposal|changelog entr(?:y|ies)|release notes|commit messages?)(?![\w-])"
 )
 _VISUAL_OBJECT = re.compile(
-    r"\b(?:ui|page|hero|layout|typography|colou?r|palette|spacing|css|tailwind|theme|"
-    r"dark mode|responsive|mobile view|visual hierarchy|screenshot|animation|navbar|mockup)\b"
+    r"(?<![\w-])(?:ui|page|hero(?: section)?|layout|contrast|typography|colou?r|palette|spacing|css|tailwind|theme|"
+    r"dark mode|mobile view|visual hierarchy|screenshot|animation|navbar|mockup)(?![\w-])"
+)
+# A known object head must close its phrase. Unknown modifiers and later keywords
+# cannot turn a different object into audience or visual work.
+_OBJECT_PREFIX = re.compile(
+    r"\s*(?:(?:a|an|the|this|that|my|our|your|their|[a-z][a-z-]*'s)\s+){0,2}"
+    r"(?:(?:short|long|new|existing|release|weekly|monthly|responsive|restyled|"
+    r"landing|login|settings|dashboard|pricing|home|visual|mobile|dark|light)\s+){0,3}"
+)
+_WRITING_COMPLEMENT = re.compile(r"(?:'s\s+)?(?:intro|introduction|summary|body|title|copy)\s*$")
+_VISUAL_COMPLEMENT = re.compile(
+    r"(?:'s\s+)?(?:spacing|typography|palette|contrast)(?:\s+and\s+(?:spacing|typography|palette|contrast))*\s*$"
+    r"|visually\s*$|look\s+(?:better|good)(?:\s+.*)?$"
 )
 _VISUAL_MAKE = re.compile(r"\blook (?:better|good)|\b(?:spacing|typography|palette|responsive)\b")
 _PHRASE = re.compile(r"^\s*(prose polish|visual design|visual polish|visual critique|ui design|frontend design)\b")
@@ -104,7 +119,7 @@ def _instruction_clauses(text: str) -> list[str]:
         # Conjoined steps can continue a negation or an explicit how-to topic.
         # Commas, sentences, and "then" still introduce independent actions.
         if (
-            boundary.group().strip() == "and"
+            boundary.group().strip() in {"and", "and also", "plus"}
             and not context.rstrip().endswith(",")
             and (_NEGATED.match(context) or _HOW_TO.search(context))
         ):
@@ -113,6 +128,15 @@ def _instruction_clauses(text: str) -> list[str]:
         start = boundary.end()
     clauses.append(text[start:])
     return clauses
+
+
+def _closed_object(context: str, pattern: re.Pattern[str], complement: re.Pattern[str]) -> bool:
+    """Accept only the first relevant head, with a bounded prefix and closed tail."""
+    head = pattern.search(context)
+    if head is None or _OBJECT_PREFIX.fullmatch(context[: head.start()]) is None:
+        return False
+    tail = context[head.end() :].strip()
+    return not tail or complement.fullmatch(tail) is not None
 
 
 def classify(text: str) -> TaskRoleDecision:
@@ -128,7 +152,7 @@ def classify(text: str) -> TaskRoleDecision:
             vetoed.add("negated-action")
             continue
         phrase = _PHRASE.match(clause)
-        if phrase is not None:
+        if phrase is not None and not _TOPIC.split(clause[phrase.end() :], maxsplit=1)[0].strip():
             matched.add("writing" if phrase.group(1) == "prose polish" else "frontend")
             continue
         action = _ACTION.match(clause)
@@ -138,15 +162,21 @@ def classify(text: str) -> TaskRoleDecision:
         # No task text from this context may enter diagnostic or persisted evidence.
         context = _TOPIC.split(clause[action.end() :], maxsplit=1)[0][:320]
         code_category = next((category for category, pattern in _CODE_OBJECTS if pattern.search(context)), None)
-        if code_category is not None:
+        writing = verb in _WRITING_VERBS and _closed_object(context, _WRITING_OBJECT, _WRITING_COMPLEMENT)
+        visual = verb in _VISUAL_VERBS and _closed_object(context, _VISUAL_OBJECT, _VISUAL_COMPLEMENT)
+        if verb == "make" and not _VISUAL_MAKE.search(context):
+            visual = False
+        # Implementation-only verbs are requests even with an unfamiliar object.
+        # Build/implement are visual only when the requested object proves that.
+        implementation = verb not in _WRITING_VERBS | _VISUAL_VERBS or (verb in {"build", "implement"} and not visual)
+        if code_category is not None or implementation:
             vetoed.add("code-context")
-            markers.add(f"backend-request:{code_category}")
+            markers.add(f"backend-request:{code_category or 'code'}")
             continue
-        if verb in _WRITING_VERBS and (_WRITING_OBJECT.search(context) or verb in {"copyedit", "proofread"}):
+        if writing:
             matched.add("writing")
-        if verb in _VISUAL_VERBS and _VISUAL_OBJECT.search(context):
-            if verb != "make" or _VISUAL_MAKE.search(context):
-                matched.add("frontend")
+        if visual:
+            matched.add("frontend")
     ordered = tuple(role for role in TASK_WORKLOADS if role in matched)
     if matched and markers:
         return TaskRoleDecision("ambiguous", "general", ordered, tuple(sorted(vetoed)), tuple(sorted(markers)))

@@ -7,13 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 - Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Fleet attention expires abandoned unknown and stale runs using the configured history horizon, excludes revoked nodes and expired failures, and compares failure lookback and newer successful runs by elapsed time across timestamp offsets.
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
+- Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 

@@ -5,6 +5,8 @@ import pytest
 from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference
 from brigade.cli import run as run_cli
 
+from tests.test_aboyeur_orchestrator_health_routing import _install_probe, PerSeatFakeAdapter
+
 _REAL_RUN = aboyeur.run
 
 
@@ -135,7 +137,6 @@ def test_detached_role_mismatch_refuses(run_task):
 def test_classified_role_runtime_refusal_never_launches_fallback(run_task, monkeypatch, tmp_path, capsys, failure):
     from brigade import agents, fleet_client, fleet_model_admission
     from tests.test_fleet_model_admission import _versioned_snapshot, _versioned_seat
-    from tests.test_aboyeur_orchestrator_health_routing import _install_probe, PerSeatFakeAdapter
     from tests.run_test_helpers import run_aboyeur_guarded
 
     invoke, seen = run_task

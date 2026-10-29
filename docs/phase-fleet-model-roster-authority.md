@@ -531,6 +531,16 @@ messages. Technical subject matter alone does not make prose or visual UI work
 ambiguous. A separate backend implementation request does. Split ambiguous
 tasks before dispatching their writing/frontend portion.
 
+Classification uses bounded action and object vocabularies, not full language
+understanding. Audience and visual objects need a supported phrase ending or
+complement. Using those words as modifiers of a different object does not
+qualify. Technical topics introduced by words such as `on`, `covering`, or
+`with` remain prose topics. Separate implementation actions, including `plus`
+and `but` clauses, report ambiguity. Explicit how-to topic steps and negated
+continuations remain within their clause. Indirect requests such as "Help me
+write", fully quoted requests, unfamiliar objects, and unsupported complements
+can return `none`. Use declared workloads or explicit workers for such cases.
+
 The Hub consumes declared `writing` and `frontend` workloads through the
 existing effective policy roles of the same names. Declare their OS and
 capabilities with the existing `routing.workload_requirements` fields. Role
@@ -547,7 +557,8 @@ configured Hub, standalone runs retain their existing ordinary routing and do
 not resolve central task roles. The local classification command still works
 without network access. A detached child already requiring a task role keeps
 that requirement if its Hub configuration disappears. It dispatches that seat directly under runtime
-admission, with its local seat fallback removed. Missing policy, an unavailable
+admission, with both local seat fallback mechanisms removed (`fallback` and
+`invalid_final_fallback`). Missing policy, an unavailable
 role, a health failure, or admission refusal stops the run. It never substitutes
 an implementation seat or a planned run for matched work. Ambiguous tasks print
 the evidence and retain ordinary routing until the caller splits or explicitly

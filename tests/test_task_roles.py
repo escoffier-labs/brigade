@@ -201,3 +201,92 @@ def test_conjoined_steps_inside_a_prose_topic_are_not_extra_actions(text):
 )
 def test_negation_continues_across_conjoined_actions(text):
     assert task_roles.classify(text).status == "none"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Update the email sender to retry",
+        "Update the Post model to include tags",
+        "Update the article model and its serializer",
+        "Update the newsletter subscription service",
+        "Update the Thread type to carry a parent id",
+        "Write a guide generator script",
+        "Update the release notes generator",
+        "Write the email template renderer",
+        "Implement the layout engine for the PDF renderer",
+        "Build the CSS minification step",
+        "Build the Tailwind plugin that purges unused CSS",
+        "Write the article indexer",
+        "Update the blog post exporter",
+        "Build the page compositor",
+        "Implement the theme transformer",
+        "Write the email-to-post converter",
+        "Write the guide generator's blog post",
+        "Build the CSS compressor page",
+        "Write a renderer using email",
+        "Design the layout-engine page",
+    ],
+)
+def test_audience_and_visual_modifiers_do_not_change_the_object_head(text):
+    assert task_roles.classify(text).status == "none"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Write the PR description and bump the version",
+        "Update the README intro and refactor the loader",
+        "Draft release notes plus add an endpoint",
+        "Draft a newsletter but optimize startup",
+        "Write an announcement and configure telemetry",
+        "Draft release notes plus remove the obsolete entrypoint",
+        "Redesign the pricing page but build a serializer",
+    ],
+)
+def test_implementation_actions_do_not_need_a_known_code_noun(text):
+    decision = task_roles.classify(text)
+    assert decision.status == "ambiguous"
+    assert decision.markers
+
+
+@pytest.mark.parametrize(
+    "text,workload",
+    [
+        ("Write a blog post on the new API", "writing"),
+        ("Write release notes covering the database migration", "writing"),
+        ("Draft a blog post announcing the new endpoint", "writing"),
+        ("Draft an announcement of the new API", "writing"),
+        ("Write a blog post with SQL examples", "writing"),
+        ("Draft release notes but do not touch the API", "writing"),
+        ("Redesign the login page with the auth API unchanged", "frontend"),
+        ("Write the team's blog post intro", "writing"),
+        ("Draft an email to customers about validation changes", "writing"),
+        ("Implement the navbar in React", "frontend"),
+        ("Improve the contrast on the pricing page", "frontend"),
+        ("Build the landing page", "frontend"),
+        ("Draft a tutorial on how to configure telemetry and bump the version", "writing"),
+        ("Write a guide covering how to refactor the loader plus add logging", "writing"),
+        ("Draft a blog post but redesign the pricing page", "frontend"),
+    ],
+)
+def test_closed_object_heads_allow_prose_topics_and_visual_complements(text, workload):
+    decision = task_roles.classify(text)
+    assert (decision.status, decision.workload) == ("matched", workload)
+
+
+@pytest.mark.parametrize("separator", [", then ", ", and ", " and also ", " plus ", " but "])
+def test_action_separators_keep_both_requests(separator):
+    decision = task_roles.classify(f"Draft release notes{separator}add an endpoint")
+    assert decision.status == "ambiguous"
+    assert decision.markers == ("backend-request:endpoint",)
+
+
+@pytest.mark.parametrize(
+    "verb", ["add", "fix", "create", "migrate", "alter", "remove", "refactor", "optimize", "wire", "bump", "configure"]
+)
+def test_implementation_verb_with_unknown_object_has_fixed_evidence(verb):
+    decision = task_roles.classify(f"Draft release notes and {verb} SyntheticOnlyObjectQ83")
+    assert decision.status == "ambiguous"
+    assert decision.markers == ("backend-request:code",)
+    assert "syntheticonly" not in str(decision.payload()).lower()
