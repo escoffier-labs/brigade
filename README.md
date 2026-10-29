@@ -32,7 +32,7 @@ Brigade Stack is an open-source coordination layer for AI coding agents. It sits
 
 You run several agents at once. Sol in Codex takes one task, Opus manages another, and Argon takes a third here and there, whether they share one window in a multi-harness tool like T3 Code or each run in its own app. Your Grok Bot runs the rest of your life, and your Dots spin up work of their own. Every agent starts from its own conversation. None of them knows who owns which task, what the others already tried, or whether a fix was actually checked.
 
-Brigade holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
+Brigade Stack holds that state outside any one tool. Agents read the same brief, claim the same tasks, and leave handoffs and evidence the next agent can inspect.
 
 - **Keep your tools.** Works alongside the agents you already use. Start with one tool in one repository and add more when you need them.
 - **Work agents can pick up.** Tasks, dependencies, claims, and handoffs make the next action discoverable without replaying a conversation.
@@ -76,6 +76,8 @@ This checks whitespace in your unstaged diff and records the command, exit code,
 
 The npm bridge exposes `brigadestack` and downloads a managed Python on first launch. Git is required for this walkthrough. For Python installs, platform limits, optional engine setup, and existing `brigade` installs, see [Quickstart](QUICKSTART.md#1-install). Existing commands, Python imports, and `.brigade/` data remain compatible.
 
+Generated agent instructions and CLI suggestions still use `brigade`. On a bridge-only install, run those commands as `brigadestack` and tell your agents to do the same. Existing `brigade` installs need no change.
+
 ## Works with
 
 | Tool | Connection |
@@ -94,8 +96,8 @@ Hosted connectors need explicit setup. See the [technical guide](docs/technical-
 A memory server with bounded recall, work briefs, and handoff drafting, plus a read-only skills server:
 
 ```bash
-brigade memory serve-mcp --stdio
-brigade skills serve-mcp --stdio
+brigadestack memory serve-mcp --stdio
+brigadestack skills serve-mcp --stdio
 ```
 
 `write_handoff` drafts a handoff and never edits a canonical card. [Transport details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)

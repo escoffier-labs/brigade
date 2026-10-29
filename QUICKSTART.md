@@ -18,6 +18,8 @@ brigadestack --help
 
 The bridge exposes `brigadestack`. Do not assume its dependency's `brigade` command is on PATH. Expected version output is `brigade 0.30.0`, the underlying CLI's version.
 
+Generated agent instructions and printed next-step suggestions still use `brigade`. On a bridge-only install, run them as `brigadestack` and tell your agents to do the same. With npx, use the full prefix below. Existing `brigade` installs need no change.
+
 The first launch needs network access to download a managed Python. Keep npm optional dependencies enabled so the platform's uv binary is installed. See the [npm package notes](npm/feasibility/README.md) for cache and offline behavior.
 
 For a one-off invocation:
@@ -39,6 +41,8 @@ brigadestack --help
 ```
 
 If pipx reports that its binary directory is missing from PATH, run `pipx ensurepath` and open a new terminal. The bridge exposes `brigadestack`. The dependency's console scripts are not exposed by this install.
+
+On Linux, prefer your distribution's pipx package. The linked guide covers platform setup, including systems with an externally managed Python.
 
 If you already use uv, the equivalent isolated tool install is:
 
@@ -65,6 +69,8 @@ Keep your working install. Existing `brigade` commands, `brigade` Python imports
 
 If you choose the new bridge, install it with one route above and check `brigadestack --version`. The bridge delegates to stable 0.30.0. Avoid mixing commands from different versions on PATH. Updating a bridge is a package-manager operation with an exact version. The npm-managed CLI refuses `brigade update`. This walkthrough does not change existing services or schedulers.
 
+On pipx or uv bridge installs, do not use `brigadestack update`: the stable updater targets a separate `brigade-cli` pipx app rather than updating the bridge. Manage the bridge through the package manager you used, with an exact version. The [update-channel guide](docs/update-channels.md) describes the legacy CLI's updater.
+
 ## 2. Configure a repository
 
 From a Git repository you control:
@@ -84,13 +90,14 @@ For template files alone, use `brigadestack init --target . --harnesses codex`. 
 
 ## 3. Optional engines
 
-The first verification receipt needs Git and your check command. Native code-graph and evidence engines are optional for this walkthrough:
+The first verification receipt needs Git and your check command. Native code-graph and evidence engines are optional for this walkthrough. Setup downloads pinned native binaries into Brigade's data directory. Preview the plan before installing:
 
 ```bash
+brigadestack setup --dry-run
 brigadestack setup
 ```
 
-On the stable 0.30.0 smoke host this returned exit 0 without output. Check the engine you intend to use through its Brigade facade. Setup does not guarantee that a dependency command is available on PATH. The [technical guide](docs/technical-guide.md#managed-stations) covers the engine surfaces. No service or session setup is needed here.
+On the stable 0.30.0 smoke host, setup returned exit 0 without output. Inspect evidence health with `brigadestack evidence status`, or see the code-graph interface with `brigadestack code --help`. Setup does not guarantee that a dependency command is available on PATH. The [technical guide](docs/technical-guide.md#managed-stations) covers the engine surfaces. No service or session setup is needed here.
 
 ## Next steps
 

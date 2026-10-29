@@ -60,6 +60,8 @@ The isolated Linux smoke returned `status: ok` and exit 0. Other hosts may repor
 
 Quickstart creates local configuration under `.brigade/`, including MCP catalog and work-loop configuration. It selects handoff source folders for the writer harnesses you chose. For Codex, that inbox is `.codex/memory-handoffs/`. It does not start services or install schedulers.
 
+Generated agent instructions and printed next-step suggestions still say `brigade`. If you installed only the bridge, substitute `brigadestack` (or the npx prefix) and tell your agents to do the same. Existing `brigade` installs need no change.
+
 Review the generated changes with `git status` and `git diff` before committing. The managed handoff `TEMPLATE.md` can travel with the repository. Session notes and local `.brigade/` state should stay private. See [agent-assisted setup](agent-assisted-setup.md) for adoption in an existing workspace.
 
 ## 5. Check health and read the brief
@@ -90,7 +92,9 @@ brigadestack work verify run --target . --command "git diff --check" --capture b
 
 The command prints the run ID, status, command exit code, and receipt path. The receipt includes log paths. Open the printed receipt and logs under `.brigade/work/verify-runs/<run-id>/`. Confirm that the receipt records the command you intended, the target, and exit 0. A failed command leaves a failed receipt to inspect. Repeated checks may reuse a matching passing receipt.
 
-`--capture brigade-work` attributes the observed result to the installed work-loop skill. This ad hoc command produces audit evidence. It does not score an artifact. Artifact scoring needs an eligible registered verifier manifest. See [verification receipts](technical-guide.md#daily-work-loop) for details.
+`--capture brigade-work` attributes the observed result to the installed work-loop skill. This ad hoc command produces audit evidence. It does not score an artifact. Artifact scoring needs an eligible registered verifier manifest. See [which receipts are scoreable](outcome-scoring.md#which-receipts-are-scoreable) for details.
+
+Capture also writes local outcome records under `memory/outcome/`, which can contain absolute receipt paths. Review `git status` after this step and leave those records out of commits unless you intend to share them.
 
 Run the brief again:
 
@@ -98,7 +102,7 @@ Run the brief again:
 brigadestack work brief --target .
 ```
 
-It now has the verification result available for the next agent.
+It now has the verification result available for the next agent. The brief may report `outcome_loop_half_fed` because this first check is audit-only. That advisory does not mean the check failed.
 
 ## 7. If a step fails
 
