@@ -83,23 +83,8 @@ Native macOS x64 acceptance of the published 0.29.0 packages ended the HUP case 
 
 Hashes stored beside payloads detect corruption and mixed installs. They do not authenticate a replaced tarball whose manifests were also replaced. `artifacts.json` records build provenance and exact transferred archive hashes. Registry acceptance verifies immutable archive integrity and publication provenance separately. Public CI artifacts are downloadable by signed-in GitHub users during their retention period. Local Linux acceptance does not establish native macOS, Windows or ARM behavior. Final clean-source builds, CI and independent reviews remain separate gates.
 
-
 ## Unreleased current-source candidates
 
-`npm-feasibility.yml` uses `prepare.py --candidate --out <external-directory>`
-and verifies transferred original archives with `--candidate --verify-artifacts`.
-This requires a clean checkout. It builds that source with the existing hashed
-build tool requirements in a disposable interpreter. Only the staged Python
-metadata and `__version__` receive the existing development wheel stamp, derived
-from the commit UTC date. Stable template pins remain unchanged. Every wheel
-package member is compared with current source, including reverse inventory.
+`npm-feasibility.yml` uses `prepare.py --candidate --out <external-directory>` and verifies transferred original archives with `--candidate --verify-artifacts`. This requires a clean checkout. It builds that source with the existing hashed build tool requirements in a disposable interpreter. Only the staged Python metadata and `__version__` receive the existing development wheel stamp, derived from the commit UTC date. Stable template pins remain unchanged. Every `brigade/` wheel member is compared with current source, including reverse inventory. The audit does not derive every dist-info member from source. Wheel metadata and RECORD checks apply separately.
 
-All six npm versions carry `-candidate.<date>.<commit-prefix>`. The Python wheel
-uses `.dev<date>`. The receipt binds the full commit, all source file hashes,
-wheel hash and original archive digests. Verification checks clean current
-source and the wheel inside the transferred launcher archive. The stable
-verifier rejects candidate runtime identities, and the stable publisher rejects
-their npm version. These bytes have no stable wheel provenance or publication
-qualification. The default builder, verifier and `runtime.json` pins retain the
-published stable contract described above. Native acceptance assertions are
-identical for candidates and stable artifacts.
+All six npm versions carry `-candidate.<date>.g<12hex>`. The Python wheel uses `.dev<date>`. The receipt binds the full commit, all source file hashes, wheel hash and original archive digests. Verification checks clean current source and the wheel inside the transferred launcher archive. The stable verifier rejects candidate runtime identities, and the stable publisher rejects their npm version. These bytes have no stable wheel provenance or publication qualification. The default builder, verifier and `runtime.json` pins retain the published stable contract described above. Native acceptance assertions are identical for candidates and stable artifacts.

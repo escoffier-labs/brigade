@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build public npm tarballs from pinned official wheel and uv release bytes."""
+"""Build npm tarballs from stable wheel pins or clean current-source candidates."""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ import base64
 import csv
 import email.parser
 import io
+import importlib.util
 import os
 import re
 import venv
@@ -17,9 +18,11 @@ import shutil
 import stat
 import subprocess
 import tarfile
+import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path, PurePosixPath
+from datetime import datetime, timezone
 
 SOURCE = Path(__file__).resolve().parent
 REPO = SOURCE.parent.parent
@@ -368,8 +371,6 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
 
 
 def dev_helper():
-    import importlib.util
-
     spec = importlib.util.spec_from_file_location("dev_wheel", REPO / "scripts/prepare_dev_wheel.py")
     assert spec and spec.loader
     helper = importlib.util.module_from_spec(spec)
@@ -378,8 +379,6 @@ def dev_helper():
 
 
 def candidate_version(identity: dict) -> str:
-    from datetime import datetime, timezone
-
     helper = dev_helper()
     date = datetime.fromtimestamp(identity["sourceDateEpoch"], timezone.utc).strftime("%Y%m%d")
     return helper.derive_dev_version(helper.read_stable_version(REPO), date)
@@ -388,20 +387,20 @@ def candidate_version(identity: dict) -> str:
 def candidate_runtime(reviewed: dict, identity: dict) -> dict:
     runtime = json.loads(json.dumps(reviewed))
     runtime["payloadVersion"] = candidate_version(identity)
-    runtime["version"] = runtime["payloadVersion"].replace(".dev", "-candidate.") + "." + identity["sourceCommit"][:12]
+    runtime["version"] = runtime["payloadVersion"].replace(".dev", "-candidate.") + ".g" + identity["sourceCommit"][:12]
     runtime.pop("payloadWheel")
     return runtime
 
 
 def audit_candidate_wheel(wheel: Path, version: str, paths: list[str]) -> None:
-    """Every package member and every source package file must agree."""
+    """Compare brigade/ package bytes and reverse inventory with staged source."""
     expected = {}
     for name in paths:
         if not name.startswith("src/brigade/"):
             continue
         data = (REPO / name).read_bytes()
         if name == "src/brigade/__init__.py":
-            data = re.sub(rb'(?m)^__version__ = "[^" ]+"$', f'__version__ = "{version}"'.encode(), data)
+            data = re.sub(rb'(?m)^__version__ = "[^"]+"$', f'__version__ = "{version}"'.encode(), data, count=1)
         expected[name.removeprefix("src/")] = data
     with zipfile.ZipFile(wheel) as archive:
         actual = {n: archive.read(n) for n in archive.namelist() if n.startswith("brigade/")}
@@ -479,7 +478,7 @@ def build_candidate_payload(output: Path, runtime: dict, identity: dict, paths: 
 
 
 def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
-    """Bind the original archives to clean packaging source and the stable pin."""
+    """Bind original archives to clean source and stable pins or candidate bytes."""
     metadata = json.loads((output / "artifacts.json").read_text())
     source, paths = source_snapshot(False)
     for key in ("sourceCommit", "sourceTree", "sourceIdentity", "sourceSha256", "sourceDateEpoch"):
@@ -557,6 +556,14 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
                 raise ValueError("candidate package identity mismatch")
             if "platform" in item:
                 pin = runtime["platforms"][item["platform"]]
+                system, cpu = item["platform"].split("-")
+                if (
+                    item["name"] != pin["package"]
+                    or manifest.get("os") != [system]
+                    or manifest.get("cpu") != [cpu]
+                    or (manifest.get("libc") != ["glibc"] if system == "linux" else "libc" in manifest)
+                ):
+                    raise ValueError("candidate companion platform mismatch")
                 expected_names = {
                     "package/package.json",
                     "package/manifest.json",
@@ -600,27 +607,13 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
                 ):
                     if files["package/" + name] != source_file.read_bytes():
                         raise ValueError("candidate launcher source mismatch")
-        launcher = next(item for item in artifacts if "platform" not in item)
-        with tarfile.open(output / launcher["filename"], "r:gz") as archive:
-            members = list(archive)
-            names = [m.name for m in members]
-            wheel_name = "package/wheel/" + payload["wheel"]
-            if len(names) != len(set(names)) or names.count(wheel_name) != 1:
-                raise ValueError("candidate archive inventory mismatch")
-            for name, expected in (("package/runtime.json", runtime),):
-                stream = archive.extractfile(name)
-                if stream is None or json.loads(stream.read()) != expected:
+                if json.loads(files["package/runtime.json"]) != runtime:
                     raise ValueError("candidate packed runtime mismatch")
-            member = archive.getmember(wheel_name)
-            if not member.isfile() or member.size > MAX_DOWNLOAD:
-                raise ValueError("candidate wheel must be bounded regular file")
-            stream = archive.extractfile(member)
-            assert stream is not None
-            data = stream.read(MAX_DOWNLOAD + 1)
+                data = files["package/wheel/" + payload["wheel"]]
+                if len(data) > MAX_DOWNLOAD:
+                    raise ValueError("candidate wheel must be bounded regular file")
         if digest(data) != payload["sha256"] or len(data) != payload["bytes"]:
             raise ValueError("candidate packed wheel identity mismatch")
-        import tempfile
-
         with tempfile.TemporaryDirectory() as scratch:
             wheel = Path(scratch) / payload["wheel"]
             wheel.write_bytes(data)
