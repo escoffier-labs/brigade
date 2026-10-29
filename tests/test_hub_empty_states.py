@@ -552,3 +552,25 @@ def test_no_empty_state_copy_uses_dashes_or_hosts():
         source = inspect.getsource(importlib.import_module(f"brigade.{name}"))
         for call in re.findall(r"empty_state\((.*?)\)\n", source, flags=re.S):
             assert not any(dash in call for dash in DASHES), (name, call)
+
+
+def test_mcp_page_empty_states_have_a_title_and_hint():
+    from brigade import fleet_mcp_inventory as inventory
+    from brigade import fleet_mcp_inventory_page as page
+
+    now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    machine = inventory.Machine("node-a", "sample-machine", True, catalog_present=True)
+    no_servers = page.render(inventory.McpView((), (machine,), 1), nonce="n", now=now)
+    assert "No MCP servers configured" in no_servers
+    assert "Reporting machines have no MCP servers in the configs Brigade reads." in no_servers
+
+    row = inventory.Row(
+        "node-a", "sample-machine", "sample-tool", "claude", "project", "stdio", True, "current", True, None
+    )
+    healthy = inventory.McpView((inventory.Server("sample-tool", (row,), frozenset()),), (machine,), 1)
+    filtered = page.render(healthy, nonce="n", now=now, filter_key="needs")
+    assert "Nothing matches this filter" in filtered and "Choose another filter above" in filtered
+
+    no_machines = page.render(inventory.McpView((), (), 1), nonce="n", now=now, group="machine")
+    assert "No machines enrolled" in no_machines
+    assert "<code>brigade fleet mcp report</code>" in no_machines
