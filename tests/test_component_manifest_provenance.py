@@ -312,3 +312,114 @@ def test_verifier_collects_errors_for_missing_or_malformed_github_release_digest
 
     assert errors
     assert any(asset_name in error and "digest" in error for error in errors)
+
+
+ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+
+
+def _additive_release():
+    release, checksums, body = _release(_manifest())
+    for component in ALIASES:
+        for platform in PLATFORMS:
+            name = _asset_name(component, platform)
+            digest = hashlib.sha256(name.encode()).hexdigest()
+            release["assets"].append(
+                {"name": name, "size": len(name), "digest": "sha256:" + digest, "browser_download_url": BASE + name}
+            )
+            checksums += f"{digest}  {name}\n"
+    _authenticate_checksums(release, checksums)
+    return release, checksums, body
+
+
+def _authenticate_checksums(release, checksums):
+    asset = next(item for item in release["assets"] if item["name"] == "checksums.txt")
+    asset["digest"] = "sha256:" + hashlib.sha256(checksums.encode()).hexdigest()
+    asset["size"] = len(checksums.encode())
+
+
+def test_verifier_accepts_additive_release_with_distinct_alias_digests(tmp_path):
+    release, checksums, body = _additive_release()
+    path = tmp_path / "manifest.json"
+    path.write_text(body)
+    assert len(release["assets"]) == 42
+    assert len(checksums.splitlines()) == 41
+    assert _module().verify_manifest(path, fetch=_fetcher(release, checksums, body)) == []
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("size", 0, "size"),
+        ("size", -1, "size"),
+        ("size", True, "size"),
+        ("size", "12", "size"),
+        ("size", 1.5, "size"),
+        ("size", None, "size"),
+        ("digest", None, "digest"),
+        ("digest", {"sha256": "a" * 64}, "digest"),
+        ("digest", "sha256:bad", "digest"),
+        ("digest", "sha256:" + "b" * 64, "digest"),
+        ("browser_download_url", BASE.replace(TAG, "latest") + "brigade-evidence-linux-amd64", "URL"),
+        ("browser_download_url", BASE + "brigade-evidence-linux-arm64", "URL"),
+        ("browser_download_url", "https://example.com/brigade-evidence-linux-amd64", "URL"),
+    ],
+)
+def test_verifier_rejects_malformed_alias_metadata(tmp_path, field, value, message):
+    release, checksums, body = _additive_release()
+    name = "brigade-evidence-linux-amd64"
+    alias = next(asset for asset in release["assets"] if asset["name"] == name)
+    alias[field] = value
+    path = tmp_path / "manifest.json"
+    path.write_text(body)
+    errors = _module().verify_manifest(path, fetch=_fetcher(release, checksums, body))
+    assert any(name in error and message in error for error in errors), errors
+
+
+@pytest.mark.parametrize(
+    "defect",
+    [
+        "missing",
+        "partial",
+        "foreign",
+        "platform",
+        "duplicate",
+        "checksum-gap",
+        "checksum-extra",
+        "checksum-duplicate",
+        "checksum-corrupt",
+    ],
+)
+def test_verifier_rejects_invalid_additive_membership_and_checksums(tmp_path, defect):
+    release, checksums, body = _additive_release()
+    name = "brigade-evidence-windows-amd64.exe"
+    alias = next(asset for asset in release["assets"] if asset["name"] == name)
+    if defect == "missing":
+        release["assets"].remove(alias)
+    elif defect == "partial":
+        release["assets"] = [
+            asset for asset in release["assets"] if not asset["name"].startswith("brigade-") or asset == alias
+        ]
+    elif defect in {"foreign", "platform"}:
+        alias["name"] = "foreign" if defect == "foreign" else "brigade-evidence-freebsd-amd64"
+    elif defect == "duplicate":
+        release["assets"].append(dict(alias))
+    elif defect == "checksum-gap":
+        checksums = "\n".join(line for line in checksums.splitlines() if not line.endswith(name)) + "\n"
+    elif defect == "checksum-extra":
+        checksums += "a" * 64 + "  unexpected\n"
+    elif defect == "checksum-duplicate":
+        checksums += next(line for line in checksums.splitlines() if line.endswith(name)) + "\n"
+    else:
+        checksums = checksums.replace(alias["digest"].removeprefix("sha256:"), "invalid")
+    _authenticate_checksums(release, checksums)
+    path = tmp_path / "manifest.json"
+    path.write_text(body)
+    errors = _module().verify_manifest(path, fetch=_fetcher(release, checksums, body))
+    expected = (
+        "duplicate"
+        if defect in {"duplicate", "checksum-duplicate"}
+        else "checksums.txt"
+        if defect.startswith("checksum")
+        else "assets"
+    )
+    assert any(expected in error for error in errors), errors
