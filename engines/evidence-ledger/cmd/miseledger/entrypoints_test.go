@@ -57,7 +57,11 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 				if canonical != legacy {
 					t.Fatalf("canonical = %#v, legacy = %#v", canonical, legacy)
 				}
-				if legacy.code != tc.code || !strings.HasPrefix(legacy.out, tc.out) || legacy.err != tc.err {
+				stdoutMatches := legacy.out == tc.out
+				if tc.out != "" {
+					stdoutMatches = strings.HasPrefix(legacy.out, tc.out)
+				}
+				if legacy.code != tc.code || !stdoutMatches || legacy.err != tc.err {
 					t.Fatalf("result = %#v, want exit %d stdout prefix %q stderr %q", legacy, tc.code, tc.out, tc.err)
 				}
 			})

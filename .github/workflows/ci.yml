@@ -1125,6 +1125,11 @@ jobs:
           go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/sessionfind.exe" ./cmd/sessionfind
           if ($LASTEXITCODE -ne 0) { throw "sessionfind build failed" }
           Pop-Location
+      - name: Canonical and legacy evidence executable compatibility
+        shell: pwsh
+        run: |
+          go -C engines/evidence-ledger test ./cmd/miseledger -run '^TestEvidenceExecutableCompatibility$' -count=1 -v
+          if ($LASTEXITCODE -ne 0) { throw "evidence executable compatibility failed" }
       - name: Run Windows native acceptance (source install)
         shell: powershell
         run: |
