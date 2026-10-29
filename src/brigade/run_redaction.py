@@ -1991,11 +1991,39 @@ def _assert_affected_values_removed(
     start: int,
     end: int,
 ) -> None:
+    selected_references = {
+        value
+        for event in original
+        if start <= event.sequence <= end
+        and (
+            event.event_type in run_events._TASK_EVENT_TYPES
+            or (
+                event.event_type in {"control.requested", "control.observed", "control.failed"}
+                and "task_id" in event.payload
+            )
+        )
+        for field, value in run_redaction_tasks.private_scalars(event)
+        if field not in run_redaction_tasks.STRUCTURAL_FIELDS | run_redaction_tasks.CONTROL_STRUCTURAL_FIELDS
+    }
+    # A later member/control selection can reach an unselected aggregate.
+    # Check its nested references too, before any replacement publication.
+    for event in rewritten:
+        if event.event_type == "task.batch-accepted" and any(
+            value in selected_references for _, value in run_redaction_tasks.private_scalars(event)
+        ):
+            raise RedactionError("rewritten journal still contains affected private values")
     for prior, current in zip(original, rewritten, strict=True):
         if not start <= prior.sequence <= end or prior.event_type in {
             run_checkpoint.CHECKPOINT_EVENT_TYPE,
             "run.redaction.recorded",
         }:
+            continue
+        if prior.event_type == "task.batch-accepted":
+            # Version, member count and row order are structural. Every string
+            # in the exact retained descriptor shape is a private reference.
+            remaining = {value for _, value in run_redaction_tasks.private_scalars(current)}
+            if any(value in remaining for _, value in run_redaction_tasks.private_scalars(prior)):
+                raise RedactionError("rewritten journal still contains affected private values")
             continue
         for key, value in prior.payload.items():
             if (
