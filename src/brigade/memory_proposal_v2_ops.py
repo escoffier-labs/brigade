@@ -9,17 +9,23 @@ from typing import Any
 from . import memory_proposal_io as io
 from . import memory_proposals as legacy
 from .memory_reflect_candidates import _evidence_id
+from .memory_claim_blocks import claim_spans
 
 ANCHOR = re.compile(r" \^(c-[0-9a-f]{6})$")
 ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
 MAX_ANCHORS = 4096
-SETEXT = re.compile(r"^ {0,3}(?:=+|-{2,})[ \t]*\r?$")
-TABLE_DELIMITER = re.compile(r"^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*\r?$")
 
 
 def claim_body(text: str) -> str:
-    """Ignore only inert block anchors, preserving every other body byte."""
-    return re.sub(r" \^c-[0-9a-f]{6}(?=\r?$)", "", text[legacy._body_offset(text) :], flags=re.MULTILINE)
+    """Remove suffixes only from addressable claims; retain all other bytes."""
+    offset = legacy._body_offset(text)
+    body = text[offset:]
+    for span in reversed(claim_spans(text, offset)):
+        match = ANCHOR.search(text[span.start : span.end])
+        if match:
+            position = span.start + match.start() - offset
+            body = body[:position] + body[span.end - offset :]
+    return body
 
 
 @dataclass(frozen=True)
@@ -34,71 +40,13 @@ class Block:
         return io.sha256(self.text.encode())
 
 
-def _table_lines(lines: list[str]) -> set[int]:
-    """Index GFM table rows, including tables whose rows omit the leading pipe."""
-    found: set[int] = set()
-    for i, line in enumerate(lines):
-        if "|" not in line or not TABLE_DELIMITER.match(line) or i == 0 or "|" not in lines[i - 1]:
-            continue
-        j = i - 1
-        while j >= 0 and "|" in lines[j] and lines[j].strip():
-            found.add(j)
-            j -= 1
-        found.add(i)
-        j = i + 1
-        while j < len(lines) and "|" in lines[j] and lines[j].strip():
-            found.add(j)
-            j += 1
-    return found
-
-
 def blocks(text: str) -> list[Block]:
-    """Address paragraphs and individual bullets, excluding code and history."""
-    result: list[Block] = []
-    offset = legacy._body_offset(text)
-    lines = text[offset:].splitlines(keepends=True)
-    fence: str | None = None
-    start: int | None = None
-    end = offset
-
-    def finish() -> None:
-        nonlocal start
-        if start is not None:
-            value = text[start:end].rstrip("\r\n")
-            match = ANCHOR.search(value)
-            result.append(Block(start, start + len(value), value, match[1] if match else None))
-            start = None
-
-    table = _table_lines(lines)
-    for index, line in enumerate(lines):
-        stripped = line.strip()
-        if fence is None and start is not None and SETEXT.match(line):
-            # The underline turns the open paragraph into a heading; neither is a claim.
-            start = None
-            offset += len(line)
-            end = offset
-            continue
-        code = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
-        bullet = re.match(r"^ {0,3}(?:[-+*]|\d+[.)])\s+", line)
-        excluded = (
-            not stripped
-            or index in table
-            or bool(re.match(r"^(?: {0,3}(?:#{1,6}\s|>|\||\[[^\]\n]+\]:\s)|previously\b| {4}|\t)", line))
-        )
-        if fence or code or excluded or bullet:
-            finish()
-        if code:
-            marker = code[1]
-            if fence is None:
-                fence = marker
-            elif marker[0] == fence[0] and len(marker) >= len(fence):
-                fence = None
-        elif fence is None and not excluded:
-            if start is None:
-                start = offset
-        offset += len(line)
-        end = offset
-    finish()
+    """Address only structurally supported spans, preserving public offsets."""
+    result = []
+    for span in claim_spans(text, legacy._body_offset(text)):
+        value = text[span.start : span.end]
+        match = ANCHOR.search(value)
+        result.append(Block(span.start, span.end, value, match[1] if match else None))
     ids = [block.block_id for block in result if block.block_id]
     if len(ids) != len(set(ids)):
         raise legacy.ProposalError("duplicate claim block ids")

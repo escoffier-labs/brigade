@@ -195,6 +195,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 - Claude hooks retain the latest skill attribution across stale concurrent state saves, preserve deliberate capture changes, and carry the retained artifact into verification guidance and receipts (#1924).
+- Reviewed memory proposals preserve Markdown structures when anchoring claims, including list-contained quotations, code and headings. Exact duplicate comparison retains literal anchor tokens in excluded blocks.
+- Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
 
 
 ## [0.30.0] - 2026-10-20
