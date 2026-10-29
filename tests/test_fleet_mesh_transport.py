@@ -811,11 +811,11 @@ def test_cross_origin_redirect_never_discloses_authority(transport, server):
         # the original request bound to the original listener's actual port.
         origin = server.origin
         server.origin = "http://localhost:" + str(destination.server_port)
-        server.callback = lambda body: (307, {})
+        server.callback = lambda body: (302, {})
         status, _ = transport._wire(
             origin=origin, token="synthetic-bearer", body=b'{"action":"identity"}', timeout=2, limit=65536
         )
-        assert status == 307
+        assert status == 302
         assert len(server.calls) == 1
         assert hits == []
     finally:
