@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Mapping, Sequence
 
 from . import fleet_command_deck as deck
+from . import fleet_investigation as investigation
 
 _esc = deck._esc
 REASONS = {
@@ -264,11 +265,22 @@ def _cloud_details(context: deck.CloudSessionContext) -> str:
     )
 
 
-def render_octopool_observation(view: deck.DeckView) -> str:
+def render_octopool_observation(view: deck.DeckView, *, expand_metrics: bool = False) -> str:
     observation = deck.octopool_observation_from_snapshot(view.octopool_observation)
     header = '<section class="panel" id="octopool-observation"><h2>GitHub reads / Octopool</h2>'
     if observation is None:
-        return header + '<p class="station-meta">Octopool reporting not connected</p></section>'
+        return (
+            header
+            + '<p class="station-meta">Octopool reporting not connected</p>'
+            + investigation.render(
+                "Octopool reporting unavailable",
+                route="/deck/capacity/github",
+                observation="unknown (no valid capture)",
+                facts={"State": "reporting not connected", "Source": "Octopool stats capture"},
+                limits="No valid capture or counters available. Reporting absence does not establish service failure.",
+            )
+            + "</section>"
+        )
     captured = datetime.fromisoformat(observation.captured_at)
     captured_label = f"{captured:%b} {captured.day} {captured:%H:%M} UTC"
     seconds = observation.window_seconds
@@ -288,17 +300,43 @@ def render_octopool_observation(view: deck.DeckView) -> str:
     )
     rate = observation.eligible_cache_hit_rate
     details = f"<p>Eligible cache hit rate: {rate:.2%}</p>" if rate is not None else ""
+    prompt = (
+        investigation.render(
+            "GitHub reads / Octopool",
+            route="/deck/capacity/github",
+            observation=observation.captured_at,
+            facts={
+                "Source": "Octopool stats capture",
+                "Scope": "pool-wide",
+                "Window seconds": seconds,
+                "Counters": metrics,
+                "Eligible cache hit rate": rate,
+            },
+            limits="Dated historical pool-wide observation, includes clients outside this fleet. "
+            "Fallbacks may be expected local fallbacks, not failures. Counters do not measure upstream savings. "
+            "No per-request exception details collected.",
+        )
+        if observation.fallbacks or observation.service_errors
+        else ""
+    )
+    methodology = (
+        f"<p>Source: Octopool stats capture</p><p>Capture timestamp: {_esc(observation.captured_at)}</p>"
+        "<p>Cache-served responses include cache hits and stale responses, including revalidations. "
+        "Uncached outcomes count responses served outside the cache. Neither counter measures upstream request savings. "
+        "Fallbacks count expected local fallbacks and do not necessarily indicate failure.</p>"
+    )
     return (
         header + f'<p class="station-meta">Captured {_esc(captured_label)} · {window} · '
         "Pool-wide, includes clients outside this fleet.</p>"
         f'<p class="row-meta">{metrics or "No valid counters provided."}</p>'
-        "<details><summary>Metric details</summary><p>Source: Octopool stats capture</p>"
-        f"<p>Capture timestamp: {_esc(observation.captured_at)}</p>"
-        "<p>Cache-served responses include cache hits and stale responses, including revalidations. "
-        "Uncached outcomes count responses served outside the cache. Neither counter measures upstream request savings. "
-        "Fallbacks count expected local fallbacks and do not necessarily indicate failure.</p>"
         + details
-        + "</details></section>"
+        + (
+            f'<div data-audience="agent">{methodology}</div>'
+            if expand_metrics
+            else f'<details data-audience="agent"><summary>Metric details</summary>{methodology}</details>'
+        )
+        + prompt
+        + "</section>"
     )
 
 

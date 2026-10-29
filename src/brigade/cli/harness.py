@@ -165,7 +165,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 def dispatch(args) -> int:
     from .. import cursor_user_cmd, harness_profile_cmd
     from ..install import ensure_surface_installable
-    from ..selection import SurfaceInstallRefusal, SurfaceRecord
+    from ..selection import SurfaceRecord
 
     if args.harness_command == "sync":
         return harness_profile_cmd.sync(
@@ -199,7 +199,11 @@ def dispatch(args) -> int:
                 verify_mcp=bool(getattr(args, "verify_mcp", False)),
                 json_output=args.json,
             )
-        return cursor_user_cmd.doctor(json_output=args.json)
+        try:
+            return cursor_user_cmd.doctor(json_output=args.json)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
 
     if args.harness_command == "fragments":
         from .. import fragments as frag_mod
@@ -218,7 +222,7 @@ def dispatch(args) -> int:
                 surface = SurfaceRecord.resolve_known(args.surface)
                 ensure_surface_installable(surface, projection_only=args.projection_only)
             return cursor_user_cmd.install(write=args.write, json_output=args.json)
-        except SurfaceInstallRefusal as exc:
+        except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
 

@@ -77,8 +77,8 @@ def _guidance(alert: Alert, *, worklore_enabled: bool) -> _Guidance:
             summary,
             "This queue report excludes the work from automatic dispatch.",
             step,
-            "/deck/work" if worklore_enabled else "/deck#queued-title",
-            "Stored tasks" if worklore_enabled else "View ready queue",
+            "/deck/work" if worklore_enabled else "/deck/activity",
+            "Stored tasks" if worklore_enabled else "View work activity",
         )
     if alert.kind == "stale telemetry":
         return _Guidance(
@@ -98,7 +98,7 @@ def _guidance(alert: Alert, *, worklore_enabled: bool) -> _Guidance:
         return _Guidance(
             "Monitoring evidence is missing. Evidence lists the gaps in this snapshot.",
             "The Deck cannot assess the missing sections or treat them as healthy.",
-            "Check the reporting sources for the listed gaps and review Control plane details in Capacity.",
+            "Check the reporting sources for the listed gaps and review the selected evidence.",
         )
     if alert.kind == "collision":
         return _Guidance(
@@ -112,13 +112,17 @@ def _guidance(alert: Alert, *, worklore_enabled: bool) -> _Guidance:
         return _Guidance(
             "An integration routine requested attention.",
             "Pickup and completion are not established by this routine state.",
-            "Check the routine's latest report and pending work. Review Integrations in Capacity's Control plane details.",
+            "Check the routine's latest report and pending work at its source.",
         )
     return _Guidance(
         "The fleet reported an attention signal.",
         "Its operational impact is unknown from this report.",
         "Check Evidence and the originating report before taking action. Review reporting context in Capacity.",
     )
+
+
+def entry_key(alert: Alert) -> str:
+    return f"{alert.kind}:{alert.source_ref or (alert.title + alert.detail)}"
 
 
 def render_alerts_page(
@@ -129,12 +133,37 @@ def render_alerts_page(
     worklore_enabled: bool,
     action_sources: frozenset[str] = frozenset(),
 ) -> str:
+    from . import fleet_investigation as investigation
+
     alerts = page_alerts(view, now)
-    content = render_alert_rows(alerts, action_sources=action_sources, worklore_enabled=worklore_enabled)
+    from . import fleet_admin_explorer as explorer
+
+    entries = []
+    for alert in alerts:
+        guidance = _guidance(alert, worklore_enabled=worklore_enabled)
+        action = fleet_action_page.alert_link(alert.source_ref, action_sources, alert.title)
+        note = explorer.agent("Preparing or copying a prompt does not execute a repair.", tag="p") if action else ""
+        detail = (
+            explorer.hero(alert.title, alert.kind)
+            + f"<p>{_esc(guidance.summary)}</p><p><strong>Next step:</strong> {_esc(guidance.next_step)}</p>"
+            + explorer.agent(
+                f"<p><strong>Why it matters:</strong> {_esc(guidance.impact)}</p>"
+                f"<h3>Evidence</h3><p>{_esc(alert.detail)}</p><p>{_esc(alert.since)}</p>"
+            )
+            + f'<div class="explorer-actions">{action}<a href="{_esc(guidance.href)}">{_esc(guidance.link)}</a></div>{note}'
+            + investigation.render(
+                alert.title,
+                route="/deck/alerts",
+                observation=str(now) + "; " + alert.since,
+                facts={"Kind": alert.kind, "Reported detail/code": alert.detail, "Subject reference": alert.source_ref},
+                limits="Alert projection; aggregate queue counts may not identify tasks. Report age is not current execution state.",
+            )
+        )
+        entries.append(explorer.Entry(entry_key(alert), alert.title, alert.kind, detail))
     body = (
-        '<main class="deck-shell alerts-page"><header class="page-head"><div><h1>Alerts</h1>'
-        f'<p class="page-sub">{len(alerts)} open</p></div></header>'
-        f'<section class="panel">{content}</section></main>'
+        f'<main class="deck-shell admin-page alerts-page"><p class="page-sub">{len(alerts)} open</p>'
+        + explorer.render(entries, label="alerts", empty="No active alerts")
+        + "</main>"
     )
     return deck._document(
         body,
@@ -144,7 +173,9 @@ def render_alerts_page(
         title="Alerts",
         view=view,
         worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.ALERTS_CSS,
+        refresh=False,
+        extra_css=ui_theme.ALERTS_CSS + explorer.CSS,
+        script=explorer.SCRIPT,
     )
 
 

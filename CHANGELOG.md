@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
+- `brigade dogfood` reads the TOML literal strings it now writes without applying escapes, so Windows paths in `.brigade/dogfood.toml` keep their backslashes.
+
 - Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
 - Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
 - Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.
@@ -80,6 +83,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
 - Preserve backslashes in TOML literal strings on Python 3.10, so Windows paths and trailing separators load correctly in local configuration, including arrays and inline tables. Generated TOML strings now round-trip through both supported parsers.
+- Corrupt local verification receipts no longer crash history, planning, or captured verification runs. Both local receipt readers handle encoding and decoder failures and reject JSON deeper than 128 containers; exports still report malformed inputs as failures and preserve the original files.
 
 - Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
 

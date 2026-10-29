@@ -20,7 +20,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import component_paths, component_state
+from . import component_manifest, component_paths, component_state
 
 # Engine name -> env var override honored before any other resolution step.
 ENV_OVERRIDES = {
@@ -30,6 +30,14 @@ ENV_OVERRIDES = {
     "miseledger": "MISELEDGER_BIN",
     "sessionfind": "SESSIONFIND_BIN",
 }
+
+ENV_OVERRIDES.update(
+    {
+        "brigade-code-graph": "BRIGADE_CODE_GRAPH_BIN",
+        "brigade-code-graph-mcp": "BRIGADE_CODE_GRAPH_MCP_BIN",
+        "brigade-evidence": "BRIGADE_EVIDENCE_BIN",
+    }
+)
 
 # Pre-consolidation install locations still honored as a last resort.
 _LEGACY_RELATIVE = {
@@ -65,19 +73,34 @@ def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | No
     state = component_state.load_installed_state(Path(component_paths.installed_state_path(data_root)))
     if state is None:
         return None
-    record = state.components.get(name)
+    key = component_manifest.wire_id(state.components, name)
+    record = state.components.get(key) if key is not None else None
     if record is None:
         return None
     executable = Path(record.executable)
     return str(executable) if _is_executable(executable) else None
 
 
+def _override_values(names: tuple[str, ...], environment: Mapping[str, str]) -> list[str]:
+    return [
+        environment[key]
+        for alias in names
+        if (key := ENV_OVERRIDES.get(alias)) is not None
+        and key in environment
+        and (len(names) > 1 or bool(environment[key]))
+    ]
+
+
 def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """Resolve ``name`` to an executable path, or None when nowhere to be found."""
     environment = env if env is not None else os.environ
     search_path = environment.get("PATH")
-    override = environment.get(ENV_OVERRIDES.get(name, ""))
-    if override:
+    names = component_manifest.family_names(name)
+    overrides = _override_values(names, environment)
+    if overrides:
+        if len(set(overrides)) != 1 or not overrides[0].strip():
+            return None
+        override = overrides[0]
         candidate = _expand_home(override, environment)
         if _is_executable(candidate):
             return str(candidate)
@@ -85,12 +108,21 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     managed = managed_path(name, env=env)
     if managed:
         return managed
-    found = shutil.which(name, path=search_path)
-    if found:
-        return found
+    if len(names) == 1:
+        found = shutil.which(name, path=search_path)
+        if found:
+            return found
+    else:
+        path_value = search_path if search_path is not None else os.environ.get("PATH", os.defpath)
+        candidates = (name, *(alias for alias in names if alias != name))
+        for directory in path_value.split(os.pathsep) if path_value else ():
+            for alias in candidates:
+                found = shutil.which(alias, path=directory or os.curdir)
+                if found:
+                    return found
     home = environment.get("HOME")
     home_path = Path(home) if home else Path.home()
-    for relative in _LEGACY_RELATIVE.get(name, ()):
+    for relative in (path for alias in names for path in _LEGACY_RELATIVE.get(alias, ())):
         legacy = home_path / relative
         if os.name == "nt" and legacy.suffix.lower() != ".exe":
             legacy = legacy.with_suffix(".exe")
@@ -102,8 +134,8 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
 def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
     """Return argv with a managed engine name in position 0 resolved to a path.
 
-    Unknown or already-absolute commands pass through unchanged, so this is safe
-    to apply to any surface command before execution.
+    Unknown or already-absolute commands pass through unchanged. Invalid explicit
+    overrides raise ValueError so callers cannot silently fall back to PATH.
     """
     if not argv:
         return list(argv)
@@ -112,4 +144,6 @@ def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
         resolved = resolve(head)
         if resolved:
             return [resolved, *argv[1:]]
+        if _override_values(component_manifest.family_names(head), os.environ):
+            raise ValueError(f"invalid or conflicting explicit executable override for {head!r}")
     return list(argv)

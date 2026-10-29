@@ -18,6 +18,8 @@ repository editor on ``/deck/policy``, which stays the authoritative editor.
 
 from __future__ import annotations
 
+from . import fleet_admin_explorer as explorer, fleet_investigation as investigation
+
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from urllib.parse import urlencode
@@ -234,7 +236,7 @@ def build_rows(
                     eligible_machines=", ".join(repo.eligible_machines) or INHERITED_MACHINES,
                     eligible_machines_note=("" if repo.eligible_machines else MACHINE_POLICY_NOTE),
                     policy_revision=str(policy.revision),
-                    editor_href=f"/deck/policy#{fleet_policy_page.repository_anchor(repo.identity)}",
+                    editor_href="/deck/policy",
                     roles=roles,
                     overrides=overrides,
                     denied=tuple(
@@ -299,12 +301,14 @@ def _row_html(row: RepoPolicyRow) -> str:
     if not row.linked:
         live = _live_items(row.live)
         return (
-            f"<details><summary>{_esc(row.label)} &middot; policy linkage {UNKNOWN}</summary>"
-            f'<p class="collision">Policy linkage {UNKNOWN}: {_esc(row.linkage_note)}.</p>'
-            f"<p>owner {_esc(row.claim_owner or UNKNOWN)} &middot; ttl {_esc(row.claim_ttl or UNKNOWN)} "
-            f"&middot; flags {_esc(row.flags or 'none')}</p>"
-            + (f'<ul class="attention-list">{live}</ul>' if live else '<p class="empty">No live runs.</p>')
-            + "</details>"
+            f'<article class="repo-policy-row"><h3>{_esc(row.label)} {explorer.pill("Policy linkage " + UNKNOWN)}</h3>'
+            + explorer.agent(
+                f'<p class="collision">Policy linkage {UNKNOWN}: {_esc(row.linkage_note)}.</p>'
+                f"<p>owner {_esc(row.claim_owner or UNKNOWN)} &middot; ttl {_esc(row.claim_ttl or UNKNOWN)} "
+                f"&middot; flags {_esc(row.flags or 'none')}</p>"
+                + (f'<ul class="attention-list">{live}</ul>' if live else '<p class="empty">No live runs.</p>')
+            )
+            + "</article>"
         )
     session_items = "".join(
         f"<li>{_esc(line.session_id)} &middot; {_esc(line.consumer)} &middot; state {_esc(line.state)} &middot; "
@@ -314,9 +318,7 @@ def _row_html(row: RepoPolicyRow) -> str:
     live_items = _live_items(row.live)
     denied_items = "".join(f"<li>{_esc(item)}</li>" for item in row.denied)
     warning_items = "".join(f"<li>{_esc(item)}</li>" for item in row.warnings)
-    return (
-        f"<details><summary>{_esc(row.label)} &middot; {_esc(row.privacy)} &middot; training "
-        f"{_esc(row.training)} &middot; free {_esc(row.free)}</summary>"
+    detail = (
         f"<p>owner {_esc(row.owner)} &middot; free models {_esc(row.free)} &middot; eligible machines {_esc(row.eligible_machines)}"
         + (
             f' (<a href="{_esc(row.editor_href)}">{_esc(row.eligible_machines_note)}</a>)'
@@ -324,7 +326,6 @@ def _row_html(row: RepoPolicyRow) -> str:
             else ""
         )
         + f" &middot; policy revision {_esc(row.policy_revision)} &middot; {_esc(row.linkage_note)}</p>"
-        f'<p><a href="{_esc(row.editor_href)}">edit this repository on the policy page</a></p>'
         "<h3>Claims and runs</h3>"
         f"<p>claim {_esc(row.claim_owner or 'none')} &middot; ttl {_esc(row.claim_ttl or '-')} &middot; "
         f"flags {_esc(row.flags or 'none')}</p>"
@@ -350,7 +351,13 @@ def _row_html(row: RepoPolicyRow) -> str:
             else '<p class="empty">No session receipts for this repository.</p>'
         )
         + f'<p class="station-meta">verification and handoff state: {_esc(row.verification)}. '
-        f"{_esc(NO_TELEMETRY)}.</p></details>"
+        f"{_esc(NO_TELEMETRY)}.</p>"
+    )
+    return (
+        f'<article class="repo-policy-row"><h3>{_esc(row.label)}</h3>'
+        f'<p class="station-meta">{_esc(row.privacy)} &middot; training {_esc(row.training)} '
+        f"&middot; free {_esc(row.free)}</p>"
+        f'<p><a href="{_esc(row.editor_href)}">View saved assignments</a></p>' + explorer.agent(detail) + "</article>"
     )
 
 
@@ -358,14 +365,20 @@ def _summary_card(row: RepoPolicyRow) -> str:
     single_target = len(row.targets) == 1
     href = "/view/repos?" + urlencode({"repo": row.targets[0]}) if single_target else "/view/repos"
     link_label = "View runs" if single_target else "View all runs"
-    claim = f"Claim held · {row.claim_owner} · {row.claim_ttl}" if row.claim_owner else "No active claim"
+    held = (
+        f'<p class="station-meta">{_esc(row.claim_owner)} &middot; {_esc(row.claim_ttl)}</p>'
+        if row.claim_owner
+        else explorer.agent('<p class="station-meta">No active claim</p>')
+    )
     flags = f'<p class="collision">{_esc(row.flags)}</p>' if row.flags else ""
     linkage = '<p class="station-meta">Policy linkage unknown</p>' if not row.linked else ""
     return (
         '<article class="repository-card"><header>'
         f'<h2>{_esc(row.label)}</h2><a class="card-link" href="{_esc(href)}">{link_label}</a></header>'
-        f"<p>{len(row.live)} reported run{'s' if len(row.live) != 1 else ''}</p>"
-        f'<p class="station-meta">{_esc(claim)}</p>{flags}{linkage}</article>'
+        f"<p>{len(row.live)} reported run{'s' if len(row.live) != 1 else ''}"
+        + (f" {explorer.pill('Claim held')}" if row.claim_owner else "")
+        + "</p>"
+        f"{held}{flags}{linkage}</article>"
     )
 
 
@@ -381,7 +394,7 @@ def render(
     """Repository summaries, with complete coordination and policy disclosures."""
     linked = sum(1 for row in rows if row.linked)
     if policy_available:
-        state = (
+        state = explorer.agent(
             f'<p class="station-meta">{linked} repository/repositories joined by canonical identity. '
             "Values come from the policy authority; this page never writes policy.</p>"
         )
@@ -390,6 +403,18 @@ def render(
             f'<p class="collision">Repository policy is {UNKNOWN}'
             + (f": {_esc(unavailable_reason)}" if unavailable_reason else "")
             + ". Claim and run coordination below is unaffected.</p>"
+        )
+    if not policy_available:
+        state += investigation.render(
+            "Repository policy",
+            route="/deck/repos",
+            observation=now,
+            facts={
+                "State": UNKNOWN,
+                "Detail": unavailable_reason or "Policy authority unavailable",
+                "Displayed targets": len(rows),
+            },
+            limits="Page render time; policy linkage unknown. Claim and run coordination is unaffected.",
         )
     blocks = "".join(_row_html(row) for row in rows) or '<p class="empty">No repositories to show.</p>'
     # Policy can decorate current observations, but cannot create them.
@@ -400,16 +425,18 @@ def render(
     if not cards:
         cards = '<p class="empty">No repository observations available. <a href="/view/repos">View run history</a></p>'
     body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Repositories</h1></div>"
-        f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
+        '<main class="deck-shell admin-page">'
         '<section aria-label="Repository summaries"><div class="repository-grid">'
         + cards
-        + "</div></section><details><summary>Claims and live runs</summary>"
-        + fleet_command_deck.repo_coordination_table(view)
-        + "</details><details><summary>Repository policy and metadata</summary>"
-        '<section class="panel" aria-labelledby="repo-policy"><header><h2 id="repo-policy">Repository policy</h2>'
-        f'<p class="panel-count">{len(rows)} target(s)</p></header>{state}{blocks}</section></details>'
+        + "</div></section>"
+        + explorer.agent(
+            '<section aria-label="Claims and live runs"><h2>Claims and live runs</h2>'
+            + fleet_command_deck.repo_coordination_table(view)
+            + "</section>"
+        )
+        + '<section class="panel" aria-labelledby="repo-policy"><header><h2 id="repo-policy">Repository policy</h2>'
+        + explorer.agent(f'<p class="panel-count">{len(rows)} target(s)</p>')
+        + f"</header>{state}{blocks}</section>"
         '<footer><a href="/view/machines">Runs</a> <a href="/view/repos">Repository board</a> '
         '<a href="/deck/ci">CI</a> <a href="/deck/owners">Ownership</a></footer></main>'
     )

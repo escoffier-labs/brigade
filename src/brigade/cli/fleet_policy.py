@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any, Mapping
 
-from .. import fleet_client, fleet_client_policy, fleet_policy
+from .. import fleet_client, fleet_client_policy, fleet_policy, fleet_policy_pr_rules
 from ..fleet_client_policy import FleetPolicyClientError
 
 
@@ -19,6 +19,14 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     p_show = policy_sub.add_parser("show", help="Show the current hub policy revision.")
     p_show.add_argument("--json", action="store_true", help="Emit JSON.")
     p_show.set_defaults(func=_dispatch_show)
+
+    p_rules = policy_sub.add_parser(
+        "pr-rules",
+        help="Print the enabled PR review and CI rules that apply to a repository (read only).",
+    )
+    p_rules.add_argument("--repo", default=None, help="Repository as owner/name. Omit to list every enabled rule.")
+    p_rules.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_rules.set_defaults(func=_dispatch_pr_rules)
 
     p_delegation = policy_sub.add_parser("delegation", help="Create or show a Brigade-to-T3 fleet policy delegation.")
     delegation_sub = p_delegation.add_subparsers(dest="policy_delegation_command", metavar="<delegation-command>")
@@ -262,6 +270,29 @@ def _dispatch_show(args: argparse.Namespace) -> int:
         json_out=False,
         text=f"policy {payload.get('schema')} version {payload.get('version')} digest {payload.get('digest')}",
     )
+
+
+PR_RULES_SCHEMA = "brigade.fleet_pr_rules.v1"
+
+
+def _dispatch_pr_rules(args: argparse.Namespace) -> int:
+    try:
+        repo = None if args.repo is None else _canonical_repo(args.repo)
+        payload = fleet_client_policy.show_policy()
+        document = payload.get("document")
+        if not isinstance(document, Mapping):
+            raise fleet_policy.FleetPolicyError("the hub returned no policy document")
+        rules = fleet_policy_pr_rules.rules_for(fleet_policy_pr_rules.parse_pr_rules(document.get("pr_rules")), repo)
+    except Exception as exc:
+        return _fail(exc)
+    revision = payload.get("version")
+    result = {"schema": PR_RULES_SCHEMA, "revision": revision, "repo": repo, "rules": rules}
+    if args.json:
+        return _emit(result, json_out=True)
+    lines = fleet_policy_pr_rules.compact_lines(rules, revision=revision, repo=repo)
+    if not rules:
+        lines.append("no enabled PR rules apply")
+    return _emit(result, json_out=False, text="\n".join(lines))
 
 
 def _dispatch_history(args: argparse.Namespace) -> int:

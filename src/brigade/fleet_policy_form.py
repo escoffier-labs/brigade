@@ -13,10 +13,10 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import parse_qs
 
-from . import fleet_policy
+from . import fleet_policy, fleet_policy_pr_rules
 
 _MAX_FIELDS = 1024
-SCOPES = ("defaults", "seat", "consumer", "repository", "rollback")
+SCOPES = ("defaults", "seat", "consumer", "repository", "pr_rules", "rollback")
 ACTIONS = ("preview", "save")
 RUNTIME_ROLES: tuple[str, ...] = ("impl", "review", "research", "scout", "security", "chef")
 ADMISSION_ROLE = "admission_default"
@@ -238,12 +238,103 @@ def _seat_record(existing: Mapping[str, Any] | None, submission: Submission) -> 
     }
 
 
+NEW_TARGET = "@new"
+
+
+def _split_items(raw: str) -> list[str]:
+    return [item for item in (part.strip() for part in raw.replace(",", " ").split()) if item]
+
+
+def _rule_when(fields: Mapping[str, str]) -> dict[str, Any]:
+    condition = (fields.get("condition") or "").strip()
+    when: dict[str, Any] = {"condition": condition}
+    if condition == "docs_only":
+        paths = _split_items(fields.get("when_paths") or "")
+        if paths:
+            when["paths"] = paths
+    elif condition == "review_quota_exhausted":
+        when["reviewer"] = (fields.get("when_reviewer") or "").strip()
+    elif condition == "label_present":
+        when["label"] = (fields.get("when_label") or "").strip()
+    elif condition == "repository":
+        when["repos"] = _split_items(fields.get("when_repos") or "")
+    return when
+
+
+def _rule_actions(fields: Mapping[str, str]) -> list[str]:
+    """One action per filled row. Unused row inputs are ignored, an unknown kind is not."""
+    actions: list[str] = []
+    for index in range(fleet_policy_pr_rules.MAX_THEN):
+        kind = (fields.get(f"act_kind_{index}") or "").strip()
+        if not kind:
+            continue
+        reviewer = (fields.get(f"act_reviewer_{index}") or "").strip()
+        value = (fields.get(f"act_value_{index}") or "").strip()
+        if kind in ("skip_label", "require_label"):
+            actions.append(f"{kind}:{value}")
+        elif kind in ("use_reviewer", "no_paid_credits"):
+            actions.append(f"{kind}:{reviewer}")
+        elif kind == "limit_reviewer":
+            count = (fields.get(f"act_count_{index}") or "").strip()
+            period = (fields.get(f"act_period_{index}") or "").strip()
+            actions.append(f"limit_reviewer:{reviewer}:{count}_per_{period}")
+        elif kind == "note":
+            actions.append(f"note:{(fields.get(f'act_value_{index}') or '').strip()}")
+        else:
+            actions.append(kind)
+    return actions
+
+
+def _pr_rules_document(document: dict[str, Any], submission: Submission) -> dict[str, Any]:
+    """Add, edit, toggle, or delete exactly one PR rule. Other rules are untouched."""
+    rules: list[dict[str, Any]] = [dict(rule) for rule in document.get("pr_rules") or []]
+    target = submission.target
+    fields = submission.fields
+    is_new = target == NEW_TARGET
+    rule_id = (fields.get("id") or "").strip() if is_new else target
+    if not rule_id:
+        raise DocumentError("a PR rule needs an id")
+    index = next((i for i, rule in enumerate(rules) if rule["id"] == rule_id), None)
+    if is_new and index is not None:
+        raise DocumentError(f"PR rule {rule_id!r} already exists")
+    if not is_new and index is None:
+        raise DocumentError(f"PR rule {rule_id!r} does not exist")
+    if _bool_field(fields.get("delete")):
+        if index is not None:
+            rules.pop(index)
+    elif (toggle := (fields.get("toggle") or "").strip()) and index is not None:
+        if toggle not in ("enable", "disable"):
+            raise DocumentError("toggle must be enable or disable")
+        rules[index]["enabled"] = toggle == "enable"
+    else:
+        rule = {
+            "id": rule_id,
+            "title": fields.get("title", "").strip(),
+            "when": _rule_when(fields),
+            "then": _rule_actions(fields),
+            "scope": {"repos": _split_items(fields.get("scope_repos") or "")},
+            "why": (fields.get("why") or "").strip() or None,
+            "enabled": _bool_field(fields.get("enabled")),
+        }
+        if index is None:
+            rules.append(rule)
+        else:
+            rules[index] = rule
+    if rules:
+        document["pr_rules"] = rules
+    else:
+        document.pop("pr_rules", None)
+    return document
+
+
 def build_document(current: Mapping[str, Any], submission: Submission) -> dict[str, Any]:
     """One scoped edit applied to the current document. Never a wholesale copy-in."""
     document = json.loads(json.dumps(fleet_policy.parse_document(current)))
     if submission.scope == "defaults":
         document["defaults"] = _merge_patch(document["defaults"], submission.fields, "")
         return document
+    if submission.scope == "pr_rules":
+        return _pr_rules_document(document, submission)
     target = submission.target
     if not target:
         raise DocumentError(f"a {submission.scope} edit needs a target")

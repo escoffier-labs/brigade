@@ -129,9 +129,7 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
         else ""
     )
     body = (
-        '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
-        "<h1>Command Deck &middot; Owners</h1></div>"
-        f'<p class="header-meta">{deck._esc(deck._stamp(now))}</p></header>'
+        '<main class="deck-shell admin-page">'
         + banners
         + '<section class="panel"><h2>Charters</h2><p>Read-only. Each charter is declared in the fleet policy '
         f"document (revision {deck._esc(revision)}) and describes responsibility. It does not block claims, "

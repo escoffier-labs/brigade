@@ -14,8 +14,11 @@ from contextlib import contextmanager
 
 import pytest
 
+from tests.fleet_investigation_assertions import investigation_markup, ordinary_prose
+
 from brigade.fleet_deck_icons import NAV_ICONS
 
+from brigade import fleet_admin_pages as admin_pages
 from brigade import fleet_command_deck as deck
 from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
@@ -159,7 +162,9 @@ def test_deck_sessions_are_separate_escaped_and_do_not_consume_capacity(conn, no
         now=now,
         interactive_sessions=sessions,
     )
-    html = deck.render_deck(view, nonce="nonce", now=now)
+    from brigade import fleet_deck_activity
+
+    html = fleet_deck_activity.render_sessions(view)
     assert "Reported agent sessions (1)" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
@@ -191,62 +196,62 @@ def _visible_text(html):
     return " ".join(parser.text)
 
 
-def test_reported_cloud_agent_survives_hub_projection_without_becoming_a_job(conn, now, monkeypatch):
-    from brigade import fleet_dot, fleet_deck_overview as overview
+def test_reported_cloud_agent_survives_hub_projection_without_becoming_a_job(tmp_path, monkeypatch):
+    from brigade import fleet_dot
 
+    now = datetime.now(timezone.utc)
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now.timestamp())
-    body = fleet_dot.report_session(
-        {
-            "version": 1,
-            "session_id": "cloud-session",
-            "agent_label": "Miller",
-            "repo_identity": "github.com/example/cloud-project",
-            "parent_session_id": "cloud-parent",
-            "work_id": "work-123",
-            "ownership_revision": 0,
-            "generation": 1,
-            "source": "cloud_threads",
-            "source_scope": "authorized-visible-threads",
-            "observed_at": now.isoformat(),
-            "sequence": 1,
-        }
-    )["presence_payload"]
-    fleet_hub_sessions.handle_session(conn, body, caller_node=NODE_A)
-    _seed_session(conn, session_id="local-session")
-    view = deck.build_view(
-        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 10),)),
-        live_runs=[],
-        claims=[],
-        enrolled_labels={NODE_A: "Alpha"},
-        last_heard={},
-        outcomes=[],
-        failed_outcomes=[],
-        observers=[],
-        now=now,
-        interactive_sessions=deck.fetch_interactive_sessions(conn, now=now),
-        cloud_workers=(deck.CloudWorker("codex", 0, 2, "closed", ()),),
-    )
-    html = deck.render_deck(view, nonce="nonce", now=now)
-    activity = html.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
-    visible = _visible_text(activity)
-    assert "Reported cloud agents (1)" in visible and "Miller" in visible and "Dot" in visible
-    assert "Presence only; running work unobserved" in visible
-    assert "cloud-session" not in visible and "cloud-parent" not in visible and "work-123" not in visible
-    assert "authorized-visible-threads" not in visible and "cloud_threads" not in visible
-    assert "Parent: cloud-parent" in html and "Work: work-123" in html
-    assert "Source: cloud_threads" in html and "Scope: authorized-visible-threads" in html
-    assert "Repository: github.com/example/cloud-project" in html
-    assert "github.com/example/cloud-project" not in visible
-    assert "Coverage: explicitly-reported-sessions" in html
-    assert "Observed: 2026-08-25T12:00:00+00:00" in html
-    assert "Session: local-session" in html and "Checkout: /tmp/project" in html
-    assert "Reported agent sessions (2)" in html
-    assert "Running: 0 · 0 managed jobs reported" in html and overview.summarize(view).busy == 0
-    assert view.cloud_workers[0].used == 0 and view.cloud_workers[0].leases == ()
-    assert "Provider leases" in html and "No active leases." in html
-    assert "Lease inventory does not cover reported agent presence." in html
-    # Hub expiry remains the authority; a display label never refreshes presence.
-    assert deck.fetch_interactive_sessions(conn, now=now + timedelta(seconds=901)) == []
+    with _start_hub(tmp_path, CONFIG) as (hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            body = fleet_dot.report_session(
+                {
+                    "version": 1,
+                    "session_id": "cloud-session",
+                    "agent_label": "Miller",
+                    "repo_identity": "github.com/example/cloud-project",
+                    "parent_session_id": "cloud-parent",
+                    "work_id": "work-123",
+                    "ownership_revision": 0,
+                    "generation": 1,
+                    "source": "cloud_threads",
+                    "source_scope": "authorized-visible-threads",
+                    "observed_at": now.isoformat(),
+                    "sequence": 1,
+                }
+            )["presence_payload"]
+            fleet_hub_sessions.handle_session(conn, body, caller_node=NODE_A)
+            _seed_session(conn, session_id="local-session")
+            conn.execute(
+                "UPDATE interactive_sessions SET started_at=?, heartbeat_at=?, expires_at=? WHERE session_id='local-session'",
+                (now.isoformat(), now.isoformat(), now.timestamp() + 900),
+            )
+            conn.commit()
+            assert deck.fetch_interactive_sessions(conn, now=now + timedelta(seconds=901)) == []
+            workers = deck.cloud_workers_from_snapshot(fleet_hub.cloud_snapshot(conn, deck.DeckConfig(stations=())))
+            assert workers and all(worker.used == 0 and worker.leases == () for worker in workers)
+        finally:
+            conn.close()
+        status, _, page = _request(hub, "GET", "/deck/activity", headers=_bearer())
+        assert status == 200
+        for value in (
+            "Miller",
+            "cloud-parent",
+            "work-123",
+            "cloud_threads",
+            "authorized-visible-threads",
+            "local-session",
+            "github.com/example/cloud-project",
+            "explicitly-reported-sessions",
+        ):
+            assert value in page
+        assert "Session report" in page and "Presence only" in page
+        assert "running work unobserved" in page
+        overview_page = _request(hub, "GET", "/deck", headers=_bearer())[2]
+        work = overview_page.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
+        assert "Miller" not in work and "local-session" not in work
+        capacity = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
+        assert "Use: 0 / 4 slots" in capacity
 
 
 @pytest.mark.parametrize("providers", [(), (deck.CloudWorker("codex", 0, 2, "closed", ()),)])
@@ -337,13 +342,16 @@ def test_cloud_presence_summary_bounds_labels_and_keeps_all_sessions_in_details(
         now=NOW,
         interactive_sessions=sessions + [dict(sessions[0], repo_label="another-membership")],
     )
-    html = overview.render_overview(view, NOW, worklore_enabled=True)
+    from brigade import fleet_deck_activity
+
+    html = fleet_deck_activity.render_cloud_presence(view)
+    details = overview.render_sessions(view)
     visible = _visible_text(html)
     assert "Reported cloud agents (12)" in visible
     assert len(re.findall(r"Agent-\d+", visible)) == 8
     assert "4 more in session details" in visible
-    assert "Agent-11" not in visible and "Agent-11" in html
-    assert "Reported agent sessions (12)" in html
+    assert "Agent-11" not in visible and "Agent-11" in details
+    assert "Reported agent sessions (12)" in details
 
 
 def _octopool_capture():
@@ -366,7 +374,7 @@ def test_capacity_without_an_octopool_observation_has_a_concise_connection_state
     from brigade import fleet_deck_overview as overview
 
     view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=())
-    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    html = admin_pages.render_capacity(view, NOW, nonce="nonce", worklore_enabled=False, tab="github-reads")
     assert "Octopool reporting not connected" in html
     assert "No quota, reset time, cache accounting" not in html
     assert "GitHub reads / Octopool" not in overview.render_overview(view, NOW, worklore_enabled=False)
@@ -377,11 +385,11 @@ def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_head
 
     observation = deck.octopool_observation_from_snapshot(_octopool_capture())
     view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), octopool_observation=observation)
-    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    html = admin_pages.render_capacity(view, NOW, nonce="nonce", worklore_enabled=False, tab="github-reads")
     panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
     visible = _visible_text(panel)
     assert "Captured Aug 25 12:00 UTC" in visible
-    assert "2026-08-25T12:00:00+00:00" in panel and "2026-08-25T12:00:00+00:00" not in visible
+    assert "2026-08-25T12:00:00+00:00" in panel
     assert "24h" in visible and "Pool-wide" in visible and "includes clients outside this fleet" in visible
     assert "41 requests" in visible and "7 cache-served responses" in visible
     assert "2 fallbacks" in visible and "1 service error" in visible
@@ -389,15 +397,16 @@ def test_capacity_renders_a_captured_pool_wide_octopool_observation_without_head
     assert "cache hits and stale responses" in panel
     assert "expected local fallbacks" in panel
     assert "Source: Octopool stats capture" in panel
-    assert "Eligible cache hit rate: 25.00%" in panel and "25.00%" not in visible
+    assert "Eligible cache hit rate: 25.00%" in panel
     assert "ignored-private-client" not in html and "untrusted window label" not in html
-    assert "quota" not in panel.lower() and "available" not in panel.lower() and "live" not in panel.lower()
+    parsed, roots = investigation_markup(panel, only_investigation_details=True)
+    metrics = ordinary_prose(parsed, roots).lower()
+    assert "quota" not in metrics and "available" not in metrics and "live" not in metrics
     assert "GitHub reads / Octopool" not in overview.render_overview(view, NOW, worklore_enabled=False)
 
 
 @pytest.mark.parametrize("bad", [True, -1, 2**53, "123", 2.5, float("nan"), float("inf")])
 def test_octopool_renderer_revalidates_provided_counters_and_omits_invalid_values(bad):
-    from brigade import fleet_deck_overview as overview
 
     raw = _octopool_capture()
     raw["pool_usage"] = {
@@ -411,7 +420,7 @@ def test_octopool_renderer_revalidates_provided_counters_and_omits_invalid_value
     }
     # Raw mappings may arrive from preview callers; the renderer owns this last boundary too.
     view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), octopool_observation=raw)
-    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    html = admin_pages.render_capacity(view, NOW, nonce="nonce", worklore_enabled=False, tab="github-reads")
     panel = html.split('id="octopool-observation"', 1)[1].split("</section>", 1)[0]
     assert "8 requests" in panel
     assert "cache-served responses" not in panel and "service errors" not in panel
@@ -431,7 +440,6 @@ def test_octopool_renderer_revalidates_provided_counters_and_omits_invalid_value
     ],
 )
 def test_octopool_renderer_refuses_malformed_capture_provenance(change):
-    from brigade import fleet_deck_overview as overview
 
     view = deck.DeckView(
         stations=(),
@@ -441,7 +449,7 @@ def test_octopool_renderer_refuses_malformed_capture_provenance(change):
         observers=(),
         octopool_observation={**_octopool_capture(), **change},
     )
-    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
+    html = admin_pages.render_capacity(view, NOW, nonce="nonce", worklore_enabled=False, tab="github-reads")
     assert "Octopool reporting not connected" in html
     assert "41 requests" not in html and "<script>bad" not in html
 
@@ -459,23 +467,14 @@ def test_capacity_leads_with_resources_and_retains_lease_evidence_in_advanced_de
             ),
         ),
     )
-    html = overview.render_capacity_page(view, NOW, nonce="nonce", worklore_enabled=False)
-    visible = _visible_text(html.split("<main", 1)[1])
-    assert html.index('id="machines-table"') < html.index("Usable for selected work: unknown")
-    assert "Usable for selected work: unknown" not in visible and "Active task" not in visible
-    assert "Dot reporting coverage unknown" not in visible
-    assert "0/64" not in visible and "circuit:" not in visible
-    assert "Configured slots are not verified usable workers" not in visible
-    assert html.count("Configured slots are not verified usable workers") == 1
-    assert "<summary>Advanced resource details</summary>" in html and "<summary>Provider details" in html
-    advanced = html.split("<summary>Advanced resource details</summary>", 1)[1]
-    assert "Usable for selected work: unknown" in advanced and "Active task" in advanced
-    assert "0/64" in advanced and "circuit: closed" in advanced
-    # Provider leases remain reachable under the grouped Fleet details disclosure.
-    overview_html = overview.render_overview(view, NOW, worklore_enabled=False)
-    overview_visible = _visible_text(overview_html)
-    assert "Active task" not in overview_visible and "0/64" not in overview_visible
-    assert "Active task" in overview_html.split("<summary>Fleet details</summary>", 1)[1]
+    machines = admin_pages.render_capacity(view, NOW, nonce="n", worklore_enabled=False)
+    cloud = admin_pages.render_capacity(view, NOW, nonce="n", worklore_enabled=False, tab="cloud-details")
+    assert "Capacity: 10 configured slots" in machines and "Usable for selected work: unknown" in machines
+    assert "Active task" not in machines
+    investigation_markup(machines, only_investigation_details=True)
+    assert "Active task" in cloud and "codex" in cloud
+    assert "usable headroom" in cloud
+    assert "Active task" not in overview.render_overview(view, NOW, worklore_enabled=False)
 
 
 def test_repo_page_marks_only_exact_live_dirty_overlap(conn, now):
@@ -1151,16 +1150,16 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
         root = _request(hub, "GET", "/", headers=_bearer())[2]
         alias = _request(hub, "GET", "/deck", headers=_bearer())[2]
-        assert "Command Deck" in root and "Alpha" in root
-        assert "Command Deck" in alias and "Alpha" in alias
-        assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
+        assert "<title>Overview \u00b7 Fleet Hub</title>" in root and "Machines (2)" in root
+        assert "<title>Overview \u00b7 Fleet Hub</title>" in alias and "Machines (2)" in alias
+        assert 'href="/deck/activity"' in root and 'href="/deck/projects"' in root
         # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
         assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}Overview</a>' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
-            ("/view/machines", "Fleet: Machines"),
-            ("/view/repos", "Fleet: Repos"),
+            ("/view/machines", "<title>Run history \u00b7 Fleet Hub</title>"),
+            ("/view/repos", "<title>Run history \u00b7 Fleet Hub</title>"),
         ):
             page = _request(hub, "GET", path, headers=_bearer())[2]
             assert title in page
@@ -1215,19 +1214,13 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         for index in range(3):
             _seed_run(hub, NODE_A, f"done-{index}", "run.completed", repo="repo-a")
         _seed_claim(hub, "repo-b", node=NODE_B)
-        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
-        # Fixed station order follows the config, not events.
-        machine_rows = body.split('id="machines-table"', 1)[1].split("</section>", 1)[0]
-        assert machine_rows.index(NODE_B[:12]) < machine_rows.index("Alpha")
-        # Unnamed station falls back to the enrolled label then node id prefix.
-        heading = f'title="{NODE_B}"'
-        assert heading in body and "BravoBox" in body
-        assert "not enrolled" not in body
-        # Capacity and busy counts.
-        assert "1 busy, 0 unknown" in body and "1 busy, 1 unknown" in body
-        # Terminal-only timeline, bounded by outcome_window.
-        assert "Recent outcomes" in body
-        assert body.count("run.completed") <= 2
+        status, _, body = _request(hub, "GET", "/deck/capacity", headers=_bearer())
+        assert status == 200
+        machine_list = body.split('aria-label="machines"', 1)[1].split("</nav>", 1)[0]
+        assert machine_list.index("BravoBox") < machine_list.index("Alpha")
+        assert "Use: 1 / 1 slots" in body and "Use: 1 / 2 slots" in body
+        activity = _request(hub, "GET", "/deck/activity", headers=_bearer())[2]
+        assert activity.count("Recorded outcome ·") == 2
 
 
 @pytest.mark.parametrize("claimed", [False, True])
@@ -1250,13 +1243,10 @@ def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path,
         _seed_run(hub, NODE_C, "obs", "run.created", repo="observer-repo")
         time.sleep(1.5)
         _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
-        assert "parallel activity" in deck_body
         assert "! collision" not in deck_body
-        assert "Same repo label on Alpha, Beta" in deck_body
-        assert "File overlap unknown" in deck_body
         alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
-        rail = alerts_page.split('<ul class="alert-rows">')[1].split("</ul>")[0]
-        assert "shared" not in rail and "parallel" not in rail
+        details = alerts_page.split("data-record-detail tabindex=")[1:]
+        assert all("shared" not in row and "parallel" not in row for row in details)
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
         repo_rows = repos_body.split("<tbody>")[1].split("<tr>")[1:]
         assert "observer-repo" in repo_rows[0]
@@ -1268,7 +1258,7 @@ def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path,
         assert "gone" not in repos_body
         # Observers are excluded from station totals.
         assert "observer-repo" not in deck_body.split("<main", 1)[1]
-        assert "Other observers" in deck_body and NODE_C[:12] in deck_body
+        assert "Other observers" not in deck_body
 
 
 def test_hostile_labels_are_escaped_and_no_config_hint(tmp_path):
@@ -1282,13 +1272,13 @@ def test_hostile_labels_are_escaped_and_no_config_hint(tmp_path):
         ]
     }
     with _start_hub(tmp_path, hostile) as (hub, _db):
-        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        _status, _headers, body = _request(hub, "GET", "/deck/capacity", headers=_bearer())
         assert "<script>" not in body
         assert "&lt;script&gt;" in body
     empty = tmp_path / "empty.json"
     empty.write_text(json.dumps({"stations": [{"node_id": NODE_A, "name": "Solo", "capacity": 1}]}), encoding="utf-8")
     with _start_hub(tmp_path / "no-config", None) as (hub, _db):
-        _status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        _status, _headers, body = _request(hub, "GET", "/deck/capacity", headers=_bearer())
         assert "No stations configured" in body
 
 
@@ -1328,17 +1318,16 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
             conn.close()
 
         _seed_run(hub, NODE_A, "physical", "run.created", repo="physical-repo")
-        status, headers, body = _request(hub, "GET", "/", headers=_bearer())
+        status, headers, body = _request(hub, "GET", "/deck/capacity/cloud", headers=_bearer())
         assert status == 200 and "frame-ancestors 'none'" in headers["content-security-policy"]
-        assert ">Provider leases</h2>" in body
-        assert " cursor</h3>" in body and ">1/3<" in body
-        assert "closed" in body
-        assert " codex</h3>" in body and ">0/2<" in body and "No active leases." in body
-        assert "1 busy, 3 unavailable" in body
+        assert "cursor" in body and "codex" in body  # a closed circuit is no longer spelled out for admins
+        assert "Configured limit" in body
         assert "&lt;task &amp; &quot;one&quot;&gt;" in body
         assert "&lt;repo &amp; &quot;one&quot;&gt;" in body
         assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
         assert HOLDER_TOKEN not in body and "a" * 64 not in body
+        machine = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
+        assert "Use: 1 / 4 slots" in machine
 
 
 def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tmp_path):
@@ -1398,9 +1387,9 @@ def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tm
             assert claimed[0] == 200
         finally:
             conn.close()
-        status, _headers, body = _request(hub, "GET", "/deck", headers=_bearer())
+        status, _headers, body = _request(hub, "GET", "/deck/capacity/cloud", headers=_bearer())
         assert status == 200
-        assert " grok-bot</h3>" in body and ">1/64<" in body
+        assert "grok-bot" in body and "1 leases · configured limit 64" in body
         assert "lease-deck" not in body
         conn = fleet_hub.open_db(db_path)
         try:
@@ -1418,8 +1407,8 @@ def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tm
             )
         finally:
             conn.close()
-        _status, _headers, after = _request(hub, "GET", "/deck", headers=_bearer())
-        assert ">0/64<" in after
+        _status, _headers, after = _request(hub, "GET", "/deck/capacity/cloud", headers=_bearer())
+        assert "0 leases · configured limit 64" in after
         assert "lease-deck" not in after
 
 
@@ -1439,6 +1428,7 @@ def _asset_request(hub, path: str):
 def test_command_deck_asset_routes_and_metadata(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
         for path, expected_type in (
+            ("/favicon.svg", "image/svg+xml"),
             ("/favicon.ico", "image/x-icon"),
             ("/favicon-32x32.png", "image/png"),
             ("/apple-touch-icon.png", "image/png"),
@@ -1557,9 +1547,9 @@ def _empty_view(control_plane=None, rail=()):
 def test_empty_rail_without_telemetry_is_not_all_clear():
     view = _empty_view()
     assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "ALL CLEAR" not in html
-    assert "Coverage unknown" in html
+    assert "unknown" in html.lower()
     assert "not the same as nothing being wrong" in html
 
 
@@ -1581,7 +1571,7 @@ def test_missing_authority_is_a_coverage_gap_not_an_all_clear():
         view = _empty_view(deck.control_plane_from_snapshot(snapshot))
         assert "control-plane authority" in deck.coverage_gaps(view.control_plane)
         assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
-        html = deck.render_deck(view, nonce="nonce", now=NOW)
+        html = deck.render_control_plane(view.control_plane)
         assert "authority unknown" in html
         assert "all control-plane sections reported" not in html
         assert "ALL CLEAR" not in html
@@ -1593,7 +1583,7 @@ def test_partial_telemetry_names_the_missing_sections():
     del snapshot["routes"]
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
     assert set(deck.coverage_gaps(view.control_plane)) == {"quota", "routes"}
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "no telemetry for: quota, routes" in html
     assert "unknown, not unlimited" in html
     assert "unknown, not unrouted" in html
@@ -1625,7 +1615,7 @@ def test_integration_needing_attention_is_not_reported_as_paused():
     )
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
     assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "needs-attention" in html
     assert "paused" not in html.replace("never proof it is paused", "")
     assert "unknown" in html  # last_report was absent
@@ -1645,19 +1635,19 @@ def test_optional_integration_telemetry_is_distinct_from_a_missing_section(repor
         del snapshot["integrations"]
     plane = deck.control_plane_from_snapshot(snapshot)
     assert ("integrations" in deck.coverage_gaps(plane)) is not reported
-    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(plane)
     if reported:
         assert "No integration readiness reports in this snapshot" in html
         assert "Worklore queue sourcing" not in html
-        assert "All clear" in html
+        assert deck.deck_verdict(_empty_view(plane)) == "ALL CLEAR"
     else:
         assert "Integration readiness unknown" in html
-        assert "Coverage unknown (1)" in html
+        assert deck.deck_verdict(_empty_view(plane)) == "COVERAGE UNKNOWN (1)"
 
 
 def test_machine_capacity_and_idle_reasons_render():
     view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "worker-linux-1" in html
     assert "1/4" in html
     assert "no eligible queued work" in html
@@ -1665,7 +1655,7 @@ def test_machine_capacity_and_idle_reasons_render():
 
 def test_quota_headroom_is_separated_from_execution_availability():
     view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "pool-one" in html
     assert "not evidence that a bot or runner will execute" in html
 
@@ -1704,7 +1694,7 @@ def test_effective_quota_is_preferred_over_raw_observations():
     assert row.admitted == "no"
     assert row.windows[0].remaining == "0"
     assert row.windows[0].observation_id == "obs-7"
-    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(plane)
     assert "Effective capacity" in html
     assert "obs-7" in html
     assert "window exhausted" in html
@@ -1716,7 +1706,7 @@ def test_effective_quota_is_preferred_over_raw_observations():
 def test_absent_effective_quota_is_unknown_and_raw_rows_stay_history():
     plane = deck.control_plane_from_snapshot(_control_plane_snapshot())
     assert plane.quota_effective_present is False
-    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(plane)
     assert "Effective headroom is <strong>unknown</strong>" in html
     assert "no centrally computed quota projection is attached" in html
     assert "pool-one" in html  # the raw observation is still visible
@@ -1734,7 +1724,7 @@ def test_the_deck_applies_no_quota_precedence_of_its_own():
         # A raw observation that disagrees, and is newer.
         quota=[{"pool": "pool-one", "used": 10, "limit": 10, "observed_at": "2026-09-05T11:59:00Z"}],
     )
-    html = deck.render_deck(_empty_view(deck.control_plane_from_snapshot(snapshot)), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(deck.control_plane_from_snapshot(snapshot))
     effective = html.split("Effective capacity", 1)[1].split("Quota observation history", 1)[0]
     assert "remaining <strong>4</strong>" in effective
     assert "used 10 of 10" not in effective
@@ -1759,7 +1749,7 @@ def test_integration_health_separates_scheduling_pickup_age_and_auth():
     assert (item.routine_state, item.auth_state) == ("needs-attention", "unauthenticated")
     assert item.last_pickup == "2026-09-05T11:40:00Z"
     assert item.last_report == deck.UNKNOWN
-    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(plane)
     assert "routine needs-attention" in html
     assert "auth unauthenticated" in html
     assert "queued for 40m" in html
@@ -1778,7 +1768,7 @@ def test_routing_receipts_and_overrides_render():
     snapshot = _control_plane_snapshot()
     snapshot["routes"][0]["override_reason"] = "operator pinned seat-beta"
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "d-1" in html
     assert "seat-alpha" in html
     assert "operator pinned seat-beta" in html
@@ -1790,7 +1780,7 @@ def test_blocked_queue_reasons_are_attention_not_zero():
     )
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
     assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "no eligible machine" in html
 
 
@@ -1798,14 +1788,14 @@ def test_control_plane_adapter_reads_authority():
     missing = deck.control_plane_from_snapshot(_control_plane_snapshot())
     assert missing.authority_present is False
     assert missing.authority.status == deck.UNKNOWN
-    html_missing = deck.render_deck(_empty_view(missing), nonce="nonce", now=NOW)
+    html_missing = deck.render_control_plane(missing)
     assert "authority unknown" in html_missing
 
     plane = deck.control_plane_from_snapshot(_control_plane_snapshot(authority={"active": True, "status": "active"}))
     assert plane.authority_present is True
     assert plane.authority.active == "yes"
     assert plane.authority.status == "active"
-    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    html = deck.render_control_plane(plane)
     assert "authority active" in html
     assert "authority unknown" not in html
     assert "authority inactive" not in html
@@ -1815,7 +1805,7 @@ def test_control_plane_values_are_escaped():
     snapshot = _control_plane_snapshot()
     snapshot["machines"][0]["unused_reason"] = "<script>alert(1)</script>"
     view = _empty_view(deck.control_plane_from_snapshot(snapshot))
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    html = deck.render_control_plane(view.control_plane)
     assert "<script>alert(1)</script>" not in html
     assert "&lt;script&gt;" in html
 
@@ -1840,8 +1830,9 @@ def test_build_view_carries_the_control_plane(conn, now):
         control_plane=plane,
     )
     assert view.control_plane is plane
-    html = deck.render_deck(view, nonce="nonce", now=now)
-    assert 'id="control-plane"' in html and 'href="/deck/roster"' in html
+    html = deck.render_control_plane(view.control_plane)
+    assert 'id="control-plane"' in html
+    assert 'href="/deck/roster"' in deck.render_deck(view, nonce="nonce", now=now)
 
 
 def _policy_machines():
@@ -1908,17 +1899,24 @@ def test_deck_http_renders_fresh_stale_queued_idle_and_unknown_slots(tmp_path):
         _insert_telemetry(db, NODE_A, observed_at=fresh, running={"session_ids": [], "run_ids": []})
         _insert_telemetry(db, NODE_B, observed_at=stale, running={"session_ids": [], "run_ids": []})
         _insert_telemetry(db, NODE_C, observed_at=fresh, running={"session_ids": ["session-busy"], "run_ids": []})
-        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
-        assert status == 200, page
-        assert "worker-idle" in page
-        assert "idle-capacity" in page
-        assert "worker-stale" in page
-        assert "stale-telemetry" in page
-        assert "worker-queued" in page
-        assert ">0<" in page
-        assert "worker-unknown" in page
-        assert "unknown-telemetry" in page
-        assert "ALL CLEAR" not in page or "unknown" in page.lower()
+        conn = fleet_hub.open_db(db)
+        try:
+            from brigade.fleet_hub_http import control_plane_from_hub
+
+            plane = control_plane_from_hub(conn)
+        finally:
+            conn.close()
+        page = deck.render_control_plane(plane)
+        for label in (
+            "worker-idle",
+            "idle-capacity",
+            "worker-stale",
+            "stale-telemetry",
+            "worker-queued",
+            "worker-unknown",
+            "unknown-telemetry",
+        ):
+            assert label in page
 
 
 def _fake_activated_marker(db) -> int:
@@ -1940,15 +1938,15 @@ def _fake_activated_marker(db) -> int:
 
 def test_deck_http_projects_fake_activated_authority(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, db):
-        status, _headers, staged = _request(hub, "GET", "/deck", headers=_bearer())
+        status, _headers, staged = _request(hub, "GET", "/deck/roster", headers=_bearer())
         assert status == 200, staged
-        assert "authority staged" in staged
-        assert "authority active" not in staged
+        assert "staged policy" in staged
+        assert "Policy authority is <strong>active</strong>" not in staged
         revision = _fake_activated_marker(db)
-        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
+        status, _headers, page = _request(hub, "GET", "/deck/roster", headers=_bearer())
         assert status == 200, page
-        assert "authority active" in page
-        assert "authority staged" not in page
+        assert "Policy authority is <strong>active</strong>" in page
+        assert "staged policy" not in page
         conn = fleet_hub.open_db(db)
         try:
             assert fleet_policy_migration.is_activated(conn) is True
@@ -2015,24 +2013,19 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         now = datetime.now(timezone.utc).replace(microsecond=0)
         _insert_telemetry(db, NODE_A, observed_at=now.isoformat())
         _insert_telemetry(db, NODE_B, observed_at=(now - timedelta(hours=2)).isoformat())
-        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
-        assert status == 200, page
-
-        def card(name: str) -> str:
-            found = re.search(rf'data-card="{name}">.*?class="card-value">([^<]*)<', page, re.S)
-            assert found, name
-            return found.group(1)
-
-        assert card("working") == "0"
-        assert card("idle") == "4"
-        assert card("offline") == "1"
-        rows = re.findall(r"<tr data-status=.*?</tr>", page, re.S)
-        alpha = next(row for row in rows if ">Alpha<" in row)
-        beta = next(row for row in rows if ">Beta<" in row)
+        status, _, page = _request(hub, "GET", "/deck/capacity", headers=_bearer())
+        assert status == 200
+        rows = page.split(' data-record-detail tabindex="-1">')[1:]
+        alpha = next(row for row in rows if "<h2>Alpha</h2>" in row)
+        beta = next(row for row in rows if "<h2>Beta</h2>" in row)
         assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
-        assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
+        assert (
+            "stale-telemetry" in beta
+            and '<h2>Beta</h2><span class="pill pill--' in beta
+            and ">stale</span></div>" in beta
+        )
         alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
-        assert 'class="attention-kind">stale telemetry</span>' in alerts_page
+        assert "stale telemetry" in alerts_page
 
 
 def test_octopool_prefers_canonical_cache_and_uncached_counters():
@@ -2089,40 +2082,32 @@ def test_v2_tasks_and_recent_outcomes_render_from_hub_without_managed_capacity(m
     )
     assert len(view.interactive_sessions) == 1
     assert len(view.recent_cloud_reports) == 2
-    html = overview.render_overview(view, NOW, worklore_enabled=True)
-    visible = _visible_text(html)
-    assert "Check <fixture>" in visible and "Check &lt;fixture&gt;" in html
-    assert "Miller" in visible and "Reported running" in visible
-    assert "Observed 1m ago" in visible
-    assert "Testing" in visible and "Awaiting fixture" not in visible and "Awaiting fixture" in html
-    assert "<summary>Recent cloud reports (2)</summary>" in html
-    history = html.split('<details class="activity-history">', 1)[1]
-    assert "Older build" not in visible and "Older build" in history and "stale" in history
-    assert "Reported completed" in history and "Reviewed fixture" in history
-    assert "provider execution unverified" in visible
-    about = html.split("<summary>About reports</summary>", 1)[1].split("</details>", 1)[0]
-    assert "explicitly reported sessions" in about and "explicitly reported sessions" not in visible
-    assert "receipt-a" not in visible and "receipt-a" in html
-    assert "active-task" not in visible and "outcome-task" not in visible
-    assert "Running: 0 · 0 managed jobs reported" in visible
+    overview_page = overview.render_overview(view, NOW, worklore_enabled=True)
+    assert "Check &lt;fixture&gt;" in overview_page and "Reported" in overview_page
+    assert "Older build" not in overview_page and "<details" not in overview_page
+    html = admin_pages.render_activity(view, NOW, nonce="p", worklore_enabled=True)
+    for fact in (
+        "Check &lt;fixture&gt;",
+        "Miller",
+        "Older build",
+        "historical",
+        "Reviewed fixture",
+        "receipt-a",
+        "active-task",
+        "outcome-task",
+        "Testing",
+        "Awaiting fixture",
+    ):
+        assert fact in html
+    assert "Provider lifecycle unverified" in html
     assert overview.summarize(view).busy == 0 and view.cloud_workers == ()
     capacity = overview.render_capacity_page(view, NOW, nonce="n", worklore_enabled=False)
-    capacity = capacity.split("<main", 1)[1].split("</main>", 1)[0]
-    assert 'data-activity-kind="reported"' not in capacity
-    for task_fact in (
-        "Check &lt;fixture&gt;",
-        "Older build",
-        "Reviewed fixture",
-        "Recent cloud reports",
-        "active-task",
-    ):
-        assert task_fact not in capacity
-    assert "<summary>Advanced resource details</summary>" in capacity
+    assert all(
+        fact not in capacity for fact in ("Check &lt;fixture&gt;", "Older build", "Reviewed fixture", "active-task")
+    )
 
 
 def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidence():
-    from dataclasses import replace
-
     from brigade import fleet_deck_overview as overview
     from tests.test_fleet_deck_overview import NOW as resource_now, _mixed_view
 
@@ -2135,22 +2120,18 @@ def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidenc
     )
     view = replace(_mixed_view(), cloud_workers=(worker,), octopool_observation=_octopool_capture())
     html = overview.render_capacity_page(view, resource_now, nonce="n", worklore_enabled=False)
-    html = html.split("<main", 1)[1].split("</main>", 1)[0]
-    visible = _visible_text(html)
-    assert "Machines (3)" in visible and "44%" in visible and "1m" in visible
-    assert "2 busy, 8 idle" in html and 'data-status="stale"' in html
-    assert "41 requests" in visible and "Pool-wide" in visible
-    assert "example-provider" not in visible and "Lease <fixture>" not in visible
-    assert "Control plane" not in visible and "No active leases." not in visible
-    assert "No active provider leases reported." not in visible
-    marker = '<details id="cloud-details"><summary>Advanced resource details</summary>'
-    assert html.count(marker) == 1
-    advanced = html.split(marker, 1)[1]
-    assert "example-provider" in advanced and "Lease &lt;fixture&gt;" in advanced
-    assert "lease-example" in advanced and "artifact-example" in advanced and "circuit: open" in advanced
-    assert "Control plane" in advanced and "stale-telemetry" in advanced
-    assert "Configured slots are not verified usable workers." in advanced
-    assert "Lease <fixture>" not in html
+    assert "Capacity: 10 configured slots" in html and "Use: 2 / 10 slots" in html
+    assert "stale-telemetry" in html and "1m" in html
+    assert "41 requests" not in html and "Lease &lt;fixture&gt;" not in html
+    investigation_markup(html, only_investigation_details=True)
+    cloud = admin_pages.render_capacity(view, resource_now, nonce="n", worklore_enabled=False, tab="cloud-details")
+    assert all(
+        value in cloud
+        for value in ("example-provider", "Lease &lt;fixture&gt;", "lease-example", "artifact-example", "open")
+    )
+    github = admin_pages.render_capacity(view, resource_now, nonce="n", worklore_enabled=False, tab="github-reads")
+    assert "41 requests" in github and "Pool-wide" in github
+    assert "Lease <fixture>" not in cloud
 
 
 @pytest.mark.parametrize(

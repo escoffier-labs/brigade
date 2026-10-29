@@ -191,7 +191,7 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
             expected_nav.append({"class": "board-nav", "aria-label": "Board views"})
         assert markup.elements("nav") == expected_nav, route
         routes = {urlsplit(attrs["href"]).path for attrs in markup.elements("a") if "href" in attrs}
-        assert {"/deck/repos", "/deck/roster", "/view/machines"} <= routes, route
+        assert {"/deck/projects", "/deck/roster", "/deck/activity"} <= routes, route
         assert "/" in routes or "/deck" in routes, route
 
 
@@ -359,7 +359,9 @@ def test_badge_icons_have_trusted_accessible_labels_without_inline_styles():
         deck.StationConfig("fixture-node", "Example", 20), "Example", True, len(tiles), NOW.isoformat(), tiles
     )
     view = deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
-    rendered = deck.render_deck(view, nonce="badge-nonce", now=NOW)
+    from brigade import fleet_deck_overview
+
+    rendered = deck._document(fleet_deck_overview.render_work_lists(view), nonce="badge-nonce", now=NOW)
     markup = Markup(rendered)
     assert not [(tag, attrs) for tag, attrs in markup.tags if "style" in attrs]
     assert markup.elements("img") == []
@@ -381,11 +383,9 @@ def test_populated_deck_orders_attention_activity_machines_and_queue():
     view = deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
     markers = [
+        'aria-labelledby="overview-machines-title"',
         'aria-labelledby="attention-title"',
         'aria-labelledby="working-title"',
-        'id="machines-table"',
-        'aria-label="Fleet summary"',
-        'aria-labelledby="queued-title"',
     ]
     positions = [rendered.index(marker) for marker in markers]
     assert positions == sorted(positions)

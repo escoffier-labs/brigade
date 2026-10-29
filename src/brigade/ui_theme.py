@@ -166,6 +166,12 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .deck-nav a[href="/deck/alerts"] .nav-count { color: var(--signal); }
 .tree-filter input { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--control-line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; }
 .tree-heading { display: flex; justify-content: space-between; margin: var(--space-4) 0 var(--space-2); color: var(--muted); font-size: 11px; }
+.sidebar-capacity-summary { min-width: 0; max-height: 320px; overflow-y: auto; }
+.sidebar-capacity-summary .tree-heading { margin: var(--space-2) 0 2px; }
+.sidebar-capacity-summary .tree-line { min-height: 26px; gap: var(--space-2); }
+.sidebar-capacity-link { display: block; min-width: 0; overflow: hidden; color: var(--ink); text-decoration: none; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-capacity-link:hover { color: var(--working); text-decoration: underline; }
+.sidebar-capacity-summary .tree-empty { padding: 4px 0; }
 .tree-row[data-status="stale"] .tree-meta { color: var(--signal); }
 .tree-row[data-status="offline"] .tree-meta { color: var(--muted); }
 .tree-row[data-status="unknown"] .tree-meta { color: var(--muted); }
@@ -202,6 +208,17 @@ tbody tr:hover td { background: var(--surface-raised); }
 .card-link { display: inline-flex; align-items: center; gap: var(--space-1); color: var(--muted); font-size: 12px; text-decoration: none; }
 .card-link:hover { color: var(--ink); }
 .card-link::after { content: "\\2192" / ""; margin-left: var(--space-1); }
+.admin-section-head { padding:28px 28px 0; }
+.admin-section-head h1 { display:flex; align-items:center; gap:12px; font-size:22px; margin:0; }
+.admin-section-head .icon { width:24px; height:24px; }
+.shell-main > .section-tabs { padding-left:28px; padding-right:28px; padding-top:24px; }
+.shell-main .admin-page { padding:28px; }
+.admin-page > .page-sub { margin:0 0 16px; }
+@media (max-width:700px) {
+ .admin-section-head { padding:16px 12px 0; }
+ .shell-main > .section-tabs { padding-left:12px; padding-right:12px; }
+ .shell-main .admin-page { padding:16px 12px; }
+}
 .section-tabs { display: flex; flex-wrap: nowrap; overflow-x: auto; max-width: 100%; margin: 0; padding: var(--space-4) var(--space-4) 0; border-bottom: 1px solid var(--line); }
 .section-tabs a { flex: 0 0 auto; white-space: nowrap; min-height: 40px; margin: 0 0 -1px; padding: var(--space-2) var(--space-3); border: 1px solid transparent; border-bottom: 1px solid var(--line); border-radius: var(--radius-control); border-bottom-left-radius: 0; border-bottom-right-radius: 0; }
 .section-tabs a[aria-current="page"] { border-color: var(--line); border-bottom-color: var(--canvas); background: var(--canvas); color: var(--ink); }
@@ -232,7 +249,7 @@ tbody tr:hover td { background: var(--surface-raised); }
   .shell-sidebar .deck-nav a { padding: 6px; gap: 4px; font-size: 12px; }
   .shell-sidebar .deck-nav .icon { display: none; }
   .shell-sidebar .deck-nav { flex-direction: row; flex-wrap: wrap; margin: var(--space-3) 0 0; }
-  .shell-sidebar .tree, .tree-filter, .resources, .sidebar-meta { display: none; }
+  .shell-sidebar .tree, .tree-filter, .sidebar-capacity-summary, .resources, .sidebar-meta { display: none; }
 }
 @media (max-width: 700px) {
   .deck-shell { padding: var(--space-3); }
@@ -376,6 +393,7 @@ _HEAD_LINKS = (
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
     '<meta name="application-name" content="Fleet Hub">'
     '<meta name="apple-mobile-web-app-title" content="Fleet Hub">'
+    '<link rel="icon" type="image/svg+xml" href="/favicon.svg">'
     '<link rel="icon" type="image/x-icon" href="/favicon.ico">'
     '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png">'
     '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">'
@@ -388,6 +406,11 @@ _THEME_COLOR_AUTO = (
     '<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">'
     '<meta name="theme-color" content="#f7f7f7" media="(prefers-color-scheme: light)">'
 )
+
+
+SOFT_REFRESH_ATTR = "data-soft-refresh"
+# Exact opening of the body tag of a soft-refresh page; the hub checks for it.
+SOFT_REFRESH_BODY_MARKER = f'<body class="deck" {SOFT_REFRESH_ATTR}="'
 
 
 def _esc(value: object) -> str:
@@ -404,6 +427,7 @@ def document(
     extra_css: str = "",
     script: str = "",
     scheme: str = "auto",
+    soft_refresh: bool = False,
 ) -> str:
     """Wrap an already-escaped *body* in the shared HTML shell.
 
@@ -412,12 +436,19 @@ def document(
     meta refresh the Deck and the boards rely on; ``None`` omits it. *scheme*
     is ``"auto"`` (dark, with light under ``prefers-color-scheme: light``) or
     ``"dark"`` (dark only, for pages whose own CSS still carries literal colors).
+    *soft_refresh* means the caller's *script* refreshes the page in place, so
+    the meta refresh moves inside ``<noscript>`` and the body carries
+    ``SOFT_REFRESH_BODY_MARKER`` (the hub widens ``connect-src`` for it).
     """
     if scheme not in ("auto", "dark"):
         raise ValueError(f"unknown color scheme {scheme!r}: use 'auto' or 'dark'")
     tokens = DARK_TOKENS if scheme == "dark" else TOKENS
     theme_color = _THEME_COLOR_DARK if scheme == "dark" else _THEME_COLOR_AUTO
     refresh_tag = f'<meta http-equiv="refresh" content="{int(refresh_seconds)}">' if refresh_seconds else ""
+    soft = bool(soft_refresh and refresh_seconds)
+    if soft:
+        refresh_tag = f"<noscript>{refresh_tag}</noscript>"
+    body_attrs = f' {SOFT_REFRESH_ATTR}="{int(refresh_seconds or 0)}"' if soft else ""
     script_tag = f'<script nonce="{_esc(nonce)}">{script}</script>' if script else ""
     return (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -425,5 +456,5 @@ def document(
         f"<title>{_esc(title)}</title>"
         f'<style nonce="{_esc(nonce)}">{tokens}{BASE_CSS}{extra_css}</style>'
         f"{script_tag}"
-        f'</head><body class="deck" data-as-of="{_esc(as_of)}">{body}</body></html>'
+        f'</head><body class="deck"{body_attrs} data-as-of="{_esc(as_of)}">{body}</body></html>'
     )

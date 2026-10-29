@@ -296,10 +296,17 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
 
 def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]:
     root = cursor_user_cmd._cursor_root()
-    desired = cursor_user_cmd._desired_files(root)
+    executable_error = None
+    try:
+        desired = cursor_user_cmd._desired_files(root)
+        expected_servers = cursor_user_cmd._mcp_servers()
+    except ValueError as exc:
+        desired = {}
+        expected_servers = {}
+        executable_error = str(exc)
     missing = False
-    stale = False
-    issues: list[str] = []
+    stale = executable_error is not None
+    issues: list[str] = [f"invalid engine executable override: {executable_error}"] if executable_error else []
     for path, (expected, executable, surface) in desired.items():
         if not path.exists():
             missing = True
@@ -339,9 +346,10 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
 
     mcp_doc, _ = cursor_user_cmd._read_json_object(root / "mcp.json")
     live_servers = mcp_doc.get("mcpServers") if mcp_doc is not None else None
-    expected_servers = cursor_user_cmd._mcp_servers()
-    mcp_current = isinstance(live_servers, dict) and all(
-        live_servers.get(name) == expected_servers[name] for name in cursor_user_cmd.MANAGED_MCP_NAMES
+    mcp_current = (
+        executable_error is None
+        and isinstance(live_servers, dict)
+        and all(live_servers.get(name) == expected_servers[name] for name in cursor_user_cmd.MANAGED_MCP_NAMES)
     )
     if not mcp_current:
         missing_names = [
@@ -373,7 +381,7 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
         issues.append("missing loaded Brigade guidance")
 
     skill_dir = root / "skills" / "brigade-work"
-    skill_current = all(
+    skill_current = executable_error is None and all(
         cursor_user_cmd._file_matches(path, expected)
         for path, (expected, _, _) in desired.items()
         if path.parent == skill_dir
@@ -383,7 +391,7 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
         "guidance": "current" if guidance_current else "missing",
         "skill": "current" if skill_current else "stale" if skill_dir.exists() else "missing",
         "hooks": "advisory" if hook_current else "stale" if (root / "hooks.json").exists() else "missing",
-        "mcp": "current" if mcp_current else "stale" if (root / "mcp.json").exists() else "missing",
+        "mcp": "current" if mcp_current else "stale" if executable_error or (root / "mcp.json").exists() else "missing",
         "version": "current" if version_current else "stale" if state else "missing",
     }
     return wiring, sorted(set(issues)), missing, stale

@@ -9,6 +9,8 @@ No token, cookie value, or identity is ever rendered.
 
 from __future__ import annotations
 
+from . import fleet_investigation as investigation
+
 import hashlib
 import hmac
 import html
@@ -68,6 +70,15 @@ class CloudRow:
 
 
 @dataclass(frozen=True)
+class PolicySeat:
+    provider: str
+    model: str
+    reasoning: str
+    enabled: bool
+    retired: bool
+
+
+@dataclass(frozen=True)
 class PolicyContext:
     """What the authoritative policy document says about the fields on this page.
 
@@ -84,6 +95,7 @@ class PolicyContext:
     retired_seats: tuple[str, ...] = ()
     consumer_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
     consumer_retired_seats: dict[str, tuple[str, ...]] = field(default_factory=dict)
+    seat_details: dict[str, PolicySeat] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -205,6 +217,16 @@ def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
             for consumer in CONSUMERS
         }
         return PolicyContext(
+            seat_details={
+                name: PolicySeat(
+                    provider=record["provider"],
+                    model=record["model"],
+                    reasoning=record["effort"] or "none",
+                    enabled=record["enabled"],
+                    retired=name in retired_seats,
+                )
+                for name, record in document["seats"].items()
+            },
             revision=int(current["revision"]),
             roles={key: str(value) for key, value in (document["defaults"].get("roles") or {}).items()},
             admission_defaults={
@@ -392,6 +414,80 @@ def _authority_banner(activation: fleet_policy_page.Activation) -> str:
     )
 
 
+def _read_only(view: RosterView, *, nonce: str, now: datetime) -> str:
+    """Use the loaded authority decision, never a second settings store."""
+    from . import fleet_admin_explorer as explorer
+    from .fleet_admin_pages import facts, document
+
+    from . import fleet_live_routing
+
+    routing = fleet_live_routing.project(view)
+    entries = []
+    for role in (*routing.roles, *routing.fallbacks):
+        detail = (
+            explorer.hero(role.label, role.state)
+            + facts(
+                {
+                    "Model": role.model,
+                    "Reasoning": role.reasoning if role.reasoning != "none" else "",
+                    "Seat": role.seat,
+                }
+            )
+            + explorer.agent(
+                facts(
+                    {
+                        "Provider": role.provider,
+                        "Assignment source": routing.source,
+                        "Policy activation": routing.activation,
+                    }
+                )
+                + "<p>Configured assignment; provider availability and sign-in are unverified.</p>"
+            )
+        )
+        if role.problem:
+            detail += investigation.render(
+                role.label,
+                route="/deck/roster",
+                observation=now,
+                facts={
+                    "Assignment": role.seat,
+                    "State": role.state or role.model,
+                    "Source": routing.source,
+                    "Activation": routing.activation,
+                },
+                limits="Page render time; assignment configuration does not establish provider availability or sign-in.",
+            )
+        entries.append(
+            explorer.Entry(role.key, role.label, role.model + (" · " + role.state if role.state else ""), detail)
+        )
+    source = routing.detail
+    content = (
+        explorer.agent(f'<p class="page-sub">{_esc(source)}</p>')
+        + (
+            investigation.render(
+                "Settings activation",
+                route="/deck/roster",
+                observation=now,
+                facts={"State": view.activation.state, "Detail": source},
+                limits="Page render time; current assignment authority is unconfirmed.",
+            )
+            if routing.uncertain
+            else ""
+        )
+        + explorer.render(entries, label="roles")
+        + "<p>Browser access is read-only.</p>"
+    )
+    return document(
+        content, None, now, nonce=nonce, title="Live routing", active="roster", worklore_enabled=_worklore_enabled()
+    )
+
+
+def _worklore_enabled() -> bool:
+    from . import worklore_http
+
+    return worklore_http.enabled()
+
+
 def render(
     view: RosterView,
     *,
@@ -410,6 +506,8 @@ def render(
     authority is active, when the role and admission-fallback dropdowns post a
     scoped policy preview instead of a legacy run-preference write.
     """
+    if not editable:
+        return _read_only(view, nonce=nonce, now=now)
     roles = dict(view.preference)
     notes = view.preference.get("notes") or ""
     seats_on = {row.seat for row in view.seats if row.enabled}
@@ -432,19 +530,27 @@ def render(
     # cannot be read, the controls go read-only rather than write anywhere.
     authoritative = editable and view.activation.active and view.policy.available
     legacy_editable = editable and not view.activation.active
-    parts: list[str] = ['<main class="deck-shell">']
+    parts: list[str] = ['<main class="deck-shell admin-page">']
     parts.append(
-        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Settings · Live routing</h1>'
-        f'<p class="station-meta">revision {view.revision}, updated {_esc(view.revision_updated_at)} by '
+        '<div data-audience="agent"><p class="station-meta">'
+        f"revision {view.revision}, updated {_esc(view.revision_updated_at)} by "
         f"{_esc(view.updated_by or 'unknown')}</p></div>"
-        f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
     parts.append("<h2>Live routing</h2>")
     parts.append(_authority_banner(view.activation))
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
     if error:
-        parts.append(f'<p class="banner banner--error">{_esc(error)}</p>')
+        parts.append(
+            f'<p class="banner banner--error">{_esc(error)}</p>'
+            + investigation.render(
+                "Settings save",
+                route="/deck/roster",
+                observation=now,
+                facts={"Reported error": error, "Revision": view.revision},
+                limits="Rendered validation/conflict message only; submitted configuration and credentials omitted.",
+            )
+        )
     if not editable:
         parts.append(
             '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'

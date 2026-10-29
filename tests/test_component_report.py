@@ -767,3 +767,24 @@ def test_doctor_detail_includes_expected_and_installed_revisions(tmp_path, monke
     _status, _name, detail = checks[0]
     assert "expected revision" in detail
     assert "installed revision none" in detail
+
+
+def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, monkeypatch):
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    _write_healthy_install(env, component_manifest.manifest_path())
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    raw = json.loads(state_path.read_text())
+    record = raw["components"].pop("miseledger")
+    old = Path(record["executable"])
+    new = old.with_name("brigade-evidence")
+    old.rename(new)
+    record["executable"] = str(new)
+    raw["components"]["brigade-evidence"] = record
+    state_path.write_text(json.dumps(raw))
+    report = component_report.inspect_components(env=env, system="linux")
+    assert report.state_file_status == "valid"
+    rows = [row for row in component_report.render_json(report)["components"] if row["component_id"] == "miseledger"]
+    assert len(rows) == 1
+    assert rows[0]["installed_component_id"] == "brigade-evidence"
+    assert rows[0]["recorded_executable"] == str(new)
