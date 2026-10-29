@@ -14,8 +14,6 @@ use crate::store::walk::Entry;
 
 pub(super) struct DbFile {
     content_hash: String,
-    size: u64,
-    mtime: i64,
     extractor_fingerprint: Option<String>,
 }
 
@@ -207,14 +205,13 @@ pub(super) fn entry_freshness(
             _ => EntryFreshness::New,
         });
     };
-    if db_file.size != entry.size || db_file.mtime != entry.mtime {
-        // Hash raw bytes (identical to the stored hash of valid UTF-8). A file
-        // that can no longer be read counts as changed, so sync retries it and
-        // records the failure instead of the freshness check aborting.
-        match fs::read(&entry.path) {
-            Ok(bytes) if hex_hash(&bytes) == db_file.content_hash => {}
-            _ => return Ok(EntryFreshness::Changed),
-        }
+    // Size and whole-second mtime can stay the same after an edit. Validate
+    // the content even when those stats match before declaring the index fresh.
+    // Hash raw bytes so invalid UTF-8 or unreadable files count as changed;
+    // sync then retries them and records the failure instead of aborting here.
+    match fs::read(&entry.path) {
+        Ok(bytes) if hex_hash(&bytes) == db_file.content_hash => {}
+        _ => return Ok(EntryFreshness::Changed),
     }
     if db_file.extractor_fingerprint.as_deref() != Some(extractor_fingerprint_for(entry.lang)) {
         return Ok(EntryFreshness::FingerprintStale);
@@ -227,9 +224,9 @@ pub(super) fn load_db_files(conn: &Connection) -> Result<HashMap<String, DbFile>
     let has_fingerprint =
         crate::store::schema::table_has_column(conn, "files", "extractor_fingerprint")?;
     let sql = if has_fingerprint {
-        "SELECT path, content_hash, size, modified_at, extractor_fingerprint FROM files"
+        "SELECT path, content_hash, extractor_fingerprint FROM files"
     } else {
-        "SELECT path, content_hash, size, modified_at, NULL AS extractor_fingerprint FROM files"
+        "SELECT path, content_hash, NULL AS extractor_fingerprint FROM files"
     };
     let mut stmt = conn.prepare(sql)?;
     let rows = stmt.query_map([], |row| {
@@ -237,9 +234,7 @@ pub(super) fn load_db_files(conn: &Connection) -> Result<HashMap<String, DbFile>
             row.get::<_, String>(0)?,
             DbFile {
                 content_hash: row.get::<_, String>(1)?,
-                size: row.get::<_, i64>(2)? as u64,
-                mtime: row.get::<_, i64>(3)?,
-                extractor_fingerprint: row.get::<_, Option<String>>(4)?,
+                extractor_fingerprint: row.get::<_, Option<String>>(2)?,
             },
         ))
     })?;
