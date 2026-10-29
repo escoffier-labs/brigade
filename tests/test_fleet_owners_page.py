@@ -180,7 +180,7 @@ def test_owners_page_shows_grokbot_jobs_only_to_editable_viewers(tmp_path):
         assert status == 200 and "grokbot-1" in admin_body
         status, _, cookie_body = _request(hub, "/deck/owners", headers=_cookie(hub))
         assert status == 200 and "grokbot-1" not in cookie_body
-        assert "Nothing held right now." in cookie_body
+        assert "Nothing held right now" in cookie_body
 
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -306,7 +306,7 @@ def test_page_shows_charters_beside_live_holdings_and_unassigned_items(tmp_path)
         assert "example/held" in alpha_card and "example/loose" not in alpha_card
         unassigned = rest.partition("<h2>Unassigned</h2>")[2]
         assert "example/loose" in unassigned and "example/held" not in unassigned
-        assert "No overlaps." in body
+        assert "No overlaps" in body
 
 
 def test_page_lists_overlaps_and_principal_state():
@@ -344,7 +344,7 @@ def test_unknown_source_is_called_out_instead_of_shown_as_empty():
     body = _render(view)
     assert "Holdings unknown: could not read claims, sessions." in body
     assert "Could not read: claims, sessions." in body
-    assert "Nothing held right now." not in body
+    assert "Nothing held right now" not in body
 
 
 def test_a_principals_read_failure_does_not_mark_holdings_unknown():
@@ -355,7 +355,7 @@ def test_a_principals_read_failure_does_not_mark_holdings_unknown():
     )
     body = _render(view)
     assert "Holdings unknown" not in body
-    assert "Nothing held right now." in body
+    assert "Nothing held right now" in body
 
 
 def test_long_overlap_lists_are_capped_with_a_note():

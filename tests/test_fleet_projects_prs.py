@@ -134,10 +134,10 @@ def test_hostile_values_are_escaped_and_bad_repository_or_number_is_skipped():
 
 def test_empty_states():
     section, _ = prs.render({"repositories": [], "as_of": CI_NOW}, PAGE_NOW)
-    assert "No open pull requests observed." in section and "brigade fleet ci reconcile" in section
+    assert "No open pull requests observed" in section and "brigade fleet ci reconcile" in section
     seen = {"repositories": [{"repo": "example/empty", "head": {}, "pulls": [], "pulls_complete": True}]}
     section, _ = prs.render(seen, PAGE_NOW)
-    assert "No open pull requests observed." in section and "reconcile" not in section
+    assert "No open pull requests observed" in section and "reconcile" not in section
     unknown = {"repositories": [{"repo": "example/empty", "head": {}, "pulls": [], "pulls_complete": False}]}
     assert "PR list incomplete for example/empty" in prs.render(unknown, PAGE_NOW)[0]
 
@@ -147,7 +147,7 @@ def test_projects_page_has_no_pull_request_rows_and_links_to_the_pull_requests_p
     page = {"state": "empty", "campaigns": [], "selected": None}
     projects = pages.render_projects(page, view, PAGE_NOW, nonce="n", worklore_enabled=True)
     assert "data-pr-root" not in projects and "pr-row" not in projects
-    assert "No projects yet. GitHub Projects boards will appear here once connected." in projects
+    assert "No projects yet" in projects
     assert '<a href="/deck/pulls">View open pull requests</a>' in projects
     assert "No project goals reported." not in projects
     pulls = pages.render_pulls(_seed(db), view, PAGE_NOW, nonce="n", worklore_enabled=True)

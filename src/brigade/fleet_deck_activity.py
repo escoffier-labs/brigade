@@ -7,6 +7,7 @@ from typing import Mapping, Sequence
 
 from . import fleet_command_deck as deck
 from . import fleet_investigation as investigation
+from . import ui_theme
 
 _esc = deck._esc
 REASONS = {
@@ -350,7 +351,9 @@ def render_provider_leases(view: deck.DeckView) -> str:
     return (
         f'<ul class="cloud-lease-list">{rows}</ul>'
         if rows
-        else '<p class="empty">No active provider leases reported.</p>'
+        else ui_theme.empty_state(
+            "No active provider leases reported", "Leases appear here while a provider is running work for a task."
+        )
     )
 
 
@@ -392,7 +395,13 @@ def render_sessions(view: deck.DeckView) -> str:
             + "".join(_membership(item) for item in memberships)
             + "</ul></details></div></li>"
         )
-    body = f'<ul class="rows">{"".join(rows[:8])}</ul>' if rows else '<p class="empty">No agent sessions reported.</p>'
+    body = (
+        f'<ul class="rows">{"".join(rows[:8])}</ul>'
+        if rows
+        else ui_theme.empty_state(
+            "No agent sessions reported", "Sessions appear here while stations report agents that are running."
+        )
+    )
     if len(rows) > 8:
         body += (
             f"<details><summary>{len(rows) - 8} more reported agent sessions</summary>"

@@ -21,13 +21,15 @@ from . import fleet_command_deck as deck
 from . import fleet_policy_pr_rules as rules_mod
 from .fleet_policy_form import NEW_TARGET, Submission
 from .fleet_policy_page import Plan, _confirm_form, csrf_value
+from .ui_theme import empty_state
 
 __all__ = ["csrf_value", "render", "FORM_ACTION", "READ_ONLY_NOTICE"]
 
 FORM_ACTION = "/deck/pr-rules"
 READ_ONLY_NOTICE = "Access: read-only. You can inspect PR rules; editing requires an authorized admin request."
 AGENT_COMMAND = "brigade fleet policy pr-rules"
-EMPTY_TEXT = "No PR rules yet."
+EMPTY_TEXT = "No PR rules yet"
+EMPTY_HINT = "PR rules decide how pull requests are handled, and each rule appears in this list once added."
 ACTION_SLOTS = 3
 CONFIRM_HINT = (
     "Saves exactly the change previewed above as a new policy revision. If the policy changed since the preview, "
@@ -400,7 +402,7 @@ def render(
     top += _plan_panel(plan, rules, draft=draft, review=review) if editable else ""
     count = len(rules)
     if count == 0:
-        body = top + f'<section class="panel"><h2>PR rules</h2><p class="empty">{EMPTY_TEXT}</p></section>'
+        body = top + f'<section class="panel"><h2>PR rules</h2>{empty_state(EMPTY_TEXT, EMPTY_HINT)}</section>'
         if editable:
             body += _add_panel(revision=revision, csrf=csrf, draft=draft)
         body += _agent_summary(revision, 0)
@@ -421,7 +423,7 @@ def render(
             top
             + bar
             + (_add_panel(revision=revision, csrf=csrf, draft=draft) if editable else "")
-            + explorer.render(entries, label="rules", empty="No rules match.")
+            + explorer.render(entries, label="rules", empty="No rules match")
             + _agent_summary(revision, count)
         )
     return deck._document(

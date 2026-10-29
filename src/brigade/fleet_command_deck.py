@@ -23,6 +23,7 @@ from brigade.fleet_deck_brands import (
 
 from .fleet_event_freshness import observation_state
 from . import fleet_deck_shell, ui_theme, fleet_live_routing
+from .fleet_deck_empty_copy import COPY
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -1616,10 +1617,7 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         return (
             '<section class="panel" aria-labelledby="control-plane"><header>'
             '<h2 id="control-plane">Control plane</h2></header>'
-            f"{gap_html}"
-            '<p class="empty">No control-plane projection is attached to this Deck yet, so policy version, '
-            "machine capacity, quota, routing receipts, queue eligibility, and integration readiness are all "
-            "unknown. That is not the same as nothing being wrong.</p></section>"
+            f"{gap_html}" + ui_theme.empty_state(*COPY["no_projection"]) + "</section>"
         )
     policy = control_plane.policy
     if control_plane.authority_present:
@@ -1641,18 +1639,14 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         "<th>Load/capacity</th><th>Claims</th><th>Free slots</th><th>Eligible queued</th><th>Why idle</th>"
         f"<th>Observed</th></tr></thead><tbody>{machine_rows}</tbody></table></div>"
         if machine_rows
-        else '<p class="empty">No machine capacity reported (unknown, not idle).</p>'
+        else ui_theme.empty_state(*COPY["capacity"])
     )
     quota_rows = "".join(
         f"<li>{_esc(row.get('pool', UNKNOWN))} &middot; used {_esc(_cp_text(row.get('used')))} of "
         f"{_esc(_cp_text(row.get('limit')))} &middot; observed {_esc(_cp_text(row.get('observed_at')))}</li>"
         for row in control_plane.quota
     )
-    quota_html = (
-        f'<ul class="attention-list">{quota_rows}</ul>'
-        if quota_rows
-        else '<p class="empty">No quota observations (unknown, not unlimited).</p>'
-    )
+    quota_html = f'<ul class="attention-list">{quota_rows}</ul>' if quota_rows else ui_theme.empty_state(*COPY["quota"])
     effective_html = _quota_effective_html(control_plane)
     route_rows = "".join(
         f"<li>{_esc(route.decision_id)} &middot; policy {_esc(route.policy_version)} &middot; "
@@ -1663,9 +1657,7 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         for route in control_plane.routes
     )
     routes_html = (
-        f'<ul class="attention-list">{route_rows}</ul>'
-        if route_rows
-        else '<p class="empty">No routing receipts (unknown, not unrouted).</p>'
+        f'<ul class="attention-list">{route_rows}</ul>' if route_rows else ui_theme.empty_state(*COPY["routes"])
     )
     from .fleet_deck_activity import REASONS
 
@@ -1682,9 +1674,9 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
             else (
                 ""
                 if control_plane.queue.exclusions
-                else '<p class="empty">No blocked reasons reported.</p>'
+                else ui_theme.empty_state(*COPY["blocked_none"])
                 if control_plane.queue.blocked_known
-                else '<p class="empty">Blocked reasons unknown.</p>'
+                else ui_theme.empty_state(*COPY["blocked_unknown"])
             )
         )
         + _queue_exclusions_html(control_plane.queue, worklore_enabled=worklore_enabled)
@@ -1701,9 +1693,9 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         f'<ul class="attention-list">{integration_rows}</ul>'
         if integration_rows
         else (
-            '<p class="empty">No integration readiness reports in this snapshot.</p>'
+            ui_theme.empty_state(*COPY["integrations_none"])
             if "integrations" in control_plane.present
-            else '<p class="empty">Integration readiness unknown: no telemetry section reported.</p>'
+            else ui_theme.empty_state(*COPY["integrations_unknown"])
         )
     )
     return (
@@ -1743,10 +1735,7 @@ def _queue_exclusions_html(queue: QueueState, *, worklore_enabled: bool) -> str:
 def _quota_effective_html(control_plane: ControlPlane) -> str:
     """Effective remaining capacity, or an honest unknown. Never derived here."""
     if not control_plane.quota_effective_present:
-        return (
-            '<p class="empty">Effective headroom is <strong>unknown</strong>: no centrally computed quota '
-            "projection is attached. Raw observations below are history, not available headroom.</p>"
-        )
+        return ui_theme.empty_state(*COPY["headroom_unknown"])
     rows = "".join(
         f"<li>{_esc(row.account_id)} &middot; pool {_esc(row.pool_id)} &middot; {_esc(row.provider)} &middot; "
         f"admitted {_esc(row.admitted)}"
@@ -1770,7 +1759,7 @@ def _quota_effective_html(control_plane: ControlPlane) -> str:
         for row in control_plane.quota_effective
     )
     if not rows:
-        return '<p class="empty">The effective quota projection reported no rows.</p>'
+        return ui_theme.empty_state(*COPY["headroom_no_rows"])
     return f'<ul class="attention-list">{rows}</ul>'
 
 

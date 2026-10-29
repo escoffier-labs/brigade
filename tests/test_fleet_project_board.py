@@ -487,8 +487,8 @@ def test_views_epics_only_and_list_grouped_by_status():
     assert listing.count('class="pr-row"') == 11 and "bd-columns" not in listing
     none = fixture.snapshot(NOW)
     none["items"] = [i for i in none["items"] if i["sub_total"] == 0]
-    assert "No epics on this board." in render(none, page.Options(view="epics"))[0]
-    assert "No issues on this board." in render({**none, "items": []})[0]
+    assert "No epics on this board" in render(none, page.Options(view="epics"))[0]
+    assert "No issues on this board" in render({**none, "items": []})[0]
 
 
 def test_header_links_updated_age_search_and_partial_note():
@@ -538,7 +538,7 @@ def test_projects_page_composition_and_empty_states():
     view = _mixed_view()
     empty = {"state": "empty", "campaigns": [], "selected": None}
     no_board = pages.render_projects(empty, view, NOW, nonce="n", worklore_enabled=True)
-    assert "No projects yet. GitHub Projects boards will appear here once connected." in no_board
+    assert "No projects yet" in no_board
     assert (
         "brigade fleet projects sync --owner escoffier-labs --number 1" in no_board and "data-bd-root" not in no_board
     )

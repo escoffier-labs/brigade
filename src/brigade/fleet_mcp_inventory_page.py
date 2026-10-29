@@ -291,7 +291,8 @@ def render(view: McpView, *, nonce: str, now: datetime, group: str = "server", f
             for machine in view.machines
         ]
         toolbar = _group_switch(group)
-        label, empty = "machines", "No machines are enrolled."
+        label, empty = "machines", "No machines enrolled"
+        hint = f"Machines appear here once they enroll with the hub and publish `{inventory.PUBLISH_COMMAND}`."
     else:
         shown = [server for server in view.servers if inventory.matches(server, filter_key)]
         entries = [
@@ -306,8 +307,14 @@ def render(view: McpView, *, nonce: str, now: datetime, group: str = "server", f
         ]
         toolbar = _group_switch(group) + _chips(view, filter_key) + note
         label = "servers"
-        empty = "Nothing needs attention." if view.servers else "No MCP servers are configured on reporting machines."
-    listing = explorer.render(entries, label=label, empty=empty, toolbar=toolbar)
+        if view.servers:
+            empty, hint = "Nothing matches this filter", "Choose another filter above to see the other servers."
+        else:
+            empty, hint = (
+                "No MCP servers configured",
+                "Reporting machines have no MCP servers in the configs Brigade reads.",
+            )
+    listing = explorer.render(entries, label=label, empty=empty, empty_hint=hint, toolbar=toolbar)
     return _page(listing + scope_note, nonce=nonce, now=now)
 
 
