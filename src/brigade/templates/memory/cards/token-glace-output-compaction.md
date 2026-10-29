@@ -27,6 +27,8 @@ standalone distributions need explicit qualification.
 `wire plan --write` saves a plan only. Adding the station never activates TokenJuice hooks.
 A legacy `brigade add token-glace` request resolves to the new owner.
 
+`brigade add tokens` refuses to install while an unqualified `tokenjuice` or legacy `token-glace` executable is on PATH. Complete the host cutover first.
+
 ### Host cutover
 
 Review `brigade tokens wire plan`. Back up the selected host's owned configuration,

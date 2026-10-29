@@ -1,6 +1,8 @@
 """Ownership and explicit activation regressions at the station boundary."""
 
 import json
+import re
+import shlex
 import sys
 
 import pytest
@@ -173,3 +175,22 @@ def test_add_failed_install_never_wires(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(managed.proc, "run", lambda *a, **kw: managed.proc.Result(1, "", "synthetic install failure"))
     assert add.run(tmp_path, "tokenjuice") == 1
     assert "[fail]" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("entrypoint", ["/qualified/upstream cli.js", "/qualified/space;$(echo unwanted)/cli.js"])
+def test_rendered_wire_plan_preserves_argv(monkeypatch, tmp_path, entrypoint):
+    monkeypatch.setattr(managed, "tokenjuice_binary", lambda: entrypoint)
+    plan = tokens_cmd.wire_plan_payload(target=tmp_path)
+    rendered = tokens_cmd.health.render_plan_md("tokens wire plan", plan)
+    blocks = re.findall(r"```sh\n(.*?)\n```", rendered, re.DOTALL)
+    assert [shlex.split(block) for block in blocks] == plan["commands"]
+
+
+@pytest.mark.parametrize("legacy_only", [False, True])
+def test_occupied_alias_guidance_requires_cutover(monkeypatch, tmp_path, legacy_only):
+    monkeypatch.setattr(managed, "tokenjuice_binary", lambda: None)
+    name = "token-glace" if legacy_only else "tokenjuice"
+    monkeypatch.setattr(managed.proc, "which", lambda candidate: "/owned/" + name if candidate == name else None)
+    for payload in [tokens_cmd.status_payload(tmp_path), tokens_cmd.wire_plan_payload(target=tmp_path)]:
+        assert "brigade add tokens" not in payload["next_commands"]
+        assert "cutover" in " ".join(payload["next_commands"]).lower()

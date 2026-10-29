@@ -835,10 +835,10 @@
         "sha256": "67ba2c28b119cd32cc24cd836248dd10be3b5d9b2f369bdfd5b3a51ba5809c61"
       },
       {
-        "byte_size": 2754,
+        "byte_size": 2909,
         "dst": "memory/cards/token-glace-output-compaction.md",
         "rendered": true,
-        "sha256": "cb4fc80e78e79c02b2d7aadafbb09d343ad813bb32de9a419cf3462e6b60c6bf"
+        "sha256": "768430031372cab9a698366af153cb0e0d464c02636780ae2957cb4454a760e3"
       },
       {
         "byte_size": 1292,

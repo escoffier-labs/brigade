@@ -9,6 +9,7 @@ binaries; these helpers only format and shell out.
 from __future__ import annotations
 
 import json
+import shlex
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -96,7 +97,7 @@ def render_plan_md(title: str, payload: Mapping[str, Any]) -> str:
     for command in payload.get("commands") or []:
         lines.append("```sh")
         if isinstance(command, (list, tuple)):
-            lines.append(" ".join(str(part) for part in command))
+            lines.append(shlex.join([str(part) for part in command]))
         else:
             lines.append(str(command))
         lines.append("```")

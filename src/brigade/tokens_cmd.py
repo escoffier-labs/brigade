@@ -25,6 +25,8 @@ DOCS = {
     },
 }
 
+CUTOVER_HINT = "Review Host cutover in memory/cards/token-glace-output-compaction.md before installation."
+
 BOUNDARIES = [
     "TokenJuice and usage-tracker stay process-boundary tools; Brigade only installs, plans, and health-checks.",
     "Brigade does not rewrite host hooks or export private usage data from these commands.",
@@ -40,6 +42,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     tracker = proc.which("usage-tracker")
     candidate = proc.which("tokenjuice")
     legacy = proc.which("token-glace")
+    occupied = bool(candidate or legacy) and glace is None
 
     tools: dict[str, Any] = {
         "tokenjuice": {
@@ -77,10 +80,11 @@ def status_payload(target: Path) -> dict[str, Any]:
         ],
     )
     payload["legacy"] = {"token-glace": {"binary": legacy, "migration": "manual; preserve hooks and artifacts"}}
-    if candidate and not glace:
+    if occupied:
         tools["tokenjuice"]["summary"] = "executable ownership unverified; Glace aliases are not upstream TokenJuice"
         payload["health"] = "warn"
         payload["summary"] = "TokenJuice ownership unverified; review the existing executable before installation"
+        payload["next_commands"] = [CUTOVER_HINT, "brigade tokens wire plan", "brigade tokens doctor"]
     if not installed_any:
         return payload
 
@@ -126,14 +130,14 @@ def status_payload(target: Path) -> dict[str, Any]:
         tools["usage-tracker"]["health"] = tracker_health
         tools["usage-tracker"]["summary"] = tracker_summary
 
-    levels = ["warn"] if candidate and not glace else []
+    levels = ["warn"] if occupied else []
     for key in ("tokenjuice", "usage-tracker"):
         if tools[key].get("installed"):
             levels.append(tools[key].get("health") or "incomplete")
     rank = {"fail": 5, "timeout": 4, "incomplete": 3, "unwired": 2, "warn": 1, "ok": 0, "missing": 0}
     overall = max(levels, key=lambda h: rank.get(str(h), 0)) if levels else "missing"
     payload["health"] = overall
-    parts = ["TokenJuice ownership unverified"] if candidate and not glace else []
+    parts = ["TokenJuice ownership unverified"] if occupied else []
     if glace:
         parts.append(glace_summary)
     if tracker:
@@ -152,6 +156,8 @@ def status_payload(target: Path) -> dict[str, Any]:
             *qualified_doctor,
             "brigade tokens doctor",
         ]
+    if occupied:
+        payload["next_commands"].insert(0, CUTOVER_HINT)
     return payload
 
 
@@ -193,6 +199,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
 def wire_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     verified = managed.tokenjuice_binary()
+    occupied = not verified and bool(proc.which("tokenjuice") or proc.which("token-glace"))
     commands = (
         [
             [verified, "install", "claude-code"],
@@ -233,7 +240,7 @@ def wire_plan_payload(*, target: Path) -> dict[str, Any]:
         "next_commands": [
             "Review the commands below, then run them yourself.",
             "brigade tokens doctor",
-            "brigade add tokens",
+            *([CUTOVER_HINT] if occupied else ["brigade add tokens"]),
         ],
         "docs": {
             "tokenjuice": DOCS["tokenjuice"]["product"],

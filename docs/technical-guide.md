@@ -2073,6 +2073,8 @@ Crawl defaults to 900 seconds and can be changed with the positive finite numeri
 
 `tokens` selects upstream TokenJuice and optional usage-tracker spend export.
 
+`brigade add tokens` refuses to install while an unqualified `tokenjuice` or legacy `token-glace` executable is on PATH. Complete the host cutover first.
+
 Automatic TokenJuice installation and npm-shim qualification on Windows are not supported by this station yet. Brigade refuses that installation path rather than repeatedly reinstalling an unqualified package.
 
 Adding the station does not activate host hooks. Preserve legacy Glace artifacts
