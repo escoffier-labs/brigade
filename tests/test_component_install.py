@@ -55,6 +55,13 @@ _SMOKE_COMPONENTS = component_manifest.KNOWN_COMPONENT_IDS
 _FOUR_ENGINE_IDS = tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid != "agent-notify")
 
 
+@pytest.fixture(autouse=True)
+def _fixture_python_on_path(monkeypatch):
+    # Fixture shebangs must use the test interpreter, not a host version-manager
+    # shim whose configuration or trust state changes under the isolated HOME.
+    monkeypatch.setenv("PATH", str(Path(sys.executable).parent), prepend=os.pathsep)
+
+
 def _write_managed_stub(tmp_path, component_id: str, *, script: str | None = None) -> str:
     payload = script.encode("utf-8") if script is not None else fixture_payload(component_id)[0]
     path = tmp_path / component_id
@@ -2520,13 +2527,15 @@ def test_run_post_install_smoke_rejects_sessionfind_missing_help(tmp_path):
 
 def test_run_post_install_smoke_rejects_timeout(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
+    # An earlier component may start slower than the MCP-only timeout budget.
+    shebang, body = smoke_stub_script("agent-notify").split("\n", 1)
+    notify_script = f"{shebang}\nimport time\ntime.sleep(0.3)\n{body}"
+    managed["agent-notify"] = _write_managed_stub(tmp_path, "agent-notify", script=notify_script)
     sleep_script = "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n"
 
     def slow_runner(argv, **kwargs):
-        kwargs["timeout"] = 0.2
-        if argv[0] == managed["graphtrail"]:
-            kwargs.pop("timeout", None)
-            return subprocess.run(argv, **kwargs)
+        if argv[0] == managed["graphtrail-mcp"]:
+            kwargs["timeout"] = 0.2
         return subprocess.run(argv, **kwargs)
 
     managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=sleep_script)
