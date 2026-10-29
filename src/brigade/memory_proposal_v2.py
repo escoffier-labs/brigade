@@ -7,6 +7,7 @@ import copy
 import posixpath
 import re
 import uuid
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
@@ -147,6 +148,18 @@ def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
             raise legacy.ProposalError("current evidence contradicts or needs review; refresh the candidate")
 
 
+def _consolidation_boundary(value: str) -> datetime:
+    """Match the full UTC day covered by a date-only consolidation cutoff."""
+    from .memory_reflect_candidates import _sort_timestamp
+
+    stamp = _sort_timestamp(value)
+    try:
+        date.fromisoformat(value)
+    except ValueError:
+        return stamp
+    return stamp.replace(hour=23, minute=59, second=59, microsecond=999999)
+
+
 def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> str | None:
     from .memory_reflect import _evidence_log
     from .memory_reflect_candidates import Card, _evidence_id, _pending_rows, _sort_timestamp, _timestamp
@@ -180,7 +193,7 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in support]
     if not stamps:
         return None
-    stamp = max(stamps, key=_sort_timestamp)
+    stamp = max(stamps, key=_consolidation_boundary)
     pending = _pending_rows(card)
     if _timestamp(card.meta.get("last_consolidated")) is None:
         value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
@@ -189,7 +202,7 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     accounted = support | cited
     if any(
         row["kind"] != "reinforced"
-        and _sort_timestamp(row["ts"]) <= _sort_timestamp(stamp)
+        and _sort_timestamp(row["ts"]) <= _consolidation_boundary(stamp)
         and _evidence_id(row["evidence_id"]) not in accounted
         for row in pending
     ):
@@ -201,7 +214,7 @@ def _consolidate_accepted(
     target: Path, texts: dict[str, str | None], sources: list[dict[str, Any]], ops: list[dict[str, Any]]
 ) -> None:
     """Derive each requested cutoff from accepted support and the original floor."""
-    from .memory_reflect_candidates import _sort_timestamp, _timestamp
+    from .memory_reflect_candidates import _timestamp
 
     for source in sources:
         path = source["path"]
@@ -216,7 +229,7 @@ def _consolidate_accepted(
         assert stamp is not None  # At least one accepted op validated a cutoff.
         original = source["metadata"].get("last_consolidated")
         floor = _timestamp(original)
-        if floor is not None and floor >= _sort_timestamp(stamp):
+        if floor is not None and _consolidation_boundary(original) >= _consolidation_boundary(stamp):
             stamp = original
         texts[path] = legacy._update_metadata(text, {"last_consolidated": stamp})
 

@@ -19,6 +19,44 @@ EARLY = ".brigade/receipts/early.json"
 LATE = ".brigade/receipts/support.json"
 
 
+def test_original_date_only_cutoff_keeps_entire_day(tmp_path):
+    path = setup(tmp_path)
+    path.write_text(path.read_text().replace("evidence: []", "evidence: []\nlast_consolidated: 2026-10-20"))
+    uncited = evidence(tmp_path, ".brigade/receipts/uncited.json")
+    log(tmp_path, path, (LATE, "outcome", NEW), (uncited, "outcome", "2026-10-20T15:00:00Z"))
+    proposal = create(tmp_path, [op("append_evidence", evidence_ids=[LATE], last_consolidated=NEW)])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["last_consolidated"] == "2026-10-20"
+
+
+@pytest.mark.parametrize("uncited_at", ["2026-10-21T15:00:00Z", "2026-10-22T00:30:00+01:00"])
+def test_date_only_support_cannot_hide_uncited_same_day(tmp_path, uncited_at):
+    path = setup(tmp_path)
+    uncited = evidence(tmp_path, ".brigade/receipts/uncited.json")
+    log(tmp_path, path, (LATE, "outcome", "2026-10-21"), (uncited, "outcome", uncited_at))
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [op("append_evidence", evidence_ids=[LATE], last_consolidated="2026-10-21")])
+    assert path.read_bytes() == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+def test_date_only_accepted_support_covers_later_same_day_stamps(tmp_path):
+    path = setup(tmp_path)
+    evidence(tmp_path, EARLY)
+    path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([EARLY, LATE])}"))
+    log(tmp_path, path, (EARLY, "outcome", "2026-10-20"), (LATE, "outcome", NEW))
+    proposal = create(
+        tmp_path,
+        [
+            op("append_evidence", evidence_ids=[EARLY], last_consolidated="2026-10-20"),
+            op("append_evidence", evidence_ids=[LATE], last_consolidated=NEW),
+        ],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["last_consolidated"] == "2026-10-20"
+
+
 @pytest.mark.parametrize("reverse", [False, True], ids=["old-then-new", "new-then-old"])
 def test_accepted_evidence_cutoff_is_order_independent(tmp_path, reverse):
     path = setup(tmp_path)
