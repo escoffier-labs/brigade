@@ -12,6 +12,16 @@ keywords = ["code-graph", "mcp", "tree-sitter", "call-graph", "agents"]
 categories = ["development-tools", "command-line-utilities"]
 default-run = "graphtrail"
 
+# Both canonical executables delegate to the existing application entry points.
+# Keep auto-discovery and default-run for the legacy executable contracts.
+[[bin]]
+name = "brigade-code-graph"
+path = "src/bin/brigade-code-graph.rs"
+
+[[bin]]
+name = "brigade-code-graph-mcp"
+path = "src/bin/brigade-code-graph-mcp.rs"
+
 [dependencies]
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }

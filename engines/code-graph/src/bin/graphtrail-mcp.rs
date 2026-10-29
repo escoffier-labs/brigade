@@ -14,7 +14,7 @@ use anyhow::Result;
 
 use graphtrail::mcp::serve;
 
-fn main() -> Result<()> {
+pub(crate) fn main() -> Result<()> {
     let default_db = resolve_db();
     let stdin = io::stdin();
     let stdout = io::stdout();
