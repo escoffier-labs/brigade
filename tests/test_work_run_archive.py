@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from copy import deepcopy
 from pathlib import Path
 
@@ -984,3 +985,261 @@ def test_export_refuses_source_lifecycle_worker_envelope(tmp_path: Path):
     assert "lifecycle.jsonl" in str(excinfo.value)
     assert not (tmp_path / "archive").exists()
     assert life.is_file()
+
+
+def _archive_bytes(root: Path) -> dict[Path, bytes]:
+    return {path.relative_to(root): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+def _replacement_case(tmp_path: Path):
+    original = _seed_run(tmp_path / "original" / RUN_ID)
+    archive = tmp_path / "archive"
+    work_run_archive.export_run(original, archive)
+    before = _archive_bytes(archive)
+    replacement = _seed_run(tmp_path / "replacement" / RUN_ID)
+    (replacement / "final.txt").write_text("replacement artifact\n", encoding="utf-8")
+    return original, replacement, archive, before
+
+
+def _assert_no_export_temps(archive: Path) -> None:
+    assert not list(archive.parent.glob(f".{archive.name}.staging-*"))
+    assert not list(archive.parent.glob(f".{archive.name}.backup-*"))
+
+
+def _inject_promotion_rename(monkeypatch, rename) -> None:
+    real_promote = work_run_archive._promote_export
+
+    def promote(staging, destination, *, force):
+        # dirfd capability checks compare os.rename's identity before staging
+        # is ready, so inject the failure only within the promotion operation.
+        with monkeypatch.context() as scoped:
+            scoped.setattr(work_run_archive.os, "rename", rename)
+            return real_promote(staging, destination, force=force)
+
+    monkeypatch.setattr(work_run_archive, "_promote_export", promote)
+
+
+@pytest.mark.parametrize("invalid", ["run-id", "symlink"])
+def test_cli_refused_replacement_preserves_only_remaining_archive(tmp_path: Path, capsys, invalid: str):
+    original, replacement, archive, before = _replacement_case(tmp_path)
+    shutil.rmtree(original)
+    if invalid == "run-id":
+        replacement = replacement.rename(replacement.with_name("unnamed-run"))
+        (replacement / "run.json").write_text('{"status": "ok"}\n', encoding="utf-8")
+    else:
+        (replacement / "link.txt").symlink_to(replacement / "final.txt")
+
+    assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--force", "--json"]) == (
+        1 if invalid == "run-id" else 2
+    )
+    assert "error:" in capsys.readouterr().err
+    assert _archive_bytes(archive) == before
+    work_run_archive.validate_archive(archive)
+    _assert_no_export_temps(archive)
+
+
+@pytest.mark.parametrize(
+    "phase",
+    [
+        "copy",
+        "manifest",
+        "validation",
+        "backup-create",
+        "backup-move",
+        "promotion",
+        "backup-interrupt",
+        "promotion-interrupt",
+    ],
+)
+def test_export_replacement_fault_preserves_previous_archive(tmp_path: Path, monkeypatch, phase: str):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    real_rename = work_run_archive.os.rename
+    real_validate = work_run_archive.validate_archive
+
+    def fail_build(*args, **kwargs):
+        if phase == "copy":
+            raise OSError("copy injected failure")
+        if phase == "backup-create":
+            raise OSError("backup-create injected failure")
+        raise WorkRunArchiveError("manifest injected failure")
+
+    def validate(path):
+        if Path(path).name.startswith(".archive.staging-"):
+            raise WorkRunArchiveError("validation injected failure", category="integrity")
+        return real_validate(path)
+
+    def rename(source, destination):
+        source = Path(source)
+        if source == archive and phase == "backup-move":
+            raise OSError("backup-move injected failure")
+        if source == archive and phase == "backup-interrupt":
+            real_rename(source, destination)
+            raise KeyboardInterrupt("backup-interrupt injected failure")
+        if source.name.startswith(".archive.staging-"):
+            if phase == "promotion":
+                raise OSError("promotion injected failure")
+            if phase == "promotion-interrupt":
+                raise KeyboardInterrupt("promotion-interrupt injected failure")
+        return real_rename(source, destination)
+
+    if phase == "copy":
+        monkeypatch.setattr(work_run_archive, "_copy_run_tree_refuse_special", fail_build)
+    elif phase == "manifest":
+        monkeypatch.setattr(work_run_archive, "build_manifest_for_payload", fail_build)
+    elif phase == "validation":
+        monkeypatch.setattr(work_run_archive, "validate_archive", validate)
+    elif phase == "backup-create":
+        monkeypatch.setattr(work_run_archive.tempfile, "mkdtemp", fail_build)
+    else:
+        _inject_promotion_rename(monkeypatch, rename)
+    expected = KeyboardInterrupt if phase.endswith("interrupt") else OSError if phase == "copy" else WorkRunArchiveError
+    with pytest.raises(expected, match="injected failure"):
+        work_run_archive.export_run(replacement, archive, force=True)
+    assert _archive_bytes(archive) == before
+    real_validate(archive)
+    _assert_no_export_temps(archive)
+
+
+def test_cli_promotion_failure_restores_previous_archive(tmp_path: Path, monkeypatch, capsys):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    real_rename = work_run_archive.os.rename
+
+    def rename(source, destination):
+        if Path(source).name.startswith(".archive.staging-"):
+            raise OSError("promotion injected failure")
+        return real_rename(source, destination)
+
+    _inject_promotion_rename(monkeypatch, rename)
+    assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--force", "--json"]) == 2
+    assert "promotion injected failure" in capsys.readouterr().err
+    assert _archive_bytes(archive) == before
+    _assert_no_export_temps(archive)
+
+
+def test_empty_backup_cleanup_does_not_mask_move_failure(tmp_path: Path, monkeypatch):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    real_rename = work_run_archive.os.rename
+    real_rmdir = Path.rmdir
+
+    def rename(source, destination):
+        if Path(source) == archive:
+            raise OSError("backup-move injected failure")
+        return real_rename(source, destination)
+
+    def rmdir(path):
+        if path.name.startswith(".archive.backup-"):
+            raise OSError("empty-container injected failure")
+        return real_rmdir(path)
+
+    _inject_promotion_rename(monkeypatch, rename)
+    monkeypatch.setattr(Path, "rmdir", rmdir)
+    with pytest.raises(WorkRunArchiveError, match="backup-move injected failure") as exc:
+        work_run_archive.export_run(replacement, archive, force=True)
+    assert "empty-container" not in str(exc.value)
+    assert _archive_bytes(archive) == before
+    containers = list(tmp_path.glob(".archive.backup-*"))
+    assert len(containers) == 1 and not list(containers[0].iterdir())
+    assert not list(tmp_path.glob(".archive.staging-*"))
+
+
+@pytest.mark.parametrize("blocker", ["rename", "directory", "symlink", "dangling"])
+def test_replacement_failed_restore_keeps_backup(tmp_path: Path, monkeypatch, blocker: str):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    victim = tmp_path / "other-archive"
+    victim.mkdir()
+    (victim / "keep.txt").write_text("other writer\n", encoding="utf-8")
+    real_rename = work_run_archive.os.rename
+
+    def rename(source, destination):
+        source = Path(source)
+        if source.name.startswith(".archive.staging-"):
+            if blocker == "directory":
+                archive.mkdir()
+                (archive / "keep.txt").write_text("other writer\n", encoding="utf-8")
+            elif blocker in {"symlink", "dangling"}:
+                archive.symlink_to(victim if blocker == "symlink" else tmp_path / "missing", target_is_directory=True)
+            raise OSError("promotion injected failure")
+        if source.parent.name.startswith(".archive.backup-"):
+            raise OSError("restore injected failure")
+        return real_rename(source, destination)
+
+    _inject_promotion_rename(monkeypatch, rename)
+    with pytest.raises(WorkRunArchiveError, match="restoration failed") as exc:
+        work_run_archive.export_run(replacement, archive, force=True)
+    backups = list(tmp_path.glob(".archive.backup-*/archive"))
+    assert len(backups) == 1
+    assert str(backups[0]) in str(exc.value)
+    assert "promotion injected failure" in str(exc.value)
+    assert _archive_bytes(backups[0]) == before
+    work_run_archive.validate_archive(backups[0])
+    assert (victim / "keep.txt").read_text(encoding="utf-8") == "other writer\n"
+    if blocker == "directory":
+        assert (archive / "keep.txt").read_text(encoding="utf-8") == "other writer\n"
+    elif blocker in {"symlink", "dangling"}:
+        assert archive.is_symlink()
+    assert not list(tmp_path.glob(".archive.staging-*"))
+
+
+def test_successful_replacement_cleanup_failure_reports_installed_archive(tmp_path: Path, monkeypatch):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    real_rmtree = work_run_archive.shutil.rmtree
+
+    def rmtree(path, *args, **kwargs):
+        if Path(path).name.startswith(".archive.backup-"):
+            raise OSError("cleanup injected failure")
+        return real_rmtree(path, *args, **kwargs)
+
+    monkeypatch.setattr(work_run_archive.shutil, "rmtree", rmtree)
+    with pytest.raises(WorkRunArchiveError, match="archive installed") as exc:
+        work_run_archive.export_run(replacement, archive, force=True)
+    backups = list(tmp_path.glob(".archive.backup-*/archive"))
+    assert len(backups) == 1
+    assert str(backups[0]) in str(exc.value)
+    assert _archive_bytes(backups[0]) == before
+    work_run_archive.validate_archive(archive)
+    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "symlink", "dangling"])
+def test_export_rechecks_destination_before_promotion(tmp_path: Path, monkeypatch, kind: str):
+    replacement = _seed_run(tmp_path / "runs" / RUN_ID)
+    archive = tmp_path / "archive"
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    marker = victim / "keep.txt"
+    marker.write_text("untouched\n", encoding="utf-8")
+    real_validate = work_run_archive.validate_archive
+
+    def validate(path):
+        result = real_validate(path)
+        if kind == "file":
+            archive.write_text("other writer\n", encoding="utf-8")
+        elif kind == "directory":
+            archive.mkdir()
+        else:
+            archive.symlink_to(victim if kind == "symlink" else tmp_path / "missing", target_is_directory=True)
+        return result
+
+    monkeypatch.setattr(work_run_archive, "validate_archive", validate)
+    with pytest.raises(WorkRunArchiveError):
+        work_run_archive.export_run(replacement, archive, force=kind != "directory")
+    assert marker.read_text(encoding="utf-8") == "untouched\n"
+    if kind == "file":
+        assert archive.read_text(encoding="utf-8") == "other writer\n"
+    elif kind == "directory":
+        assert archive.is_dir() and not list(archive.iterdir())
+    else:
+        assert archive.is_symlink()
+    _assert_no_export_temps(archive)
+
+
+def test_forced_replacement_success_and_nonforced_refusal(tmp_path: Path, capsys):
+    _, replacement, archive, before = _replacement_case(tmp_path)
+    assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--json"]) == 2
+    assert "already exists" in capsys.readouterr().err
+    assert _archive_bytes(archive) == before
+    assert cli.main(["runs", "export", str(replacement), "--output", str(archive), "--force", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "exported"
+    work_run_archive.validate_archive(archive)
+    assert (archive / "payload" / "final.txt").read_text(encoding="utf-8") == "replacement artifact\n"
+    _assert_no_export_temps(archive)
