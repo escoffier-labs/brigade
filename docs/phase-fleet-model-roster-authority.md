@@ -517,3 +517,40 @@ canary fails until that evidence path exists.
 None block the first implementation. An asymmetric Hub signature and adjustable
 LKG age remain later choices if the zero-dependency or 900-second decisions
 change.
+
+## Writing and frontend task roles
+
+`brigade fleet policy classify --task-file PATH --json` classifies the first
+8,000 characters locally. Use `--task-file -` for standard input. Its
+`brigade.task_role.v1` result reports `matched`, `none`, or `ambiguous`, the
+workload, matched roles, mechanical vetoes, and extra implementation requests.
+Audience prose includes changelog entries, release notes, and commit/PR
+messages. Technical subject matter alone does not make prose or visual UI work
+ambiguous. A separate backend implementation request does. Split ambiguous
+tasks before dispatching their writing/frontend portion.
+
+The Hub consumes declared `writing` and `frontend` workloads through the
+existing effective policy roles of the same names. Declare their OS and
+capabilities with the existing `routing.workload_requirements` fields. Role
+resolution retains fleet, consumer, repository, and session policy precedence.
+These workloads consider only the selected role seat, with no seat fallback.
+An explicit eligible seat retains precedence. `general` and `windows-native`
+retain their existing routing. Task-role evidence stays in the stored decision
+JSON. The public route response has no new keys.
+
+Without an explicit `--worker` or a named roster seat in the original task,
+`brigade run` classifies task intent and resolves a matched role through the
+central policy resolver. It dispatches that seat directly under runtime
+admission, with its local seat fallback removed. Missing policy, an unavailable
+role, a health failure, or admission refusal stops the run. It never substitutes
+an implementation seat or a planned run for matched work. Ambiguous tasks print
+the evidence and retain ordinary routing until the caller splits or explicitly
+selects a worker. Task evidence uses the existing `seat_routing` payload.
+
+The existing T3 fleet consumer forwards a declared workload and launches the
+Hub-selected admitted seat. Legacy deployed controllers do not automatically
+classify omitted workloads. Native T3 `delegate_task` remains selected by the
+parent. Receipt enforcement for arbitrary native calls is outside this feature.
+Serving Hub code must support task workloads before operators configure those
+roles and workloads. This code change does not activate policy or change legacy
+role fields or authority migration state.

@@ -581,3 +581,20 @@ def test_client_error_codes_are_bounded_and_do_not_echo_server_secrets():
     assert err.code != "sqlite-traceback"
     assert "super-secret-db" not in err.message
     assert "token=" not in err.message.lower()
+
+
+def test_classify_is_local_only(monkeypatch, tmp_path):
+    def no_network(*args, **kwargs):
+        raise AssertionError("classifier must not contact Hub")
+
+    monkeypatch.setattr("brigade.fleet_client_policy.post_policy", no_network)
+    monkeypatch.setattr("sys.stdin", StringIO("Draft a blog post about SQL"))
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", "-", "--json"])
+    assert rc == 0
+    assert err == ""
+    assert json.loads(out)["workload"] == "writing"
+    task = tmp_path / "task.txt"
+    task.write_text("Write unit tests for file writes")
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", str(task), "--json"])
+    assert rc == 0
+    assert json.loads(out)["status"] == "none"

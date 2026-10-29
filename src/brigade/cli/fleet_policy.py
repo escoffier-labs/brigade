@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -15,6 +16,11 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     p_policy = fleet_sub.add_parser("policy", help="Read and apply the fleet control-plane policy document.")
     policy_sub = p_policy.add_subparsers(dest="policy_command", metavar="<policy-command>")
     policy_sub.required = True
+
+    p_classify = policy_sub.add_parser("classify", help="Classify task intent locally without contacting the Hub.")
+    p_classify.add_argument("--task-file", required=True, help="UTF-8 task file, or - for stdin.")
+    p_classify.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_classify.set_defaults(func=_dispatch_classify)
 
     p_show = policy_sub.add_parser("show", help="Show the current hub policy revision.")
     p_show.add_argument("--json", action="store_true", help="Emit JSON.")
@@ -530,3 +536,26 @@ def _dispatch_acknowledge(args: argparse.Namespace) -> int:
     except Exception as exc:
         return _fail(exc)
     return _emit(payload, json_out=True)
+
+
+def _dispatch_classify(args: argparse.Namespace) -> int:
+    from .. import task_roles
+
+    try:
+        if args.task_file == "-":
+            text = sys.stdin.read(task_roles.MAX_TASK_CHARS)
+        else:
+            with Path(args.task_file).open(encoding="utf-8") as stream:
+                text = stream.read(task_roles.MAX_TASK_CHARS)
+        decision = task_roles.classify(text)
+    except (OSError, UnicodeError) as exc:
+        return _fail(exc)
+    if args.json:
+        print(json.dumps(decision.payload(), sort_keys=True))
+    else:
+        print(
+            f"task role: {decision.status} workload={decision.workload} role={task_roles.role_for_workload(decision.workload)}"
+        )
+        print(f"matched: {', '.join(decision.matched) or 'none'}")
+        print(f"markers: {', '.join(decision.markers) or 'none'}")
+    return 0

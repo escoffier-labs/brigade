@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Classify writing and frontend tasks locally and route them through effective policy roles without seat fallback, while preserving explicit worker selection and ordinary implementation routing.
+
 - Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Fleet attention expires abandoned unknown and stale runs using the configured history horizon, excludes revoked nodes and expired failures, and compares failure lookback and newer successful runs by elapsed time across timestamp offsets.

@@ -9,6 +9,7 @@ import math
 import sys
 import time
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from pathlib import Path
 from subprocess import DEVNULL, STDOUT, Popen
 from typing import Any, Callable, Iterator, Mapping
@@ -181,6 +182,7 @@ def _add_run_arguments(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=argparse.SUPPRESS,
     )
+    parser.add_argument("--task-role-workload", choices=("writing", "frontend"), default=None, help=argparse.SUPPRESS)
     parser.add_argument("--dry-run", action="store_true", help="Print the plan without dispatching workers.")
     parser.add_argument(
         "--worker",
@@ -497,25 +499,30 @@ def dispatch(args) -> int:
     except ValueError as exc:
         print(f"error: invalid roster at {roster_path}: {exc}", file=sys.stderr)
         return 2
-    from .. import run_preference
+    from .. import fleet_client_policy, run_preference, task_roles
 
+    # Inspect the original task before preference text can add incidental seat names.
+    classified = None
+    if args.task_role_workload is not None:
+        classified = task_roles.classify(args.task)
+        if classified.status != "matched" or classified.workload != args.task_role_workload:
+            print("error: detached task role no longer matches the original task", file=sys.stderr)
+            return 2
+    elif args.worker is None and not run_preference._spoken_seat_names(args.task, loaded_roster):
+        classified = task_roles.classify(args.task)
+    if classified is not None and classified.status == "ambiguous":
+        print(
+            f"task role: ambiguous ({', '.join(classified.matched)} + {', '.join(classified.markers)}). "
+            "Split the writing/frontend and implementation requests or select --worker explicitly.",
+            file=sys.stderr,
+        )
     if not getattr(args, "applied_preference", False):
         preference = run_preference.refresh_cache()
         loaded_roster = run_preference.apply_to_roster(loaded_roster, preference)
-        if args.worker is None:
-            pinned_worker = run_preference.resolve_worker(
-                preference,
-                loaded_roster,
-                worker=None,
-                task=args.task,
-            )
+        if args.worker is None and (classified is None or classified.status != "matched"):
+            pinned_worker = run_preference.resolve_worker(preference, loaded_roster, worker=None, task=args.task)
             if pinned_worker is not None:
-                pin_error = _direct_worker_error(
-                    pinned_worker,
-                    loaded_roster,
-                    roster_mod,
-                    read_only=args.read_only,
-                )
+                pin_error = _direct_worker_error(pinned_worker, loaded_roster, roster_mod, read_only=args.read_only)
                 if pin_error is None:
                     args.worker = pinned_worker
                 else:
@@ -524,10 +531,53 @@ def dispatch(args) -> int:
                         f"({pin_error}); continuing with a planned run",
                         file=sys.stderr,
                     )
-        args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
+        # Matched tasks keep their original text for the detached child's revalidation.
+        if classified is None or classified.status != "matched":
+            args.task = run_preference.apply_to_task(args.task, preference, worker=args.worker)
         preference_bits = [f"{key}={value}" for key, value in preference.payload().items() if key != "notes"]
         if preference_bits:
             print(f"run preference: {' '.join(preference_bits)} (cached)", file=sys.stderr)
+    if classified is not None and classified.status == "matched":
+        from .fleet_policy import _canonical_repo
+
+        try:
+            resolution = fleet_client_policy.resolve_policy(
+                consumer="brigade-run",
+                repo=_canonical_repo(str(run_cwd)),
+                session_id=f"task-role-{time.time_ns()}",
+                origin=fleet_client.resolve_node_id(),
+            )
+            role = classified.workload
+            selected = resolution.get("effective", {}).get("roles", {}).get(role)
+            if not isinstance(selected, str) or not selected:
+                raise ValueError(f"roles.{role} is unset")
+            error = _direct_worker_error(selected, loaded_roster, roster_mod, read_only=args.read_only)
+            if error is not None:
+                raise ValueError(error)
+            if selected not in loaded_roster.agents:
+                agent, error = _hub_synthesized_agent(selected, loaded_roster)
+                if agent is None or error is not None:
+                    raise ValueError(error or f"unknown worker: {selected}")
+                loaded_roster = replace(loaded_roster, agents={**loaded_roster.agents, selected: agent})
+            loaded_roster = task_roles.strict_roster(loaded_roster, selected)
+        except (fleet_client.FleetClientError, OSError, ValueError) as exc:
+            detail = fleet_client_policy._scrub(str(exc))
+            print(
+                f"error: task classified {classified.workload}; role seat unavailable: {detail}. "
+                "Select --worker explicitly to choose a different seat.",
+                file=sys.stderr,
+            )
+            return 2
+        source = resolution.get("sources", {}).get(f"roles.{role}", {}).get("layer")
+        evidence = {**classified.payload(), "seat": selected, "source_layer": source, "fallback": "disabled"}
+        loaded_roster = replace(loaded_roster, seat_routing=(*loaded_roster.seat_routing, {"task_role": evidence}))
+        args.worker = selected
+        args.task_role_workload = classified.workload
+        print(f"task role: {role} -> {selected} ({source})", file=sys.stderr)
+    elif classified is not None and classified.status == "ambiguous":
+        loaded_roster = replace(
+            loaded_roster, seat_routing=(*loaded_roster.seat_routing, {"task_role": classified.payload()})
+        )
     print(f"roster: {roster_resolution.path} ({roster_resolution.source})", file=sys.stderr)
     # A worktree-parent roster shadowing the user roster is the designed
     # outcome for worktrees of a wired repo, so only a workspace roster warns.
@@ -1277,6 +1327,8 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         argv.append("--read-only")
     if args.worker is not None:
         argv.extend(["--worker", args.worker])
+    if getattr(args, "task_role_workload", None) is not None:
+        argv.extend(["--task-role-workload", args.task_role_workload])
     argv.append("--applied-preference")
     model_override = getattr(args, "model", None)
     if model_override is not None:
