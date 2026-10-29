@@ -47,7 +47,7 @@ def codex_session_root(session_id: str) -> Path | None:
     return None
 
 
-def session_repository_root(cwd: Path, *, harness: str) -> Path:
+def session_repository_root(cwd: Path, *, harness: str | None) -> Path:
     """Publish the session's own checkout, not an arbitrary wired ancestor.
 
     The nearest Git root at or below the wired workspace wins; a wired project
@@ -65,3 +65,20 @@ def session_repository_root(cwd: Path, *, harness: str) -> Path:
         if candidate == wired:
             break
     return wired or cwd
+
+
+def is_session_root(target: Path, *, harness: str | None) -> bool:
+    """True when ``target`` is what presence would publish for a session there.
+
+    The wired ancestor must still opt into ``harness``; a nested Git checkout
+    without its own config counts as its own root.
+    """
+    from .wiring import resolve_wired_target
+
+    try:
+        resolved = target.resolve()
+    except (OSError, RuntimeError):
+        return False
+    if resolve_wired_target(str(resolved), harness=harness) is None:
+        return False
+    return session_repository_root(resolved, harness=harness) == resolved

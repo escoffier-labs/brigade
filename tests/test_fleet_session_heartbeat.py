@@ -822,3 +822,23 @@ def test_secondary_legacy_checkout_does_not_survive_primary_root_refresh(setup):
     )
     assert report["published"] == 1
     assert sent == [snapshot]
+
+
+def test_nested_checkout_beneath_wired_workspace_is_renewed(setup):
+    import subprocess
+    from dataclasses import replace
+
+    target, snapshot, processes, sent, _ = setup
+    nested = target / "checkouts" / "inner"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    inner = replace(snapshot, session_id="session-nested", checkout_path=str(nested))
+    _remember(inner)
+
+    def send(value):
+        sent.append(value)
+        return fleet_client.SessionWriteResult(ok=True)
+
+    report = heartbeat.observe([nested], processes=processes, publisher=send, publish=True)
+    assert report["live"] == report["published"] == 1
+    assert sent == [inner]
