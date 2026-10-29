@@ -56,8 +56,11 @@ def _extract_target(arguments: Sequence[str]) -> tuple[Path | None, list[str], s
     index = 0
     while index < len(tokens):
         token = tokens[index]
+        if token == "--":
+            forwarded.extend(tokens[index:])
+            break
         if token == "--target":
-            if index + 1 >= len(tokens):
+            if index + 1 >= len(tokens) or tokens[index + 1] == "--":
                 return None, [], "--target requires a directory"
             target = Path(tokens[index + 1])
             index += 2
