@@ -512,7 +512,7 @@ def _terminal_label(meta: Mapping[str, Any], *, run_dir: Path | None = None) -> 
 
 
 def _read_run_state(
-    run_dir: Path, meta: Mapping[str, Any], *, tolerate_io_errors: bool = False
+    run_dir: Path, meta: Mapping[str, Any], *, tolerate_io_errors: bool = False, retry_partial_tail: bool = False
 ) -> tuple[dict[str, Any], Any | None]:
     from .runs_read_state import read_run_state
 
@@ -522,6 +522,7 @@ def _read_run_state(
         nonterminal_statuses=_NONTERMINAL_STATUSES,
         terminal_event_types=_TERMINAL_LIFECYCLE_EVENT_TYPES,
         tolerate_io_errors=tolerate_io_errors,
+        retry_partial_tail=retry_partial_tail,
     )
 
 
@@ -1585,7 +1586,7 @@ def _poll_watch_artifacts(
         if run_meta is None:
             print(f"error: run.json not found in {run_dir}", file=sys.stderr)
             return None, 2
-        run_meta, _ = _read_run_state(run_dir, run_meta)
+        run_meta, _ = _read_run_state(run_dir, run_meta, retry_partial_tail=True)
         run_sig = _artifact_signature(run_meta)
         if signatures.get("run") != run_sig:
             _emit_run(run_meta, json_output=json_output)

@@ -440,18 +440,178 @@ def test_watch_waits_through_reopen_until_new_terminal_event(tmp_path, capsys, m
     assert snapshot == (run_dir / "run.json").read_bytes()
 
 
-def test_watch_reports_partial_terminal_journal_without_success_summary(tmp_path, capsys, monkeypatch):
+def _read_partial_tail_watch(run_dir, mode):
+    if mode == "stream":
+        return None, list(runs_cmd.iter_watch_records(run_dir, interval=0))
+    return runs_cmd.watch(run_dir, cwd=run_dir.parent, interval=0, json_output=mode == "json"), None
+
+
+@pytest.mark.parametrize("mode", ["json", "stream"])
+def test_watch_reports_partial_terminal_journal_without_success_summary(tmp_path, capsys, monkeypatch, mode):
     run_dir = tmp_path / "partial"
     _write_run(run_dir, status="ok", finished=True)
     _append_watch_lifecycle(run_dir, "run.completed", {"status": "ok"})
     journal = run_dir / "events" / "lifecycle.jsonl"
     journal.write_bytes(journal.read_bytes() + b'{"partial":')
 
-    def unexpected_sleep(_seconds):
-        pytest.fail("watch polled an invalid journal")
+    original = journal.read_bytes()
+    sleeps = []
 
-    monkeypatch.setattr(runs_cmd.time, "sleep", unexpected_sleep)
-    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0, json_output=True) == 2
+    monkeypatch.setattr(runs_cmd.time, "sleep", sleeps.append)
+    rc, records = _read_partial_tail_watch(run_dir, mode)
+    if mode != "stream":
+        assert rc == 2
     captured = capsys.readouterr()
     assert "lifecycle journal" in captured.err
-    assert not any(json.loads(line)["type"] == "summary" for line in captured.out.splitlines())
+    if records is None:
+        records = [json.loads(line) for line in captured.out.splitlines()]
+    assert not any(row["type"] in {"run", "summary"} for row in records)
+    assert sleeps == [0.01, 0.01]
+    assert journal.read_bytes() == original
+
+
+@pytest.mark.parametrize("mode,finishes_on", [("text", 1), ("json", 1), ("stream", 1), ("json", 2), ("stream", 2)])
+def test_watch_waits_for_transient_partial_journal_tail(tmp_path, capsys, monkeypatch, mode, finishes_on):
+    run_dir = tmp_path / "partial-append"
+    _write_run(run_dir, status="dispatching")
+    _append_watch_lifecycle(run_dir, "run.failed", {"status": "failed"})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    complete = journal.read_bytes()
+    journal.write_bytes(complete[: len(complete) // 2])
+    snapshot = (run_dir / "run.json").read_bytes()
+    sleeps = []
+
+    def finish_append(seconds):
+        assert seconds == 0.01, "watch entered normal polling instead of completing the terminal outcome"
+        sleeps.append(seconds)
+        assert len(sleeps) <= finishes_on
+        if len(sleeps) == finishes_on:
+            journal.write_bytes(complete)
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", finish_append)
+    rc, records = _read_partial_tail_watch(run_dir, mode)
+    if mode != "stream":
+        assert rc == 1
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    if mode == "text":
+        assert "status: failed" in captured.out
+        assert "summary: failed" in captured.out
+        assert "status: dispatching" not in captured.out
+    else:
+        if records is None:
+            records = [json.loads(line) for line in captured.out.splitlines()]
+        assert [row["status"] for row in records if row["type"] == "run"] == ["failed"]
+        assert [row["status"] for row in records if row["type"] == "summary"] == ["failed"]
+    assert sleeps == [0.01] * finishes_on
+    assert snapshot == (run_dir / "run.json").read_bytes()
+    assert journal.read_bytes() == complete
+
+
+@pytest.mark.parametrize("mode", ["json", "stream"])
+@pytest.mark.parametrize("fault", ["missing", "empty", "corrupt", "io"])
+def test_watch_fails_closed_if_partial_journal_changes_during_retry(tmp_path, capsys, monkeypatch, mode, fault):
+    run_dir = tmp_path / "changing-partial"
+    _write_run(run_dir, status="ok", finished=True)
+    _append_watch_lifecycle(run_dir, "run.completed", {"status": "ok"})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.write_bytes(journal.read_bytes() + b'{"partial":')
+    sleeps = []
+
+    def change_journal(seconds):
+        sleeps.append(seconds)
+        assert sleeps == [0.01], "watch retried a journal disappearance, corruption or I/O failure"
+        if fault == "missing":
+            journal.unlink()
+        elif fault == "empty":
+            journal.write_bytes(b"")
+        elif fault == "corrupt":
+            journal.write_bytes(b"not-json\n")
+        else:
+
+            def unreadable(_path):
+                raise OSError("synthetic journal read failure")
+
+            monkeypatch.setattr(run_journal, "read_journal_bounded", unreadable)
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", change_journal)
+    rc, records = _read_partial_tail_watch(run_dir, mode)
+    if mode != "stream":
+        assert rc == 2
+    captured = capsys.readouterr()
+    assert "lifecycle journal" in captured.err
+    if records is None:
+        records = [json.loads(line) for line in captured.out.splitlines()]
+    assert not any(row["type"] in {"run", "summary"} for row in records)
+    assert sleeps == [0.01]
+
+
+@pytest.mark.parametrize("mode", ["json", "stream"])
+@pytest.mark.parametrize("retry_number", [1, 2])
+@pytest.mark.parametrize("fault", ["truncated", "replaced"])
+def test_watch_partial_retry_preserves_each_verified_prefix(tmp_path, capsys, monkeypatch, mode, retry_number, fault):
+    run_dir = tmp_path / "partial-prefix"
+    _write_run(run_dir, status="ok", finished=True)
+    _append_watch_lifecycle(run_dir, "run.created", {"status": "started"})
+    _append_watch_lifecycle(run_dir, "run.failed", {"status": "failed"})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    prefix = journal.read_bytes()
+    _append_watch_lifecycle(run_dir, "run.dispatch.completed", {"seat": "worker", "attempt": 1})
+    advanced = journal.read_bytes()
+    replacement = tmp_path / "replacement" / "events" / "lifecycle.jsonl"
+    for sequence in range(1, retry_number + 2):
+        run_journal.append_event(
+            replacement,
+            run_id=run_dir.name,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key=f"replacement-{sequence}",
+            expected_previous_sequence=sequence - 1,
+            recorded_at="2026-10-28T12:00:00.000000Z",
+        )
+    journal.write_bytes(prefix + b'{"partial":')
+    sleeps = []
+
+    def replace_prefix(seconds):
+        assert seconds == 0.01
+        sleeps.append(seconds)
+        assert len(sleeps) <= retry_number
+        if len(sleeps) < retry_number:
+            journal.write_bytes(advanced + b'{"partial":')
+        elif fault == "replaced":
+            journal.write_bytes(replacement.read_bytes())
+        else:
+            journal.write_bytes(prefix if retry_number == 2 else prefix.splitlines(keepends=True)[0])
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", replace_prefix)
+    rc, records = _read_partial_tail_watch(run_dir, mode)
+    if mode != "stream":
+        assert rc == 2
+    captured = capsys.readouterr()
+    assert "lifecycle journal" in captured.err
+    if records is None:
+        records = [json.loads(line) for line in captured.out.splitlines()]
+    assert not any(row["type"] in {"run", "summary"} for row in records)
+    assert sleeps == [0.01] * retry_number
+
+
+@pytest.mark.parametrize("reader", ["show", "detail", "inspect"])
+def test_static_readers_do_not_retry_partial_journal(tmp_path, capsys, monkeypatch, reader):
+    run_dir = tmp_path / "static-partial"
+    _write_run(run_dir, status="ok", finished=True)
+    _append_watch_lifecycle(run_dir, "run.completed", {"status": "ok"})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.write_bytes(journal.read_bytes() + b'{"partial":')
+
+    def unexpected_sleep(_seconds):
+        pytest.fail("a static reader retried a partial journal")
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", unexpected_sleep)
+    if reader == "detail":
+        payload, diagnostic, rc = runs_cmd.run_detail_contract(run_dir)
+        assert payload is None
+        assert "partial trailing record" in diagnostic
+    else:
+        rc = runs_cmd.show(run_dir) if reader == "show" else runs_cmd.inspect(run_dir, cwd=tmp_path)
+        assert "partial trailing record" in capsys.readouterr().err
+    assert rc == 2

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -13,6 +14,7 @@ def read_run_state(
     nonterminal_statuses: frozenset[str],
     terminal_event_types: frozenset[str],
     tolerate_io_errors: bool = False,
+    retry_partial_tail: bool = False,
 ) -> tuple[dict[str, Any], Any | None]:
     """Overlay verified journal status in memory; never repair stored artifacts.
 
@@ -46,6 +48,23 @@ def read_run_state(
             return effective, None
         expected_run_id = run_lifecycle._run_id_from_dir(run_dir)
         report = run_journal.read_journal_bounded(journal_path)
+        if retry_partial_tail:
+            # Only live watch polls opt into this short, bounded append grace.
+            for _ in range(2):
+                if report.partial_tail is None or report.chain_errors:
+                    break
+                prefix_size = len(report.events)
+                prefix_digest = report.events[-1].event_digest if prefix_size else None
+                time.sleep(0.01)
+                journal_path.lstat()
+                report = run_journal.read_journal_bounded(journal_path)
+                if len(report.events) < prefix_size or (
+                    prefix_size and report.events[prefix_size - 1].event_digest != prefix_digest
+                ):
+                    raise ValueError("lifecycle journal prefix changed during partial trailing record retry")
+                if not report.events and report.partial_tail is None and not report.chain_errors:
+                    # A lost journal must not become a legacy snapshot fallback.
+                    raise ValueError("lifecycle journal lost during partial trailing record retry")
     except run_journal.RunJournalError as exc:
         raise ValueError(f"lifecycle journal is unreadable: {exc.diagnostic}") from exc
     except OSError as exc:
