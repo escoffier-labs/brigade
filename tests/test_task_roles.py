@@ -290,3 +290,18 @@ def test_implementation_verb_with_unknown_object_has_fixed_evidence(verb):
     assert decision.status == "ambiguous"
     assert decision.markers == ("backend-request:code",)
     assert "syntheticonly" not in str(decision.payload()).lower()
+
+
+@pytest.mark.parametrize("backend", ["update the email sender to retry", "write the email template renderer"])
+@pytest.mark.parametrize("separator", [" and ", " plus "])
+def test_rejected_backend_modifier_composes_with_audience_work(backend, separator):
+    assert task_roles.classify(backend).status == "none"
+    decision = task_roles.classify("Draft release notes" + separator + backend)
+    assert (decision.status, decision.workload) == ("ambiguous", "general")
+    assert decision.markers == ("backend-request:code",)
+
+
+def test_conjoined_closed_audience_objects_remain_writing():
+    decision = task_roles.classify("Draft release notes and write a short email about the parser")
+    assert (decision.status, decision.workload) == ("matched", "writing")
+    assert decision.markers == ()
