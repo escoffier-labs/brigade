@@ -952,10 +952,54 @@ def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
         text = (root / ".github/workflows" / filename).read_text()
         build = text.split("  " + job + ":", 1)[1].split("\n  acceptance:", 1)[0]
         gate = build.index("npm/feasibility/provenance.test.cjs")
-        assert build.index("python-version:") < gate < build.index("Build six stable payload archives")
+        assert build.index("python-version:") < gate < build.index("Build six ")
         assert "NODE_OPTIONS" not in text
     import re
 
     for filename, allowed in (("publish.cjs", {"GITHUB_SHA"}), ("provenance.cjs", {"npm_execpath", "PATH"})):
         text = (SOURCE.parent / filename).read_text()
         assert set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z_0-9]*)", text)) <= allowed
+
+
+def test_candidate_wheel_is_bound_to_current_source_and_stable_refuses(tmp_path, monkeypatch):
+    import json
+
+    root = tmp_path / "source"
+    (root / "src/brigade").mkdir(parents=True)
+    (root / "src/brigade/__init__.py").write_text('__version__ = "0.30.0"\n')
+    (root / "src/brigade/new.py").write_text("CURRENT = True\n")
+    (root / "pyproject.toml").write_text('version = "0.30.0"\n')
+    (root / "scripts").mkdir()
+    (root / "scripts/prepare_dev_wheel.py").write_bytes(
+        (SOURCE.parents[2] / "scripts/prepare_dev_wheel.py").read_bytes()
+    )
+    monkeypatch.setattr(prepare, "REPO", root)
+    identity = {
+        "sourceCommit": "a" * 40,
+        "sourceTree": "clean",
+        "sourceDateEpoch": 1793232000,
+        "sourceIdentity": "b" * 64,
+        "sourceSha256": {},
+    }
+    version = prepare.candidate_version(identity)
+    assert version == "0.30.0.dev20261029"
+    built = wheel(tmp_path, version=version, extra={"brigade/new.py": b"CURRENT = True\n"})
+    # The fixture uses a different version constant: source comparison must reject it.
+    with pytest.raises(ValueError, match="source"):
+        prepare.audit_candidate_wheel(built, version, ["src/brigade/__init__.py", "src/brigade/new.py"])
+    omitted = wheel(tmp_path, version=version, extra={"brigade/__init__.py": f'__version__ = "{version}"\n'.encode()})
+    with pytest.raises(ValueError, match="inventory"):
+        prepare.audit_candidate_wheel(omitted, version, ["src/brigade/__init__.py", "src/brigade/new.py"])
+    exact = wheel(
+        tmp_path,
+        version=version,
+        extra={"brigade/__init__.py": f'__version__ = "{version}"\n'.encode(), "brigade/new.py": b"CURRENT = True\n"},
+    )
+    prepare.audit_candidate_wheel(exact, version, ["src/brigade/__init__.py", "src/brigade/new.py"])
+    runtime = json.loads((SOURCE.parent / "runtime.json").read_text())
+    runtime["version"] = "0.30.0-candidate.20261029.aaaaaaaaaaaa"
+    metadata = {**identity, "runtime": runtime}
+    monkeypatch.setattr(prepare, "source_snapshot", lambda dirty: (identity, []))
+    (tmp_path / "artifacts.json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="runtime differs"):
+        prepare.verify_artifacts(tmp_path)

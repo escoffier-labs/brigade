@@ -367,21 +367,141 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
     return wheel, {"versions": tools, "requirementsSha256": digest(requirements.read_bytes()), "sourceDateEpoch": epoch}
 
 
-def verify_artifacts(output: Path) -> dict:
+def dev_helper():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("dev_wheel", REPO / "scripts/prepare_dev_wheel.py")
+    assert spec and spec.loader
+    helper = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(helper)
+    return helper
+
+
+def candidate_version(identity: dict) -> str:
+    from datetime import datetime, timezone
+
+    helper = dev_helper()
+    date = datetime.fromtimestamp(identity["sourceDateEpoch"], timezone.utc).strftime("%Y%m%d")
+    return helper.derive_dev_version(helper.read_stable_version(REPO), date)
+
+
+def candidate_runtime(reviewed: dict, identity: dict) -> dict:
+    runtime = json.loads(json.dumps(reviewed))
+    runtime["payloadVersion"] = candidate_version(identity)
+    runtime["version"] = runtime["payloadVersion"].replace(".dev", "-candidate.") + "." + identity["sourceCommit"][:12]
+    runtime.pop("payloadWheel")
+    return runtime
+
+
+def audit_candidate_wheel(wheel: Path, version: str, paths: list[str]) -> None:
+    """Every package member and every source package file must agree."""
+    expected = {}
+    for name in paths:
+        if not name.startswith("src/brigade/"):
+            continue
+        data = (REPO / name).read_bytes()
+        if name == "src/brigade/__init__.py":
+            data = re.sub(rb'(?m)^__version__ = "[^" ]+"$', f'__version__ = "{version}"'.encode(), data)
+        expected[name.removeprefix("src/")] = data
+    with zipfile.ZipFile(wheel) as archive:
+        actual = {n: archive.read(n) for n in archive.namelist() if n.startswith("brigade/")}
+    if set(actual) != set(expected):
+        raise ValueError("candidate source package inventory mismatch")
+    for name, data in expected.items():
+        if actual[name] != data:
+            raise ValueError(f"candidate wheel differs from source: {name}")
+
+
+def build_candidate_payload(output: Path, runtime: dict, identity: dict, paths: list[str]) -> tuple[Path, dict]:
+    if identity["sourceTree"] != "clean":
+        raise ValueError("candidate requires clean source")
+    runtime.clear()
+    runtime.update(candidate_runtime(json.loads((SOURCE / "runtime.json").read_text()), identity))
+    build = output / "build"
+    source = build / "source"
+    source.mkdir(parents=True, exist_ok=False)
+    for name in paths:
+        destination = source / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((REPO / name).read_bytes())
+    version = runtime["payloadVersion"]
+    dev_helper().prepare_dev_wheel(source, version)
+    builder = build / "venv"
+    venv.EnvBuilder(with_pip=True).create(builder)
+    python = builder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    requirements = SOURCE / "build-requirements.txt"
+    subprocess.run(
+        [str(python), "-m", "pip", "--isolated", "install", "--require-hashes", "-r", str(requirements)], check=True
+    )
+    subprocess.run(
+        [
+            str(python),
+            "-m",
+            "pip",
+            "--isolated",
+            "wheel",
+            "--no-build-isolation",
+            "--no-deps",
+            "--no-index",
+            "--wheel-dir",
+            str(build),
+            str(source),
+        ],
+        env={**os.environ, "SOURCE_DATE_EPOCH": str(identity["sourceDateEpoch"])},
+        check=True,
+    )
+    wheels = list(build.glob("*.whl"))
+    if len(wheels) != 1:
+        raise ValueError("candidate must produce exactly one wheel")
+    wheel = wheels[0]
+    payload = validate_wheel(wheel, version)
+    audit_candidate_wheel(wheel, version, paths)
+    payload.update(sourceCommit=identity["sourceCommit"], sourceTree="clean", sourceIdentity=identity["sourceIdentity"])
+    runtime["payload"] = payload
+    # Refuse source races during construction, including changes outside the wheel.
+    if source_snapshot(False)[0] != identity:
+        raise ValueError("candidate source changed during build")
+    tools = json.loads(
+        subprocess.check_output(
+            [
+                str(python),
+                "-I",
+                "-c",
+                "import importlib.metadata as m,json;print(json.dumps({n:m.version(n) for n in ('pip','packaging','setuptools','wheel')}))",
+            ]
+        )
+    )
+    return wheel, {
+        "versions": tools,
+        "requirementsSha256": digest(requirements.read_bytes()),
+        "sourceDateEpoch": identity["sourceDateEpoch"],
+    }
+
+
+def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
     """Bind the original archives to clean packaging source and the stable pin."""
     metadata = json.loads((output / "artifacts.json").read_text())
-    source = source_snapshot(False)[0]
+    source, paths = source_snapshot(False)
     for key in ("sourceCommit", "sourceTree", "sourceIdentity", "sourceSha256", "sourceDateEpoch"):
         if metadata.get(key) != source[key]:
             raise ValueError(f"packaging source mismatch: {key}")
     runtime = metadata["runtime"]
     reviewed = json.loads((SOURCE / "runtime.json").read_text())
-    if {key: value for key, value in runtime.items() if key != "payload"} != reviewed:
+    expected_runtime = candidate_runtime(reviewed, source) if candidate else reviewed
+    if {key: value for key, value in runtime.items() if key != "payload"} != expected_runtime:
         raise ValueError("runtime differs from reviewed source")
     if json.loads((output / "runtime.json").read_text()) != runtime:
         raise ValueError("runtime receipt mismatch")
     pin, payload = reviewed["payloadWheel"], runtime["payload"]
-    if (
+    if candidate:
+        if any(payload.get(key) != source[key] for key in ("sourceCommit", "sourceTree", "sourceIdentity")):
+            raise ValueError("candidate payload source identity mismatch")
+        if (
+            payload.get("version") != runtime["payloadVersion"]
+            or payload.get("wheel") != f"brigade_cli-{runtime['payloadVersion']}-py3-none-any.whl"
+        ):
+            raise ValueError("candidate payload version mismatch")
+    elif (
         runtime["version"] != "0.30.0"
         or runtime["payloadVersion"] != "0.30.0"
         or payload["sourceCommit"] != pin["sourceCommit"]
@@ -418,17 +538,106 @@ def verify_artifacts(output: Path) -> dict:
             or "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode() != item["integrity"]
         ):
             raise ValueError(f"original archive integrity mismatch: {name}")
+    if candidate:
+        # Hash receipts alone are not derivation evidence. Inspect original package
+        # bytes without extracting paths or trusting a producer-supplied inventory.
+        for item in artifacts:
+            with tarfile.open(output / item["filename"], "r:gz") as archive:
+                files = {}
+                total = 0
+                for member in archive:
+                    total += member.size
+                    if not member.isfile() or member.name in files or total > MAX_EXPANDED:
+                        raise ValueError("unsafe candidate archive")
+                    stream = archive.extractfile(member)
+                    assert stream is not None
+                    files[member.name] = stream.read(MAX_EXPANDED + 1)
+            manifest = json.loads(files["package/package.json"])
+            if manifest["name"] != item["name"] or manifest["version"] != runtime["version"]:
+                raise ValueError("candidate package identity mismatch")
+            if "platform" in item:
+                pin = runtime["platforms"][item["platform"]]
+                expected_names = {
+                    "package/package.json",
+                    "package/manifest.json",
+                    "package/" + pin["executable"],
+                    *("package/" + n for n in runtime["licenses"]),
+                }
+                if set(files) != expected_names or digest(files["package/" + pin["executable"]]) != pin["binarySha256"]:
+                    raise ValueError("candidate companion identity mismatch")
+                expected_manifest = {
+                    "version": runtime["version"],
+                    "uvVersion": runtime["uvVersion"],
+                    "sha256": pin["binarySha256"],
+                    "executable": pin["executable"],
+                }
+                if json.loads(files["package/manifest.json"]) != expected_manifest:
+                    raise ValueError("candidate companion manifest mismatch")
+                if any(digest(files["package/" + name]) != sha for name, sha in runtime["licenses"].items()):
+                    raise ValueError("candidate license mismatch")
+            else:
+                expected_names = {
+                    "package/package.json",
+                    "package/runtime.json",
+                    "package/launcher.cjs",
+                    "package/README.md",
+                    "package/LICENSE",
+                    "package/wheel/" + payload["wheel"],
+                }
+                if set(files) != expected_names:
+                    raise ValueError("candidate launcher inventory mismatch")
+                expected_manifest = json.loads((SOURCE / "package.json").read_text())
+                expected_manifest["version"] = runtime["version"]
+                expected_manifest["optionalDependencies"] = {
+                    p["package"]: runtime["version"] for p in runtime["platforms"].values()
+                }
+                if manifest != expected_manifest:
+                    raise ValueError("candidate launcher manifest mismatch")
+                for name, source_file in (
+                    ("launcher.cjs", SOURCE / "launcher.cjs"),
+                    ("README.md", SOURCE / "README.md"),
+                    ("LICENSE", REPO / "LICENSE"),
+                ):
+                    if files["package/" + name] != source_file.read_bytes():
+                        raise ValueError("candidate launcher source mismatch")
+        launcher = next(item for item in artifacts if "platform" not in item)
+        with tarfile.open(output / launcher["filename"], "r:gz") as archive:
+            members = list(archive)
+            names = [m.name for m in members]
+            wheel_name = "package/wheel/" + payload["wheel"]
+            if len(names) != len(set(names)) or names.count(wheel_name) != 1:
+                raise ValueError("candidate archive inventory mismatch")
+            for name, expected in (("package/runtime.json", runtime),):
+                stream = archive.extractfile(name)
+                if stream is None or json.loads(stream.read()) != expected:
+                    raise ValueError("candidate packed runtime mismatch")
+            member = archive.getmember(wheel_name)
+            if not member.isfile() or member.size > MAX_DOWNLOAD:
+                raise ValueError("candidate wheel must be bounded regular file")
+            stream = archive.extractfile(member)
+            assert stream is not None
+            data = stream.read(MAX_DOWNLOAD + 1)
+        if digest(data) != payload["sha256"] or len(data) != payload["bytes"]:
+            raise ValueError("candidate packed wheel identity mismatch")
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as scratch:
+            wheel = Path(scratch) / payload["wheel"]
+            wheel.write_bytes(data)
+            validate_wheel(wheel, runtime["payloadVersion"])
+            audit_candidate_wheel(wheel, runtime["payloadVersion"], paths)
     return metadata
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--candidate", action="store_true", help="unreleased clean current-source candidate only")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--verify-artifacts", type=Path)
     parser.add_argument("--allow-dirty", action="store_true", help="local evidence only, records dirty provenance")
     args = parser.parse_args()
     if args.verify_artifacts:
-        metadata = verify_artifacts(args.verify_artifacts.resolve())
+        metadata = verify_artifacts(args.verify_artifacts.resolve(), candidate=args.candidate)
         print(json.dumps({"status": "verified", "sourceCommit": metadata["sourceCommit"], "archives": 6}))
         return
     if args.out is None:
@@ -446,7 +655,8 @@ def main() -> None:
     for platform, pin in runtime["platforms"].items():
         if not isinstance(pin.get("binarySha256"), str) or len(pin["binarySha256"]) != 64:
             raise ValueError(f"missing executable SHA-256 pin: {platform}")
-    wheel, build_tools = build_payload(output, runtime, identity, paths)
+    builder = build_candidate_payload if args.candidate else build_payload
+    wheel, build_tools = builder(output, runtime, identity, paths)
     tag = runtime["uvVersion"]
     licenses = {
         name: download(
@@ -521,6 +731,11 @@ def main() -> None:
     (launcher / "launcher.cjs").chmod(0o755)
     (launcher / "wheel").mkdir()
     shutil.copyfile(wheel, launcher / "wheel" / wheel.name)
+    if args.candidate:
+        manifest = json.loads((launcher / "package.json").read_text())
+        manifest["version"] = runtime["version"]
+        manifest["optionalDependencies"] = {p["package"]: runtime["version"] for p in runtime["platforms"].values()}
+        write_json(launcher / "package.json", manifest)
     write_json(launcher / "runtime.json", runtime)
     artifacts.append(pack(launcher, output))
     write_json(output / "runtime.json", runtime)
