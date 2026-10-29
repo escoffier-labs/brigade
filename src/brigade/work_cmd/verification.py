@@ -303,6 +303,8 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
     """
     if not argv:
         return None, {}, "empty command"
+    if any("\x00" in arg for arg in argv):
+        return None, {}, "verification command contains NUL characters"
     executable = Path(argv[0]).name
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, {}, _high_risk_command_message(executable)
@@ -1310,6 +1312,16 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
     }
 
 
+def _verify_run_suggestion(target: Path, *, commands: list[str] | None = None, manifest_id: str | None = None) -> str:
+    """Render a POSIX-shell hint while preserving raw command parsing."""
+    argv = ["brigade", "work", "verify", "run", f"--target={target}"]
+    if manifest_id:
+        argv.append(f"--manifest={manifest_id}")
+    else:
+        argv.extend(f"--command={command}" for command in commands or ["..."])
+    return shlex.join(argv)
+
+
 def _verify_plan_payload(
     target: Path,
     commands: list[str] | None = None,
@@ -1336,7 +1348,8 @@ def _verify_plan_payload(
                 "evidence": _verification_evidence_payload(target),
                 "graph_impact": ranking,
                 "ranked_candidates": ranking.get("candidates") or [],
-                "suggested_command": f'brigade work verify run --manifest "{manifest_id}"',
+                "suggested_command": _verify_run_suggestion(target, manifest_id=manifest_id),
+                "suggested_command_shell": "posix",
             }
         planned_commands = manifest.planned_commands
     else:
@@ -1346,7 +1359,10 @@ def _verify_plan_payload(
     if not planned_commands:
         blockers.append("no verification commands found; pass --command or --manifest")
     for command in planned_commands:
-        _, _, error = _verify_parse_command(command, target)
+        if isinstance(command, list):
+            _, _, error = _verify_parse_argv(command, target)
+        else:
+            _, _, error = _verify_parse_command(command, target)
         if error:
             blockers.append(f"{command}: {error}")
     payload = {
@@ -1357,9 +1373,10 @@ def _verify_plan_payload(
         "evidence": evidence,
         "graph_impact": ranking,
         "ranked_candidates": ranking.get("candidates") or [],
-        "suggested_command": "brigade work verify run"
-        if planned_commands
-        else 'brigade work verify run --command "..."',
+        "suggested_command": _verify_run_suggestion(
+            target, commands=planned_commands if manifest is None else None, manifest_id=manifest_id
+        ),
+        "suggested_command_shell": "posix",
     }
     # Advisory only: when GraphTrail ranked affected tests and the caller did not
     # lock a command/manifest, prefer the combined affected-test command as the
@@ -1371,12 +1388,11 @@ def _verify_plan_payload(
         and ranking["suggested_command"].strip()
     ):
         ranked_cmd = ranking["suggested_command"].strip()
-        payload["suggested_command"] = f'brigade work verify run --command "{ranked_cmd}"'
+        payload["suggested_command"] = _verify_run_suggestion(target, commands=[ranked_cmd])
         payload["suggested_from_graph_impact"] = True
     if manifest is not None:
         payload["manifest_id"] = manifest.manifest_id
         payload["scoreable"] = True
-        payload["suggested_command"] = f'brigade work verify run --manifest "{manifest.manifest_id}"'
         payload.pop("suggested_from_graph_impact", None)
         contract_view = manifest.contract_plan_view()
         payload["verification_contract"] = contract_view
@@ -1920,7 +1936,7 @@ def verify_plan(
         print("blockers:")
         for blocker in blockers:
             print(f"  - {blocker}")
-    print(f"run: {payload['suggested_command']}")
+    print(f"run (POSIX shell): {payload['suggested_command']}")
     return 0 if not blockers else 1
 
 
