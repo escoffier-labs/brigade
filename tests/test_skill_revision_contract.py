@@ -300,3 +300,104 @@ def test_target_binding_is_rendered_package_used_by_install(tmp_path):
     binding = _review_binding(tmp_path, "security-review", "codex", "registry:security-review")
     assert binding["target"] == binding["installed"]
     assert binding["source"] != binding["target"]
+
+
+def test_accept_serializes_ordinary_import_and_refuses_stale_baseline(tmp_path, capsys, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+    from brigade.skills_cmd import registry
+
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source) == 0
+    capsys.readouterr()
+    assert skills_cmd.inbox_add(target=tmp_path, source=source, json_output=True) == 0
+    proposal = json.loads(capsys.readouterr().out)
+    entered, release, attempted = Event(), Event(), Event()
+    original = registry._collect_classified_source_tree
+
+    def collect(target, path):
+        if path == source:
+            entered.set()
+            assert release.wait(10)
+        return original(target, path)
+
+    monkeypatch.setattr(registry, "_collect_classified_source_tree", collect)
+    (source / "helper.py").write_text("replacement generation")
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        importer = pool.submit(skills_cmd.import_skill, target=tmp_path, source=source, force=True)
+        assert entered.wait(10)
+
+        def accept():
+            attempted.set()
+            return skills_cmd.inbox_accept(target=tmp_path, proposal_id=proposal["proposal_id"], force=True)
+
+        acceptance = pool.submit(accept)
+        assert attempted.wait(10)
+        # A bounded event wait gives the contender a chance to expose the old race.
+        done = Event()
+        acceptance.add_done_callback(lambda f: done.set())
+        completed_while_importing = done.wait(0.5)
+        release.set()
+        assert importer.result(timeout=10) == 0
+        assert acceptance.result(timeout=10) == 2
+    assert not completed_while_importing
+    assert (tmp_path / ".brigade/skills/registry/security-review/helper.py").read_text() == "replacement generation"
+
+
+@pytest.mark.parametrize("action", ["install", "uninstall", "rollback"])
+def test_reviewed_mutations_wait_for_supported_install(tmp_path, monkeypatch, action):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event, get_ident
+    from brigade.skills_cmd import registry
+    from brigade.skills_cmd.install import _review_binding
+
+    source = _write_skill(tmp_path / "source")
+    assert skills_cmd.import_skill(target=tmp_path, source=source) == 0
+    assert skills_cmd.install(workspace=tmp_path, skill="registry:security-review", harness="mcp") == 0
+    assert skills_cmd.install(workspace=tmp_path, skill="registry:security-review", harness="mcp", force=True) == 0
+    binding = _review_binding(tmp_path, "security-review", "mcp", "registry:security-review")
+    entered, release, attempted, done = Event(), Event(), Event(), Event()
+    original = registry._read_registry_entry_tree
+    owner = []
+
+    def collect(anchor, skill_id):
+        if owner and get_ident() == owner[0]:
+            entered.set()
+            assert release.wait(10)
+        return original(anchor, skill_id)
+
+    monkeypatch.setattr(registry, "_read_registry_entry_tree", collect)
+
+    def replacement():
+        owner.append(get_ident())
+        return skills_cmd.install(workspace=tmp_path, skill="registry:security-review", harness="mcp", force=True)
+
+    def reviewed():
+        attempted.set()
+        kwargs = dict(workspace=tmp_path, skill="security-review", harness="mcp", expected_binding=binding)
+        if action == "install":
+            kwargs.update(skill="registry:security-review", force=True)
+        return getattr(skills_cmd, action)(**kwargs)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(replacement)
+        assert entered.wait(10)
+        second = pool.submit(reviewed)
+        assert attempted.wait(10)
+        second.add_done_callback(lambda f: done.set())
+        early = done.wait(0.5)
+        release.set()
+        assert first.result(timeout=10) == 0
+        assert second.result(timeout=10) == 2
+    assert not early
+    assert skills_cmd._install_dir(tmp_path, "mcp", "security-review").is_dir()
+
+
+def test_skill_lock_refuses_symlink_without_touching_victim(tmp_path):
+    source = _write_skill(tmp_path / "source")
+    (tmp_path / ".brigade").mkdir()
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"preserve")
+    (tmp_path / ".brigade/skills.mutation.lock").symlink_to(victim)
+    assert skills_cmd.import_skill(target=tmp_path, source=source) == 2
+    assert victim.read_bytes() == b"preserve"

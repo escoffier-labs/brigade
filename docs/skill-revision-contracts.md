@@ -71,8 +71,10 @@ mutation. Install checks the collected source bytes used for rendering and the
 installed bytes used for rollback capture. Rollback checks the collected exact
 snapshot it restores. Ordinary local invocations retain their existing behavior
 when the optional precondition is absent. Filesystem operations retain existing
-no-follow protections. These preconditions do not establish an exclusive lock
-against an unrelated process writing installed files concurrently.
+no-follow protections. Supported skill mutations share a workspace lock,
+including ordinary imports, inbox acceptance and projection operations. This
+serializes cooperative writers. It does not exclude an unrelated process that
+writes installed files without taking the lock.
 
 ## Evaluation integration
 

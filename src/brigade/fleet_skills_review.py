@@ -197,7 +197,8 @@ def validate_report(raw: Any) -> dict[str, Any]:
         raise SkillsReportError("observed_at must be an ISO timestamp")
     version = _text(top["brigade_version"], "brigade_version")
     assert version is not None
-    copies = []
+    copies: list[dict[str, Any]] = []
+    copy_keys: set[tuple[str, str]] = set()
     for row in _rows(top["copies"], "copies"):
         row = _closed(row, _COPY_KEYS, "copy", required=_COPY_KEYS - {"update_selector", "binding"})
         selector = _text(row.get("update_selector"), "update_selector", optional=True)
@@ -213,6 +214,21 @@ def validate_report(raw: Any) -> dict[str, Any]:
                 "binding": validate_binding(row.get("binding")) if top["schema_version"] == 2 else None,
             }
         )
+        copy = copies[-1]
+        key = (copy["skill_id"], copy["harness"])
+        if key in copy_keys:
+            raise SkillsReportError("duplicate skill and harness copy")
+        copy_keys.add(key)
+        binding = copy["binding"]
+        if binding is not None and any(
+            binding[field] != copy[enclosing]
+            for field, enclosing in (
+                ("skill_id", "skill_id"),
+                ("harness", "harness"),
+                ("source_selector", "update_selector"),
+            )
+        ):
+            raise SkillsReportError("copy binding does not match enclosing copy")
     conflicts = []
     for row in _rows(top["conflicts"], "conflicts"):
         row = _closed(row, _CONFLICT_KEYS, "conflict")
@@ -647,6 +663,8 @@ def save_decision(
     if not allowed(skill, decision):
         raise DecisionError(f"{DECISION_LABELS.get(decision, decision)} is not available for this skill")
     copies = {copy.key: copy for copy in skill.copies}
+    if len(copies) != len(skill.copies):
+        raise DecisionError("review-stale: duplicate copies require a current report")
     kept: dict[str, str] = {}
     for key, choice in overrides.items():
         if choice == "":
@@ -738,14 +756,21 @@ def build_plan(view: SkillsView, draft: Mapping[str, Any]) -> Plan:
             blockers.append(f"review-stale: {skill.skill_id}: copies or binding changed or missing")
             continue
         approved = entry.get("copies")
-        if not isinstance(approved, dict) or set(approved) != {c.key for c in skill.copies}:
+        if (
+            not isinstance(approved, dict)
+            or len(approved) != len(skill.copies)
+            or set(approved) != {c.key for c in skill.copies}
+        ):
             blockers.append(f"review-stale: {skill.skill_id}: explicit copy approval missing")
             continue
+        if any(
+            not isinstance(approved.get(copy.key), dict) or approved[copy.key].get("binding") != copy.binding
+            for copy in skill.copies
+        ):
+            blockers.append(f"review-stale: {skill.skill_id}: binding changed")
+            continue
         for copy in skill.copies:
-            saved = approved.get(copy.key)
-            if not isinstance(saved, dict) or saved.get("binding") != copy.binding:
-                blockers.append(f"review-stale: {skill.skill_id}: binding changed")
-                continue
+            saved = approved[copy.key]
             action = saved.get("decision")
             if action not in {"update", "remove", "rollback"} or not allowed(skill, action, copy):
                 continue

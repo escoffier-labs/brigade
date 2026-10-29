@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -216,6 +218,7 @@ def _validate_contract(value: Any) -> dict[str, Any]:
     return value
 
 
+@skill_command
 def inbox_add(
     *,
     target: Path,
@@ -396,6 +399,7 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     return 0
 
 
+@skill_command
 def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     name, proposal, error = _resolve_proposal(target, proposal_id)
@@ -451,6 +455,8 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
             with tempfile.TemporaryDirectory(prefix="brigade-proposal-import-") as staging:
                 staged = Path(staging) / "skill"
                 _registry_mod._write_snapshot_tree(proposal_dirs, proposal_files, staged)
+                if proposal["baseline_identity"] != _registry_mod._baseline_identity(state_anchor, skill_id):
+                    raise _registry_mod.SkillsStatePathError("baseline changed; review a new proposal")
                 payload, import_error, rc = _registry_mod._registry_import_payload(
                     target=target,
                     source=staged,
@@ -482,6 +488,7 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
     return rc
 
 
+@skill_command
 def inbox_reject(*, target: Path, proposal_id: str, reason: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     name, proposal, error = _resolve_proposal(target, proposal_id)

@@ -19,6 +19,8 @@ skill directories.
 
 from __future__ import annotations
 
+from .mutation import registry_import_mutation
+
 import contextlib
 import difflib
 import hashlib
@@ -616,6 +618,7 @@ def _normalized_registry_metadata(incoming: dict[str, Any], skill_id: str) -> di
     return metadata
 
 
+@registry_import_mutation
 def _registry_import_payload(
     *,
     target: Path,

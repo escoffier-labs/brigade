@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -425,6 +427,7 @@ def _sync_projection_plan(
     )
 
 
+@skill_command
 def sync(
     *,
     workspace: Path,
@@ -529,6 +532,7 @@ def sync(
     )
 
 
+@skill_command
 def uninstall(
     *,
     workspace: Path,
@@ -622,6 +626,7 @@ def uninstall(
     return 0
 
 
+@skill_command
 def rollback(
     *,
     workspace: Path,
@@ -734,6 +739,8 @@ def rollback(
                 "restored_receipt": bool(previous_receipt),
                 "snapshot_consumed": True,
             }
+            if expected_binding is not None:
+                _install_mod._check_review_binding(expected_binding, workspace, skill_id, harness, anchor=state_anchor)
             if under_state_root:
                 _registry_mod._remove_tree_in_anchor(state_anchor, *state_parts)
                 _registry_mod._write_collected_tree_into_anchor(dirs, files, state_anchor, *state_parts)

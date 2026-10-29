@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -524,6 +526,7 @@ def _check_review_binding(
         raise registry.SkillsStatePathError("review-stale: expected package binding changed; review again")
 
 
+@skill_command
 def install(
     *,
     workspace: Path,
@@ -781,6 +784,8 @@ def install(
                 )
                 rollback_snapshot = str(rollback_dir)
                 rollback_snapshot_fingerprint = registry._files_fingerprint(replaced_files)
+                if expected_binding is not None:
+                    _check_review_binding(expected_binding, workspace, skill_id, install_target, anchor=state_anchor)
                 if under_state_root:
                     registry._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:

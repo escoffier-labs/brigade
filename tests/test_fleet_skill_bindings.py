@@ -2,11 +2,46 @@
 
 import copy
 import dataclasses
+import json
 
 import pytest
 
 from brigade import fleet_skills_review as review
 from tests.test_fleet_skills_review import seeded, view_for
+
+
+@pytest.mark.parametrize("mismatch", ["duplicate", "skill_id", "harness", "source_selector"])
+def test_report_intake_rejects_ambiguous_copy_bindings(tmp_path, mismatch):
+    conn, _, _ = seeded(tmp_path, bindings=True)
+    node, encoded = conn.execute("SELECT node_id, report FROM fleet_skill_reports LIMIT 1").fetchone()
+    report = json.loads(encoded)
+    row = next(c for c in report["copies"] if c["update_selector"] is not None)
+    if mismatch == "duplicate":
+        report["copies"].append(copy.deepcopy(row))
+    elif mismatch == "skill_id":
+        row["binding"].update(skill_id="other-skill", source_selector="registry:other-skill")
+    elif mismatch == "harness":
+        row["binding"]["harness"] = "codex" if row["harness"] != "codex" else "claude"
+    else:
+        row["binding"]["source_selector"] = None
+    with pytest.raises(review.SkillsReportError):
+        review.store_report(conn, node, report)
+    assert conn.execute("SELECT report FROM fleet_skill_reports WHERE node_id=?", (node,)).fetchone()[0] == encoded
+    conn.close()
+
+
+def test_one_stale_copy_suppresses_every_command_for_skill(tmp_path):
+    conn, _, _ = seeded(tmp_path)
+    view = bound_view(conn)
+    item = next(s for s in view.skills if sum(c.updatable for c in s.copies) >= 2)
+    review.save_decision(conn, view, item.skill_id, "update", {}, display_token=review.review_token(item))
+    draft = review.load_draft(conn)
+    assert review.build_plan(view, draft).count >= 2
+    draft[item.skill_id]["copies"][item.copies[0].key]["binding"]["source"] = "e" * 64
+    plan = review.build_plan(view, draft)
+    assert plan.blockers
+    assert plan.count == 0
+    conn.close()
 
 
 def bound_view(conn):

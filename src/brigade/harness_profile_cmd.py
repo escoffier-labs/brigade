@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .skills_cmd.mutation import skill_command
+
 import hashlib
 import json
 import os
@@ -2379,6 +2381,7 @@ def _run(
     return 0 if payload["ready"] else 1
 
 
+@skill_command
 def sync(
     *,
     harness: str,
@@ -2407,6 +2410,7 @@ def sync(
     )
 
 
+@skill_command
 def uninstall(
     *,
     harness: str,
