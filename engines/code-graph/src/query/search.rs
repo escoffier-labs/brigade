@@ -24,10 +24,11 @@ pub fn search_symbols_with_path(
 ) -> Result<Vec<SearchRow>> {
     let fts = fts_query(query);
     let path = path_filter.map(normalize_path_filter);
-    let path_prefix = path
+    let escaped_path = path.as_deref().map(escape_like_literal);
+    let path_prefix = escaped_path
         .as_ref()
         .map(|p| format!("{}/%", p.trim_end_matches('/')));
-    let path_contains = path.as_ref().map(|p| format!("%{p}%"));
+    let path_contains = escaped_path.as_ref().map(|p| format!("%{p}%"));
     let mut rows = Vec::new();
     if !fts.is_empty() {
         let sql = r#"
@@ -36,7 +37,7 @@ pub fn search_symbols_with_path(
             FROM symbols_fts
             JOIN symbols s ON s.id = symbols_fts.symbol_id
             WHERE symbols_fts MATCH ?1
-              AND (?2 IS NULL OR s.file_path = ?2 OR s.file_path LIKE ?3 OR s.file_path LIKE ?4)
+              AND (?2 IS NULL OR s.file_path = ?2 OR s.file_path LIKE ?3 ESCAPE '!' OR s.file_path LIKE ?4 ESCAPE '!')
             ORDER BY bm25(symbols_fts), s.file_path, s.start_line
             LIMIT ?5
         "#;
@@ -58,7 +59,7 @@ pub fn search_symbols_with_path(
                    end_line, signature, 1.0 AS rank
             FROM symbols
             WHERE (name LIKE ?1 OR qualified_name LIKE ?1 OR signature LIKE ?1)
-              AND (?2 IS NULL OR file_path = ?2 OR file_path LIKE ?3 OR file_path LIKE ?4)
+              AND (?2 IS NULL OR file_path = ?2 OR file_path LIKE ?3 ESCAPE '!' OR file_path LIKE ?4 ESCAPE '!')
             ORDER BY file_path, start_line
             LIMIT ?5
             "#,
@@ -78,6 +79,17 @@ fn normalize_path_filter(path: &str) -> String {
     path.trim_matches('/')
         .trim_start_matches("./")
         .replace('\\', "/")
+}
+
+fn escape_like_literal(path: &str) -> String {
+    let mut escaped = String::with_capacity(path.len());
+    for character in path.chars() {
+        if matches!(character, '!' | '%' | '_') {
+            escaped.push('!');
+        }
+        escaped.push(character);
+    }
+    escaped
 }
 
 fn search_row_from_sql(row: &rusqlite::Row<'_>) -> rusqlite::Result<SearchRow> {
