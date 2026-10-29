@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from typing import Any
 
 from . import __version__
@@ -245,7 +246,7 @@ def export(
         settings = _settings(
             project_doc_max_bytes, fallback_filenames, root_markers, assume_codex_defaults, trust, read_access
         )
-        if not cp._POSIX_NOFOLLOW_SUPPORTED:
+        if not cp._POSIX_NOFOLLOW_SUPPORTED or not callable(getattr(os, "pread", None)):
             raise _Refusal("unsupported_platform")
         root, working = _absolute(target), _absolute(cwd)
         if os.path.commonpath([root, working]) != root:
@@ -368,5 +369,11 @@ def command(*, json_output: bool, **settings: Any) -> int:
             result = export(**settings)
     except (TypeError, ValueError, UnicodeError, RecursionError):
         result = error("invalid_settings")
-    print(canonical_bytes(result).decode("utf-8"))
+    payload = canonical_bytes(result) + b"\n"
+    binary = getattr(sys.stdout, "buffer", None)
+    if binary is None:
+        sys.stdout.write(payload.decode("utf-8"))
+    else:
+        sys.stdout.flush()
+        binary.write(payload)
     return 0 if result["schema"] == "brigade.context_handoff" else 2

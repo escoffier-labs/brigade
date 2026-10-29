@@ -319,6 +319,25 @@ def test_negative_source_timestamp_has_an_identity_refusal(repo):
     refused(export(repo), "identity_not_established")
 
 
+def test_missing_positional_read_is_unsupported(repo, monkeypatch):
+    monkeypatch.delattr(os, "pread")
+    refused(export(repo), "unsupported_platform")
+
+
+def test_cli_emits_utf8_json_with_ascii_stdout(repo):
+    env = dict(os.environ, PYTHONPATH=str(Path("src").resolve()), PYTHONIOENCODING="ascii", BRIGADE_EXTRAS="1")
+    result = subprocess.run(
+        [sys.executable, "-m", "brigade", *cli_args(repo), "--fallback-filenames", '["référence.md"]'],
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["settings"]["fallback_filenames"]["value"] == ["référence.md"]
+    assert "référence.md".encode() in result.stdout
+    assert b"Traceback" not in result.stderr
+
+
 def test_unreadable_has_no_raw_exception(repo, monkeypatch):
     producer()
 
