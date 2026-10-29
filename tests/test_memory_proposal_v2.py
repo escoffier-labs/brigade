@@ -1208,3 +1208,261 @@ def test_reviewed_edit_cannot_target_blank_separated_comment_suffix(tmp_path, ki
     with pytest.raises(api.ProposalError, match="no valid"):
         create(tmp_path, [edit])
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("destination", ["other", "cards/other.md", "memory/cards/other.md"])
+def test_final_block_index_refuses_loser_only_anchor(tmp_path, destination):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    index = tmp_path / "MEMORY.md"
+    index.write_text(f"[[{destination}#^c-456def|claim]]\n")
+    before = {p: p.read_bytes() for p in (path, other, index)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize("markdown", [False, True])
+def test_final_block_unrelated_destination_keeps_same_anchor(tmp_path, in_index, markdown):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    unrelated = card(tmp_path, "unrelated", body="Separate claim. ^c-456def")
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker", body="Placeholder.")
+    destination = "memory/cards/unrelated.md" if in_index else "unrelated.md"
+    referrer.write_text(f"[claim]({destination}#^c-456def)\n" if markdown else "[[unrelated#^c-456def]]\n")
+    before = referrer.read_bytes(), unrelated.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert (referrer.read_bytes(), unrelated.read_bytes()) == before
+
+
+@pytest.mark.parametrize("stage", ["review", "apply"])
+def test_final_block_survivor_alias_and_index_drift(tmp_path, stage):
+    path = card(tmp_path, "cache", body=CLAIM, extra="id: card-00000000-0000-4000-8000-000000000001\n")
+    other = card(tmp_path, "other", body=CLAIM)
+    index = tmp_path / "MEMORY.md"
+    index.write_text("[[cards/other.md#^c-123abc|claim]]\n")
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    values = dict(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+    if stage == "apply":
+        api.review_payload(**values, reason="Inspect retained anchor.")
+    before = path.read_bytes(), other.read_bytes()
+    index.write_text("[[other#^c-456def]]\n")
+    with pytest.raises(api.ProposalError, match="drift"):
+        if stage == "review":
+            api.review_payload(**values, reason="Inspect retained anchor.")
+        else:
+            api.apply_payload(**values)
+    assert (path.read_bytes(), other.read_bytes()) == before
+
+
+def test_final_block_survivor_alias_applies_without_retargeting(tmp_path):
+    card(tmp_path, "cache", body=CLAIM, extra="id: card-00000000-0000-4000-8000-000000000001\n")
+    other = card(tmp_path, "other", body=CLAIM)
+    index = tmp_path / "MEMORY.md"
+    index.write_text("[[other#^c-123abc|claim]]\n")
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    from brigade.card_identity import IdentityIndex, card_identity
+
+    final = next(change["after"] for change in proposal["mutations"] if change["path"] == PATH)
+    identities = IdentityIndex()
+    identities.claim_identity(card_identity(api._meta(final), PATH), PATH)
+    assert identities.resolve("other") == PATH
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert index.read_text() == "[[other#^c-123abc|claim]]\n"
+
+
+def test_final_block_changed_third_source_is_checked(tmp_path):
+    setup(tmp_path)
+    card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    third = card(tmp_path, "third", body="Third claim. ^c-789abc")
+    change = dict(
+        type="replace_block",
+        card_path="memory/cards/third.md",
+        block_id="c-789abc",
+        expected_block_hash=hashlib.sha256(b"Third claim. ^c-789abc").hexdigest(),
+        text="See [claim](%63ache.md#%5Ec-456def).",
+    )
+    before = third.read_bytes()
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [change, op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md", "memory/cards/third.md"],
+        )
+    assert third.read_bytes() == before
+
+
+@pytest.mark.parametrize("destination", ["missing", "unrelated"])
+def test_final_block_refuses_missing_or_unaddressable_destination(tmp_path, destination):
+    setup(tmp_path)
+    card(tmp_path, "other", body=CLAIM)
+    # Literal code and reservations cannot supply a retained addressable anchor.
+    card(tmp_path, "unrelated", body="```\nExample ^c-123abc\n```", extra="claim_anchor_ids: [c-123abc]\n")
+    (tmp_path / "MEMORY.md").write_text(f"[[{destination}#^c-123abc]]\n")
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "link", [r"[[other#^c-456def\|claim]]", "[claim](<other.md#^c-456def>)", "[[other#^c-456def ]]"]
+)
+def test_final_block_unparsed_removed_fragment_stays_fail_closed(tmp_path, in_index, link):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text("| ref |\n| --- |\n| " + link + " |\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("case", ["noncard", "index-self", "duplicate-unreferenced"])
+def test_final_block_unrelated_documents_do_not_expand_merge_scope(tmp_path, case):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    if case == "noncard":
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs/notes.md").write_text("A note. ^c-456def\n")
+        document = card(tmp_path, "linker", body="See [note](../../docs/notes.md#^c-456def).")
+    elif case == "index-self":
+        document = tmp_path / "MEMORY.md"
+        document.write_text("Pinned item. ^c-456def\n\n[jump](#^c-456def)\n")
+    else:
+        document = card(tmp_path, "dup", body="First. ^c-111111\n\nSecond. ^c-111111")
+    before = document.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert document.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "link",
+    [
+        "[claim](<other.md#%5E%63-456def>)",
+        "[claim](<other.md#%5Ec%2D456def>)",
+        "[claim](<other.md#%5Ec-%34%35%36def>)",
+        r"\[note](../../docs/notes.md#^c-456def)",
+        "[claim](Other.md#^c-456def)",
+        "[claim](other#%5Ec-456def)",
+        "[claim](memory/cards/Other.md#^c-456def)",
+    ],
+)
+def test_final_block_ambiguous_wrappers_and_removed_names_refuse(tmp_path, in_index, link):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text("See " + link + ".\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("slashes", [2, 4])
+def test_final_block_outside_note_after_even_backslashes_remains_valid(tmp_path, slashes):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = card(tmp_path, "linker", body="\\" * slashes + "[note](../../docs/notes.md#^c-456def)")
+    before = referrer.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert referrer.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "destination",
+    ["%5Cother.md", "other.md%20", "other.md.", "file:Other.md", "file:other", "obsidian://open?file=other"],
+)
+def test_final_block_platform_aliases_and_local_schemes_stay_fail_closed(tmp_path, in_index, destination):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text(f"[claim]({destination}#^c-456def)\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("destination", ["https://example.com/Other.md", "//example.com/Other.md"])
+def test_final_block_remote_host_links_remain_outside_merge_authority(tmp_path, destination):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = card(tmp_path, "linker", body=f"[claim]({destination}#^c-456def)")
+    before = referrer.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert referrer.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize("destination", ["./other.md::$DATA", "other.md%00"])
+def test_final_block_stream_and_control_aliases_stay_fail_closed(tmp_path, in_index, destination):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text(f"[claim]({destination}#^c-456def)\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
