@@ -10,8 +10,14 @@ import pytest
 from brigade import managed, tokens_cmd
 
 
+@pytest.fixture
+def posix_platform(monkeypatch):
+    """Exercise POSIX ownership independently of the test runner's host OS."""
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
 @pytest.mark.parametrize("owner", ["tokenjuice", "token-glace", "unrelated", "missing", "fork", "malformed"])
-def test_tokens_discovery_requires_upstream_package(monkeypatch, tmp_path, owner):
+def test_tokens_discovery_requires_upstream_package(monkeypatch, tmp_path, owner, posix_platform):
     package = tmp_path / "package"
     executable = package / "dist" / "cli.js"
     executable.parent.mkdir(parents=True)
@@ -59,7 +65,7 @@ def test_legacy_tool_request_resolves_upstream_without_activating(monkeypatch, t
     assert tool.wire(build_context(tmp_path))
 
 
-def test_add_preserves_upstream_development_owner_on_repeat(monkeypatch, tmp_path):
+def test_add_preserves_upstream_development_owner_on_repeat(monkeypatch, tmp_path, posix_platform):
     from brigade import add
 
     package = tmp_path / "upstream"
@@ -92,7 +98,7 @@ def test_unverified_compactor_is_not_hidden_by_usage_tracker(monkeypatch, tmp_pa
 
 
 @pytest.mark.parametrize("occupied", ["tokenjuice", "token-glace", "both"])
-def test_add_refuses_occupied_alias_before_install(monkeypatch, tmp_path, occupied, capsys):
+def test_add_refuses_occupied_alias_before_install(monkeypatch, tmp_path, occupied, capsys, posix_platform):
     from brigade import add
 
     monkeypatch.setattr(managed, "tokenjuice_binary", lambda: None)
@@ -103,7 +109,7 @@ def test_add_refuses_occupied_alias_before_install(monkeypatch, tmp_path, occupi
     assert "migration" in capsys.readouterr().err
 
 
-def test_add_requires_post_install_package_qualification(monkeypatch, tmp_path, capsys):
+def test_add_requires_post_install_package_qualification(monkeypatch, tmp_path, capsys, posix_platform):
     from brigade import add
 
     monkeypatch.setattr(managed, "tokenjuice_binary", lambda: None)
@@ -125,7 +131,7 @@ def test_windows_station_requires_manual_qualification(monkeypatch, tmp_path, ca
     assert "Windows" in capsys.readouterr().err
 
 
-def test_qualified_execution_binds_resolved_entrypoint(monkeypatch, tmp_path):
+def test_qualified_execution_binds_resolved_entrypoint(monkeypatch, tmp_path, posix_platform):
     package = tmp_path / "upstream"
     package.mkdir()
     executable = package / "cli.js"
@@ -162,7 +168,7 @@ def test_wire_plan_binds_only_qualified_owner(monkeypatch, tmp_path, qualified):
     assert all(argv[0] != "tokenjuice" for argv in plan["commands"])
 
 
-def test_add_failed_install_never_wires(monkeypatch, tmp_path, capsys):
+def test_add_failed_install_never_wires(monkeypatch, tmp_path, capsys, posix_platform):
     from dataclasses import replace
     from brigade import add
 
