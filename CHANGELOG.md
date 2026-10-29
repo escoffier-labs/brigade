@@ -87,6 +87,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
 - Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 
+- Native source builds add `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` entry points over the existing engines. Legacy commands, archive locations, protocol identities, and release assets remain compatible.
+
 ### Fixed
 
 - Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).

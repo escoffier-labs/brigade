@@ -3,6 +3,6 @@ use clap::Parser;
 
 use graphtrail::cli::{Cli, run};
 
-fn main() -> Result<()> {
+pub(crate) fn main() -> Result<()> {
     run(Cli::parse())
 }

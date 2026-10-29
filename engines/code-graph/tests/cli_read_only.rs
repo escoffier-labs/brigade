@@ -732,3 +732,56 @@ fn context_help_lists_join_layer_flags() {
     assert!(help.contains("--blend-code-search"));
     assert!(help.contains("--evidence"));
 }
+
+/// Exercise real executables: target metadata alone cannot provide compatibility.
+#[test]
+fn canonical_and_legacy_cli_contracts() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+    for binary in [graphtrail(), env!("CARGO_BIN_EXE_brigade-code-graph")] {
+        let invoke = |args: &[&str]| {
+            Command::new(binary)
+                .current_dir(dir.path())
+                .env("HOME", dir.path())
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        let help = invoke(&["--help"]);
+        assert_eq!(help.status.code(), Some(0), "{help:?}");
+        let text = String::from_utf8_lossy(&help.stdout);
+        assert!(text.contains("--db <PATH>"), "{text}");
+        assert!(text.contains("sync"), "{text}");
+        assert!(help.stderr.is_empty(), "{help:?}");
+
+        let version = invoke(&["--version"]);
+        assert_eq!(version.status.code(), Some(0));
+        assert_eq!(
+            version.stdout,
+            format!("graphtrail {}\n", env!("CARGO_PKG_VERSION")).as_bytes()
+        );
+        assert!(version.stderr.is_empty());
+
+        for args in [
+            vec!["--unknown-option"],
+            vec!["--db"],
+            vec!["unknown-command"],
+        ] {
+            let error = invoke(&args);
+            assert_eq!(error.status.code(), Some(2), "{error:?}");
+            assert!(error.stdout.is_empty(), "{error:?}");
+            assert!(
+                String::from_utf8_lossy(&error.stderr).contains("error:"),
+                "{error:?}"
+            );
+        }
+        let stats = invoke(&["--db", db.to_str().unwrap(), "stats", "--json"]);
+        assert_eq!(stats.status.code(), Some(0), "{stats:?}");
+        let value: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+        assert_eq!(value["symbols"], 2, "{value}");
+
+        let missing = invoke(&["--db", "absent.db", "search", "helper", "--json"]);
+        assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+        assert!(!dir.path().join("absent.db").exists());
+    }
+}

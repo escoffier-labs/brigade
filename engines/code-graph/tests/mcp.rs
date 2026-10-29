@@ -1146,3 +1146,109 @@ fn request_complete(request: &[u8]) -> bool {
         .unwrap_or(0);
     request.len() >= header_end + 4 + content_length
 }
+
+/// Cover stdio framing, database selection and wire identity at both entry points.
+#[test]
+fn canonical_and_legacy_mcp_process_contracts() {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    let (dir, db) = ro_db();
+    let default_dir = dir.path().join(".graphtrail");
+    fs::create_dir(&default_dir).unwrap();
+    // Use SQLite backup semantics via VACUUM INTO rather than copying a live WAL.
+    let conn = open_db(&db).unwrap();
+    conn.execute(
+        "VACUUM INTO ?1",
+        [default_dir.join("graphtrail.db").to_str().unwrap()],
+    )
+    .unwrap();
+    drop(conn);
+    // Explicit and environment cases must not succeed through the default DB.
+    let nondefault_dir = dir.path().join("nondefault");
+    fs::create_dir(&nondefault_dir).unwrap();
+    let input = concat!(
+        "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\"}}\n",
+        "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"search\",\"arguments\":{\"query\":\"helper\"}}}\n",
+        "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"unknown-method\"}\n",
+        "invalid json\n"
+    );
+    for binary in [
+        env!("CARGO_BIN_EXE_graphtrail-mcp"),
+        env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
+    ] {
+        for (args, env_db) in [
+            (
+                vec!["--db".to_owned(), db.display().to_string()],
+                Some("absent.db"),
+            ),
+            (vec![format!("--db={}", db.display())], Some("absent.db")),
+            (vec![], db.to_str()),
+            (vec![], None),
+            // Legacy MCP has no help/version parser: these and a missing --db
+            // value are ignored and database selection falls back to the env.
+            (
+                vec!["--help".into(), "--version".into(), "--db".into()],
+                db.to_str(),
+            ),
+        ] {
+            let mut command = Command::new(binary);
+            command
+                .args(args)
+                .current_dir(if env_db.is_some() {
+                    nondefault_dir.as_path()
+                } else {
+                    dir.path()
+                })
+                .env("HOME", dir.path());
+            if let Some(path) = env_db {
+                command.env("GRAPHTRAIL_DB", path);
+            } else {
+                command.env_remove("GRAPHTRAIL_DB");
+            }
+            let mut child = command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(input.as_bytes())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert_eq!(output.status.code(), Some(0), "{output:?}");
+            assert!(output.stderr.is_empty(), "{output:?}");
+            let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            assert_eq!(responses.len(), 4, "{responses:?}");
+            assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+            assert_eq!(responses[0]["result"]["serverInfo"]["name"], "graphtrail");
+            assert_eq!(responses[1]["id"], 2);
+            assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
+            assert!(
+                responses[1]["result"]["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains("helper"),
+                "{responses:?}"
+            );
+            assert_eq!(responses[2]["error"]["code"], -32601);
+            assert_eq!(responses[3]["error"]["code"], -32700);
+        }
+        let output = Command::new(binary)
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .env_remove("GRAPHTRAIL_DB")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(0), "{output:?}");
+    }
+}
