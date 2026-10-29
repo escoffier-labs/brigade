@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
 
+- Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
+
 - Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
 - `brigade dogfood` reads the TOML literal strings it now writes without applying escapes, so Windows paths in `.brigade/dogfood.toml` keep their backslashes.
