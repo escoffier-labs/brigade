@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import os
+import select
+import shlex
 import shutil
+import signal
 import subprocess
+import sys
 import time
 from pathlib import Path
+
+import pytest
 
 from brigade import cli, localio, runbook_cmd
 
@@ -629,3 +636,123 @@ def test_runbook_step_timeout_reaps_descendants_and_records_receipt(tmp_path, ca
         time.sleep(0.2)
         probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
     assert probe.returncode != 0, f"descendant survived timeout: {probe.stdout.decode()}"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"),
+    reason="Linux process handles are required for isolated signal probes",
+)
+@pytest.mark.parametrize("repeat_interrupt", [False, True])
+def test_runbook_cli_interrupt_reaps_worker_and_descendant(tmp_path, repeat_interrupt):
+    ready = tmp_path / "ready.json"
+    terminating = tmp_path / "terminating"
+    heartbeat = tmp_path / "heartbeat"
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "\n".join(
+            [
+                "import json, os, signal, subprocess, sys, time",
+                "from pathlib import Path",
+                "root = Path(sys.argv[1])",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+                "def terminate(signum, frame):",
+                "    child.terminate()",
+                "    child.wait(timeout=5)",
+                "    (root / 'terminating').touch()",
+                "    time.sleep(0.2)",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, terminate)",
+                "(root / 'ready.json').write_text(json.dumps({'worker': os.getpid(), 'child': child.pid}))",
+                "while True:",
+                "    with (root / 'heartbeat').open('a') as stream:",
+                "        stream.write('tick\\n')",
+                "    time.sleep(0.02)",
+            ]
+        )
+    )
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "interrupt",
+                "steps": [{"id": "worker", "run": "exec " + shlex.join([sys.executable, str(worker), str(tmp_path)])}],
+            }
+        )
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-m", "brigade", "runbook", "run", str(runbook), "--target", str(tmp_path), "--approved"],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    handles = []
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), owner.communicate(timeout=5)
+        pids = json.loads(ready.read_text())
+        handles = [os.pidfd_open(pids[name]) for name in ("worker", "child")]
+        owner.send_signal(signal.SIGINT)
+        if repeat_interrupt:
+            while not terminating.exists() and owner.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert terminating.exists(), "worker never entered cancellation cleanup"
+            owner.send_signal(signal.SIGINT)
+        stdout, stderr = owner.communicate(timeout=5)
+        assert owner.returncode == -signal.SIGINT, (stdout, stderr)
+        for handle in handles:
+            assert select.select([handle], [], [], 0)[0], "runbook process survived CLI interruption"
+        before = heartbeat.read_bytes()
+        time.sleep(0.05)
+        assert heartbeat.read_bytes() == before
+    finally:
+        # These handles bind cleanup to this probe's processes, even on RED.
+        for handle in handles:
+            if not select.select([handle], [], [], 0)[0]:
+                signal.pidfd_send_signal(handle, signal.SIGTERM)
+        for handle in handles:
+            if not select.select([handle], [], [], 5)[0]:
+                signal.pidfd_send_signal(handle, signal.SIGKILL)
+            os.close(handle)
+        if owner.poll() is None:
+            owner.kill()
+        owner.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("as_shell", [False, True])
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(7), UnicodeError("invalid child output")])
+def test_runbook_command_exception_preserves_failure_and_releases_resources(monkeypatch, tmp_path, as_shell, failure):
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise failure
+
+        def wait(self, **kwargs):
+            events.append(("wait", kwargs))
+
+    child = Child()
+    events = []
+    original_handler = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+
+    def terminate(process, **kwargs):
+        assert process is child
+        events.append(("terminate", kwargs))
+        if not kwargs:
+            raise KeyboardInterrupt("repeated interruption during cleanup")
+
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", terminate)
+    with pytest.raises(type(failure)) as raised:
+        runbook_cmd._shell_or_argv_command("worker" if as_shell else ["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is failure
+    assert events == [
+        ("terminate", {}),
+        ("terminate", {"terminate_grace": 0.0, "kill_grace": 0.0}),
+        ("wait", {"timeout": runbook_cmd._TIMEOUT_DRAIN_SECONDS}),
+    ]
+    assert child.stdout.closed and child.stderr.closed
+    assert signal.getsignal(signal.SIGINT) == original_handler

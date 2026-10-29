@@ -7,8 +7,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -375,6 +377,36 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
     return plan, None
 
 
+def _cleanup_interrupted_command(process: subprocess.Popen[Any]) -> None:
+    """Release the owned group without replacing its original exception."""
+    previous_sigint = signal.getsignal(signal.SIGINT) if threading.current_thread() is threading.main_thread() else None
+    # Ctrl-C has already canceled the command. A second Ctrl-C must not skip
+    # escalation or pipe release while the owner is unwinding.
+    if previous_sigint is not None:
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+    try:
+        try:
+            brigade_proc.terminate_process_tree(process)
+        except BaseException:
+            try:
+                brigade_proc.terminate_process_tree(process, terminate_grace=0.0, kill_grace=0.0)
+            except BaseException:
+                pass
+        try:
+            process.wait(timeout=_TIMEOUT_DRAIN_SECONDS)
+        except BaseException:
+            pass
+        for stream in (process.stdout, process.stderr):
+            if stream is not None:
+                try:
+                    stream.close()
+                except BaseException:
+                    pass
+    finally:
+        if previous_sigint is not None:
+            signal.signal(signal.SIGINT, previous_sigint)
+
+
 def _shell_or_argv_command(
     command: str | list[str],
     *,
@@ -383,9 +415,8 @@ def _shell_or_argv_command(
 ) -> tuple[int, bool, str, str]:
     """Run a contract verifier/rollback command. Returns exit_code, timed_out, stdout, stderr.
 
-    Timeouts go through the shared process-group cleanup path
-    (``brigade.proc.terminate_process_tree``) so descendant processes are
-    reaped exactly as they would be on a normal-exit cancellation.
+    Timeouts and exceptional exits use the shared process-group cleanup path
+    (``brigade.proc.terminate_process_tree``), including descendant processes.
     """
     try:
         process = subprocess.Popen(
@@ -400,15 +431,19 @@ def _shell_or_argv_command(
     except OSError:
         return 127, False, "", "command launch failed"
     try:
-        stdout, stderr = process.communicate(timeout=max(timeout, 0))
-        return process.returncode, False, stdout or "", stderr or ""
-    except subprocess.TimeoutExpired:
-        brigade_proc.terminate_process_tree(process)
         try:
-            stdout, stderr = process.communicate(timeout=_TIMEOUT_DRAIN_SECONDS)
-        except (subprocess.TimeoutExpired, ValueError):
-            stdout, stderr = "", ""
-        return 124, True, stdout or "", stderr or ""
+            stdout, stderr = process.communicate(timeout=max(timeout, 0))
+            return process.returncode, False, stdout or "", stderr or ""
+        except subprocess.TimeoutExpired:
+            brigade_proc.terminate_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=_TIMEOUT_DRAIN_SECONDS)
+            except (subprocess.TimeoutExpired, ValueError):
+                stdout, stderr = "", ""
+            return 124, True, stdout or "", stderr or ""
+    except BaseException:
+        _cleanup_interrupted_command(process)
+        raise
 
 
 def _resolve_verifier_command(
