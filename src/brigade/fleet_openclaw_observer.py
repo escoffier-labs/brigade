@@ -39,6 +39,7 @@ class RecentSession:
     session_id: str
     workspace: Path
     updated_at: int
+    provider_link: dict[str, str] | None = None
 
 
 def _remaining(deadline: float, *, cap: float, reserve: float = 0) -> float:
@@ -287,7 +288,9 @@ def _publish_recent(recent: list[RecentSession], *, harness: str, deadline: floa
             attempted += 1
             if session.workspace not in cache:
                 cache[session.workspace] = _workspace_snapshot(session.workspace, harness=harness, deadline=deadline)
-            snapshot = replace(cache[session.workspace], session_id=session.session_id)
+            snapshot = replace(
+                cache[session.workspace], session_id=session.session_id, provider_link=session.provider_link
+            )
             _remaining(deadline, cap=1, reserve=fleet_client.REPORT_TIMEOUT_SECONDS)
             if not fleet_client.publish_session(snapshot).ok:
                 raise ObservationError("publication_failed")

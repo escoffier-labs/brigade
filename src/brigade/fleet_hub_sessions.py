@@ -1,4 +1,4 @@
-"""Fleet Hub authority for interactive session presence (schema version 24)."""
+"""Fleet Hub authority for interactive session presence and exact provider links."""
 
 from __future__ import annotations
 
@@ -62,22 +62,25 @@ _UPSERT_FIELDS = frozenset(
         "ttl_seconds",
         "node_id",
         "cloud_context",
+        "provider_link",
     }
 )
 _END_FIELDS = frozenset({"action", "harness", "session_id", "repo_identity", "node_id"})
 _SESSION_COLUMNS = (
     "node_id, harness, session_id, repo_identity, identity_scope, repo_label, "
     "checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
-    "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json"
+    "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json, provider_link_json"
 )
 
 
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create the v14 table and add the nullable v24 cloud context column."""
+    """Create presence storage and add nullable projection metadata."""
     conn.execute(SCHEMA)
     columns = {row[1] for row in conn.execute("PRAGMA table_info(interactive_sessions)")}
     if "cloud_context_json" not in columns:
         conn.execute("ALTER TABLE interactive_sessions ADD COLUMN cloud_context_json TEXT")
+    if "provider_link_json" not in columns:
+        conn.execute("ALTER TABLE interactive_sessions ADD COLUMN provider_link_json TEXT")
 
 
 def handle_session(
@@ -121,6 +124,25 @@ def _casefold(value: object) -> str:
     return str(value).casefold() if value is not None else ""
 
 
+# Prefer the hook's dirty-path snapshot to the observer's checkout-only row.
+# The native resume identity is exact. Same-checkout sessions without a link
+# remain separate, including standalone sessions running beside a T3 thread.
+_VISIBLE_SESSION = """
+AND NOT (
+    interactive_sessions.harness = 't3' AND provider_link_json IS NOT NULL
+    AND interactive_sessions.state = 'active' AND interactive_sessions.expires_at > ?
+    AND EXISTS (
+        SELECT 1 FROM interactive_sessions AS provider
+        WHERE provider.node_id = interactive_sessions.node_id
+        AND provider.harness = json_extract(interactive_sessions.provider_link_json, '$.harness')
+        AND provider.session_id = json_extract(interactive_sessions.provider_link_json, '$.session_id')
+        AND provider.checkout_path = interactive_sessions.checkout_path
+        AND provider.state = 'active' AND provider.expires_at > ?
+    )
+)
+"""
+
+
 def list_sessions(
     conn: sqlite3.Connection,
     *,
@@ -143,7 +165,7 @@ def list_sessions(
     cap = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
     limit = cap if limit is None else max(0, min(limit, cap))
     node_filter = ""
-    params: list[Any] = [int(include_all), now]
+    params: list[Any] = [int(include_all), now, now, now]
     if node_ids is not None:
         if not node_ids:
             return []
@@ -188,6 +210,7 @@ def list_sessions(
     rows = conn.execute(
         f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "
         "WHERE (? = 1 OR (state = 'active' AND expires_at > ?)) "
+        + _VISIBLE_SESSION
         + node_filter
         + text_clause
         + "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
@@ -208,9 +231,8 @@ def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[st
         "WHERE state = 'active' AND expires_at > ? "
         "AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
         "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
-        "IN ('completed', 'failed', 'cancelled')) "
-        "GROUP BY node_id",
-        (now_epoch,),
+        "IN ('completed', 'failed', 'cancelled')) " + _VISIBLE_SESSION + "GROUP BY node_id",
+        (now_epoch, now_epoch, now_epoch),
     ).fetchall()
     return {str(node_id): int(count) for node_id, count in rows}
 
@@ -328,6 +350,19 @@ def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[s
             or request["repo_label"] != expected.repo_label
         ):
             raise FleetHubError("cloud presence must not contain local checkout state")
+    link = raw.get("provider_link")
+    if link is not None:
+        if (
+            request["harness"] != "t3"
+            or cloud is not None
+            or not isinstance(link, dict)
+            or set(link) != {"harness", "session_id"}
+            or not isinstance(link.get("harness"), str)
+            or link.get("harness") not in {"claude", "codex"}
+        ):
+            raise FleetHubError("session provider_link must identify a Claude or Codex session observed by T3")
+        link = {"harness": link["harness"], "session_id": _opaque_id(link["session_id"], "provider_link.session_id")}
+    request["provider_link"] = link
     return request
 
 
@@ -453,13 +488,19 @@ def _upsert_session(
         if observed > now + 60:
             raise FleetHubError("cloud observation is in the future")
         expires_at = min(now, observed) + request["ttl_seconds"]
+    if request["harness"] in {"claude", "codex"}:
+        conn.execute(
+            "UPDATE interactive_sessions SET state='ended', ended_at=? "
+            "WHERE node_id=? AND harness=? AND session_id=? AND repo_identity != ? AND state='active'",
+            (now_iso, request["node_id"], request["harness"], request["session_id"], request["repo_identity"]),
+        )
     dirty_json = json.dumps(request["dirty_paths"], ensure_ascii=False)
     conn.execute(
         "INSERT INTO interactive_sessions ("
         "node_id, harness, session_id, repo_identity, identity_scope, repo_label, "
         "checkout_path, branch, dirty_paths_json, dirty_truncated, state, started_at, "
-        "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json"
-        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?) "
+        "heartbeat_at, ended_at, ttl_seconds, expires_at, cloud_context_json, provider_link_json"
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NULL, ?, ?, ?, ?) "
         "ON CONFLICT(node_id, harness, session_id, repo_identity) DO UPDATE SET "
         "identity_scope = excluded.identity_scope, "
         "repo_label = excluded.repo_label, "
@@ -475,7 +516,8 @@ def _upsert_session(
         "ended_at = NULL, "
         "ttl_seconds = excluded.ttl_seconds, "
         "expires_at = excluded.expires_at, "
-        "cloud_context_json = excluded.cloud_context_json",
+        "cloud_context_json = excluded.cloud_context_json, "
+        "provider_link_json = excluded.provider_link_json",
         (
             request["node_id"],
             request["harness"],
@@ -492,6 +534,7 @@ def _upsert_session(
             request["ttl_seconds"],
             expires_at,
             cloud_json,
+            json.dumps(request["provider_link"]) if request["provider_link"] is not None else None,
             now,
         ),
     )
@@ -610,6 +653,8 @@ def _session_payload(row: tuple[Any, ...], *, now: float | None = None) -> dict[
         "expires_at": row[15],
     }
 
+    if row[17] is not None:
+        payload["provider_link"] = json.loads(row[17])
     if row[16] is not None:
         context = json.loads(row[16])
         payload["cloud_context"] = context

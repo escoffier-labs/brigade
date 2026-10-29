@@ -35,14 +35,16 @@ MAX_METADATA_BYTES = 262_144
 _ACTIVE = frozenset({"queued", "preparing", "starting", "running", "waiting"})
 _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolled_back"})
 # Constant program, never interpolated with user input. The installed read client
-# bounds shell responses to 16 MiB. No thread details, messages, provider turns,
+# bounds shell and detail responses to 16 MiB. No messages, provider turns,
 # target store or raw shell data are serialized here. Native auth may issue its
 # own local grant; no grant values are exposed by this helper.
 _NATIVE_PROGRAM = r"""
-import json, os
+import json, os, time
+from concurrent.futures import ThreadPoolExecutor, wait
 try:
     from t3_fleet.agent import _build_agent
-    shell = _build_agent(os.environ).t3.shell_snapshot()
+    client = _build_agent(os.environ).t3
+    shell = client.shell_snapshot()
     if not isinstance(shell, dict) or type(shell.get("schemaVersion")) is not int or shell["schemaVersion"] != 2:
         raise ValueError()
     projects, threads = (shell.get(k) for k in ("projects", "threads"))
@@ -75,12 +77,40 @@ try:
             continue
         if status in active_states or run_id is not None or activity is not None or bool(pending) or bool(background):
             active.append(row)
+    # Bounded detail reads expose only a strong native resume ID, never messages.
+    # Rotate the lookup window so large fleets eventually link every thread.
+    linked = sorted(active, key=lambda r: r["id"])
+    offset = (int(time.time()) // 60) % len(linked) if linked else 0
+    def provider_link(row):
+        active_provider = row.get("activeProviderThreadId")
+        if not active_provider:
+            return None
+        try:
+            detail = client.thread_snapshot(row["id"])["thread"]
+            if detail.get("activeProviderThreadId") != active_provider:
+                return None
+            provider = next(p for p in detail.get("providerThreads", []) if p.get("id") == active_provider)
+            ref = provider.get("nativeThreadRef")
+            harness = {"claudeAgent": "claude", "codex": "codex"}.get(provider.get("driver"))
+            if harness and isinstance(ref, dict) and ref.get("strength") == "strong" and ref.get("driver") == provider.get("driver"):
+                return {"harness": harness, "session_id": ref.get("nativeId")}
+        except Exception:
+            pass  # An unavailable link leaves a separate observation, never a guessed match.
+        return None
+    pool = ThreadPoolExecutor(max_workers=8)
+    futures = {pool.submit(provider_link, row): row for row in (linked[offset:] + linked[:offset])[:50]}
+    done, _ = wait(futures, timeout=4)
+    for future in done:
+        link = future.result()
+        if link is not None:
+            futures[future]["provider_link"] = link
+    pool.shutdown(wait=False, cancel_futures=True)
     needed = {row.get("projectId") for row in active if isinstance(row.get("projectId"), str)}
     result = {
         "schemaVersion": 2,
         "total_threads": len(threads) + len(archived),
         "projects": [{k: row.get(k) for k in ("id", "workspaceRoot")} for row in projects if isinstance(row.get("id"), str) and row.get("id") in needed],
-        "threads": [{**{k: row.get(k) for k in ("id", "projectId", "status", "activeRunId", "activityRunStatus", "worktreePath", "archivedAt", "deletedAt") if k in row}, "hasPendingRuntimeRequest": bool(row.get("pendingRuntimeRequest")), "hasPendingBackgroundTasks": bool(row.get("pendingBackgroundTasks"))} for row in active],
+        "threads": [{**{k: row.get(k) for k in ("id", "projectId", "status", "activeRunId", "activityRunStatus", "worktreePath", "archivedAt", "deletedAt", "provider_link") if k in row}, "hasPendingRuntimeRequest": bool(row.get("pendingRuntimeRequest")), "hasPendingBackgroundTasks": bool(row.get("pendingBackgroundTasks"))} for row in active],
         "archived_count": len(archived),
     }
     output = json.dumps(result)
@@ -196,7 +226,12 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
                 if project_id not in roots:
                     raise ObservationError("native_metadata_invalid")
                 raw = roots[project_id]
-            active.append(RecentSession(session_id, _absolute_workspace(raw), now_ms))
+            link = row.get("provider_link")
+            if link is not None:
+                if not isinstance(link, dict) or link.get("harness") not in ("claude", "codex"):
+                    raise ObservationError("native_metadata_invalid")
+                link = {"harness": link["harness"], "session_id": _opaque_id(link.get("session_id"))}
+            active.append(RecentSession(session_id, _absolute_workspace(raw), now_ms, link))
         except ObservationError:
             invalid += 1
     return active, total, invalid

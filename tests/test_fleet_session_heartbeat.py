@@ -786,3 +786,39 @@ def test_versioned_claude_owner_requires_verified_native_installation(tmp_path, 
     assert table.owner("claude") == (proof if native_layout else None)
     binary.chmod(0o777)
     assert not table.alive(proof, "claude")
+
+
+def test_legacy_attribution_records_are_not_renewed(setup):
+    target, snapshot, _, sent, observe = setup
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    record = anchored_io.read_json(target, name)
+    record["version"] = 1
+    anchored_io.write_json(target, name, record)
+    assert observe(publish=True)["published"] == 0
+    assert sent == []
+    # The next correctly attributed hook replaces the legacy sidecar.
+    _remember(snapshot)
+    assert observe(publish=True)["published"] == 1
+
+
+def test_secondary_legacy_checkout_does_not_survive_primary_root_refresh(setup):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    target, snapshot, processes, sent, _ = setup
+    secondary = target / "other"
+    write_config(secondary, Config(version=1, selection=Selection(depth="repo", harnesses=("claude",))))
+    wrong = replace(snapshot, checkout_path=str(secondary), repo_identity="github.com/example/other")
+    _remember(wrong)
+    name = state.record_name(wrong.harness, wrong.session_id)
+    record = anchored_io.read_json(secondary, name)
+    record["version"] = 1
+    anchored_io.write_json(secondary, name, record)
+    report = heartbeat.observe(
+        [secondary, target],
+        processes=processes,
+        publish=True,
+        publisher=lambda s: sent.append(s) or fleet_client.SessionWriteResult(ok=True),
+    )
+    assert report["published"] == 1
+    assert sent == [snapshot]

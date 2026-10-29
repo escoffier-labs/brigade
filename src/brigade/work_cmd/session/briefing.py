@@ -584,8 +584,12 @@ def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
         }
     try:
         from ...fleet_session_heartbeat_state import publish_tracked
+        from ...fleet_session_root import codex_session_root
+        from ...wiring import resolve_wired_target
 
-        snapshot = presence.build_snapshot(target, harness="codex", session_id=session_id)
+        cwd = codex_session_root(session_id) or Path.cwd()
+        root = resolve_wired_target(str(cwd), harness="codex") or cwd
+        snapshot = presence.build_snapshot(root, harness="codex", session_id=session_id)
         result = publish_tracked(
             snapshot, lambda: fleet_client.publish_session(snapshot), successful=lambda result: result.ok
         )
@@ -604,8 +608,12 @@ def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
         interactive["error"] = presence._bounded_presence_error(exc)
         return {"interactive_sessions": interactive, "overlap_warnings": []}
     try:
+        # Warnings concern the requested checkout; this snapshot is never published.
+        overlap = (
+            snapshot if root == target else presence.build_snapshot(target, harness="codex", session_id=session_id)
+        )
         warnings = presence.overlap_warnings(
-            snapshot,
+            overlap,
             rows,
             current_node=fleet_client.resolve_node_id(target),
         )

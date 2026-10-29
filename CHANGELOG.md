@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
 - Removed Jules cloud provider
+- Count a T3 thread and its precisely linked Claude or Codex presence once in Fleet session lists and machine totals. Publish presence from the session root and stop renewing legacy tool-attributed checkout records.
 
 - Add `context handoff --json` for body-free, locally bound Codex instruction accounting, complete source hashes, and selection observations.
 

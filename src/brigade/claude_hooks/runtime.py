@@ -2276,6 +2276,7 @@ def _handle_event(
     if not isinstance(session_id, str) or not session_id:
         return None
 
+    presence_target = effective_hook_target({"cwd": payload.get("cwd")}, pin=pin)
     task_epoch = _task_epoch_for_event(event, payload, session_id)
     persisted_state = read_session_state(target, session_id)
     # No tool runs inside one hook event, so its fingerprints are reused within it.
@@ -2286,11 +2287,13 @@ def _handle_event(
     if event not in {"Stop", "SessionEnd"}:
         _touch_session_targets(session_id, target, payload, task_epoch=task_epoch)
     if event == "SessionEnd":
-        heartbeat.on_event("SessionEnd", target, session_id)
+        if presence_target is not None:
+            heartbeat.on_event("SessionEnd", presence_target, session_id)
         return None
     if event == "SessionStart":
-        presence.emit_presence("SessionStart", target, session_id)
-        heartbeat.on_event("SessionStart", target, session_id)
+        if presence_target is not None:
+            presence.emit_presence("SessionStart", presence_target, session_id)
+            heartbeat.on_event("SessionStart", presence_target, session_id)
         # True starts and Claude's inject-capable compact source both clear any
         # leftover marker so UserPromptSubmit does not double-inject.
         try:
@@ -2338,7 +2341,8 @@ def _handle_event(
         )
 
     if event == "PreToolUse":
-        heartbeat.on_event("PreToolUse", target, session_id)
+        if presence_target is not None:
+            heartbeat.on_event("PreToolUse", presence_target, session_id)
         tool_name = payload.get("tool_name")
         if tool_name in _WRITE_TOOLS:
             # Heartbeat so a concurrent session can attribute the coming write
@@ -2459,7 +2463,8 @@ def _handle_event(
             _write_session_state_preserving_latch(
                 target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
             )
-            presence.emit_presence("PostToolUse", target, session_id)
+            if presence_target is not None:
+                presence.emit_presence("PostToolUse", presence_target, session_id)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)

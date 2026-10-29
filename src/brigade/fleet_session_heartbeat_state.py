@@ -30,6 +30,9 @@ def publish_tracked(
 ) -> T:
     """Serialize the actual write and saved payload against timer renewals.
 
+    Version 2 records are published with session-root attribution. Version 1
+    could contain tool-attributed secondary checkouts and must never renew.
+
     Refuse a contended publication rather than sending metadata that cannot be
     saved while an older heartbeat is in flight. Hook callers already fail open.
     """
@@ -40,7 +43,7 @@ def publish_tracked(
     name = record_name(snapshot.harness, snapshot.session_id)
     with anchored_io.session_directory(target, create=True) as anchor:
         with anchor.held_lock(name + ".lock", deadline_seconds=2.25 if ended else LOCK_SECONDS):
-            record = {"version": 1, "enabled": False, "process": proof, "snapshot": asdict(snapshot)}
+            record = {"version": 2, "enabled": False, "process": proof, "snapshot": asdict(snapshot)}
             # Disable the previous payload before sending. A failed write,
             # process crash, or failed state save cannot renew stale metadata.
             anchor.write_json(name, record)
@@ -59,7 +62,7 @@ def read_record(anchor: anchored_io.SessionDirectory, name: str) -> dict[str, An
         value = json.loads(raw)
     except (ValueError, UnicodeError, RecursionError):
         return None
-    if not isinstance(value, dict) or value.get("version") != 1 or type(value.get("enabled")) is not bool:
+    if not isinstance(value, dict) or value.get("version") != 2 or type(value.get("enabled")) is not bool:
         return None
     return value
 

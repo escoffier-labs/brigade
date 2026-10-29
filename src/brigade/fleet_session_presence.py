@@ -104,6 +104,7 @@ class SessionSnapshot:
     dirty_truncated: bool
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     cloud_context: Mapping[str, object] | None = None
+    provider_link: Mapping[str, str] | None = None
 
 
 _IDENTITY_CACHE: dict[str, tuple[RepositoryIdentity, int | None]] = {}

@@ -30,6 +30,10 @@ def native_t3(tmp_path, monkeypatch):
         " def shell_snapshot(self):\n"
         "  if os.environ.get('FIXTURE_MODE') == 'sleep': time.sleep(30)\n"
         "  return json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
+        " def thread_snapshot(self, thread_id):\n"
+        "  time.sleep(float(os.environ.get('FIXTURE_DETAIL_DELAY', '0')))\n"
+        "  shell = json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
+        "  return {'thread': next(r for r in shell['threads'] if r['id'] == thread_id)}\n"
         "class Agent:\n"
         " t3 = Client()\n"
         " @property\n"
@@ -368,3 +372,93 @@ def test_duplicate_native_identity_fails_entire_collection(native_t3, capsys):
     assert main(["--t3-python", sys.executable, "--publish"]) == 1
     assert json.loads(capsys.readouterr().out)["error"] == "native_identity_collision"
     assert not published
+
+
+@pytest.mark.parametrize("driver,harness", [("claudeAgent", "claude"), ("codex", "codex")])
+def test_observer_publishes_strong_native_link_not_internal_provider_id(native_t3, capsys, driver, harness):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": driver,
+                        "providerSessionId": "internal-session",
+                        "nativeThreadRef": {"driver": driver, "nativeId": "native-session", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert published[0].provider_link == {"harness": harness, "session_id": "native-session"}
+
+
+@pytest.mark.parametrize("strength,driver", [("weak", "codex"), ("strong", "other")])
+def test_observer_does_not_guess_a_provider_link(native_t3, capsys, strength, driver):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": driver, "nativeId": "native-session", "strength": strength},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert published[0].provider_link is None
+
+
+def test_observer_links_a_batch_within_the_native_budget(native_t3, capsys, monkeypatch):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "0.15")
+    configure(
+        [
+            {
+                "id": f"app-thread-{i:02d}",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": f"provider-{i}",
+                "providerThreads": [
+                    {
+                        "id": f"provider-{i}",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": f"native-{i}", "strength": "strong"},
+                    }
+                ],
+            }
+            for i in range(50)
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert len(published) == 50
+    assert all(s.provider_link is not None for s in published)
