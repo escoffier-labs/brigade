@@ -368,8 +368,11 @@ def test_new_epoch_can_publish_while_old_absence_stays_ambiguous(proof):
     authority, client = proof
     client.pending = prepare(authority, "old-pending")
     assert authority.restore(RECOVERY, authority.backup())["state"] == "restored"
-    fresh = prepare(authority, "new-epoch")
+    # Only the client can enforce no replacement of an ambiguous operation.
+    # This separately prepared artifact exercises the authority's new-epoch path.
+    fresh = prepare(authority, "new-epoch", handle="opaque-distinct-new-revision")
     assert fresh.epoch == 1
+    assert authority.outcome(PUBLISHER, fresh) == {"state": "absent", "terminal": False}
     assert authority.commit(PUBLISHER, fresh)["state"] == "committed"
     assert client.reconcile() == {"state": "ambiguous"}
     assert client.pending is not None
@@ -393,7 +396,10 @@ def test_restore_cannot_drop_ledger_only_terminal(proof, terminal):
 def test_checkpoint_gap_cannot_restore_revoked_access(proof):
     authority, client = proof
     before = authority.backup()
+    checkpoints = len(authority.checkpoints)
     authority.revoke(CHECKPOINT)
+    assert len(authority.checkpoints) == checkpoints
+    assert authority.restore(RECOVERY, authority.backup()) == REFUSAL
     authority.revoke(B)
     assert client.read(B, TEAM) == REFUSAL
     assert authority.restore(RECOVERY, before) == REFUSAL
@@ -513,3 +519,121 @@ def test_each_epoch_binding_is_current_independently(proof, epoch_field):
         attempt = prepare(authority, epoch=1)
     assert authority.commit(PUBLISHER, attempt)["state"] == "conflict"
     assert authority.head == 0
+
+
+@pytest.mark.parametrize("phase", ["commit", "restore", "retention"])
+def test_checkpoint_exception_preserves_gap_and_outcomes(proof, monkeypatch, phase):
+    authority, client = proof
+    attempt = prepare(authority)
+    client.pending = attempt
+    before = authority.backup()
+    original_digest = authority.snapshot_digest
+
+    def fail_digest(db):
+        if db is authority.db:
+            raise OSError("scripted checkpoint construction failure")
+        return original_digest(db)
+
+    class FailingRetention(list):
+        def append(self, value):
+            raise OSError("scripted checkpoint retention failure")
+
+    if phase == "retention":
+        monkeypatch.setattr(authority, "checkpoints", FailingRetention(authority.checkpoints))
+    else:
+        monkeypatch.setattr(authority, "snapshot_digest", fail_digest)
+    with pytest.raises(OSError, match="scripted checkpoint"):
+        if phase == "restore":
+            authority.restore(RECOVERY, before)
+        else:
+            authority.commit(PUBLISHER, attempt)
+    assert authority.checkpoint_gap
+    assert authority.restore(RECOVERY, before) == REFUSAL
+    if phase == "restore":
+        assert client.reconcile() == {"state": "ambiguous"}
+    else:
+        receipt = authority.outcome(RECOVERY, attempt)
+        assert receipt == {"state": "committed", "terminal": True, "head": 1}
+        assert authority.commit(PUBLISHER, attempt) == receipt
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        "attempt",
+        "artifact",
+        "recipients",
+        "unhashable",
+        "bundle",
+        "signatures",
+        "review",
+        "publisher",
+        "head",
+        "sources",
+        "handle",
+    ],
+)
+def test_malformed_attempt_has_bounded_preadmission_refusal(proof, malformed):
+    authority, _ = proof
+    attempt = prepare(authority)
+    if malformed == "attempt":
+        attempt = None
+    elif malformed == "artifact":
+        attempt = replace(attempt, artifact=None)
+    elif malformed in {"recipients", "unhashable"}:
+        recipients = None if malformed == "recipients" else ([],)
+        attempt = replace(attempt, artifact=replace(attempt.artifact, recipients=recipients))
+    elif malformed == "bundle":
+        attempt = replace(attempt, bundle=None)
+    elif malformed == "signatures":
+        attempt = replace(attempt, signatures="2")
+    elif malformed in {"review", "publisher"}:
+        attempt = replace(attempt, **{malformed: []})
+    elif malformed == "head":
+        attempt = replace(attempt, head="not-a-sequence")
+    else:
+        attempt = replace(attempt, artifact=replace(attempt.artifact, **{malformed: None}))
+    authority.trace.clear()
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert "BEGIN IMMEDIATE" not in authority.trace
+    assert counts(authority) == (3, 0, 0)
+
+
+def test_hostile_backup_never_executes_attached_database_sql(proof, tmp_path):
+    authority, _ = proof
+    outside = tmp_path / "outside.sqlite"
+    quoted = str(outside).replace("'", "''")
+    hostile = authority.backup() + f"\nATTACH DATABASE '{quoted}' AS outside; CREATE TABLE outside.leak(value);"
+    assert authority.restore(RECOVERY, hostile) == REFUSAL
+    assert not outside.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["fixture"]
+
+
+def test_restored_old_epoch_terminals_remain_lookupable(proof):
+    authority, _ = proof
+    attempt = prepare(authority)
+    receipt = authority.commit(PUBLISHER, attempt)
+    assert authority.restore(RECOVERY, authority.backup())["state"] == "restored"
+    assert authority.outcome(PUBLISHER, attempt) == receipt
+    assert authority.outcome(RECOVERY, attempt) == receipt
+    assert authority.commit(PUBLISHER, attempt) == receipt
+
+
+def test_duplicate_recipient_refuses_without_lock_even_with_incomplete_ledger(proof):
+    authority, _ = proof
+    attempt = prepare(authority, recipients=(A[1], A[1]))
+    authority.ledger_complete = False
+    authority.trace.clear()
+    assert authority.commit(PUBLISHER, attempt) == REFUSAL
+    assert "BEGIN IMMEDIATE" not in authority.trace
+
+
+def test_signed_owner_cannot_be_replaced_by_another_granted_publisher(proof):
+    authority, _ = proof
+    other = ("other-publisher", "other-device")
+    authority.db.execute("INSERT INTO grants VALUES (?, ?, 'publish', 0, 1)", other)
+    attempt = replace(prepare(authority), owner=other[0])
+    attempt = replace(attempt, digest=request_digest(attempt))
+    assert authority.commit(other, attempt) == REFUSAL
+    assert authority.verifier.calls[-2:] == [("review", True), ("publisher", True)]
+    assert counts(authority) == (3, 0, 0)

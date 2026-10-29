@@ -149,10 +149,13 @@ class Authority:
         ).fetchone()
 
     def checkpoint(self, actor):
+        previous_gap = self.checkpoint_gap
+        # Every unsuccessful construction or retention path leaves a sticky gap.
+        self.checkpoint_gap = True
         if self.allowed(actor, "checkpoint") is None:
-            self.checkpoint_gap = True
             return False
         self.checkpoints.append((self.head, self.snapshot_digest(self.db)))
+        self.checkpoint_gap = previous_gap
         return True
 
     def revoke(self, actor):
@@ -230,6 +233,35 @@ class Authority:
 
     @staticmethod
     def bounded(attempt):
+        if not isinstance(attempt, Attempt) or not isinstance(attempt.artifact, Artifact):
+            return False
+        if not isinstance(attempt.bundle, str) or type(attempt.signatures) is not int:
+            return False
+        artifact = attempt.artifact
+        texts = (
+            attempt.owner,
+            attempt.request,
+            attempt.scope,
+            attempt.publisher,
+            attempt.digest,
+            artifact.item,
+            artifact.base,
+            artifact.handle,
+            artifact.scope,
+            artifact.mutation,
+        )
+        numbers = (attempt.head, attempt.fence, attempt.epoch, artifact.epoch, artifact.policy)
+        if not all(isinstance(text, str) for text in texts):
+            return False
+        if not all(type(number) is int and number >= 0 for number in numbers):
+            return False
+        if attempt.review is not None and not isinstance(attempt.review, str):
+            return False
+        if not isinstance(artifact.sources, tuple) or not all(isinstance(source, str) for source in artifact.sources):
+            return False
+        recipients = attempt.artifact.recipients
+        if not isinstance(recipients, tuple) or not all(isinstance(device, str) for device in recipients):
+            return False
         return (
             len(repr(attempt).encode()) <= 4096
             and attempt.signatures == 2
@@ -367,8 +399,9 @@ class Authority:
                 return REFUSAL.copy()
             candidate.backup(self.db)
         # Missing old-epoch operations stay ambiguous, while new-epoch work can proceed.
+        # Preserve old-operation ambiguity even if the post-restore checkpoint fails.
+        self.restore_epoch = self.db.execute("SELECT epoch FROM meta").fetchone()[0] + 1
         self.advance("epoch")
-        self.restore_epoch = self.db.execute("SELECT epoch FROM meta").fetchone()[0]
         return {"state": "restored"}
 
     def diagnostics(self):
