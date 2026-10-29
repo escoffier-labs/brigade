@@ -785,8 +785,43 @@ function Invoke-CanonicalComponentSmoke {
     if ($LASTEXITCODE -ne 0) { throw "canonical evidence version smoke failed" }
 }
 
+function Invoke-CanonicalAttestationVerifier {
+    param([string]$GhExe, [string]$Subject, [string]$Revision, [string]$Version)
+    if (-not $GhExe -or -not [IO.Path]::IsPathRooted($GhExe) -or -not (Test-Path -LiteralPath $GhExe -PathType Leaf)) {
+        throw "canonical attestation verification failed: verifier unavailable"
+    }
+    $arguments = @("attestation", "verify", $Subject, "--repo", "escoffier-labs/brigade", "--signer-workflow", "escoffier-labs/brigade/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
+    # Quote for Windows CreateProcess/CommandLineToArgvW, without a shell.
+    $quoted = foreach ($argument in $arguments) {
+        $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
+        '"' + [regex]::Replace($escaped, '(\\+)$', '$1$1') + '"'
+    }
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo.FileName = $GhExe
+    $process.StartInfo.Arguments = $quoted -join ' '
+    $process.StartInfo.UseShellExecute = $false
+    $process.StartInfo.CreateNoWindow = $true
+    $process.StartInfo.RedirectStandardOutput = $true
+    $process.StartInfo.RedirectStandardError = $true
+    try {
+        if (-not $process.Start()) { throw "verifier did not start" }
+        # Drain both pipes concurrently. Native stderr must never enter the
+        # PowerShell 5.1 error pipeline, even for a successful gh verification.
+        $stdout = $process.StandardOutput.ReadToEndAsync()
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $process.WaitForExit()
+        $null = $stdout.GetAwaiter().GetResult()
+        $null = $stderr.GetAwaiter().GetResult()
+        return $process.ExitCode
+    } catch {
+        throw "canonical attestation verification failed: verifier process unavailable"
+    } finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-VerifiedCanonicalSmoke {
-    param([string]$Version, [string]$ReleaseDirectory)
+    param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe)
     $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
     if ($checksums.Count -eq 26) { return }
     if ($checksums.Count -ne 41) { throw "invalid cached release inventory" }
@@ -800,15 +835,15 @@ function Invoke-VerifiedCanonicalSmoke {
     $revision = $null
     foreach ($id in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
         $current = $manifest.components.$id.component_revision
-        if ($current -isnot [string] -or $current -cnotmatch '^[0-9a-f]{40}$' -or ($revision -and $revision -cne $current)) {
+        if ($current -isnot [string] -or $current -cnotmatch '\A[0-9a-f]{40}\z' -or ($revision -and $revision -cne $current)) {
             throw "primary manifest must contain one valid source commit for all components"
         }
         $revision = $current
     }
     # Verify exact local bytes, including the manifest that supplies the source.
     foreach ($path in @($manifestPath) + @($paths)) {
-        & gh attestation verify $path --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml --source-digest $revision --source-ref "refs/tags/v$Version" | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "canonical attestation verification failed" }
+        $exitCode = Invoke-CanonicalAttestationVerifier -GhExe $GhExe -Subject $path -Revision $revision -Version $Version
+        if ($exitCode -ne 0) { throw "canonical attestation verification failed (exit $exitCode)" }
     }
     $saved = @{}
     try {
@@ -1023,6 +1058,13 @@ try {
         $env:XDG_CACHE_HOME
     ) | Out-Null
 
+    # Capture the application before the minimal acceptance PATH removes gh.
+    # Absence is fatal only for additive releases, preserving legacy acceptance.
+    $ghExe = $null
+    if ($InstallMode -eq "pypi") {
+        $ghCommand = Get-Command gh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($ghCommand) { $ghExe = $ghCommand.Source }
+    }
     $systemPython = (Get-Command python -ErrorAction Stop).Source
     $pythonExeDir = Get-PythonExeDir -PythonExe $systemPython
     $pythonScriptsDir = Get-PythonScriptsDir -PythonExe $systemPython
@@ -1113,7 +1155,7 @@ try {
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
-        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets")
+        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe
     }
 
     $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe

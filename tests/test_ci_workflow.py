@@ -2464,7 +2464,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
         "$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
         "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
         + function
-        + "\nfunction gh {\n"
+        + "\nfunction Invoke-CanonicalAttestationVerifier { param($GhExe, $Subject, $Revision, $Version)\n"
+        "$args = @('attestation','verify',$Subject,'--repo','escoffier-labs/brigade','--signer-workflow',"
+        "'escoffier-labs/brigade/.github/workflows/publish.yml','--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
         "if ($args[0] -ne 'attestation' -or $args[1] -ne 'verify') { throw 'wrong command' }\n"
         "if (-not [IO.Path]::IsPathRooted($args[2])) { throw 'relative subject' }\n"
         "foreach ($pair in @(@('--source-digest', ('a' * 40)), @('--source-ref', 'refs/tags/v1.2.3'), "
@@ -2478,7 +2480,7 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
             else ""
         )
         + ("if ($args[2].EndsWith('.json')) { $global:LASTEXITCODE = 1 }\n" if case == "manifest-attestation" else "")
-        + "}\nfunction Invoke-CanonicalComponentSmoke { param($Paths)\n"
+        + "return $global:LASTEXITCODE\n}\nfunction Invoke-CanonicalComponentSmoke { param($Paths)\n"
         "if ($script:verified -ne 4) { throw 'smoke before verification' }\n"
         "foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process')) { throw 'native credential leak' } }\n"
         "$script:smoked++\n"
@@ -2510,3 +2512,149 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
         )
         assert expected in output, output
     assert "auth restoration failed" not in output
+
+
+@pytest.mark.parametrize("engine", ["powershell", "pwsh"])
+@pytest.mark.parametrize("case", ["ok", "rejected", "unavailable", "legacy", "smoke-failure", "newline"])
+def test_windows_native_attestation_process_boundary(tmp_path, engine, case):
+    """Exercise a real no-network executable after the production PATH rewrite."""
+    if os.name != "nt" or not shutil.which(engine) or not shutil.which("powershell"):
+        pytest.skip("native Windows PowerShell compiler/runtime unavailable")
+    from tests.test_published_artifact_acceptance import _release_fixture
+
+    shell = shutil.which(engine)
+    compiler = shutil.which("powershell")
+    verifier_dir = tmp_path / "verifier with spaces"
+    verifier_dir.mkdir()
+    verifier = verifier_dir / "gh.exe"
+    log = tmp_path / "verifier-args.txt"
+    source = tmp_path / "stub.cs"
+    source.write_text(r"""using System;
+using System.IO;
+class Stub {
+    static int Main(string[] args) {
+        Console.Error.WriteLine("fixture verifier progress and success");
+        File.AppendAllLines(Environment.GetEnvironmentVariable("FIXTURE_LOG"), args);
+        foreach (string key in new [] {"GH_TOKEN", "GITHUB_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"})
+            if (Environment.GetEnvironmentVariable(key) != "fixture-only") return 91;
+        return Environment.GetEnvironmentVariable("FIXTURE_REJECT") == "yes" ? 23 : 0;
+    }
+}
+""")
+
+    def literal(path):
+        return "'" + str(path).replace("'", "''") + "'"
+
+    compile_result = subprocess.run(
+        [
+            compiler,
+            "-NoProfile",
+            "-Command",
+            f"Add-Type -Path {literal(source)} -OutputAssembly {literal(verifier)} -OutputType ConsoleApplication",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert compile_result.returncode == 0, compile_result.stdout + compile_result.stderr
+    _, bodies, checksums = _release_fixture(additive=case != "legacy")
+    release = tmp_path / "release with spaces & punctuation"
+    release.mkdir()
+    for name, body in bodies.items():
+        (release / name).write_bytes(body)
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    for component in manifest["components"].values():
+        component["component_revision"] = "a" * 40 + ("\n" if case == "newline" else "")
+    (release / "component-manifest-v1.json").write_text(json.dumps(manifest))
+    (release / "checksums.txt").write_text("".join(f"{digest}  {name}\n" for name, digest in checksums.items()))
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    functions = "\n".join(
+        _extract_powershell_function(script, name)
+        for name in (
+            "Set-AcceptancePath",
+            "Invoke-CanonicalAttestationVerifier",
+            "Invoke-VerifiedCanonicalSmoke",
+        )
+        if f"function {name}" in script
+    )
+    harness = tmp_path / "native-boundary.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + functions
+        + "\n$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
+        + "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
+        + f"$env:PATH = {literal(verifier_dir)} + ';' + $env:PATH\n"
+        + "$ghExe = (Get-Command gh -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source\n"
+        + f"if ($ghExe -ne {literal(verifier)}) {{ throw 'wrong verifier resolved' }}\n"
+        + f"Set-AcceptancePath -PythonExeDir {literal(tmp_path)} -PythonScripts {literal(tmp_path)}\n"
+        + "if (Get-Command gh -CommandType Application -ErrorAction SilentlyContinue) { throw 'verifier still on PATH' }\n"
+        + ("Remove-Item -LiteralPath $ghExe\n" if case in {"unavailable", "legacy"} else "")
+        + "function Invoke-CanonicalComponentSmoke { param($Paths)\n"
+        + "foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process')) { throw 'native credential leak' } }\n"
+        + "if (@(Get-Content -LiteralPath $env:FIXTURE_LOG).Count -ne 44) { throw 'smoke before four verifications' }\n"
+        + "Set-Content -LiteralPath $env:FIXTURE_SMOKE -Value 'smoked'\n"
+        + ("throw 'fixture smoke failed'\n" if case == "smoke-failure" else "")
+        + "}\ntry {\n"
+        + f"Invoke-VerifiedCanonicalSmoke -Version '1.2.3' -ReleaseDirectory {literal(release)} -GhExe $ghExe\n"
+        + "} finally { foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process') -ne 'fixture-only') { throw 'auth restoration failed' } } }\n"
+    )
+    smoke = tmp_path / "smoked.txt"
+    result = subprocess.run(
+        [shell, "-NoProfile", "-File", str(harness)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env=dict(
+            os.environ,
+            FIXTURE_LOG=str(log),
+            FIXTURE_SMOKE=str(smoke),
+            FIXTURE_REJECT="yes" if case == "rejected" else "no",
+        ),
+    )
+    output = result.stdout + result.stderr
+    assert "auth restoration failed" not in output
+    assert smoke.exists() == (case in {"ok", "smoke-failure"}), output
+    if case in {"ok", "legacy"}:
+        assert result.returncode == 0, output
+    else:
+        assert result.returncode != 0, output
+        assert (
+            "fixture smoke failed"
+            if case == "smoke-failure"
+            else "source commit"
+            if case == "newline"
+            else "attestation verification failed"
+        ) in output, output
+    calls = log.read_text().splitlines() if log.exists() else []
+    expected_subjects = [
+        "component-manifest-v1.json",
+        "brigade-code-graph-windows-amd64.exe",
+        "brigade-code-graph-mcp-windows-amd64.exe",
+        "brigade-evidence-windows-amd64.exe",
+    ]
+    count = 4 if case in {"ok", "smoke-failure"} else 1 if case == "rejected" else 0
+    expected = []
+    for name in expected_subjects[:count]:
+        expected.extend(
+            [
+                "attestation",
+                "verify",
+                str(release / name),
+                "--repo",
+                "escoffier-labs/brigade",
+                "--signer-workflow",
+                "escoffier-labs/brigade/.github/workflows/publish.yml",
+                "--source-digest",
+                "a" * 40,
+                "--source-ref",
+                "refs/tags/v1.2.3",
+            ]
+        )
+    assert calls == expected
+
+
+def test_windows_verifier_is_resolved_before_path_is_replaced():
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    main = script[script.index("    $ghExe = $null") :]
+    assert main.index("Get-Command gh -CommandType Application") < main.index("    Set-AcceptancePath ")
+    assert "-GhExe $ghExe" in main
