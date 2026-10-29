@@ -19,6 +19,7 @@ import json
 import os
 import stat
 import tempfile
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
@@ -1002,6 +1003,7 @@ def write_checkpoint(
     paired_event_type: str | None,
     body_kind: str | None = None,
     pairing_key: str | None = None,
+    following_task_request: tuple[str, Mapping[str, Any], str] | None = None,
 ) -> "run_journal.RunEvent | None":
     """Publish a crash-safe recovery checkpoint and append the checkpoint event.
 
@@ -1024,6 +1026,10 @@ def write_checkpoint(
     SHA, payload, published file, and event payload ``body_kind`` are
     derived from the stripped bytes; the idempotency key becomes
     ``checkpoint:base-stripped:<sha256>:<paired-event-type-or-none>``.
+
+    ``following_task_request`` optionally preflights the exact new checkpoint
+    and paired task fact before publishing an asset. Reused keys and invalid
+    or over-capacity pairs refuse without publishing either record.
 
     No-op (no file, no event) when the journal is not active for the run.
     When the journal is active but the caller does not hold the matching active
@@ -1132,35 +1138,40 @@ def write_checkpoint(
         body_kind=body_kind,
         pairing_key=pairing_key,
     )
-    # Crash-safe publish FIRST. A CheckpointError here fails before the
-    # lifecycle status append and before run.json replacement.
-    publish_checkpoint_file(run_dir, publish_bytes)
+    idempotency_key = _checkpoint_idempotency_key(
+        sha,
+        paired_event_type=paired_event_type,
+        body_kind=body_kind,
+        pairing_key=pairing_key,
+    )
+    # Keep the checked tail stable through checkpoint publication and append.
+    # Existing callers preserve their original locking and replay behavior.
     try:
-        report = run_journal.read_journal_bounded(journal_path)
-        if report.partial_tail is not None or report.chain_errors:
-            raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
-        idempotency_key = _checkpoint_idempotency_key(
-            sha,
-            paired_event_type=paired_event_type,
-            body_kind=body_kind,
-            pairing_key=pairing_key,
-        )
-        return run_journal.append_event(
-            journal_path,
-            run_id=run_lifecycle._run_id_from_dir(run_dir),
-            event_type=CHECKPOINT_EVENT_TYPE,
-            payload=payload,
-            idempotency_key=idempotency_key,
-            expected_previous_sequence=report.events[-1].sequence if report.events else 0,
-            workspace=workspace,
-        )
+        with run_journal.journal_mutation(journal_path) if following_task_request is not None else nullcontext():
+            if following_task_request is not None:
+                run_journal.preflight_new_event_pair(
+                    journal_path,
+                    run_id=run_lifecycle._run_id_from_dir(run_dir),
+                    requests=[(CHECKPOINT_EVENT_TYPE, payload, idempotency_key), following_task_request],
+                )
+            # Crash-safe publish FIRST. A CheckpointError here fails before the
+            # lifecycle status append and before run.json replacement.
+            publish_checkpoint_file(run_dir, publish_bytes)
+            report = run_journal.read_journal_bounded(journal_path)
+            if report.partial_tail is not None or report.chain_errors:
+                raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
+            return run_journal.append_event(
+                journal_path,
+                run_id=run_lifecycle._run_id_from_dir(run_dir),
+                event_type=CHECKPOINT_EVENT_TYPE,
+                payload=payload,
+                idempotency_key=idempotency_key,
+                expected_previous_sequence=report.events[-1].sequence if report.events else 0,
+                workspace=workspace,
+            )
     except CheckpointError:
         raise
-    except run_journal.RunJournalError as exc:
-        raise run_lifecycle._bound_journal_failure(exc) from exc
-    except run_events.CanonicalizationError as exc:
-        raise run_lifecycle._bound_journal_failure(exc) from exc
-    except OSError as exc:
+    except (run_journal.RunJournalError, run_events.CanonicalizationError, OSError) as exc:
         raise run_lifecycle._bound_journal_failure(exc) from exc
 
 

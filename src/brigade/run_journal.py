@@ -50,7 +50,7 @@ from copy import deepcopy
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterator, Mapping, Sequence
 
 from brigade import dirfd, run_dirfd, run_events
 from brigade.run_events import CanonicalizationError, canonical_bytes
@@ -1080,6 +1080,82 @@ def sync_journal_head(journal_path: Path, *, expected_sequence: int, expected_ev
         _sync_existing_journal(journal_path)
 
 
+def _bounded_event_line(envelope: Mapping[str, Any], *, journal_bytes: int) -> bytes:
+    """Apply the writer's exact line, event-count and cumulative-byte bounds."""
+    line = canonical_bytes(envelope) + b"\n"
+    if len(line) > run_events.MAX_LINE_BYTES:
+        raise CanonicalizationError(_bound(f"canonical line exceeds {run_events.MAX_LINE_BYTES} bytes"))
+
+    from brigade.run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
+
+    if envelope["sequence"] > MAX_JOURNAL_EVENTS:
+        raise RunJournalError(_bound("bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS"))
+    if journal_bytes + len(line) > MAX_JOURNAL_BYTES:
+        raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+    return line
+
+
+def preflight_new_event_pair(
+    journal_path: Path,
+    *,
+    run_id: str,
+    requests: Sequence[tuple[str, Mapping[str, Any], str]],
+) -> None:
+    """Validate two new checkpoint/task envelopes without publishing either.
+
+    Callers retain the owner transaction across preflight and publication.
+    Exact replays refuse here: both keys must be new. No journal or checkpoint
+    is created, repaired or appended by this helper.
+    """
+    from datetime import datetime, timezone
+
+    from brigade.run_checkpoint import CHECKPOINT_EVENT_TYPE
+
+    if len(requests) != 2:
+        raise CanonicalizationError("event pair requires exactly two new requests")
+    try:
+        first, second = deepcopy(requests)
+    except Exception as exc:
+        raise CanonicalizationError("event pair cannot be copied for canonicalization") from exc
+    checkpoint_type, checkpoint_payload, _checkpoint_key = first
+    task_type, task_payload, task_key = second
+    if checkpoint_type != CHECKPOINT_EVENT_TYPE or task_type not in run_events._TASK_EVENT_TYPES:
+        raise CanonicalizationError("event pair requires checkpoint then task fact")
+    if checkpoint_payload.get("paired_event_type") != task_type or checkpoint_payload.get(
+        "pairing_key"
+    ) != run_events.request_digest(event_type=task_type, payload=task_payload, idempotency_key=task_key):
+        raise CanonicalizationError("event pair task type or pairing key mismatch")
+    journal_path = Path(journal_path)
+    with _append_critical_section(journal_path):
+        sequence, previous_digest, index, partial_tail, journal_bytes = _read_tail_state(journal_path)
+        if partial_tail is not None:
+            raise PartialTailError(_bound("journal ends in a partial line; pair preflight refused"))
+        if any(event["run_id"] != run_id for event in index.values()):
+            raise ChainIntegrityError("event pair journal run identity mismatch")
+        seen: set[str] = set()
+        # The writer uses this same six-digit UTC encoding. Timestamp and
+        # digest values vary, but their serialized widths do not.
+        recorded_at = run_events.format_recorded_at(datetime.now(timezone.utc))
+        for event_type, payload, key in (first, second):
+            run_events.validate_event_request(event_type=event_type, payload=payload, idempotency_key=key)
+            if key in index or key in seen:
+                raise RunJournalError("event pair requires new distinct idempotency keys")
+            seen.add(key)
+            sequence += 1
+            envelope = run_events.build_event(
+                run_id=run_id,
+                sequence=sequence,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key=key,
+                recorded_at=recorded_at,
+                previous_digest=previous_digest,
+            )
+            line = _bounded_event_line(envelope, journal_bytes=journal_bytes)
+            journal_bytes += len(line)
+            previous_digest = envelope["event_digest"]
+
+
 def append_event(
     journal_path: Path,
     *,
@@ -1154,16 +1230,7 @@ def append_event(
             request_digest_value=rd,
         )
 
-        line = canonical_bytes(envelope) + b"\n"
-        if len(line) > run_events.MAX_LINE_BYTES:
-            raise CanonicalizationError(_bound(f"canonical line exceeds {run_events.MAX_LINE_BYTES} bytes"))
-
-        from brigade.run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
-
-        if sequence > MAX_JOURNAL_EVENTS:
-            raise RunJournalError(_bound("bound exceeded: journal event sequence above MAX_JOURNAL_EVENTS"))
-        if journal_bytes + len(line) > MAX_JOURNAL_BYTES:
-            raise RunJournalError(_bound("bound exceeded: journal above MAX_JOURNAL_BYTES"))
+        line = _bounded_event_line(envelope, journal_bytes=journal_bytes)
 
         fd = _open_nofollow(journal_path, _OPEN_FLAGS, _FILE_MODE)
         primary: BaseException | None = None

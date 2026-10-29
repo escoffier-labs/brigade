@@ -99,6 +99,33 @@ class TaskResult:
 
 
 @dataclass(frozen=True)
+class TaskBatchResult:
+    run_id: str
+    request_id: str
+    descriptor_version: int
+    membership_digest: str
+    batch_ref: str
+    members: tuple[TaskResult, ...]
+
+    @property
+    def specs(self) -> tuple[TaskSpec, ...]:
+        return tuple(member.handle.spec for member in self.members)
+
+
+@dataclass(frozen=True)
+class _BatchMembership:
+    descriptor_version: int
+    membership_digest: str
+    specs: tuple[TaskSpec, ...]
+
+
+@dataclass
+class _TaskHistory:
+    tasks: dict[str, TaskResult]
+    batches: dict[str, _BatchMembership]
+
+
+@dataclass(frozen=True)
 class TaskLaunchDecision:
     outcome: Literal["granted", "already-claimed", "terminal"]
     task: TaskResult
@@ -212,8 +239,9 @@ def _validate_launch_candidate(
         raise TaskJournalError("task launch dispatch binding already used")
 
 
-def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResult]:
+def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHistory:
     results: dict[str, TaskResult] = {}
+    batches: dict[str, _BatchMembership] = {}
     requests: set[str] = set()
     prior_types: dict[str, str] = {}
     used_bindings: set[tuple[str, int]] = set()
@@ -224,6 +252,25 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
         if event.event_type not in journal.TASK_FIELDS:
             continue
         p = event.payload
+        try:
+            journal.validate_payload(event.event_type, p)
+        except run_events.CanonicalizationError as exc:
+            raise TaskJournalError("invalid task payload history") from exc
+        if event.event_type == "task.batch-accepted":
+            request_id = p["request_id"]
+            specs = tuple(TaskSpec(row["task_id"], row["seat"], row["payload_digest"]) for row in p["members"])
+            if request_id in batches:
+                raise TaskJournalError("duplicate task batch acceptance history")
+            children = _batch_children(run_id, request_id, specs)
+            _validate_batch_collisions(results, requests, specs, children)
+            batches[request_id] = _BatchMembership(p["descriptor_version"], p["membership_digest"], specs)
+            for spec, child in zip(specs, children, strict=True):
+                requests.add(child)
+                prior_types[spec.task_id] = event.event_type
+                results[spec.task_id] = TaskResult(
+                    TaskHandle(run_id, child, spec), "queued", version=event.event_digest
+                )
+            continue
         task_id = p["task_id"]
         if event.event_type == "task.accepted":
             spec = TaskSpec(task_id, p["seat"], p["payload_digest"])
@@ -265,7 +312,44 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             results[task_id] = replace(current, acknowledged=True)
         prior_types[task_id] = event.event_type
         results[task_id] = replace(results[task_id], version=event.event_digest)
-    return results
+    return _TaskHistory(results, batches)
+
+
+def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResult]:
+    """Compatibility view over the single validated task/batch history fold."""
+    return _fold_history(run_id, events).tasks
+
+
+def _batch_children(run_id: str, request_id: str, specs: tuple[TaskSpec, ...]) -> tuple[str, ...]:
+    return tuple(
+        journal.batch_child_request_id(run_id=run_id, request_id=request_id, task_id=spec.task_id) for spec in specs
+    )
+
+
+def _validate_batch_collisions(
+    results: dict[str, TaskResult], requests: set[str], specs: tuple[TaskSpec, ...], children: tuple[str, ...]
+) -> None:
+    if (
+        len({spec.task_id for spec in specs}) != len(specs)
+        or any(spec.task_id in results for spec in specs)
+        or len(set(children)) != len(children)
+        or requests.intersection(children)
+    ):
+        raise TaskJournalError("task batch acceptance identity conflict")
+
+
+def _batch_result(run_id: str, request_id: str, history: _TaskHistory) -> TaskBatchResult:
+    batch = history.batches.get(request_id)
+    if batch is None:
+        raise TaskJournalError("task batch identity not accepted")
+    return TaskBatchResult(
+        run_id,
+        request_id,
+        batch.descriptor_version,
+        batch.membership_digest,
+        journal.batch_reference(run_id=run_id, request_id=request_id, membership_digest=batch.membership_digest),
+        tuple(history.tasks[spec.task_id] for spec in batch.specs),
+    )
 
 
 def _find(results: dict[str, TaskResult], task_id: str) -> TaskResult:
@@ -292,6 +376,58 @@ def accept_task(run_dir: Path, *, workspace: Path, request_id: str, spec: TaskSp
             payload={**asdict(spec), "spec_digest": spec.spec_digest, "request_id": request_id},
         )
         return TaskHandle(run_dir.name, request_id, spec)
+
+
+def accept_task_batch(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    request_id: str,
+    specs: tuple[TaskSpec, ...],
+    descriptor_version: int = 1,
+) -> TaskBatchResult:
+    """Commit bounded ordered descriptors, without granting execution authority."""
+    if (
+        not journal.token(request_id)
+        or type(descriptor_version) is not int
+        or descriptor_version != journal.BATCH_DESCRIPTOR_VERSION
+        or type(specs) is not tuple
+        or not 1 <= len(specs) <= journal.MAX_BATCH_MEMBERS
+        or any(type(spec) is not TaskSpec or set(vars(spec)) != {"task_id", "seat", "payload_digest"} for spec in specs)
+    ):
+        raise TaskJournalError("invalid task batch acceptance")
+    # Revalidate and snapshot every scalar before locking or publishing. Never
+    # project richer execution requests into descriptor-only acceptance.
+    specs = tuple(TaskSpec(spec.task_id, spec.seat, spec.payload_digest) for spec in specs)
+    rows = [asdict(spec) for spec in specs]
+    payload = {
+        "descriptor_version": descriptor_version,
+        "request_id": request_id,
+        "members": rows,
+        "membership_digest": journal.batch_membership_digest(descriptor_version=descriptor_version, members=rows),
+    }
+    with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
+        history = _fold_history(run_dir.name, events)
+        prior = history.batches.get(request_id)
+        if prior is not None:
+            if prior.descriptor_version != descriptor_version or prior.specs != specs:
+                raise TaskJournalError("task batch acceptance identity conflict")
+            return _batch_result(run_dir.name, request_id, history)
+        children = _batch_children(run_dir.name, request_id, specs)
+        _validate_batch_collisions(
+            history.tasks, {result.handle.request_id for result in history.tasks.values()}, specs, children
+        )
+        event = journal.append(run_dir, workspace=workspace, event_type="task.batch-accepted", payload=payload)
+        # Fold the committed fact through the same validator as every reader.
+        return _batch_result(run_dir.name, request_id, _fold_history(run_dir.name, [*events, event]))
+
+
+def read_task_batch(run_dir: Path, *, request_id: str) -> TaskBatchResult:
+    """Enumerate one retained batch's current members after a fresh barrier."""
+    if not journal.token(request_id):
+        raise TaskJournalError("invalid task batch request identity")
+    with journal.transaction(run_dir) as (run_dir, events):
+        return _batch_result(run_dir.name, request_id, _fold_history(run_dir.name, events))
 
 
 def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHandle:
@@ -353,7 +489,7 @@ def claim_task_launch(
                 (
                     e.event_type
                     for e in reversed(events)
-                    if e.event_type in journal.TASK_FIELDS and e.payload["task_id"] == handle.spec.task_id
+                    if e.event_type in journal.TASK_FIELDS and e.payload.get("task_id") == handle.spec.task_id
                 ),
                 None,
             )

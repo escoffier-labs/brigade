@@ -17,6 +17,7 @@ from .fleet_policy_page import (
     _layer_text,
     _text,
 )
+from .ui_theme import empty_state
 
 
 def _acknowledged_cell(value: object) -> str:
@@ -112,7 +113,7 @@ def sessions_section(view: PolicyView) -> str:
             "<th>Current revision</th><th>State now</th><th>Pending snapshot</th><th>Reload</th><th>Refresh</th><th>Refresh requested</th>"
             f"</tr></thead><tbody>{rows}</tbody></table></div>"
             if rows
-            else '<p class="empty">No session receipts.</p>'
+            else empty_state("No session receipts", "Receipts appear here when a live session loads policy.")
         )
         + f'<p class="hint">{_esc(SNAPSHOT_CONTRACT_UNAVAILABLE)}.</p>'
         + "</section>"

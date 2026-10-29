@@ -338,9 +338,9 @@ def test_page_puts_ids_json_revision_and_command_in_agent_blocks():
 
 def test_empty_state_and_add_button_for_admins_only():
     admin = _render([])
-    assert "No PR rules yet." in admin and "Add rule" in admin and 'name="csrf"' in admin
+    assert "No PR rules yet" in admin and "Add rule" in admin and 'name="csrf"' in admin
     reader = _render([], editable=False)
-    assert "No PR rules yet." in reader and "Add rule" not in reader and 'name="csrf"' not in reader
+    assert "No PR rules yet" in reader and "Add rule" not in reader and 'name="csrf"' not in reader
     assert page.READ_ONLY_NOTICE in reader
 
 
@@ -428,7 +428,7 @@ def test_admin_adds_edits_toggles_and_deletes_through_preview_and_confirm(tmp_pa
     with _hub(tmp_path) as (hub, db):
         revision = _revision(db)["revision"]
         status, _, body = _request(hub, "/deck/pr-rules", headers=_bearer())
-        assert status == 200 and "No PR rules yet." in body and 'name="csrf"' in body
+        assert status == 200 and "No PR rules yet" in body and 'name="csrf"' in body
         # preview writes nothing and offers a confirm form with a review token
         status, _, body = _post(hub, _add_fields(hub, expected_version=revision))
         assert status == 200 and "Preview only" in body and "Sample rule" in body

@@ -12,6 +12,7 @@ from . import fleet_command_deck as deck
 from . import fleet_investigation as investigation
 from . import worklore_store, fleet_admin_explorer as explorer
 from .fleet_deck_overview import format_age, seconds_since
+from .ui_theme import empty_state
 from .worklore_validate import WorkloreValidationError, safe_https_url
 
 PAGE_SIZE = 25
@@ -101,7 +102,11 @@ def _references(item: Mapping[str, Any]) -> str:
             parts.append("</li>")
         parts.append("</ul>")
     else:
-        parts.append('<p class="empty">No stored references in this projection.</p>')
+        parts.append(
+            empty_state(
+                "No stored references in this projection", "The projection omitted every reference for this task."
+            )
+        )
     if len(links) > REFERENCE_LIMIT:
         parts.append(f'<p class="station-meta">Showing {REFERENCE_LIMIT} of {len(links)} projected references.</p>')
     if item.get("links_truncated"):
@@ -208,7 +213,12 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
         )
         for index, item in enumerate(items[:PAGE_SIZE])
     ]
-    blocks = explorer.render(entries, label="stored tasks", empty="No Worklore tasks on this page.")
+    blocks = explorer.render(
+        entries,
+        label="stored tasks",
+        empty="No Worklore tasks on this page",
+        empty_hint="Tasks appear here once Worklore holds one, for example after `brigade fleet work sync-github` imports labeled GitHub issues.",
+    )
     pagination = '<nav class="pager" aria-label="Worklore pages"><a href="/deck/work">First page</a>'
     cursor = page.get("next_cursor")
     if cursor:

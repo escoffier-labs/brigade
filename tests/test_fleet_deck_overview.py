@@ -606,7 +606,7 @@ def test_repositoryless_jobs_remain_visible_without_shared_label_claim():
 
 
 def test_working_list_empty_state_and_hostile_names_are_inert():
-    assert "No managed jobs reported." in overview.render_work_lists(_view([_station(NODE_A, "linux-a", 2)]))
+    assert "No managed jobs reported" in overview.render_work_lists(_view([_station(NODE_A, "linux-a", 2)]))
     hostile = _station(NODE_A, HOSTILE, 2, [_run(NODE_A, "r1", HOSTILE, seat=HOSTILE)])
     html = overview.render_work_lists(_view([hostile]))
     assert HOSTILE not in html and "&lt;script&gt;" in html
@@ -620,7 +620,7 @@ def test_queued_panel_states():
     positive = deck.QueueState(eligible_count="2", queued_count="2", blocked_known=True)
     assert "2 ready to run" in overview.render_work_lists(_view(plane=_plane(queue=positive)))
     unsure = deck.QueueState(eligible_count="2", queued_count="2", blocked_known=False)
-    assert "Blocked reasons unknown." in overview.render_work_lists(_view(plane=_plane(queue=unsure)))
+    assert "Blocked reasons unknown" in overview.render_work_lists(_view(plane=_plane(queue=unsure)))
     unreported = deck.QueueState(eligible_count=deck.UNKNOWN, queued_count=deck.UNKNOWN, blocked_known=True)
     assert "Ready to run: unknown · queued: unknown" in overview.render_work_lists(
         _view(plane=_plane(queue=unreported))
@@ -878,7 +878,7 @@ def test_cloud_workers_render_compact_cards_and_empty_state():
     html = overview.render_cloud_workers(_view(cloud_workers=(worker,)))
     assert " cursor</h3>" in html and ">1/3<" in html and "circuit: closed" in html
     assert "label one" in html and "example/tool" in html
-    assert "No cloud providers configured." in overview.render_cloud_workers(_view())
+    assert "No cloud providers configured" in overview.render_cloud_workers(_view())
 
 
 def test_session_details_retain_exact_escaped_checkout_branch_and_dirty_count():
@@ -900,7 +900,7 @@ def test_session_details_retain_exact_escaped_checkout_branch_and_dirty_count():
     assert "Session: sess-1" in details and "Branch: main" in details and "Dirty paths: 2+" in details
     assert "Checkout: &lt;script&gt;alert(1)&lt;/script&gt;" in details
     assert html.count("&lt;script&gt;") == 1
-    assert "No agent sessions reported." in overview.render_sessions(_view())
+    assert "No agent sessions reported" in overview.render_sessions(_view())
 
 
 def test_outcomes_collapse_adjacent_duplicates_and_label_the_node():
@@ -914,7 +914,7 @@ def test_outcomes_collapse_adjacent_duplicates_and_label_the_node():
     assert "3 shown" in html
     assert html.count("run.completed") == 1 and "<span>×2</span>" in html
     assert "skillet · linux-a" in html and "skillet · 22222222-222" in html
-    assert "No recent outcomes." in overview.render_outcomes(_view())
+    assert "No recent outcomes" in overview.render_outcomes(_view())
 
 
 def test_observed_groups_and_observers_fold_away():

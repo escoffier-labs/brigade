@@ -474,7 +474,12 @@ def _read_only(view: RosterView, *, nonce: str, now: datetime) -> str:
             if routing.uncertain
             else ""
         )
-        + explorer.render(entries, label="roles")
+        + explorer.render(
+            entries,
+            label="roles",
+            empty="No roles reported",
+            empty_hint="Roles appear here when the model roster reports them.",
+        )
         + "<p>Browser access is read-only.</p>"
     )
     return document(

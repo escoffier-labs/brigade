@@ -9,6 +9,7 @@ travel in ``extra_css``. The scale is a 4px base: panels pad 16px, labels sit
 from __future__ import annotations
 
 import html
+import re
 
 # Pixel steps used below. Label/control (6px) and table row (10px) spacing
 # are optical half-steps. Panels/gaps use 16, headings/fields/actions use 12,
@@ -113,6 +114,9 @@ nav a[aria-current="page"], .deck-nav a[aria-current="page"] { border-bottom-col
 .panel + .repo-panel { margin-top: var(--space-4); }
 .panel > h2, .repo-panel > h2, details > h3 { margin-bottom: var(--space-3); }
 .empty { margin: 0; padding: var(--space-6) var(--space-3); color: var(--muted); text-align: center; font-size: 13px; }
+.empty-title { display: block; color: var(--ink); font-weight: 600; }
+.empty-hint { display: block; margin-top: var(--space-1); }
+.empty-hint code { font-size: 12px; }
 .callout { margin: var(--space-4) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
 .callout--error { border-color: var(--error-line); }
 .banner { margin: var(--space-4) 0 0; padding: var(--space-3) var(--space-4); border: 1px solid var(--signal); color: var(--ink); font-size: 12px; }
@@ -457,4 +461,25 @@ def document(
         f'<style nonce="{_esc(nonce)}">{tokens}{BASE_CSS}{extra_css}</style>'
         f"{script_tag}"
         f'</head><body class="deck"{body_attrs} data-as-of="{_esc(as_of)}">{body}</body></html>'
+    )
+
+
+_CODE_SPAN = re.compile(r"`([^`]+)`")
+
+
+def empty_state(title: str, hint: str = "", *, classes: str = "", attrs: str = "") -> str:
+    """Render the shared two-line empty state: a title, then one guidance line.
+
+    *title* and *hint* are plain text and escaped here; a backtick span in
+    *hint* renders as ``<code>``, for the command that fills the section.
+    *classes* adds CSS classes after ``empty``; *attrs* is trusted attribute
+    markup (such as ``data-x hidden``) supplied by the caller.
+    """
+    hint_html = _CODE_SPAN.sub(r"<code>\1</code>", _esc(hint))
+    class_attr = f"empty {classes}".strip()
+    extra = f" {attrs.strip()}" if attrs.strip() else ""
+    return (
+        f'<p class="{_esc(class_attr)}"{extra}><span class="empty-title">{_esc(title)}</span>'
+        + (f'<span class="empty-hint">{hint_html}</span>' if hint else "")
+        + "</p>"
     )

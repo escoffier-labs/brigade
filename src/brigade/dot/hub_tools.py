@@ -401,6 +401,45 @@ class HubTools:
             digest["section_errors"] = sorted(
                 name for name in sections if isinstance(digest[name], dict) and "error" in digest[name]
             )
+            # Six fixed components only: never scan peer messages or arbitrary payloads.
+            overview = digest["fleet_overview"]
+            overview_ok = isinstance(overview, dict) and "error" not in overview
+            components = {
+                "fleet_overview.status": overview.get("status") if overview_ok else None,
+                "fleet_overview.claims": overview.get("claims") if overview_ok else None,
+                "fleet_work_next": digest["fleet_work_next"],
+                "inbox": digest["inbox"],
+                "subscriptions": digest["subscriptions"],
+                "brigade_prs": digest["brigade_prs"],
+            }
+            shapes: dict[str, dict[str, type]] = {
+                "fleet_overview.status": {"run_count": int, "by_state": dict, "latest_runs": list},
+                "fleet_overview.claims": {"count": int, "claims": list},
+                "fleet_work_next": {"considered_count": int, "considered_by_bucket": dict, "reserved": bool},
+                "inbox": {"unacked": int, "oldest": list},
+                "subscriptions": {"count": int},
+                "brigade_prs": {"count": int, "prs": list},
+            }
+            unavailable = []
+            for name, value in components.items():
+                valid = isinstance(value, dict) and "error" not in value
+                if valid:
+                    for key, kind in shapes[name].items():
+                        field = value.get(key)
+                        if not isinstance(field, kind) or (kind is int and (type(field) is not int or field < 0)):
+                            valid = False
+                    if name == "fleet_work_next" and value.get("reserved") is not False:
+                        valid = False
+                if not valid:
+                    unavailable.append(name)
+            digest["availability"] = {
+                "state": "unavailable"
+                if len(unavailable) == len(components)
+                else "partial"
+                if unavailable
+                else "complete",
+                "unavailable_components": sorted(unavailable),
+            }
             return digest
         finally:
             # Unfinished children are bounded by their own subprocess timeouts.

@@ -68,7 +68,7 @@ def test_empty_alerts_hide_nav_count_and_show_empty_state():
         ),
         action_sources=frozenset(),
     )
-    assert "No active alerts</p>" in page and "0 open" in page
+    assert "No active alerts</span>" in page and "0 open" in page
     assert "Alerts</a>" in page
     assert 'class="alert-row"' not in page
     sidebar = overview.render_sidebar(None, "alerts", NOW, worklore_enabled=True)

@@ -1637,7 +1637,7 @@ def test_optional_integration_telemetry_is_distinct_from_a_missing_section(repor
     assert ("integrations" in deck.coverage_gaps(plane)) is not reported
     html = deck.render_control_plane(plane)
     if reported:
-        assert "No integration readiness reports in this snapshot" in html
+        assert "No integration readiness reports" in html
         assert "Worklore queue sourcing" not in html
         assert deck.deck_verdict(_empty_view(plane)) == "ALL CLEAR"
     else:
@@ -1707,8 +1707,8 @@ def test_absent_effective_quota_is_unknown_and_raw_rows_stay_history():
     plane = deck.control_plane_from_snapshot(_control_plane_snapshot())
     assert plane.quota_effective_present is False
     html = deck.render_control_plane(plane)
-    assert "Effective headroom is <strong>unknown</strong>" in html
-    assert "no centrally computed quota projection is attached" in html
+    assert "Effective headroom unknown" in html
+    assert "No centrally computed quota projection is attached" in html
     assert "pool-one" in html  # the raw observation is still visible
     assert "Quota observation history" in html
 

@@ -22,7 +22,16 @@ from .. import localio
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
-from . import anchored_io, compaction_marker, dependencies, envelope, fleet_inbox, heartbeat, presence
+from . import (
+    anchored_io,
+    compaction_marker,
+    dependencies,
+    envelope,
+    fleet_inbox,
+    heartbeat,
+    presence,
+    write_attribution,
+)
 from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -536,7 +545,7 @@ def _as_tool_input(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
+def wired_target_from_payload(payload: dict[str, Any], *, attribute_writes: bool = True) -> Path | None:
     try:
         cwd = expand_user_path(Path(str(payload.get("cwd") or "."))).resolve(strict=False)
     except (OSError, RuntimeError):
@@ -546,6 +555,11 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
         command = str(tool_input.get("command") or "")
+        for written_target, confident in (
+            write_attribution.bash_scopes(command, cwd).items() if attribute_writes else ()
+        ):
+            if confident:
+                return written_target
         verifier_target = _verifier_target_from_command(command, cwd)
         if verifier_target is not None:
             wired = resolve_wired_target(str(verifier_target))
@@ -598,7 +612,9 @@ def _session_id_from_payload(payload: dict[str, Any]) -> str:
     return "unknown"
 
 
-def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -> Path | None:
+def effective_hook_target(
+    payload: dict[str, Any], *, pin: Path | None = None, attribute_writes: bool = True
+) -> Path | None:
     """Return the workspace a hook may operate on, or None to no-op.
 
     User-scope installs fire for every Claude session. Home is never a work
@@ -606,7 +622,7 @@ def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -
     what times out on every tool call. An optional ``--target`` pin restricts
     work to that wired workspace and no-ops everywhere else.
     """
-    derived = wired_target_from_payload(payload)
+    derived = wired_target_from_payload(payload, attribute_writes=attribute_writes)
     resolved_pin = _resolve_pin(pin)
     if resolved_pin is not None:
         if derived is not None and _path_is_within(derived, resolved_pin):
@@ -1126,7 +1142,8 @@ def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, dept
 
 
 def _shell_lexer(command: str | StringIO) -> shlex.shlex:
-    lexer = shlex.shlex(command, posix=os.name != "nt", punctuation_chars=";&|<>\n")
+    # Bash payloads use POSIX quoting on Windows too (Claude Code uses Git Bash).
+    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>\n")
     lexer.whitespace = " \t\r"
     lexer.whitespace_split = True
     lexer.commenters = ""
@@ -1378,54 +1395,7 @@ def _command_path_arguments(tokens: list[str]) -> list[str]:
 
 
 def _bash_confident_write_touches_worktree(target: Path, command: object) -> bool:
-    if not isinstance(command, str) or not command.strip():
-        return False
-    try:
-        tokens = _shell_path_tokens(command)
-    except ValueError:
-        return True
-    if any(
-        not path
-        or (_relative_path_under_target(target, path) and not _path_targets_brigade_internal_artifact(target, path))
-        for path in _redirect_file_targets(tokens)
-    ):
-        return True
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    touches_worktree = False
-    for segment in segments:
-        stripped = _strip_env(segment)
-        if not stripped:
-            continue
-        names = [Path(token).name for token in stripped]
-        command_name = names[0]
-        if command_name in _BASH_WRITE_COMMANDS:
-            candidates = _command_path_arguments(stripped[1:])
-            if not candidates:
-                if command_name == "tee":
-                    continue  # With no file operands, tee only copies to stdout.
-                return True
-            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
-                touches_worktree = True
-        elif command_name == "sed" and any(arg == "-i" or arg.startswith("-i") for arg in stripped[1:]):
-            candidates = _command_path_arguments(stripped[1:])
-            if not candidates:
-                return True
-            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
-                touches_worktree = True
-        elif command_name == "ruff" and names[1:2] == ["format"] and not {"--check", "--diff"}.intersection(names[2:]):
-            candidates = _command_path_arguments(stripped[2:])
-            if not candidates:
-                return True
-            if any(not _path_targets_brigade_internal_artifact(target, token) for token in candidates):
-                touches_worktree = True
-        elif command_name == "git" and len(names) > 1 and names[1] in _GIT_WRITE_COMMANDS:
-            touches_worktree = True
-    return touches_worktree
+    return write_attribution.touches_worktree(target, command)
 
 
 def _shell_wrapper_payload(tokens: list[str]) -> str | None:
@@ -2276,7 +2246,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     started = _monotonic()
     pin = pin if pin is not None else _hook_pin_from_env()
-    result = _handle_event(event, payload, pin=pin)
+    result = write_attribution.handle_event(event, payload, pin=pin)
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
     # It only gets what the event left of the hook budget, so a slow brief still
     # returns its claim path to the parent before the outer timeout kills the worker.
@@ -2289,13 +2259,15 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
     )
 
 
-def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
+def _handle_event(
+    event: str, payload: dict[str, Any], *, pin: Path | None, target_override: Path | None = None
+) -> dict[str, Any] | None:
     if event == "PreCompact":
         return _handle_pre_compact(payload, pin=pin)
     if event == "UserPromptSubmit":
         return _handle_user_prompt_submit(payload, pin=pin)
 
-    target = effective_hook_target(payload, pin=pin)
+    target = target_override or effective_hook_target(payload, pin=pin)
     if target is None:
         if event == "SessionStart" and pin is None:
             return _unwired_init_hint(payload)
@@ -2405,8 +2377,11 @@ def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> d
                 f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
             )
         else:
+            # The replacement runs the verifier with cwd=target, so it names the
+            # verifier's checkout, not a worktree a later segment writes to.
+            verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
             replacement = _verify_replacement(
-                target,
+                verify_target,
                 _first_verifier_command(str(command)),
                 str(state["session_fingerprint"]),
                 capture_artifact_id=capture_artifact_id,
@@ -2442,9 +2417,7 @@ def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> d
                 _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
         wrote = tool_name in _WRITE_TOOLS or (
-            tool_name == "Bash"
-            and _is_confident_bash_write(command)
-            and _bash_confident_write_touches_worktree(target, command)
+            tool_name == "Bash" and write_attribution.touches_worktree(target, command, cwd=payload.get("cwd"))
         )
         capture_artifact_id = None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):

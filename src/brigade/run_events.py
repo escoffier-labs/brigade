@@ -198,10 +198,18 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
 # Durable assignment facts use closed reference-only shapes, without changing
 # existing envelope bounds or the schema version.
 _TASK_EVENT_TYPES = frozenset(
-    {"task.accepted", "task.attempt-prepared", "task.launch-claimed", "task.observed", "task.acknowledged"}
+    {
+        "task.accepted",
+        "task.batch-accepted",
+        "task.attempt-prepared",
+        "task.launch-claimed",
+        "task.observed",
+        "task.acknowledged",
+    }
 )
 EVENT_TYPES.update(
     {
+        "task.batch-accepted": frozenset({"descriptor_version", "request_id", "members", "membership_digest"}),
         "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
         "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
         "task.launch-claimed": frozenset({"task_id", "attempt_id", "seat", "dispatch_attempt"}),
@@ -476,6 +484,9 @@ def _validate_payload(event_type: str, payload: Any) -> None:
     if missing:
         raise CanonicalizationError(_bound(f"missing payload keys for {event_type}: {sorted(missing)}"))
     for key, value in payload.items():
+        if event_type == "task.batch-accepted" and key == "members":
+            # The dedicated closed row validator above is the only exception.
+            continue
         if value is None:
             continue
         if isinstance(value, bool):
