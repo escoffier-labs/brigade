@@ -400,6 +400,9 @@ def audit_candidate_wheel(wheel: Path, version: str, paths: list[str]) -> None:
             continue
         data = (REPO / name).read_bytes()
         if name == "src/brigade/__init__.py":
+            # The staging helper reads universal newlines, then writes its host's
+            # text format. Accept exactly its LF and CRLF stamped forms below.
+            data = data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
             data = re.sub(rb'(?m)^__version__ = "[^"]+"$', f'__version__ = "{version}"'.encode(), data, count=1)
         expected[name.removeprefix("src/")] = data
     with zipfile.ZipFile(wheel) as archive:
@@ -407,7 +410,9 @@ def audit_candidate_wheel(wheel: Path, version: str, paths: list[str]) -> None:
     if set(actual) != set(expected):
         raise ValueError("candidate source package inventory mismatch")
     for name, data in expected.items():
-        if actual[name] != data:
+        if actual[name] != data and not (
+            name == "brigade/__init__.py" and actual[name] == data.replace(b"\n", b"\r\n")
+        ):
             raise ValueError(f"candidate wheel differs from source: {name}")
 
 

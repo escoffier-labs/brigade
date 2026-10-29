@@ -1019,7 +1019,9 @@ def candidate_wheel(directory, runtime, root, *, mutation=None):
         "brigade/__init__.py": f'__version__ = "{runtime["payloadVersion"]}"\n'.encode(),
         "brigade/current.py": (root / "src/brigade/current.py").read_bytes(),
     }
-    if mutation == "source-bytes":
+    if mutation == "source-init-bytes":
+        extra["brigade/__init__.py"] += b"UNREVIEWED = True\n"
+    elif mutation == "source-bytes":
         extra["brigade/current.py"] = b"CURRENT = False\n"
     elif mutation == "source-inventory":
         extra.pop("brigade/current.py")
@@ -1122,6 +1124,7 @@ def save_candidate(output, metadata, packages):
         ("payload-source", "candidate payload source identity"),
         ("packed-runtime", "packed runtime"),
         ("source-bytes", "wheel differs from source"),
+        ("source-init-bytes", "wheel differs from source"),
         ("source-inventory", "source package inventory"),
         ("companion-manifest", "companion manifest"),
         ("companion-binary", "companion identity"),
@@ -1158,7 +1161,7 @@ def test_candidate_verifier_binds_physical_archives(candidate_artifacts, mutatio
         launcher["package/runtime.json"] = json.dumps(runtime).encode()
     elif mutation == "packed-runtime":
         launcher["package/runtime.json"] = b"{}"
-    elif mutation in {"source-bytes", "source-inventory", "wheel-record"}:
+    elif mutation in {"source-bytes", "source-init-bytes", "source-inventory", "wheel-record"}:
         payload = candidate_wheel(output, runtime, root, mutation=mutation)
         if mutation == "wheel-record":
             with zipfile.ZipFile(payload) as archive:
@@ -1316,9 +1319,12 @@ def test_candidate_mode_is_confined_to_unreleased_workflow():
         assert all(("--candidate" in command) == bool(expected) for command in commands)
 
 
-def test_candidate_audit_matches_helper_first_version_stamp(tmp_path, candidate_source):
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_candidate_audit_matches_helper_first_version_stamp(tmp_path, candidate_source, newline):
+    import os
+
     root, _, identity, paths = candidate_source
-    original = b'__version__ = "0.30.0 label"\n__version__ = "retained"\n'
+    original = b'__version__ = "0.30.0 label"\n__version__ = "retained"\n'.replace(b"\n", newline)
     (root / "src/brigade/__init__.py").write_bytes(original)
     version = prepare.candidate_version(identity)
     prepare.dev_helper().prepare_dev_wheel(root, version)
@@ -1330,5 +1336,5 @@ def test_candidate_audit_matches_helper_first_version_stamp(tmp_path, candidate_
     prepare.audit_candidate_wheel(payload, version, paths)
     with zipfile.ZipFile(payload) as archive:
         assert archive.read("brigade/__init__.py") == (
-            f'__version__ = "{version}"\n__version__ = "retained"\n'.encode()
+            f'__version__ = "{version}"\n__version__ = "retained"\n'.replace("\n", os.linesep).encode()
         )
