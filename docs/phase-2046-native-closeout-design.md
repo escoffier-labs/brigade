@@ -1,6 +1,6 @@
 # Epic 2046: assisted native result closeout
 
-Status: proposed design, pending user approval. Native execution through Brigade remains disabled.
+Status: design approved by the user on 2026-10-29. Implementation plan pending review. Native execution through Brigade remains disabled.
 
 ## Outcome and scope
 
