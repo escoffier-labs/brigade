@@ -724,3 +724,125 @@ class ReportChecks(Fixture):
             self.runner.handler = lambda argv, stdin, reply=reply: reply
             result = self.call("fleet_report_session", report=v2_report(), publish=True)
             assert result["status"] == "unknown" and result["summaries_persisted"] is False
+
+
+class DigestAvailability(Fixture):
+    @requires_local_state
+    def test_nested_failures_and_empty_results_through_adapter(self):
+        for component in (None, "status", "claims"):
+            with self.subTest(component=component):
+                routes = {"status": ok({"runs": []}), "claims": ok({"claims": []})}
+                if component:
+                    routes[component] = CommandResult(None, b"private failure", timed_out=True)
+                self.runner.handler = Hub(**routes)
+                result = self.call("fleet_digest")
+                self.assertEqual(result["section_errors"], [])
+                self.assertEqual(
+                    result["availability"],
+                    {
+                        "state": "partial" if component else "complete",
+                        "unavailable_components": [f"fleet_overview.{component}"] if component else [],
+                    },
+                )
+                other = "claims" if component == "status" else "status"
+                self.assertNotIn("error", result["fleet_overview"][other])
+                self.assertNotIn("private failure", json.dumps(result))
+
+    @requires_local_state
+    def test_missing_and_malformed_owned_containers_preserve_legacy_sections(self):
+        good = {
+            "fleet_overview": {
+                "status": {"run_count": 0, "by_state": {}, "latest_runs": []},
+                "claims": {"count": 0, "claims": []},
+            },
+            "fleet_work_next": {
+                "work_id": None,
+                "item": None,
+                "route": None,
+                "considered_count": 0,
+                "considered_by_bucket": {},
+                "reserved": False,
+            },
+            "inbox": {"unacked": 0, "oldest": [{"subject": "error", "body": {"error": "peer"}}]},
+            "subscriptions": {"count": 0},
+            "brigade_prs": {"count": 0, "prs": [{"title": "error", "body": {"error": "peer"}}], "via": "gh"},
+        }
+        methods = {
+            "fleet_overview": "_digest_overview",
+            "fleet_work_next": "_digest_work_next",
+            "inbox": "_digest_inbox",
+            "brigade_prs": "_digest_prs",
+        }
+        from contextlib import ExitStack
+        from copy import deepcopy
+
+        cases = [(None, None, [])]
+        for section in methods:
+            for bad in (None, [], {}, {"error": "private error"}):
+                unavailable = (
+                    ["fleet_overview.claims", "fleet_overview.status"] if section == "fleet_overview" else [section]
+                )
+                cases.append((section, bad, unavailable))
+        for member in ("status", "claims"):
+            for bad in (None, [], {}, {"error": "private error"}):
+                overview = deepcopy(good["fleet_overview"])
+                overview[member] = bad
+                cases.append(("fleet_overview", overview, [f"fleet_overview.{member}"]))
+        for section, bad, unavailable in cases:
+            with self.subTest(section=section, bad=bad), ExitStack() as stack:
+                values = deepcopy(good)
+                if section:
+                    values[section] = bad
+                for name, method in methods.items():
+                    stack.enter_context(patch.object(self.adapter.hub, method, return_value=values[name]))
+                stack.enter_context(patch.object(BridgeState, "subscription_count", return_value=0))
+                result = self.call("fleet_digest")
+                self.assertEqual(
+                    result["availability"],
+                    {"state": "partial" if unavailable else "complete", "unavailable_components": unavailable},
+                )
+                self.assertEqual({name: result[name] for name in good}, values)
+                expected_errors = [section] if isinstance(bad, dict) and "error" in bad else []
+                self.assertEqual(result["section_errors"], expected_errors)
+                self.assertNotIn("private", json.dumps(result["availability"]))
+
+    @requires_local_state
+    def test_wholly_unavailable_exceptions_and_deadline(self):
+        self.runner.handler = Hub()
+        from contextlib import ExitStack
+
+        for timed_out in (False, True):
+            with self.subTest(timed_out=timed_out), ExitStack() as stack:
+
+                def fail(timed_out=timed_out):
+                    if timed_out:
+                        time.sleep(0.1)
+                    raise RuntimeError("private exception bytes")
+
+                for method in ("_digest_overview", "_digest_work_next", "_digest_inbox", "_digest_prs"):
+                    stack.enter_context(patch.object(self.adapter.hub, method, side_effect=fail))
+                stack.enter_context(patch.object(BridgeState, "subscription_count", side_effect=lambda owner: fail()))
+                if timed_out:
+                    stack.enter_context(patch.object(hub_module, "DIGEST_DEADLINE", 0))
+                result = self.call("fleet_digest")
+                self.assertEqual(
+                    result["availability"],
+                    {
+                        "state": "unavailable",
+                        "unavailable_components": [
+                            "brigade_prs",
+                            "fleet_overview.claims",
+                            "fleet_overview.status",
+                            "fleet_work_next",
+                            "inbox",
+                            "subscriptions",
+                        ],
+                    },
+                )
+                self.assertEqual(
+                    result["section_errors"],
+                    ["brigade_prs", "fleet_overview", "fleet_work_next", "inbox", "subscriptions"],
+                )
+                self.assertNotIn("private exception", json.dumps(result))
+                if timed_out:
+                    time.sleep(0.15)
