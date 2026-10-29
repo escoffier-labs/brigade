@@ -11,9 +11,12 @@ import json
 import re
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, runguard
+
+BATCH_DESCRIPTOR_VERSION = 1
+MAX_BATCH_MEMBERS = 8
 
 TASK_FIELDS = {event_type: run_events.EVENT_TYPES[event_type] for event_type in run_events._TASK_EVENT_TYPES}
 STATES = frozenset(
@@ -62,11 +65,68 @@ def digest(value: object) -> bool:
     return isinstance(value, str) and bool(run_events._HEX64.fullmatch(value))
 
 
+def batch_membership_digest(*, descriptor_version: int, members: Sequence[Mapping[str, Any]]) -> str:
+    return hashlib.sha256(
+        run_events.canonical_bytes(
+            {
+                "domain": "brigade.task-batch.members.v1",
+                "descriptor_version": descriptor_version,
+                "members": list(members),
+            }
+        )
+    ).hexdigest()
+
+
+def batch_child_request_id(*, run_id: str, request_id: str, task_id: str) -> str:
+    return hashlib.sha256(
+        run_events.canonical_bytes(
+            {"domain": "brigade.task-batch.child.v1", "run_id": run_id, "request_id": request_id, "task_id": task_id}
+        )
+    ).hexdigest()
+
+
+def batch_reference(*, run_id: str, request_id: str, membership_digest: str) -> str:
+    return hashlib.sha256(
+        run_events.canonical_bytes(
+            {
+                "domain": "brigade.task-batch.ref.v1",
+                "run_id": run_id,
+                "request_id": request_id,
+                "membership_digest": membership_digest,
+            }
+        )
+    ).hexdigest()
+
+
+def _validate_batch_payload(payload: Mapping[str, Any]) -> None:
+    version, members = payload["descriptor_version"], payload["members"]
+    if type(version) is not int or version != BATCH_DESCRIPTOR_VERSION:
+        raise run_events.CanonicalizationError("unsupported task batch descriptor version")
+    if not token(payload["request_id"]) or not digest(payload["membership_digest"]):
+        raise run_events.CanonicalizationError("invalid task batch identity")
+    if not isinstance(members, list) or not 1 <= len(members) <= MAX_BATCH_MEMBERS:
+        raise run_events.CanonicalizationError("task batch requires 1 through 8 members")
+    seen: set[str] = set()
+    for row in members:
+        if not isinstance(row, Mapping) or set(row) != {"task_id", "seat", "payload_digest"}:
+            raise run_events.CanonicalizationError("task batch member fields do not match closed schema")
+        if not task_id(row["task_id"]) or not token(row["seat"]) or not digest(row["payload_digest"]):
+            raise run_events.CanonicalizationError("invalid task batch member")
+        if row["task_id"] in seen:
+            raise run_events.CanonicalizationError("duplicate task batch member")
+        seen.add(row["task_id"])
+    if payload["membership_digest"] != batch_membership_digest(descriptor_version=version, members=members):
+        raise run_events.CanonicalizationError("task batch membership digest mismatch")
+
+
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
     if set(payload) != fields:
         raise run_events.CanonicalizationError("task payload fields do not match closed schema")
+    if event_type == "task.batch-accepted":
+        _validate_batch_payload(payload)
+        return
     optional = (
         {"provider_task_id", "original_run_id", "provider_result_id", "result_id", "artifact_kind", "artifact_digest"}
         if event_type == "task.observed"
