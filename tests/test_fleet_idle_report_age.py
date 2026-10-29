@@ -1,16 +1,14 @@
-"""Idle report freshness at the full Overview HTTP and browser boundaries."""
+"""Idle report freshness at the Overview HTTP, markup, and refresh boundaries."""
 
 import json
 import re
-import shutil
-import subprocess
 from dataclasses import replace
 from datetime import datetime
-from html import escape, unescape
 
 import pytest
 
-from brigade import fleet_command_deck as deck, fleet_hub_http, fleet_deck_pages_http
+from brigade import fleet_command_deck as deck, fleet_hub_http, fleet_deck_pages_http, fleet_deck_shell
+from tests.fleet_script_dom import Tree, run_script
 from tests.test_fleet_command_deck import CONFIG, _bearer, _request, _start_hub
 from tests.test_fleet_deck_overview import NOW, NODE_A, _machine, _plane, _run, _station, _view
 from tests.test_ui_theme_integration import Markup
@@ -98,112 +96,115 @@ def test_overview_report_age_initial_and_soft_refresh(tmp_path, monkeypatch, cas
                 assert f"Last run report: <b>{expected}</b>" in panel
 
 
-@pytest.mark.parametrize("width", [390, 1100, 1280])
-def test_overview_machine_panel_fits_viewport(tmp_path, width):
-    chromium = shutil.which("chromium") or shutil.which("chromium-browser")
-    if chromium is None:
-        pytest.skip("Chromium is required for the Overview layout check")
+def test_overview_machine_panel_uses_shrinkable_cells_and_mobile_grid():
     page = deck.render_deck(report_age_view(), nonce="fixture", now=NOW)
-    # Remove scripts so the geometry also proves the no-script presentation.
-    page = re.sub(r"<script\b[^>]*>.*?</script>", "", page, flags=re.S)
-    page = (
-        f'<iframe style="width:{width}px;height:1200px;border:0" srcdoc="{escape(page, quote=True)}"></iframe>'
-        + """<script>
-setTimeout(function(){
- const frame=document.querySelector('iframe').contentWindow;
- const panel=frame.document.querySelector('.overview-machines');
- const result={viewport:frame.innerWidth,page:frame.document.documentElement.scrollWidth,
-               panel:panel.clientWidth,content:panel.scrollWidth};
- document.body.setAttribute('data-layout-result',JSON.stringify(result));
-},500);
-</script>"""
-    )
-    source = tmp_path / "overview.html"
-    source.write_text(page, encoding="utf-8")
-    result = subprocess.run(
-        [
-            chromium,
-            "--headless=new",
-            "--ozone-platform=headless",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            "--hide-scrollbars",
-            f"--user-data-dir={tmp_path / 'browser'}",
-            f"--window-size={width},1200",
-            "--virtual-time-budget=1000",
-            "--dump-dom",
-            source.as_uri(),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-    match = re.search(r'data-layout-result="([^"]+)"', result.stdout)
-    assert match, result.stderr
-    sizes = json.loads(unescape(match[1]))
-    assert sizes["viewport"] == width, sizes
-    assert sizes["page"] <= sizes["viewport"], sizes
-    assert sizes["content"] <= sizes["panel"], sizes
+    markup = Markup(page)
+    labels = [
+        i
+        for i, (tag, _attrs) in enumerate(markup.tags)
+        if tag == "span" and markup.text[i].startswith("Last run report:")
+    ]
+    assert len(labels) == 2
+    for label in labels:
+        cell = markup.ancestors[label][-1]
+        row = markup.ancestors[cell][-1]
+        assert markup.tags[cell] == ("div", {"class": "overview-machine-age"})
+        assert markup.tags[row] == ("div", {"class": "overview-machine-row"})
+        cells = [i for i in markup.descendants(row, "div") if markup.ancestors[i][-1] == row]
+        assert len(cells) == 4 and cells[-1] == cell
+        assert markup.tags[label] == ("span", {})
+
+    stylesheet = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", page, re.S))
+    assert ".overview-machines { min-width:0;" in stylesheet
+    assert ".overview-machine-rows { min-width:0; }" in stylesheet
+    assert (
+        ".overview-machine-name, .overview-machine-capacity, .overview-machine-load, "
+        ".overview-machine-age { min-width:0; }"
+    ) in stylesheet
+    assert ".overview-machine-load > span, .overview-machine-age > span { display:block;" in stylesheet
+    # The report wraps within the existing fourth cell at desktop widths, including
+    # 1100/1280px. It must not gain a fixed width or suppress normal text wrapping.
+    age_rules = [
+        body
+        for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", stylesheet)
+        if ".overview-machine-age" in selector
+    ]
+    assert age_rules
+    for rule in age_rules:
+        assert not re.search(r"(?:^|;)\s*(?:width|max-width|flex-basis)\s*:", rule)
+        assert not re.search(r"min-width\s*:\s*[1-9]", rule)
+        assert not re.search(r"white-space\s*:\s*(?:nowrap|pre)\s*(?:;|$)", rule)
+    # At 390px the shell drops its sidebar column and machine rows stack.
+    narrow_shell = stylesheet.split("@media (max-width: 900px)", 1)[1]
+    assert ".shell { grid-template-columns: 1fr; }" in narrow_shell
+    mobile = stylesheet.split("@media (max-width:700px)", 1)[1]
+    assert ".overview-machine-row { grid-template-columns:minmax(0,1fr); gap:8px; }" in mobile
+    assert ".overview-machine-age { display:flex; gap:6px; align-items:baseline; }" in mobile
+    assert ".overview-machine-age > span { display:inline; }" in mobile
 
 
-def test_report_age_survives_the_browser_soft_refresh_swap(tmp_path):
-    chromium = shutil.which("chromium") or shutil.which("chromium-browser")
-    if chromium is None:
-        pytest.skip("Chromium is required for the Overview soft refresh check")
+def test_report_age_survives_the_soft_refresh_swap():
     refreshed = deck.render_deck(report_age_view(), nonce="fixture", now=NOW)
     initial_view = report_age_view()
     initial_view = replace(
         initial_view, stations=tuple(replace(station, last_heard=None) for station in initial_view.stations)
     )
     page = deck.render_deck(initial_view, nonce="fixture", now=NOW)
-    page = re.sub(r"var SECONDS=\d+,", "var SECONDS=1,", page)
-    response_body = json.dumps(refreshed).replace("<", "\\u003c")
-    intercept = "<script>window.fetch=function(url,options){" + (
-        "document.body.dataset.refreshRequested=options.headers['X-Fleet-Soft-Refresh'];"
-        "return Promise.resolve({status:200,headers:{get:function(){return 'text/html';}},"
-        f"text:function(){{return Promise.resolve({response_body});}}"
-        "});};</script>"
+    # Supply browser APIs at the existing Node DOM boundary. The shipped script
+    # owns the fetch, region selection, node replacement, and audience behavior.
+    setup = """
+Object.defineProperties(Element.prototype,{
+ tagName:{get(){return this.tag.toUpperCase();}},parentNode:{get(){return this.parent;}}
+});
+Element.prototype.appendChild=function(node){node.parent=this;this.children.push(node);return node;};
+Element.prototype.contains=function(node){while(node){if(node===this)return true;node=node.parent;}return false;};
+const matches=Element.prototype.matches;
+Element.prototype.matches=function(selector){return selector==='*'||matches.call(this,selector);};
+function prepare(node){node.classList.contains=name=>node.matches('.'+name);
+ node.children.filter(child=>typeof child!=='string').forEach(prepare);return node;}
+prepare(dom);
+document.body=dom.querySelector('body');document.addEventListener=()=>{};
+document.importNode=node=>prepare(node.cloneNode());
+window.scrollX=0;window.scrollY=0;window.scrollTo=()=>{};
+location.href='https://example.invalid/deck';location.pathname='/deck';location.search='';
+var tick,requests=0;
+global.setTimeout=fn=>{tick=fn;return 1;};global.clearTimeout=()=>{};
+"""
+    setup += "const refreshed=" + json.dumps(refreshed) + ";\n"
+    setup += "const nextTree=" + json.dumps(Tree(refreshed).root) + ";\n"
+    setup += """
+global.DOMParser=class{parseFromString(text,kind){
+ assert.equal(text,refreshed);assert.equal(kind,'text/html');return prepare(new Element(nextTree));}};
+global.fetch=(url,options)=>{requests++;assert.equal(url,location.href);
+ assert.equal(options.headers['X-Fleet-Soft-Refresh'],'1');
+ return Promise.resolve({status:200,headers:{get:()=> 'text/html'},text:()=>Promise.resolve(refreshed)});};
+"""
+    from brigade import fleet_admin_explorer as explorer
+
+    run_script(
+        page,
+        setup + explorer.SHELL_SCRIPT + fleet_deck_shell.soft_refresh_script(10),
+        """
+async function check(){
+ const ages=()=>document.querySelectorAll('.overview-machine-age').map(el=>el.textContent);
+ const main=document.querySelector('.shell-main');
+ const oldRow=document.querySelector('.overview-machine-row');
+ assert.ok(ages()[0].includes('Last run report: never'));
+ tick();await new Promise(setImmediate);
+ assert.equal(requests,1);assert.equal(document.querySelector('.shell-main'),main);
+ assert.notEqual(document.querySelector('.overview-machine-row'),oldRow);
+ assert.ok(ages()[0].includes('Last run report: 1h 13m'));
+ assert.ok(ages()[1].includes('Last run report: never'));
+ const working=document.querySelectorAll('.overview-machine-row')[2].textContent;
+ assert.ok(!working.includes('Last run report')&&working.includes('1/4 used'));
+ for(const mode of ['admin','agent']){
+  window.fleetSetAudience(mode);
+  assert.equal(htmlRoot.getAttribute('data-audience-mode'),mode);
+  for(const age of document.querySelectorAll('.overview-machine-age')){
+   for(let el=age;el;el=el.parentNode){assert.ok(!el.hidden);assert.ok(!el.hasAttribute('data-audience'));}
+  }
+ }
+}
+check().catch(error=>{console.error(error);process.exitCode=1;});
+""",
     )
-    page = page.replace("<head>", "<head>" + intercept, 1)
-    page += """<script>
-setTimeout(function(){
- const ages=()=>Array.from(document.querySelectorAll('.overview-machine-age'),el=>el.textContent);
- const initial=ages();
- setTimeout(function(){
-  window.fleetSetAudience('agent');
-  document.body.setAttribute('data-swap-result',JSON.stringify({initial:initial,final:ages(),
-    requested:document.body.dataset.refreshRequested,
-    working:document.querySelectorAll('.overview-machine-row')[2].textContent,
-    visible:Array.from(document.querySelectorAll('.overview-machine-age')).every(el=>el.offsetHeight>0)}));
- },2000);
-},100);
-</script>"""
-    source = tmp_path / "refresh.html"
-    source.write_text(page, encoding="utf-8")
-    result = subprocess.run(
-        [
-            chromium,
-            "--headless=new",
-            "--ozone-platform=headless",
-            "--no-sandbox",
-            "--disable-dev-shm-usage",
-            f"--user-data-dir={tmp_path / 'browser'}",
-            "--window-size=1100,1200",
-            "--virtual-time-budget=3000",
-            "--dump-dom",
-            source.as_uri(),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=True,
-    )
-    match = re.search(r'data-swap-result="([^"]+)"', result.stdout)
-    assert match, result.stderr
-    swap = json.loads(unescape(match[1]))
-    assert swap["requested"] == "1" and swap["visible"]
-    assert "Last run report: never" in swap["initial"][0]
-    assert "Last run report: 1h 13m" in swap["final"][0]
-    assert "Last run report: never" in swap["final"][1]
-    assert "Last run report" not in swap["working"] and "1/4 used" in swap["working"]
