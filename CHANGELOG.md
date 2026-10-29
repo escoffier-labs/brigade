@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
+- Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
+- Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.
+
 - Claude work-loop hooks no longer treat descriptor duplication (`2>&1`, `>&2`), `/dev/null`, or redirects to files outside the repository as repository writes, so read-only commands stop re-arming the closeout verification gate.
 
 - Use Brigade Stack in current core guides and starter guidance. New default and packaged starter rosters use `orchestrator`, with `orchestrator_local` as the budget fallback. Existing `chef` seats, flags, storage fields, commands, and integrations remain compatible.
