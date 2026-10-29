@@ -141,7 +141,7 @@ def render_overview(routing: Routing, now: datetime) -> str:
             if part
         )
         return (
-            f'<a class="routing-role" data-routing-role="{escape(role.key)}" href="/deck/roster#{explorer.anchor(role.key)}">'
+            f'<a class="routing-role" data-routing-role="{escape(role.key)}" href="/deck/roster{explorer.selection_href(role.key)}">'
             f"<span>{escape(role.label)}</span><strong>{escape(detail)}</strong></a>"
         )
 

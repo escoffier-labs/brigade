@@ -230,6 +230,8 @@ class HubTools:
         shown = []
         for item in sessions[:limit]:
             entry = self._pick(item, keys)
+            if entry.get("cloud_context") is not None:
+                entry["content_trust"] = "untrusted"
             dirty = item.get("dirty_paths")
             entry["dirty_count"] = len(dirty) if isinstance(dirty, list) else None
             entry["dirty_truncated"] = item.get("dirty_truncated")

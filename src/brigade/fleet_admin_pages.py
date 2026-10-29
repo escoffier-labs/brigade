@@ -314,7 +314,7 @@ def render_activity(view: deck.DeckView, now: datetime, *, nonce: str, worklore_
 
 
 def render_capacity(
-    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity"
+    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity", query: str = ""
 ) -> str:
     if tab == "github-reads":
         # This dedicated tab intentionally shows the whole bounded observation.
@@ -478,7 +478,7 @@ def render_capacity(
         content = (
             '<div id="machines-table">'
             + explorer.render(
-                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1]
+                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1], query=query
             )
             + "</div>"
         )
@@ -504,8 +504,8 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         load_bar = load_cell[len(load) :] if load != overview.UNKNOWN else ""
         rows.append(
             '<div class="overview-machine-row">'
-            '<div class="overview-machine-name"><a href="/deck/capacity#'
-            + explorer.anchor(station.station.node_id)
+            '<div class="overview-machine-name"><a href="/deck/capacity'
+            + explorer.selection_href(station.station.node_id)
             + '">'
             + _esc(station.label)
             + "</a><span>"
