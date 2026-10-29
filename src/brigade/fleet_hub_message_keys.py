@@ -158,6 +158,12 @@ def get(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[s
         raise MessageError("keys_get requires a key id")
     decode_binary(raw["kid"][3:], 16)
     row = conn.execute(f"SELECT {COLUMNS} FROM fleet_message_keys WHERE kid=?", (raw["kid"],)).fetchone()
+    if (
+        row is not None
+        and row[0] == caller
+        and grants.classify_principal(conn, caller) in {"node", "agent", "teammate"}
+    ):
+        return {"key": _entry(row)}
     patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
     if row is None or not grants.permits(conn, patterns, caller, row[0]):
         return None
