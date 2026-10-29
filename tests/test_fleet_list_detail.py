@@ -196,3 +196,73 @@ def test_existing_hostile_key_is_encoded_in_links_and_selected_safely():
     assert_selection(page, key)
     assert key not in page
     assert "selected=seat%3A%3C%22%26" in page
+
+
+def test_long_valid_repository_identity_has_an_addressable_policy_detail(tmp_path):
+    from tests.test_fleet_policy_page import _document, _submission
+
+    identity = "example/" + "a" * 241
+    document = _document()
+    document["repositories"] = {identity: {"privacy": "public"}}
+    conn = fleet_hub.init_db(tmp_path / "fixture.db")
+    try:
+        _seed(conn, document)
+        view = policy.load_view(conn, inventory=_fresh_inventory())
+        key = "repository:" + identity
+        assert len(key) > 256
+        href = explorer.selection_href(key)
+        selected = parse_qs(urlsplit(href).query)["selected"][0]
+        assert len(selected) <= 256
+        page = policy.render(
+            view, nonce="fixture", now=NOW, csrf="fixture-csrf", editable=True, query=urlsplit(href).query
+        )
+        assert_selection(page, selected)
+        assert identity in page
+        draft = _submission("repository", "preview", view.revision, target=identity)
+        refused = policy.render(
+            view, nonce="fixture", now=NOW, csrf="fixture-csrf", editable=True, draft=draft, error="Draft refused"
+        )
+        assert_selection(refused, selected)
+    finally:
+        conn.close()
+
+
+def test_overview_and_sidebar_links_select_their_machine_without_fragments():
+    from brigade import fleet_deck_sidebar
+
+    view = _mixed_view()
+    for content in (
+        fleet_admin_pages.render_overview_machines(view, NOW),
+        fleet_deck_sidebar._capacity_inventory(view),
+    ):
+        links = [
+            attrs["href"]
+            for tag, attrs in Markup(content).tags
+            if tag == "a" and attrs.get("href", "").startswith("/deck/capacity?")
+        ]
+        assert len(links) == len(view.stations)
+        assert all(not urlsplit(href).fragment for href in links)
+        for href, station in zip(links, view.stations, strict=True):
+            page = fleet_admin_pages.render_capacity(
+                view, NOW, nonce="fixture", worklore_enabled=False, query=urlsplit(href).query
+            )
+            assert_selection(page, station.station.node_id)
+
+
+def test_overview_routing_links_select_the_role_without_fragments(tmp_path):
+    from brigade import fleet_live_routing
+
+    conn = fleet_hub.init_db(tmp_path / "fixture.db")
+    try:
+        view = roster.load_view(conn, deck.DeckConfig())
+        routing = fleet_live_routing.project(view)
+        content = fleet_live_routing.render_overview(routing, NOW)
+        links = [attrs for tag, attrs in Markup(content).tags if tag == "a" and "data-routing-role" in attrs]
+        assert links
+        for link in links:
+            url = urlsplit(link["href"])
+            assert url.path == "/deck/roster" and not url.fragment
+            page = roster.render(view, nonce="fixture", now=NOW, csrf="fixture-csrf", editable=False, query=url.query)
+            assert_selection(page, link["data-routing-role"])
+    finally:
+        conn.close()

@@ -121,7 +121,7 @@ def render(
 
         key = draft_scope + (":" + draft.target if draft_scope in {"seat", "consumer", "repository"} else "")
         params = explorer.query_params(query)
-        query = urlencode({**params, "selected": [key]}, doseq=True)
+        query = urlencode({**params, "selected": [explorer.selection_id(key)]}, doseq=True)
     parts.append(explorer.render(entries, label="policy", query=query, searchable=editable))
     parts.append("</main>")
     return fleet_command_deck._document(

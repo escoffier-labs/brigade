@@ -1,6 +1,7 @@
 """Overview live routing agrees with the served read-only authority view."""
 
 import html
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -75,9 +76,16 @@ def test_served_overview_routing_matches_live_routing(tmp_path, monkeypatch, sta
                     model = "model-b-1"
                 assert model in parsed.text[i] and model in detail
                 assert title in parsed.text[i]
-                target = attrs["href"].split("#", 1)[1]
-                settings_markup = Markup(settings)
-                selected = next(j for j, (_, values) in enumerate(settings_markup.tags) if values.get("id") == target)
+                url = urlsplit(attrs["href"])
+                assert not url.fragment and parse_qs(url.query)["selected"] == [role]
+                status, _, selected_page = hub.request("GET", attrs["href"], headers=headers)
+                assert status == 200
+                settings_markup = Markup(selected_page)
+                selected = next(
+                    j
+                    for j, (tag, values) in enumerate(settings_markup.tags)
+                    if tag == "article" and "data-record-detail" in values and "hidden" not in values
+                )
                 assert title in settings_markup.text[selected] and model in settings_markup.text[selected]
             summary = parsed.text[root]
             assert ("active policy" in summary) == (state in {"active", "unavailable"})

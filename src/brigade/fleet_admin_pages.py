@@ -504,8 +504,8 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         load_bar = load_cell[len(load) :] if load != overview.UNKNOWN else ""
         rows.append(
             '<div class="overview-machine-row">'
-            '<div class="overview-machine-name"><a href="/deck/capacity#'
-            + explorer.anchor(station.station.node_id)
+            '<div class="overview-machine-name"><a href="/deck/capacity'
+            + explorer.selection_href(station.station.node_id)
             + '">'
             + _esc(station.label)
             + "</a><span>"

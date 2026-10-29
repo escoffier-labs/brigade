@@ -123,6 +123,15 @@ def query_params(query: str) -> dict[str, list[str]]:
         return {}
 
 
+def selection_id(key: str) -> str:
+    """Keep ordinary keys readable and long stored identities addressable."""
+    return key if len(key) <= 256 else anchor(key)
+
+
+def selection_href(key: str) -> str:
+    return "?" + urlencode({"selected": selection_id(key)})
+
+
 def selected_key(query: str) -> str:
     values = query_params(query).get("selected", [])
     if len(values) != 1 or len(values[0]) > 256:
@@ -147,13 +156,14 @@ def render(
     links, details = [], []
     keys = [entry.key for entry in entries]
     selected = selected_key(query or "")
-    chosen = keys.index(selected) if selected in keys else 0
+    selections = [selection_id(key) for key in keys]
+    chosen = selections.index(selected) if selected in selections else 0
     params = query_params(query or "")
     for index, (entry, identifier) in enumerate(zip(entries, identifiers(keys), strict=True)):
         href = "#" + identifier
         current = hidden = ""
         if query is not None:
-            href = "?" + urlencode({**params, "selected": [entry.key[:256]]}, doseq=True)
+            href = "?" + urlencode({**params, "selected": [selection_id(entry.key)]}, doseq=True)
             current = ' aria-current="true"' if index == chosen else ""
             hidden = " hidden" if index != chosen else ""
         links.append(
@@ -162,7 +172,7 @@ def render(
             f"<span>{esc(entry.status[:160])}</span>{entry.summary_html}</a>"
         )
         details.append(
-            f'<article id="{identifier}" data-record-detail tabindex="-1"{hidden}>'
+            f'<article id="{identifier}"{hidden} data-record-detail tabindex="-1">'
             f'<div class="detail-bar"><span>{esc(entry.title[:120])}</span></div>'
             f'<div class="detail-body">{entry.detail}</div></article>'
         )
