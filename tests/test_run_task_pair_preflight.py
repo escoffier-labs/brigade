@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 
 import pytest
 
@@ -196,3 +197,46 @@ def test_pair_preflight_refuses_damaged_history(task_run, suffix):
     with pytest.raises(run_journal.RunJournalError):
         run_journal.preflight_new_event_pair(journal_path, run_id=run_dir.name, requests=requests)
     assert journal_path.read_bytes() == before
+
+
+@pytest.mark.parametrize("phase", ["enter", "exit"])
+def test_optional_checkpoint_normalizes_lock_failures(task_run, monkeypatch, phase):
+    run_dir, workspace = task_run
+    snapshot, body_kind, pairing_key, requests = _pair(task_run)
+    journal_path = run_dir / "events/lifecycle.jsonl"
+    checkpoint_dir = journal_path.parent / run_checkpoint.CHECKPOINT_DIR_NAME
+    before = journal_path.read_bytes()
+    before_assets = sorted(checkpoint_dir.iterdir())
+    mutation = run_journal.journal_mutation
+
+    @contextmanager
+    def failing_guard(path):
+        if phase == "enter":
+            raise OSError("private-lock-detail")
+        with mutation(path):
+            yield
+        raise run_journal.RunJournalError("journal lock close failed")
+
+    monkeypatch.setattr(run_journal, "journal_mutation", failing_guard)
+    message = r"^lifecycle journal I/O failure \(OSError\)$" if phase == "enter" else "^journal lock close failed$"
+    with pytest.raises(run_lifecycle.LifecycleJournalError, match=message) as failure:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=workspace,
+            paired_event_type="task.accepted",
+            body_kind=body_kind,
+            pairing_key=pairing_key,
+            following_task_request=requests[1],
+        )
+    assert "private-lock-detail" not in str(failure.value)
+    if phase == "enter":
+        assert journal_path.read_bytes() == before
+        assert sorted(checkpoint_dir.iterdir()) == before_assets
+    else:
+        # A release failure after publication cannot roll back committed bytes.
+        assert journal_path.read_bytes().startswith(before)
+        report = run_journal.read_journal_bounded(journal_path)
+        assert not report.chain_errors and report.partial_tail is None
+        assert report.events[-1].event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+        assert len(report.events) == len(before.splitlines()) + 1

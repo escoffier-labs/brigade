@@ -1146,20 +1146,17 @@ def write_checkpoint(
     )
     # Keep the checked tail stable through checkpoint publication and append.
     # Existing callers preserve their original locking and replay behavior.
-    with run_journal.journal_mutation(journal_path) if following_task_request is not None else nullcontext():
-        if following_task_request is not None:
-            try:
+    try:
+        with run_journal.journal_mutation(journal_path) if following_task_request is not None else nullcontext():
+            if following_task_request is not None:
                 run_journal.preflight_new_event_pair(
                     journal_path,
                     run_id=run_lifecycle._run_id_from_dir(run_dir),
                     requests=[(CHECKPOINT_EVENT_TYPE, payload, idempotency_key), following_task_request],
                 )
-            except (run_journal.RunJournalError, run_events.CanonicalizationError, OSError) as exc:
-                raise run_lifecycle._bound_journal_failure(exc) from exc
-        # Crash-safe publish FIRST. A CheckpointError here fails before the
-        # lifecycle status append and before run.json replacement.
-        publish_checkpoint_file(run_dir, publish_bytes)
-        try:
+            # Crash-safe publish FIRST. A CheckpointError here fails before the
+            # lifecycle status append and before run.json replacement.
+            publish_checkpoint_file(run_dir, publish_bytes)
             report = run_journal.read_journal_bounded(journal_path)
             if report.partial_tail is not None or report.chain_errors:
                 raise run_journal.ChainIntegrityError(run_events._bound(run_lifecycle._CHAIN_CATEGORY))
@@ -1172,14 +1169,10 @@ def write_checkpoint(
                 expected_previous_sequence=report.events[-1].sequence if report.events else 0,
                 workspace=workspace,
             )
-        except CheckpointError:
-            raise
-        except run_journal.RunJournalError as exc:
-            raise run_lifecycle._bound_journal_failure(exc) from exc
-        except run_events.CanonicalizationError as exc:
-            raise run_lifecycle._bound_journal_failure(exc) from exc
-        except OSError as exc:
-            raise run_lifecycle._bound_journal_failure(exc) from exc
+    except CheckpointError:
+        raise
+    except (run_journal.RunJournalError, run_events.CanonicalizationError, OSError) as exc:
+        raise run_lifecycle._bound_journal_failure(exc) from exc
 
 
 # -- Checkpoint-backed recovery (issue #568 slice 5, Task 5) -------------------

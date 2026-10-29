@@ -227,6 +227,31 @@ def test_batch_replay_preserves_current_member_versions(task_run):
     assert decision.outcome == "granted"
 
 
+def test_member_launch_survives_interleaved_unrelated_batch(task_run):
+    run_dir, workspace = task_run
+    tasks.accept_task_batch(run_dir, workspace=workspace, request_id="batch-one", specs=_specs())
+    handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    member = tasks.read_task_batch(run_dir, request_id="batch-one").members[0]
+    unrelated = tasks.accept_task_batch(
+        run_dir,
+        workspace=workspace,
+        request_id="batch-two",
+        specs=(tasks.TaskSpec("three", "other-worker", "c" * 64),),
+    )
+    assert member.version is not None
+    decision = tasks.claim_task_launch(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        expected_version=member.version,
+        seat="worker",
+        dispatch_attempt=1,
+    )
+    assert decision.outcome == "granted"
+    assert decision.task.launch_claim == tasks.TaskLaunchBinding("worker", 1)
+    assert tasks.read_task_batch(run_dir, request_id="batch-two") == unrelated
+
+
 def test_duplicate_aggregate_history_refuses_all_access(task_run):
     run_dir, workspace = task_run
     tasks.accept_task_batch(run_dir, workspace=workspace, request_id="batch-one", specs=_specs())
