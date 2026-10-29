@@ -405,3 +405,119 @@ def test_existing_message_event_subscription_rechecks_supported_role(mesh, monke
     row["name"] = "claim.created"
     assert dispatch._still_allowed(conn, row) is (False if allowed else None)
     assert calls == ([(conn, principal, "another-inbox")] if allowed else [])
+
+
+def _audit_http_response(hub, query, token):
+    import json
+    import urllib.error
+    import urllib.request
+
+    request = urllib.request.Request(
+        hub[0] + "/audit" + ("?" + query if query else ""),
+        headers={} if token is None else {"Authorization": "Bearer " + token},
+    )
+    try:
+        response = urllib.request.urlopen(request, timeout=5)
+    except urllib.error.HTTPError as exc:
+        response = exc
+    with response:
+        return response.code, json.load(response)
+
+
+def _audit_tracked_connection(open_db, path):
+    from unittest.mock import Mock
+
+    return Mock(wraps=open_db(path))
+
+
+@pytest.mark.parametrize(
+    "query, error, opens",
+    [
+        ("limit=1&limit=2", "invalid audit query", False),
+        ("after_id=0&after_id=1", "invalid audit query", False),
+        ("detail=fixture", "invalid audit query", False),
+        ("after_id=", "invalid literal for int() with base 10: ''", False),
+        ("limit=word", "invalid literal for int() with base 10: 'word'", False),
+        ("after_id=-1", "invalid audit cursor", True),
+        ("after_id=9223372036854775808", "invalid audit cursor", True),
+        ("limit=0", "invalid audit page limit", True),
+        ("limit=501", "invalid audit page limit", True),
+    ],
+)
+def test_audit_http_query_errors_preserve_validation_order_and_close(hub, monkeypatch, query, error, opens):
+    from brigade import fleet_hub_http
+    from tests.test_fleet_messages import ADMIN
+
+    original = fleet_hub_http.open_db
+    connections = []
+
+    def observed(path):
+        conn = _audit_tracked_connection(original, path)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(fleet_hub_http, "open_db", observed)
+    assert _audit_http_response(hub, query, None) == (401, {"error": "admin token required"})
+    assert connections == []
+    assert _audit_http_response(hub, query, ADMIN) == (400, {"error": error})
+    assert len(connections) == int(opens)
+    for conn in connections:
+        conn.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("query, bounds", [("", (0, 100)), ("after_id=2&limit=3", (2, 3))])
+def test_audit_http_passes_bounds_and_closes_injected_connection(hub, monkeypatch, query, bounds):
+    from brigade import fleet_hub_audit, fleet_hub_http
+    from tests.test_fleet_messages import ADMIN
+
+    original = fleet_hub_http.open_db
+    connections = []
+    calls = []
+
+    def observed(path):
+        conn = _audit_tracked_connection(original, path)
+        connections.append(conn)
+        return conn
+
+    def page(conn, *, after_id, limit):
+        assert conn is connections[0]
+        calls.append((after_id, limit))
+        return [{"id": 3}]
+
+    monkeypatch.setattr(fleet_hub_http, "open_db", observed)
+    monkeypatch.setattr(fleet_hub_audit, "page", page)
+    assert _audit_http_response(hub, query, ADMIN) == (200, {"audit": [{"id": 3}]})
+    assert calls == [bounds]
+    assert len(connections) == 1
+    connections[0].close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("stage", ["open", "page"])
+@pytest.mark.parametrize("error_type", [fleet_hub.FleetHubError, sqlite3.OperationalError])
+def test_audit_http_database_errors_preserve_wrapper_seam_and_close(hub, monkeypatch, stage, error_type):
+    from brigade import fleet_hub_audit, fleet_hub_http
+    from tests.test_fleet_messages import ADMIN
+
+    original = fleet_hub_http.open_db
+    connections = []
+    opened = []
+
+    def observed(path):
+        opened.append(path)
+        if stage == "open":
+            raise error_type("private fixture storage detail")
+        conn = _audit_tracked_connection(original, path)
+        connections.append(conn)
+        return conn
+
+    def page(conn, **kwargs):
+        assert conn is connections[0]
+        raise error_type("private fixture storage detail")
+
+    monkeypatch.setattr(fleet_hub_http, "open_db", observed)
+    monkeypatch.setattr(fleet_hub_audit, "page", page)
+    assert _audit_http_response(hub, "", ADMIN) == (500, {"error": "hub database error"})
+    assert len(opened) == 1
+    assert len(connections) == int(stage == "page")
+    for conn in connections:
+        conn.close.assert_called_once_with()
