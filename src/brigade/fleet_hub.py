@@ -1538,11 +1538,14 @@ def _expire_cloud_leases(conn: sqlite3.Connection, now: float) -> None:
     )
 
 
-def _active_cloud_counts(conn: sqlite3.Connection, policy: dict[str, Any]) -> tuple[int, dict[str, int]]:
+def _active_cloud_counts(
+    conn: sqlite3.Connection, policy: dict[str, Any], config: fleet_command_deck.DeckConfig
+) -> tuple[int, dict[str, int]]:
     rows = conn.execute(
         "SELECT provider, COUNT(*) FROM cloud_leases WHERE released_at IS NULL GROUP BY provider"
     ).fetchall()
-    counts = {str(provider): int(count) for provider, count in rows}
+    # Leases held by a retired provider neither appear in snapshots nor consume capacity.
+    counts = {str(provider): int(count) for provider, count in rows if str(provider) in config.cloud.providers}
     hosted = sum(
         count for provider, count in counts.items() if policy["providers"].get(provider, {}).get("hosted", True)
     )
@@ -1628,7 +1631,7 @@ def handle_cloud(
             if not provider_policy["enabled"] or provider_policy.get("circuit_state") == "open":
                 conn.commit()
                 return 409, {"admitted": False, "error": provider_policy.get("reason") or "provider disabled by policy"}
-            hosted_count, provider_counts = _active_cloud_counts(conn, policy)
+            hosted_count, provider_counts = _active_cloud_counts(conn, policy, config)
             if provider_counts.get(request["provider"], 0) >= provider_policy["limit"]:
                 conn.commit()
                 return 409, {"admitted": False, "error": "provider cloud capacity is exhausted"}

@@ -2337,6 +2337,23 @@ def test_unsupported_stored_cloud_policy_is_ignored_without_migration(conn):
     assert payload == {"admitted": False, "error": "unsupported cloud provider"}
 
 
+def test_retired_provider_lease_does_not_consume_hosted_capacity(conn):
+    config = deck.DeckConfig()
+    assert fleet_hub.handle_cloud(conn, {"action": "policy", "global_limit": 1}, config=config)[0] == 200
+    conn.execute(
+        "INSERT INTO cloud_leases (lease_id, provider, provider_task_id, repo, label, prompt_hash, "
+        "owner_node, owner_conductor, holder_token, state, admitted_at, renewed_at, ttl_seconds, "
+        "expires_at, artifact_ref, released_at) VALUES ('legacy', 'retired-provider', 'task', 'repo-a', "
+        "'legacy', ?, ?, NULL, 'holder-legacy', 'bound', '2026-01-01T00:00:00Z', "
+        "'2026-01-01T00:00:00Z', 21600, ?, NULL, NULL)",
+        ("a" * 64, NODE_A, fleet_hub._now_epoch() + 3600),
+    )
+    conn.commit()
+    assert fleet_hub.cloud_snapshot(conn, config, include_all=True)["leases"] == []
+    status, payload = fleet_hub.handle_cloud(conn, _admit(), caller_node=NODE_A, config=config)
+    assert status == 200 and payload["admitted"] is True
+
+
 def test_obsolete_configured_cloud_lane_is_ignored(tmp_path):
     path = tmp_path / "deck.json"
     path.write_text(
