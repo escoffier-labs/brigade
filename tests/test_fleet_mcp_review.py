@@ -16,6 +16,7 @@ from brigade import (
     fleet_mcp_inventory_page as page_mod,
     fleet_mcp_report,
 )
+from tests._home import set_home
 from tests.fixtures import fleet_mcp_reports as fixture
 from tests.test_fleet_skills_review import Hub as _Hub
 
@@ -63,8 +64,7 @@ SECRETS = ("SECRETENV", "SECRETHEADER", "SECRETARG", "SECRETQUERY", "SECRETUSER"
 def workspace(tmp_path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.setenv("USERPROFILE", str(home))
+    set_home(monkeypatch, home)
     ws = tmp_path / "ws"
     (ws / ".brigade").mkdir(parents=True)
     return ws
