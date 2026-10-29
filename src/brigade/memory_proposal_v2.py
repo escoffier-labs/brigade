@@ -323,7 +323,7 @@ def _refuse_dangling_block_links(
                 # An unrelated note does not gain read or validation authority.
                 # Angle wrappers and other unparsed spellings stay fail-closed.
                 stem = posixpath.basename(destination.replace("\\", "/")).lower().rstrip(". ").removesuffix(".md")
-                if not re.search(r"[\s<>\\]", unquote(link[1])) and stem not in removed_stems:
+                if not re.search(r"[\s<>\\:\x00-\x1f]", unquote(link[1])) and stem not in removed_stems:
                     validated.append(link.span())
             elif check(destination, unquote(parsed.fragment)):
                 validated.append(link.span())

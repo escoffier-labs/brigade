@@ -1449,3 +1449,20 @@ def test_final_block_remote_host_links_remain_outside_merge_authority(tmp_path, 
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert not other.exists()
     assert referrer.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize("destination", ["./other.md::$DATA", "other.md%00"])
+def test_final_block_stream_and_control_aliases_stay_fail_closed(tmp_path, in_index, destination):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text(f"[claim]({destination}#^c-456def)\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
