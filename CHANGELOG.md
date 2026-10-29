@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Document native T3 result closeout and recovery of reviewed work notes after a session ends.
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
