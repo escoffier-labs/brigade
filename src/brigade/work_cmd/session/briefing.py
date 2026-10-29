@@ -583,8 +583,12 @@ def _interactive_presence_for_brief(target: Path) -> dict[str, Any]:
             "overlap_warnings": [],
         }
     try:
+        from ...fleet_session_heartbeat_state import publish_tracked
+
         snapshot = presence.build_snapshot(target, harness="codex", session_id=session_id)
-        result = fleet_client.publish_session(snapshot)
+        result = publish_tracked(
+            snapshot, lambda: fleet_client.publish_session(snapshot), successful=lambda result: result.ok
+        )
         published = bool(result.ok)
     except Exception as exc:
         return {
