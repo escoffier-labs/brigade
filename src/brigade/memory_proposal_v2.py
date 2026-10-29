@@ -246,6 +246,7 @@ def _refuse_dangling_block_links(
     if not removed:
         return
     originals = {source["path"]: source["text"] for source in sources}
+    removed_stems = {posixpath.basename(path).lower().removesuffix(".md") for path in removed}
     gone: set[str] = set()
     for loser, survivor in removed.items():
         kept = set(re.findall(r"\^(c-[0-9a-f]{6})\b", texts[survivor] or ""))
@@ -286,9 +287,17 @@ def _refuse_dangling_block_links(
             raise legacy.ProposalError("merge would break a link to a removed claim block")
         return True
 
+    def escaped(text: str, position: int) -> bool:
+        start = position
+        while start and text[start - 1] == "\\":
+            start -= 1
+        return (position - start) % 2 == 1
+
     for rel, text in documents.items():
         validated: list[tuple[int, int]] = []
         for link in legacy.WIKI.finditer(text):
+            if escaped(text, link.start()):
+                continue
             destination, sep, fragment = link[1].split("|", 1)[0].partition("#")
             if sep:
                 key = destination.lower().removesuffix(".md").removeprefix("cards/")
@@ -297,6 +306,8 @@ def _refuse_dangling_block_links(
         # Keep v1's direct removed-path and safe-fragment restrictions. This
         # check only validates the addressable destination; it grants no rewrite.
         for link in legacy.LINK.finditer(text):
+            if escaped(text, link.start()):
+                continue
             parsed = urlsplit(link[1])
             if parsed.scheme or parsed.netloc:
                 validated.append(link.span())
@@ -308,14 +319,16 @@ def _refuse_dangling_block_links(
             if destination not in cards and destination not in care.index_paths:
                 # An unrelated note does not gain read or validation authority.
                 # Angle wrappers and other unparsed spellings stay fail-closed.
-                if not re.search(r"[\s<>\\]", link[1]):
+                stem = posixpath.basename(destination).lower().removesuffix(".md")
+                if not re.search(r"[\s<>\\]", link[1]) and stem not in removed_stems:
                     validated.append(link.span())
             elif check(destination, unquote(parsed.fragment)):
                 validated.append(link.span())
         # Preserve the old refusal for loser-only fragments in syntax the
         # bounded parsers cannot validate, without rejecting proven other targets.
-        for fragment in re.finditer(r"#(?:\^|%5[eE])(c-[0-9a-f]{6})\b", text):
-            if fragment[1] in gone and not any(start <= fragment.start() < end for start, end in validated):
+        for fragment in re.finditer(r"#[^\s#\[\]()<>|]+", text):
+            block = re.match(r"\^(c-[0-9a-f]{6})\b", unquote(fragment[0][1:]))
+            if block and block[1] in gone and not any(start <= fragment.start() < end for start, end in validated):
                 raise legacy.ProposalError("merge would break a link to a removed claim block")
 
 

@@ -1369,3 +1369,47 @@ def test_final_block_unrelated_documents_do_not_expand_merge_scope(tmp_path, cas
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert not other.exists()
     assert document.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "link",
+    [
+        "[claim](<other.md#%5E%63-456def>)",
+        "[claim](<other.md#%5Ec%2D456def>)",
+        "[claim](<other.md#%5Ec-%34%35%36def>)",
+        r"\[note](../../docs/notes.md#^c-456def)",
+        "[claim](Other.md#^c-456def)",
+        "[claim](other#%5Ec-456def)",
+        "[claim](memory/cards/Other.md#^c-456def)",
+    ],
+)
+def test_final_block_ambiguous_wrappers_and_removed_names_refuse(tmp_path, in_index, link):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text("See " + link + ".\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("slashes", [2, 4])
+def test_final_block_outside_note_after_even_backslashes_remains_valid(tmp_path, slashes):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = card(tmp_path, "linker", body="\\" * slashes + "[note](../../docs/notes.md#^c-456def)")
+    before = referrer.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert referrer.read_bytes() == before
