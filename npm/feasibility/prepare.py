@@ -477,6 +477,30 @@ def build_candidate_payload(output: Path, runtime: dict, identity: dict, paths: 
     }
 
 
+def companion_package_manifest(runtime: dict, platform: str) -> dict:
+    """Construct every npm manifest field for a reviewed runtime companion."""
+    pin = runtime["platforms"][platform]
+    system, cpu = platform.split("-")
+    manifest = {
+        "name": pin["package"],
+        "version": runtime["version"],
+        "publishConfig": {"access": "public"},
+        "repository": {
+            "type": "git",
+            "url": "git+https://github.com/escoffier-labs/brigade.git",
+            "directory": "npm/feasibility",
+        },
+        "license": "MIT OR Apache-2.0",
+        "os": [system],
+        "cpu": [cpu],
+        "main": "manifest.json",
+        "files": [pin["executable"], "manifest.json", *runtime["licenses"]],
+    }
+    if system == "linux":
+        manifest["libc"] = ["glibc"]
+    return manifest
+
+
 def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
     """Bind original archives to clean source and stable pins or candidate bytes."""
     metadata = json.loads((output / "artifacts.json").read_text())
@@ -564,6 +588,8 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
                     or (manifest.get("libc") != ["glibc"] if system == "linux" else "libc" in manifest)
                 ):
                     raise ValueError("candidate companion platform mismatch")
+                if manifest != companion_package_manifest(runtime, item["platform"]):
+                    raise ValueError("candidate companion package manifest mismatch")
                 expected_names = {
                     "package/package.json",
                     "package/manifest.json",
@@ -679,24 +705,7 @@ def main() -> None:
         executable.chmod(0o755)
         for name, data in licenses.items():
             (package / name).write_bytes(data)
-        system, cpu = platform.split("-")
-        manifest = {
-            "name": pin["package"],
-            "version": runtime["version"],
-            "publishConfig": {"access": "public"},
-            "repository": {
-                "type": "git",
-                "url": "git+https://github.com/escoffier-labs/brigade.git",
-                "directory": "npm/feasibility",
-            },
-            "license": "MIT OR Apache-2.0",
-            "os": [system],
-            "cpu": [cpu],
-            "main": "manifest.json",
-            "files": [pin["executable"], "manifest.json", *licenses],
-        }
-        if system == "linux":
-            manifest["libc"] = ["glibc"]
+        manifest = companion_package_manifest(runtime, platform)
         write_json(package / "package.json", manifest)
         write_json(
             package / "manifest.json",

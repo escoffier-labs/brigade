@@ -1056,7 +1056,21 @@ def candidate_artifacts(tmp_path, candidate_source):
     packages = []
     for index, (platform, pin) in enumerate(runtime["platforms"].items()):
         system, cpu = platform.split("-")
-        manifest = {"name": pin["package"], "version": runtime["version"], "os": [system], "cpu": [cpu]}
+        manifest = {
+            "name": pin["package"],
+            "version": runtime["version"],
+            "publishConfig": {"access": "public"},
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "directory": "npm/feasibility",
+            },
+            "license": "MIT OR Apache-2.0",
+            "os": [system],
+            "cpu": [cpu],
+            "main": "manifest.json",
+            "files": [pin["executable"], "manifest.json", *runtime["licenses"]],
+        }
         if system == "linux":
             manifest["libc"] = ["glibc"]
         files = {
@@ -1117,6 +1131,9 @@ def save_candidate(output, metadata, packages):
         ("companion-os", "companion platform"),
         ("companion-cpu", "companion platform"),
         ("companion-libc", "companion platform"),
+        ("companion-install-script", "companion package manifest"),
+        ("companion-dependency", "companion package manifest"),
+        ("companion-entrypoint", "companion package manifest"),
         ("launcher-identity", "package identity"),
         ("launcher-source", "launcher source"),
         ("launcher-inventory", "launcher inventory"),
@@ -1165,6 +1182,15 @@ def test_candidate_verifier_binds_physical_archives(candidate_artifacts, mutatio
     elif mutation in {"companion-os", "companion-cpu", "companion-libc"}:
         manifest = json.loads(companion["package/package.json"])
         manifest.pop(mutation.removeprefix("companion-"))
+        companion["package/package.json"] = json.dumps(manifest).encode()
+    elif mutation in {"companion-install-script", "companion-dependency", "companion-entrypoint"}:
+        manifest = json.loads(companion["package/package.json"])
+        key, value = {
+            "companion-install-script": ("scripts", {"postinstall": "node -e process.exit(1)"}),
+            "companion-dependency": ("dependencies", {"unexpected-package": "1.0.0"}),
+            "companion-entrypoint": ("main", "unexpected.js"),
+        }[mutation]
+        manifest[key] = value
         companion["package/package.json"] = json.dumps(manifest).encode()
     elif mutation == "companion-manifest":
         companion["package/manifest.json"] = b"{}"
