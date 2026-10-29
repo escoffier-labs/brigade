@@ -2341,3 +2341,15 @@ def test_recent_cloud_outcomes_are_closed_with_count_and_keep_stale_and_cap_deta
     assert "Older fixture" in html and "Reviewed fixture" in html and "stale" in html
     assert "Recent report list may be capped." in html
     assert "Outcomes do not complete leases." in html
+
+
+def test_station_session_counts_ignore_the_activity_row_limit(conn, now, monkeypatch):
+    for index in range(3):
+        _seed_session(conn, node=NODE_A, session_id=f"sess-live-{index}")
+    _seed_session(conn, node=NODE_B, session_id="sess-other")
+    conn.execute(
+        "UPDATE interactive_sessions SET expires_at = ? WHERE session_id = 'sess-live-2'", (now.timestamp() - 1,)
+    )
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_ACTIVE_LIMIT", 1)
+    assert len(fleet_hub_sessions.list_sessions(conn, now_epoch=now.timestamp())) == 1
+    assert fleet_hub_sessions.count_live_by_node(conn, now_epoch=now.timestamp()) == {NODE_A: 2, NODE_B: 1}

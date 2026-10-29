@@ -1250,6 +1250,7 @@ def build_view(
     cloud_workers: Sequence[CloudWorker] = (),
     interactive_sessions: Sequence[Mapping[str, object]] = (),
     control_plane: ControlPlane | None = None,
+    session_counts: Mapping[str, int] | None = None,
 ) -> DeckView:
     from .fleet_dot import TERMINAL_STATES
     from .fleet_deck_activity import interactive_session
@@ -1298,7 +1299,11 @@ def build_view(
                 busy=len(tiles),
                 last_heard=last_heard.get(station.node_id),
                 tiles=tiles,
-                sessions=sum(row.node_id == station.node_id for row in session_rows_list),
+                sessions=(
+                    session_counts.get(station.node_id, 0)
+                    if session_counts is not None
+                    else sum(row.node_id == station.node_id for row in session_rows_list)
+                ),
             )
         )
     rail: list[RailEntry] = [
