@@ -1066,3 +1066,33 @@ def test_oversized_cited_evidence_list_is_refused_not_skipped(tmp_path):
         create(tmp_path, [op("replace_block", text="Keep the cache cold.")])
     assert path.read_bytes() == before
     assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+@pytest.mark.parametrize(
+    "structure",
+    [
+        "```\nvalue ^c-{ident}\n```",
+        "- > quoted ^c-{ident}\n  lazy text",
+        "-     code ^c-{ident}",
+        "- Title ^c-{ident}\n  =",
+    ],
+)
+def test_reviewed_merge_preserves_literal_tokens_in_excluded_structure(tmp_path, structure):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    path.write_text(path.read_text() + "\n\n" + structure.format(ident="abcdef") + "\n")
+    other.write_text(other.read_text() + "\n\n" + structure.format(ident="fedcba") + "\n")
+    before = {p: p.read_bytes() for p in (path, other)}
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    # A reviewed proposal containing another valid delta still cannot publish
+    # the refused merge. This exercises review and apply, not just the helper.
+    proposal = create(
+        tmp_path, [merge, op("add_previously", text="Old cache wording.")], paths=[PATH, "memory/cards/other.md"]
+    )
+    assert len(proposal["dropped_ops"]) == 1
+    assert [operation["type"] for operation in proposal["ops"]] == ["add_previously"]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert other.read_bytes() == before[other]
+    assert structure.format(ident="abcdef") in path.read_text()
