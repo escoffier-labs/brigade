@@ -529,7 +529,14 @@ def sync(
     )
 
 
-def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
+def uninstall(
+    *,
+    workspace: Path,
+    skill: str,
+    harness: str,
+    json_output: bool = False,
+    expected_binding: dict[str, Any] | None = None,
+) -> int:
     """Remove an installed skill from one or all harnesses, the inverse of install."""
     workspace = workspace.expanduser().resolve()
     install_targets = _install_mod._install_targets(workspace)
@@ -537,6 +544,9 @@ def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = 
         print(f"error: unknown skill install target: {harness}", file=sys.stderr)
         return 2
     skill_id = _registry_mod._slug(skill)
+    if expected_binding is not None and harness == "all":
+        print("error: review-stale: expected binding requires one explicit harness", file=sys.stderr)
+        return 2
     targets = install_targets if harness == "all" else (harness,)
     removed: list[dict[str, Any]] = []
     try:
@@ -561,6 +571,10 @@ def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = 
             # Refuse redirected state paths before anything is deleted.
             _registry_mod._require_plain_state_dirs(state_anchor, "skills", "installs")
             has_receipt = _registry_mod._state_file_exists(state_anchor, "skills", "installs", receipt_name)
+            if expected_binding is not None:
+                _install_mod._check_review_binding(
+                    expected_binding, workspace, skill_id, install_target, anchor=state_anchor
+                )
             if not dest.exists() and not has_receipt:
                 continue
             if dest.exists():
@@ -608,7 +622,14 @@ def uninstall(*, workspace: Path, skill: str, harness: str, json_output: bool = 
     return 0
 
 
-def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = False) -> int:
+def rollback(
+    *,
+    workspace: Path,
+    skill: str,
+    harness: str,
+    json_output: bool = False,
+    expected_binding: dict[str, Any] | None = None,
+) -> int:
     workspace = workspace.expanduser().resolve()
     skill_id = _registry_mod._slug(skill)
     if harness not in _install_mod._install_targets(workspace):
@@ -665,6 +686,10 @@ def rollback(*, workspace: Path, skill: str, harness: str, json_output: bool = F
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
             dirs, files = _registry_mod._read_tree_from_anchor(state_anchor, *snapshot_rel)
+            if expected_binding is not None:
+                _install_mod._check_review_binding(
+                    expected_binding, workspace, skill_id, harness, anchor=state_anchor, rollback_files=files
+                )
             # The snapshot lives in attacker-influenced state: treat it as
             # untrusted input. It is only restored when its bytes match the
             # fingerprint recorded for this installation at snapshot-capture

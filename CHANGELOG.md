@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
+- Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
+
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.

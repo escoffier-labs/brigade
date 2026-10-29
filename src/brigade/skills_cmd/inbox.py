@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
 from .. import mcp_server
-from ..localio import slugify, utc_now_iso as _now
+from ..localio import canonical_json_digest, slugify, utc_now_iso as _now
 from ..projection import kernel as projection
 from ..templates import template_root
 from ..untrusted import scan_untrusted
@@ -141,6 +141,7 @@ def _anchored_proposals(target: Path) -> list[tuple[str, dict[str, Any]]]:
             continue
         if not isinstance(meta, dict):
             continue
+        meta.setdefault("contract_status", "incomplete" if meta.get("behavioral_contract") is None else "complete")
         meta.setdefault("proposal_id", name)
         meta.setdefault("path", str(_registry_mod._inbox_root(target) / name))
         proposals.append((name, meta))
@@ -173,22 +174,83 @@ def _load_anchored_proposal(state_anchor: Any, name: str) -> dict[str, Any] | No
     return meta
 
 
+CHANGE_CATEGORIES = ("behavior", "bugfix", "clarification", "safety", "compatibility")
+
+
+def _validate_contract(value: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "reason",
+        "addressed_failure",
+        "change_category",
+        "baseline_fingerprint",
+        "expected_observable_behavior",
+    }
+    if not isinstance(value, dict) or set(value) != fields:
+        raise ValueError("behavioral_contract has missing or unknown fields")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("behavioral_contract schema_version must be 1")
+    for key in ("reason", "addressed_failure"):
+        if not isinstance(value[key], str) or not value[key].strip() or len(value[key]) > 4000:
+            raise ValueError(f"behavioral_contract {key} must be bounded nonempty text")
+    if value["change_category"] not in CHANGE_CATEGORIES:
+        raise ValueError("behavioral_contract change_category is unsupported")
+    baseline = value["baseline_fingerprint"]
+    if baseline is not None and (
+        not isinstance(baseline, str) or len(baseline) != 64 or any(c not in "0123456789abcdef" for c in baseline)
+    ):
+        raise ValueError("behavioral_contract baseline_fingerprint must be sha256 or null")
+    rows = value["expected_observable_behavior"]
+    if not isinstance(rows, list) or not 1 <= len(rows) <= 100:
+        raise ValueError("behavioral_contract needs 1 to 100 observable assertions")
+    seen = set()
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"id", "description"}:
+            raise ValueError("observable assertion needs id and description")
+        for key in ("id", "description"):
+            if not isinstance(row[key], str) or not row[key].strip() or len(row[key]) > 4000:
+                raise ValueError("observable assertion text is invalid")
+        if row["id"] in seen:
+            raise ValueError("observable assertion ids must be unique")
+        seen.add(row["id"])
+    return value
+
+
 def inbox_add(
     *,
     target: Path,
     source: Path,
     skill_id: str | None = None,
     summary: str | None = None,
+    behavioral_contract: dict[str, Any] | None = None,
     force: bool = False,
     json_output: bool = False,
 ) -> int:
+    try:
+        if behavioral_contract is not None:
+            _validate_contract(behavioral_contract)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     target = target.expanduser().resolve()
     source_dir, collected_dirs, collected_files, error = _registry_mod._collect_classified_source_tree(target, source)
     if source_dir is None:
         print(f"error: {error}", file=sys.stderr)
         return 2
     metadata = _registry_mod._metadata_from_collected(collected_files)
+    if behavioral_contract is None:
+        behavioral_contract = metadata.get("behavioral_contract")
+        if behavioral_contract is not None:
+            try:
+                _validate_contract(behavioral_contract)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
     resolved_skill_id = _registry_mod._slug(skill_id or str(metadata.get("id") or source_dir.name))
+    metadata = _registry_mod._normalized_registry_metadata(metadata, resolved_skill_id)
+    if behavioral_contract is not None:
+        metadata["behavioral_contract"] = behavioral_contract
+    collected_files = {**collected_files, ("skill.json",): _registry_mod._json_bytes(metadata)}
     created = _now()
     proposal_id = f"{created[:19].replace(':', '').replace('-', '')}-{resolved_skill_id}-{uuid.uuid4().hex[:8]}"
     proposal_rel = ("skills", "inbox", _registry_mod._slug(proposal_id))
@@ -199,6 +261,10 @@ def inbox_add(
             # Refuse a redirected inbox before anything is copied, replaced,
             # or deleted; a symlinked component never reaches the disk outside.
             _registry_mod._require_plain_state_dirs(state_anchor, "skills", "inbox")
+            baseline = _registry_mod._baseline_identity(state_anchor, resolved_skill_id)
+            if behavioral_contract is not None and behavioral_contract["baseline_fingerprint"] != baseline:
+                print("error: behavioral_contract baseline does not match current registry", file=sys.stderr)
+                return 2
             existing = _registry_mod._state_entry_kind(state_anchor, *proposal_rel)
             if existing == "dir" and not force:
                 print(f"error: skill proposal already exists: {proposal_dir}", file=sys.stderr)
@@ -230,6 +296,11 @@ def inbox_add(
                 "path": str(proposal_dir),
                 "skill_path": str(skill_dest),
                 "fingerprint": _registry_mod._files_fingerprint(collected_files),
+                "candidate_identity": _registry_mod._package_identity(collected_files),
+                "baseline_identity": baseline,
+                "behavioral_contract": behavioral_contract,
+                "contract_identity": canonical_json_digest(behavioral_contract),
+                "contract_status": "complete" if behavioral_contract is not None else "incomplete",
                 "lint": lint_payload,
             }
             _registry_mod._write_state_file(
@@ -275,6 +346,7 @@ def inbox_show(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     print(f"skill_id: {proposal.get('skill_id')}")
     print(f"status: {proposal.get('status')}")
     print(f"fingerprint: {proposal.get('fingerprint')}")
+    print("behavioral_contract: " + json.dumps(proposal.get("behavioral_contract") or "incomplete", sort_keys=True))
     return 0
 
 
@@ -312,11 +384,14 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
         "target": str(target),
         "proposal_id": proposal.get("proposal_id"),
         "skill_id": proposal.get("skill_id"),
+        "behavioral_contract": proposal.get("behavioral_contract"),
+        "contract_status": proposal.get("contract_status", "incomplete"),
         "diff": diff,
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    print("behavioral_contract: " + json.dumps(proposal.get("behavioral_contract") or "incomplete", sort_keys=True))
     print("\n".join(diff) if diff else "no diff")
     return 0
 
@@ -347,6 +422,32 @@ def inbox_accept(*, target: Path, proposal_id: str, force: bool = False, json_ou
             proposal_dirs, proposal_files = _registry_mod._read_tree_from_anchor(
                 state_anchor, "skills", "inbox", name, "skill"
             )
+            if proposal.get("candidate_identity") != _registry_mod._package_identity(proposal_files):
+                print("error: candidate changed or proposal identity missing; review a new proposal", file=sys.stderr)
+                return 2
+            skill_id = _registry_mod._slug(str(proposal.get("skill_id") or name))
+            if "baseline_identity" not in proposal or proposal["baseline_identity"] != _registry_mod._baseline_identity(
+                state_anchor, skill_id
+            ):
+                print("error: baseline changed; review a new proposal", file=sys.stderr)
+                return 2
+            contract = proposal.get("behavioral_contract")
+            metadata = _registry_mod._metadata_from_collected(proposal_files)
+            if (
+                proposal.get("contract_identity") != canonical_json_digest(contract)
+                or metadata.get("behavioral_contract") != contract
+            ):
+                print("error: behavioral_contract changed; review a new proposal", file=sys.stderr)
+                return 2
+            if contract is not None:
+                try:
+                    _validate_contract(contract)
+                except ValueError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
+                if contract["baseline_fingerprint"] != proposal["baseline_identity"]:
+                    print("error: behavioral_contract changed; review a new proposal", file=sys.stderr)
+                    return 2
             with tempfile.TemporaryDirectory(prefix="brigade-proposal-import-") as staging:
                 staged = Path(staging) / "skill"
                 _registry_mod._write_snapshot_tree(proposal_dirs, proposal_files, staged)

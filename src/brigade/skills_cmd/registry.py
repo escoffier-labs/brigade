@@ -299,6 +299,90 @@ def _files_fingerprint(files: dict[tuple[str, ...], bytes]) -> str:
     return digest.hexdigest()
 
 
+def _package_identity(files: dict[tuple[str, ...], bytes]) -> str:
+    """Identity of collected package bytes plus semantic metadata, without timestamps."""
+    from ..localio import canonical_json_digest
+
+    metadata = dict(_metadata_from_collected(files))
+    invalid_metadata = None
+    raw_metadata = files.get(("skill.json",))
+    if raw_metadata is not None:
+        try:
+            parsed_metadata = json.loads(raw_metadata.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            parsed_metadata = None
+        if not isinstance(parsed_metadata, dict):
+            invalid_metadata = _bytes_fingerprint(raw_metadata)
+    for key in ("imported_at", "updated_at", "created_at", "fingerprint", "source"):
+        metadata.pop(key, None)
+    # The existing body digest excludes every skill.json, including nested ones.
+    # Root metadata is semantic; nested metadata remains ordinary package content.
+    nested = {
+        "/".join(parts): _bytes_fingerprint(data)
+        for parts, data in files.items()
+        if parts[-1] == "skill.json" and parts != ("skill.json",)
+    }
+    return canonical_json_digest(
+        {
+            "schema_version": 1,
+            "package": _files_fingerprint(files),
+            "metadata": metadata,
+            "nested_metadata": nested,
+            "invalid_metadata": invalid_metadata,
+        }
+    )
+
+
+def _validate_expected_binding(value: Any) -> dict[str, Any]:
+    fields = {
+        "schema_version",
+        "workspace",
+        "node",
+        "skill_id",
+        "harness",
+        "source_selector",
+        "source",
+        "installed",
+        "target",
+        "rollback",
+        "contract",
+        "evaluation",
+    }
+    if (
+        not isinstance(value, dict)
+        or set(value) != fields
+        or type(value["schema_version"]) is not int
+        or value["schema_version"] != 1
+    ):
+        raise ValueError("invalid expected binding schema")
+    for key in ("workspace", "source", "installed", "target", "rollback", "contract", "evaluation"):
+        v = value[key]
+        if v is None and key in {"target", "rollback", "contract", "evaluation"}:
+            continue
+        if not isinstance(v, str) or len(v) != 64 or any(c not in "0123456789abcdef" for c in v):
+            raise ValueError(f"invalid expected binding {key}")
+    for key in ("skill_id", "harness", "node"):
+        v = value[key]
+        if not isinstance(v, str) or not v or len(v) > 120 or _slug(v) != v:
+            raise ValueError(f"invalid expected binding {key}")
+    if value["node"] == "unknown":
+        raise ValueError("expected binding requires actual node identity")
+    selector = value["source_selector"]
+    if selector is not None and (
+        not isinstance(selector, str)
+        or selector not in {"registry:" + value["skill_id"], "bundled:" + value["skill_id"]}
+    ):
+        raise ValueError("invalid expected binding source selector")
+    return value
+
+
+def _baseline_identity(anchor: Any, skill_id: str) -> str | None:
+    if _state_entry_kind(anchor, "skills", "registry", skill_id) == "missing":
+        return None
+    _dirs, files = _read_registry_entry_tree(anchor, skill_id)
+    return _package_identity(files)
+
+
 def _bytes_fingerprint(data: bytes | None) -> str:
     return hashlib.sha256(b"<missing>" if data is None else data).hexdigest()
 
@@ -509,6 +593,29 @@ def _collect_classified_source_tree(
     return source_dir, collected_dirs, collected_files, None
 
 
+def _normalized_registry_metadata(incoming: dict[str, Any], skill_id: str) -> dict[str, Any]:
+    """Finalize semantic defaults before a proposal or import binds its identity."""
+    metadata = dict(incoming)
+    metadata.update(
+        {
+            "id": skill_id,
+            "version": str(metadata.get("version") or "0.1.0"),
+            "trust_level": str(metadata.get("trust_level") or "unreviewed"),
+            "required_tools": metadata.get("required_tools")
+            if isinstance(metadata.get("required_tools"), list)
+            else [],
+            "required_mcp_servers": metadata.get("required_mcp_servers")
+            if isinstance(metadata.get("required_mcp_servers"), list)
+            else [],
+            "supported_harnesses": metadata.get("supported_harnesses")
+            if isinstance(metadata.get("supported_harnesses"), list)
+            else list(HARNESS_TARGETS),
+            "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
+        }
+    )
+    return metadata
+
+
 def _registry_import_payload(
     *,
     target: Path,
@@ -534,26 +641,9 @@ def _registry_import_payload(
             _write_collected_tree_into_anchor(
                 collected_dirs, collected_files, anchor, "skills", "registry", resolved_id
             )
-            metadata = dict(incoming_metadata)
-            metadata.update(
-                {
-                    "id": resolved_id,
-                    "version": str(metadata.get("version") or "0.1.0"),
-                    "source": str(source_provenance if source_provenance is not None else source),
-                    "imported_at": _now(),
-                    "trust_level": str(metadata.get("trust_level") or "unreviewed"),
-                    "required_tools": metadata.get("required_tools")
-                    if isinstance(metadata.get("required_tools"), list)
-                    else [],
-                    "required_mcp_servers": metadata.get("required_mcp_servers")
-                    if isinstance(metadata.get("required_mcp_servers"), list)
-                    else [],
-                    "supported_harnesses": metadata.get("supported_harnesses")
-                    if isinstance(metadata.get("supported_harnesses"), list)
-                    else list(HARNESS_TARGETS),
-                    "tests": metadata.get("tests") if isinstance(metadata.get("tests"), list) else [],
-                }
-            )
+            metadata = _normalized_registry_metadata(incoming_metadata, resolved_id)
+            metadata["source"] = str(source_provenance if source_provenance is not None else source)
+            metadata["imported_at"] = _now()
             metadata["fingerprint"] = _files_fingerprint(collected_files)
             _write_state_file(anchor, "skills", "registry", resolved_id, "skill.json", data=_json_bytes(metadata))
     except SkillsStatePathError as exc:
