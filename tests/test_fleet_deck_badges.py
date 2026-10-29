@@ -127,24 +127,6 @@ def test_brand_lookups_known_and_unknown() -> None:
     assert "<svg" in deck.provider_brand("cursor-cloud").svg
 
 
-def test_jules_mascot_resolves_for_harness_and_cloud_provider() -> None:
-    jules = deck.harness_brand("jules")
-    assert jules.label == "Jules"
-    assert jules == deck.provider_brand("jules-cloud")
-    assert jules.svg != brands.UNKNOWN_BRAND.svg
-    for render in (deck.harness_badge_html, deck.provider_badge_html):
-        badge = ElementTree.fromstring(render("jules"))
-        assert badge.attrib["aria-label"] == "Jules"
-        assert badge.attrib["role"] == "img"
-        assert badge.attrib["title"] == "jules"
-        svg = next(iter(badge))
-        assert svg.attrib["viewBox"] == "0 0 180 180"
-        # Self-contained vector geometry, with no resource or executable elements.
-        assert {element.tag for element in svg.iter()} <= {"svg", "path"}
-        assert all(not key.startswith("on") for element in svg.iter() for key in element.attrib)
-        assert all("href" not in key for element in svg.iter() for key in element.attrib)
-
-
 def test_badge_html_embeds_svg_and_escapes_title() -> None:
     html = deck.harness_badge_html("claude")
     assert "<svg" in html and "viewBox" in html

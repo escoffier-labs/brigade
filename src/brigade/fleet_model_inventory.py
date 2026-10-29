@@ -56,7 +56,6 @@ UNSUPPORTED_HARNESSES = frozenset(
     {
         "claudecode",
         "codex",
-        "jules",
         "grokbot",
     }
 )

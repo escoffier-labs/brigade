@@ -31,7 +31,7 @@ def clock(monkeypatch):
 def _admit(lease_id: str = "lease-a", **extra: object) -> dict[str, object]:
     return {
         "action": "admit",
-        "provider": "jules",
+        "provider": "cursor",
         "lease_id": lease_id,
         "node_id": NODE_A,
         "holder": "holder-a",
@@ -132,7 +132,7 @@ def _capture_bind_bodies(monkeypatch) -> list[dict[str, Any]]:
 
     def capture_post(_hub, _token, body, *, timeout):
         bodies.append(dict(body))
-        return 200, {"bound": True, "lease": {"lease_id": body["lease_id"], "provider": "jules"}}
+        return 200, {"bound": True, "lease": {"lease_id": body["lease_id"], "provider": "cursor"}}
 
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "token"})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda _base=None: NODE_A)
@@ -157,9 +157,9 @@ def test_sync_renews_active_leases_with_the_bound_ttl(monkeypatch, tmp_path: Pat
     now = cloud_tracker._parse_time("2026-08-12T20:00:00Z")
     cloud_tracker.register(
         tmp_path,
-        provider="jules",
+        provider="cursor-cloud",
         task_id="sess-long",
-        label="jules:owner/repo@001122334455",
+        label="cursor-cloud:owner/repo@001122334455",
         prompt_hash="sha256:" + "b" * 64,
         lease_holder="holder-a",
         dispatched_at="2026-08-12T19:59:00Z",

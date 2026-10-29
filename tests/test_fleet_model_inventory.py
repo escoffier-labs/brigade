@@ -12,7 +12,7 @@ Tests cover:
 - Malformed inputs, oversized payloads, nonfinite floats, and credential-bearing URL sanitization
 - Safe error sanitization without raw stderr
 - Probe runner dependency injection, executable allowlist, and zero real process execution
-- Parsers for agy, opencode, cursor-agent, and refusal of unsupported harnesses (claudecode, codex, jules, grokbot)
+- Parsers for agy, opencode, cursor-agent, and refusal of unsupported harnesses (claudecode, codex, grokbot)
 - Expiring manual browser observations
 - Adaptation to fleet_policy.validate_inventory
 """
@@ -579,7 +579,7 @@ def test_parse_cursor_agent_models() -> None:
 
 
 def test_unsupported_harnesses_report_unsupported_immediately() -> None:
-    for harness in ("claudecode", "codex", "jules", "grokbot"):
+    for harness in ("claudecode", "codex", "grokbot"):
         payload = fmi.probe_cli_inventory(harness)
         assert payload["status"] == "error"
         assert payload["error_reason"] == "unsupported-harness-no-verified-live-model-list"
