@@ -377,13 +377,58 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
     return plan, None
 
 
+def _set_cleanup_sigint(handler: Any) -> None:
+    """An interrupt during a disposition update must not replace cancellation."""
+    for _ in range(2):
+        try:
+            signal.signal(signal.SIGINT, handler)
+            return
+        except BaseException:
+            pass
+
+
+def _close_command_streams(process: subprocess.Popen[Any]) -> None:
+    """Bound closure even if a communicate reader still owns a stream lock."""
+    closers = []
+
+    def close(stream: Any) -> None:
+        try:
+            stream.close()
+        except BaseException:
+            pass
+
+    deadline = time.monotonic() + _TIMEOUT_DRAIN_SECONDS
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                closer = threading.Thread(target=close, args=(stream,), daemon=True)
+                closer.start()
+                closers.append(closer)
+            except BaseException:
+                pass
+    for closer in closers:
+        try:
+            closer.join(timeout=max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            pass
+    # Each daemon retains its stream until closure completes. A surviving pipe
+    # writer may delay release, but cannot keep the cancellation caller waiting.
+
+
 def _cleanup_interrupted_command(process: subprocess.Popen[Any]) -> None:
     """Release the owned group without replacing its original exception."""
-    previous_sigint = signal.getsignal(signal.SIGINT) if threading.current_thread() is threading.main_thread() else None
+    previous_sigint = None
+    if threading.current_thread() is threading.main_thread():
+        for _ in range(2):
+            try:
+                previous_sigint = signal.getsignal(signal.SIGINT)
+                break
+            except BaseException:
+                pass
     # Ctrl-C has already canceled the command. A second Ctrl-C must not skip
     # escalation or pipe release while the owner is unwinding.
     if previous_sigint is not None:
-        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        _set_cleanup_sigint(signal.SIG_IGN)
     try:
         try:
             brigade_proc.terminate_process_tree(process)
@@ -396,15 +441,10 @@ def _cleanup_interrupted_command(process: subprocess.Popen[Any]) -> None:
             process.wait(timeout=_TIMEOUT_DRAIN_SECONDS)
         except BaseException:
             pass
-        for stream in (process.stdout, process.stderr):
-            if stream is not None:
-                try:
-                    stream.close()
-                except BaseException:
-                    pass
+        _close_command_streams(process)
     finally:
         if previous_sigint is not None:
-            signal.signal(signal.SIGINT, previous_sigint)
+            _set_cleanup_sigint(previous_sigint)
 
 
 def _shell_or_argv_command(

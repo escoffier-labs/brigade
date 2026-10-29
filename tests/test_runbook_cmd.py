@@ -10,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -756,3 +757,234 @@ def test_runbook_command_exception_preserves_failure_and_releases_resources(monk
     ]
     assert child.stdout.closed and child.stderr.closed
     assert signal.getsignal(signal.SIGINT) == original_handler
+
+
+@pytest.mark.parametrize("fault", ["lookup", "ignore", "ignore-after", "restore", "restore-after"])
+@pytest.mark.parametrize("previous", [signal.SIG_IGN, lambda signum, frame: None], ids=["ignored", "custom"])
+def test_runbook_cleanup_signal_fault_preserves_exception_and_handler(monkeypatch, tmp_path, fault, previous):
+    original = UnicodeError("primary failure")
+    events = []
+    state = {"handler": previous, "failed": False}
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def lookup(signum):
+        if fault == "lookup" and not state["failed"]:
+            state["failed"] = True
+            raise KeyboardInterrupt("during signal lookup")
+        return state["handler"]
+
+    def install(signum, handler):
+        phase = "ignore" if handler == signal.SIG_IGN and "ignored" not in events else "restore"
+        if fault in {phase, phase + "-after"} and not state["failed"]:
+            state["failed"] = True
+            if fault.endswith("-after"):
+                state["handler"] = handler
+            raise KeyboardInterrupt("during signal update")
+        state["handler"] = handler
+        events.append("ignored" if phase == "ignore" else "restored")
+
+    monkeypatch.setattr(runbook_cmd.signal, "getsignal", lookup)
+    monkeypatch.setattr(runbook_cmd.signal, "signal", install)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: events.append("terminate"))
+    with pytest.raises(BaseException) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
+    assert state["failed"] and state["handler"] is previous
+    assert "terminate" in events and "wait" in events
+    assert child.stdout.closed and child.stderr.closed
+
+
+def test_runbook_command_exception_from_worker_thread_avoids_signal_apis(monkeypatch, tmp_path):
+    original = KeyboardInterrupt("worker cancellation")
+    caught = []
+    events = []
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def unexpected_signal_call(*args):
+        raise AssertionError("signal API called from worker thread")
+
+    def run():
+        try:
+            runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+        except BaseException as exc:
+            caught.append(exc)
+
+    monkeypatch.setattr(runbook_cmd.signal, "getsignal", unexpected_signal_call)
+    monkeypatch.setattr(runbook_cmd.signal, "signal", unexpected_signal_call)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: events.append("terminate"))
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive() and caught == [original]
+    assert events == ["terminate", "wait"]
+    assert child.stdout.closed and child.stderr.closed
+
+
+@pytest.mark.parametrize("both_blocked", [False, True])
+def test_runbook_cleanup_bounds_blocked_capture_close(monkeypatch, both_blocked):
+    release = threading.Event()
+    closers = []
+
+    class Capture:
+        def __init__(self, blocked):
+            self.blocked = blocked
+            self.closed = threading.Event()
+
+        def close(self):
+            closers.append(threading.current_thread())
+            if self.blocked:
+                release.wait(timeout=5)
+            self.closed.set()
+
+    class Child:
+        stdout = Capture(True)
+        stderr = Capture(both_blocked)
+
+        def wait(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(runbook_cmd, "_TIMEOUT_DRAIN_SECONDS", 0.05)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: None)
+    cleanup = threading.Thread(target=runbook_cmd._cleanup_interrupted_command, args=(Child(),), daemon=True)
+    started = time.monotonic()
+    cleanup.start()
+    try:
+        cleanup.join(timeout=0.5)
+        assert not cleanup.is_alive(), "capture close blocked cancellation cleanup"
+        assert time.monotonic() - started < 0.5
+        assert len(closers) == 2 and all(thread.daemon and thread is not cleanup for thread in closers)
+    finally:
+        release.set()
+        cleanup.join(timeout=5)
+        for closer in closers:
+            closer.join(timeout=5)
+        assert Child.stdout.closed.is_set() and Child.stderr.closed.is_set()
+
+
+def test_runbook_capture_closers_share_one_deadline(monkeypatch):
+    joins = []
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+    class Closer:
+        def __init__(self, *, target, args, daemon):
+            assert daemon
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+        def join(self, *, timeout):
+            joins.append(timeout)
+
+    clock = iter([10.0, 10.25, 10.9])
+    with monkeypatch.context() as patch:
+        patch.setattr(runbook_cmd, "_TIMEOUT_DRAIN_SECONDS", 1.0)
+        patch.setattr(runbook_cmd.threading, "Thread", Closer)
+        patch.setattr(runbook_cmd.time, "monotonic", lambda: next(clock))
+        runbook_cmd._close_command_streams(Child())
+    assert joins == pytest.approx([0.75, 0.1])
+    assert Child.stdout.closed and Child.stderr.closed
+
+
+@pytest.mark.parametrize("failure", [OSError("taskkill unavailable"), subprocess.TimeoutExpired("taskkill", 0.1)])
+def test_runbook_cleanup_preserves_exception_after_windows_taskkill_failure(monkeypatch, tmp_path, failure):
+    original = KeyboardInterrupt("primary cancellation")
+    events = []
+
+    class Child:
+        pid = 4242
+        returncode = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            events.append("kill")
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def taskkill(argv, **kwargs):
+        assert argv == ["taskkill", "/PID", "4242", "/T", "/F"]
+        assert kwargs["timeout"] == 0.1
+        raise failure
+
+    # Exercise the existing Windows fallback on this platform without invoking
+    # taskkill or claiming execution of the native Windows process APIs.
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc.subprocess, "run", taskkill)
+    monkeypatch.setattr(
+        runbook_cmd.brigade_proc,
+        "terminate_process_tree",
+        lambda process: runbook_cmd.brigade_proc._terminate_windows_process_tree(process, timeout=0.1),
+    )
+    with pytest.raises(KeyboardInterrupt) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
+    assert events == ["kill", "wait"]
+    assert child.stdout.closed and child.stderr.closed
+
+
+@pytest.mark.parametrize("failure_stage", ["construction", "start"])
+def test_runbook_capture_closer_start_failure_preserves_primary_exception(monkeypatch, tmp_path, failure_stage):
+    original = SystemExit(7)
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            pass
+
+    class Closer:
+        def __init__(self, **kwargs):
+            if failure_stage == "construction":
+                raise RuntimeError("no cleanup thread available")
+
+        def start(self):
+            raise RuntimeError("no cleanup thread available")
+
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: Child())
+    monkeypatch.setattr(runbook_cmd.threading, "Thread", Closer)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: None)
+    with pytest.raises(SystemExit) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
