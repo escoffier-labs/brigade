@@ -545,7 +545,7 @@ def _as_tool_input(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
+def wired_target_from_payload(payload: dict[str, Any], *, attribute_writes: bool = True) -> Path | None:
     try:
         cwd = expand_user_path(Path(str(payload.get("cwd") or "."))).resolve(strict=False)
     except (OSError, RuntimeError):
@@ -555,7 +555,9 @@ def wired_target_from_payload(payload: dict[str, Any]) -> Path | None:
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
         command = str(tool_input.get("command") or "")
-        for written_target, confident in write_attribution.bash_scopes(command, cwd).items():
+        for written_target, confident in (
+            write_attribution.bash_scopes(command, cwd).items() if attribute_writes else ()
+        ):
             if confident:
                 return written_target
         verifier_target = _verifier_target_from_command(command, cwd)
@@ -610,7 +612,9 @@ def _session_id_from_payload(payload: dict[str, Any]) -> str:
     return "unknown"
 
 
-def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -> Path | None:
+def effective_hook_target(
+    payload: dict[str, Any], *, pin: Path | None = None, attribute_writes: bool = True
+) -> Path | None:
     """Return the workspace a hook may operate on, or None to no-op.
 
     User-scope installs fire for every Claude session. Home is never a work
@@ -618,7 +622,7 @@ def effective_hook_target(payload: dict[str, Any], *, pin: Path | None = None) -
     what times out on every tool call. An optional ``--target`` pin restricts
     work to that wired workspace and no-ops everywhere else.
     """
-    derived = wired_target_from_payload(payload)
+    derived = wired_target_from_payload(payload, attribute_writes=attribute_writes)
     resolved_pin = _resolve_pin(pin)
     if resolved_pin is not None:
         if derived is not None and _path_is_within(derived, resolved_pin):
@@ -2373,8 +2377,11 @@ def _handle_event(
                 f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
             )
         else:
+            # The replacement runs the verifier with cwd=target, so it names the
+            # verifier's checkout, not a worktree a later segment writes to.
+            verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
             replacement = _verify_replacement(
-                target,
+                verify_target,
                 _first_verifier_command(str(command)),
                 str(state["session_fingerprint"]),
                 capture_artifact_id=capture_artifact_id,
