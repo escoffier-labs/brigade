@@ -7,10 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
-- Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
-- Concurrent skill updates share a mutation lock so reviewed approvals cannot overwrite a newer baseline. Paired replay refuses redirected output paths, binds the replay transcript and reports offline apparatus outcomes explicitly.
+- Verification plans now validate argv-array checks without crashing, reject embedded NUL arguments, and emit runnable POSIX-shell suggestions retaining selected checks, the target and the original manifest selector.
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
+- Fleet attention expires abandoned unknown and stale runs using the configured history horizon, excludes revoked nodes and expired failures, and compares failure lookback and newer successful runs by elapsed time across timestamp offsets.
+
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
 
@@ -211,6 +211,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
 
 - Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
+
+- Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
+- Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
+- Concurrent skill updates share a mutation lock so reviewed approvals cannot overwrite a newer baseline. Paired replay refuses redirected output paths, binds the replay transcript and reports offline apparatus outcomes explicitly.
 
 ## [0.30.0] - 2026-10-20
 
