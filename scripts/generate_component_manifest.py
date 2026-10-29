@@ -12,6 +12,7 @@ from typing import Any
 
 
 COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+CANONICAL_ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -34,7 +35,7 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> None:
+def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> set[str]:
     if not tag.startswith("v") or len(tag) == 1:
         raise ValueError("tag must be an immutable Brigade tag beginning with v")
     if _COMMIT.fullmatch(commit) is None:
@@ -43,29 +44,35 @@ def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> None:
         raise ValueError(f"assets directory does not exist: {assets_dir}")
     found = {path.name for path in assets_dir.iterdir() if path.is_file()}
     expected = expected_asset_names()
+    aliases = {asset_name(component, platform) for component in CANONICAL_ALIASES for platform in SUPPORTED_PLATFORMS}
+    if found & aliases:
+        expected |= aliases
     missing = sorted(expected - found)
     extra = sorted(found - expected)
     if missing:
         raise ValueError("missing native assets: " + ", ".join(missing))
     if extra:
         raise ValueError("unexpected native assets: " + ", ".join(extra))
+    for name in sorted(found & aliases):
+        if (assets_dir / name).stat().st_size <= 0:
+            raise ValueError(f"canonical native asset {name!r} must have positive byte size")
+    return found
 
 
 def generate_manifest(
     *, tag: str, commit: str, assets_dir: Path, output: Path, checksums_output: Path
 ) -> dict[str, Any]:
     """Write the manifest and its complete checksums map in deterministic order."""
-    _validate_inputs(tag, commit, assets_dir)
+    native_names = _validate_inputs(tag, commit, assets_dir)
     base_url = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
     components: dict[str, Any] = {}
-    native_digests: dict[str, str] = {}
+    native_digests = {name: sha256(assets_dir / name) for name in sorted(native_names)}
     for component in COMPONENT_IDS:
         assets: dict[str, Any] = {}
         for platform in SUPPORTED_PLATFORMS:
             name = asset_name(component, platform)
             path = assets_dir / name
-            digest = sha256(path)
-            native_digests[name] = digest
+            digest = native_digests[name]
             assets[platform] = {
                 "asset_name": name,
                 "byte_size": path.stat().st_size,

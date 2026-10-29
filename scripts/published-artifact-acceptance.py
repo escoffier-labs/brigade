@@ -22,6 +22,7 @@ from urllib.parse import urlparse
 
 
 COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 GITHUB_API_HOST = "api.github.com"
@@ -202,6 +203,15 @@ def _parse_checksums(text: str) -> dict[str, str]:
     return result
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise AcceptanceError(f"release manifest repeats JSON key {key!r}")
+        result[key] = value
+    return result
+
+
 def verify_release_assets(
     version: str,
     destination: Path,
@@ -215,7 +225,7 @@ def verify_release_assets(
     manifest_url = _release_url(version, "component-manifest-v1.json")
     try:
         manifest_bytes = fetch_bytes(manifest_url)
-        manifest = json.loads(manifest_bytes.decode("utf-8"))
+        manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise AcceptanceError(f"could not fetch release component manifest: {exc}") from exc
     if not isinstance(manifest, dict) or not isinstance(manifest.get("components"), dict):
@@ -256,12 +266,21 @@ def verify_release_assets(
 
     checksums_url = _release_url(version, "checksums.txt")
     try:
-        checksums = _parse_checksums(fetch_bytes(checksums_url).decode("utf-8"))
+        checksums_bytes = fetch_bytes(checksums_url)
+        checksums = _parse_checksums(checksums_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
-    if set(checksums) != expected_checksum_names:
-        raise AcceptanceError("checksums.txt must cover exactly all 25 native assets and component-manifest-v1.json")
+    canonical_assets = {
+        f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else ""): (component, platform)
+        for component in CANONICAL_IDS
+        for platform in SUPPORTED_PLATFORMS
+    }
+    if set(checksums) == expected_checksum_names | set(canonical_assets):
+        for name in canonical_assets:
+            expected[name] = (checksums[name], _release_url(version, name))
+    elif set(checksums) != expected_checksum_names:
+        raise AcceptanceError("checksums.txt must cover exactly 25 or 40 native assets and component-manifest-v1.json")
     if checksums.get("component-manifest-v1.json") != _sha256_bytes(manifest_bytes):
         raise AcceptanceError("release manifest digest does not match checksums.txt")
     (release_dir / "component-manifest-v1.json").write_bytes(manifest_bytes)
@@ -276,15 +295,21 @@ def verify_release_assets(
             raise AcceptanceError(f"release asset {name!r} digest does not match the release manifest")
         path = release_dir / name
         path.write_bytes(body)
-        component, platform = next(
-            (component, platform)
-            for component in COMPONENT_IDS
-            for platform in SUPPORTED_PLATFORMS
-            if name == f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+        component, platform = (
+            canonical_assets[name]
+            if name in canonical_assets
+            else next(
+                (component, platform)
+                for component in COMPONENT_IDS
+                for platform in SUPPORTED_PLATFORMS
+                if name == f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
+            )
         )
         if platform != "windows-amd64":
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-        native_paths[component][platform] = path
+        if component in native_paths:
+            native_paths[component][platform] = path
+    (release_dir / "checksums.txt").write_bytes(checksums_bytes)
     return {"manifest": manifest, "native_paths": native_paths}
 
 
@@ -639,12 +664,8 @@ def validate_agent_notify_version_payload(payload: Any, version: str) -> None:
         raise AcceptanceError("agent-notify build_date must be a UTC timestamp (YYYY-MM-DDTHH:MM:SSZ), not 'unknown'")
 
 
-def smoke_managed_components(
-    managed_paths: Mapping[str, Path],
-    *,
-    version: str,
-    runner: Runner = subprocess.run,
-    env: Mapping[str, str] | None = None,
+def _smoke_graph_and_evidence(
+    managed_paths: Mapping[str, Path], *, runner: Runner, env: Mapping[str, str] | None
 ) -> None:
     graphtrail = run_checked([managed_paths["graphtrail"], "--version"], runner=runner, env=env)
     if not graphtrail.stdout.strip():
@@ -664,6 +685,30 @@ def smoke_managed_components(
         raise AcceptanceError("graphtrail-mcp smoke returned an invalid JSON-RPC response")
 
     run_checked([managed_paths["miseledger"], "version"], runner=runner, env=env)
+
+
+def smoke_canonical_components(
+    paths: Mapping[str, Path], *, runner: Runner = subprocess.run, env: Mapping[str, str] | None = None
+) -> None:
+    _smoke_graph_and_evidence(
+        {
+            "graphtrail": paths["brigade-code-graph"],
+            "graphtrail-mcp": paths["brigade-code-graph-mcp"],
+            "miseledger": paths["brigade-evidence"],
+        },
+        runner=runner,
+        env=env,
+    )
+
+
+def smoke_managed_components(
+    managed_paths: Mapping[str, Path],
+    *,
+    version: str,
+    runner: Runner = subprocess.run,
+    env: Mapping[str, str] | None = None,
+) -> None:
+    _smoke_graph_and_evidence(managed_paths, runner=runner, env=env)
     sessionfind = run_checked([managed_paths["sessionfind"], "--help"], runner=runner, env=env)
     if "usage" not in f"{sessionfind.stdout}{sessionfind.stderr}".lower() and not any(
         line.strip().startswith("sessionfind ") for line in sessionfind.stdout.splitlines()
@@ -714,7 +759,7 @@ GO_TOOLS = frozenset({"go", "gofmt"})
 
 
 def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path, mirror_root: Path) -> str:
-    """Build a Unix PATH that keeps the poison and pipx entries plus every system
+    """Build a PATH that keeps the poison and pipx entries plus every system
     directory from ``original_path`` while making ``go`` unreachable. Managed setup
     must download release assets instead of building the Go components from source,
     so the toolchain has to be unreachable.
@@ -723,18 +768,20 @@ def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path, mir
     links every other entry. Runner images that install Go into ``/usr/bin`` still
     need ``git`` and the rest of that directory.
     """
+    suffixes = ("", ".exe", ".cmd", ".bat", ".com") if os.name == "nt" else ("",)
+    tool_names = {name + suffix for name in GO_TOOLS for suffix in suffixes}
     entries: list[str] = [str(poison_dir), str(pipx_bin)]
     for index, entry in enumerate(original_path.split(os.pathsep)):
         if not entry or entry in entries:
             continue
         directory = Path(entry)
-        if not (directory / "go").exists():
+        if not any((directory / ("go" + suffix)).exists() for suffix in suffixes):
             entries.append(entry)
             continue
         mirror = mirror_root / f"path-{index}"
         mirror.mkdir(parents=True, exist_ok=True)
         for child in directory.iterdir():
-            if child.name in GO_TOOLS:
+            if (child.name.casefold() if os.name == "nt" else child.name) in tool_names:
                 continue
             link = mirror / child.name
             if not link.exists() and not link.is_symlink():
@@ -757,6 +804,56 @@ def _write_poison_binaries(poison_dir: Path, marker: Path) -> None:
         poison = poison_dir / component_id
         poison.write_text(f"#!/bin/sh\nprintf '%s\\n' {shlex.quote(component_id)} >> {marker_literal}\nexit 97\n")
         poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
+
+
+def smoke_verified_canonical_release(
+    release_dir: Path, version: str, *, runner: Runner, env: Mapping[str, str]
+) -> None:
+    # The original validated inventory, not file presence, determines intent.
+    checksums = _parse_checksums((release_dir / "checksums.txt").read_text(encoding="utf-8"))
+    if len(checksums) == 26:
+        return
+    if len(checksums) != 41:
+        raise AcceptanceError("invalid cached release inventory")
+    platform = host_platform_key()
+    paths = {name: (release_dir / f"{name}-{platform}").resolve() for name in CANONICAL_IDS}
+    if not all(path.is_file() for path in paths.values()):
+        raise AcceptanceError("missing canonical host asset in additive release")
+    manifest_path = (release_dir / "component-manifest-v1.json").resolve()
+    manifest = json.loads(manifest_path.read_bytes(), object_pairs_hook=_unique_json_object)
+    revisions = [manifest["components"][name].get("component_revision") for name in COMPONENT_IDS]
+    if (
+        any(not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None for revision in revisions)
+        or len(set(revisions)) != 1
+    ):
+        raise AcceptanceError("primary manifest must contain one valid source commit for all components")
+    # Bind the manifest itself as well as the aliases to signed source identity.
+    # A checksum map alone is not provenance, and releases can be mutable.
+    for path in [manifest_path, *paths.values()]:
+        run_checked(
+            [
+                "gh",
+                "attestation",
+                "verify",
+                path,
+                "--repo",
+                REPOSITORY,
+                "--signer-workflow",
+                f"{REPOSITORY}/.github/workflows/publish.yml",
+                "--source-digest",
+                revisions[0],
+                "--source-ref",
+                f"refs/tags/v{version}",
+            ],
+            runner=runner,
+            env=env,
+        )
+    native_env = {
+        key: value
+        for key, value in env.items()
+        if key.upper() not in {"GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"}
+    }
+    smoke_canonical_components(paths, runner=runner, env=native_env)
 
 
 def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_darwin_amd64: bool = False) -> None:
@@ -822,6 +919,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
             assert_go_unavailable(env=env)
             smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
+            smoke_verified_canonical_release(root / "release-assets", version, runner=runner, env=env)
             smoke_import_and_search(
                 managed_brigade,
                 managed_paths["miseledger"],

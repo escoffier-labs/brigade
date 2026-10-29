@@ -104,3 +104,63 @@ def test_generator_rejects_missing_extra_or_duplicate_native_assets(generator_mo
             output=tmp_path / "manifest.json",
             checksums_output=tmp_path / "checksums.txt",
         )
+
+
+ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+
+
+def _write_aliases(root: Path) -> set[str]:
+    names = {_asset_name(component, platform) for component in ALIASES for platform in PLATFORMS}
+    for name in names:
+        (root / name).write_bytes(name.encode())
+    return names
+
+
+def test_generator_additive_inventory_preserves_primary_manifest_and_hashes_every_file(generator_module, tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    legacy = _write_inventory(assets)
+    output = tmp_path / "component-manifest-v1.json"
+    checksums = tmp_path / "checksums.txt"
+    kwargs = dict(tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums)
+    generator_module.generate_manifest(**kwargs)
+    legacy_manifest = output.read_bytes()
+    aliases = _write_aliases(assets)
+
+    generator_module.generate_manifest(**kwargs)
+
+    assert output.read_bytes() == legacy_manifest
+    assert generator_module.expected_asset_names() == legacy
+    entries = dict(line.split()[::-1] for line in checksums.read_text().splitlines())
+    assert len(entries) == 41
+    assert set(entries) == legacy | aliases | {output.name}
+    for name in legacy | aliases:
+        assert entries[name] == hashlib.sha256((assets / name).read_bytes()).hexdigest()
+    assert entries[output.name] == hashlib.sha256(output.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("defect", ["partial", "empty", "foreign", "platform", "duplicate"])
+def test_generator_rejects_invalid_additive_inventory_before_writing(generator_module, tmp_path, defect):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    _write_aliases(assets)
+    if defect == "partial":
+        (assets / "brigade-evidence-windows-amd64.exe").unlink()
+    elif defect == "empty":
+        (assets / "brigade-evidence-linux-amd64").write_bytes(b"")
+    else:
+        name = {
+            "foreign": "foreign-linux-amd64",
+            "platform": "brigade-evidence-freebsd-amd64",
+            "duplicate": "brigade-evidence-linux-amd64-copy",
+        }[defect]
+        (assets / name).write_bytes(b"invalid")
+    output = tmp_path / "component-manifest-v1.json"
+    checksums = tmp_path / "checksums.txt"
+    with pytest.raises(ValueError):
+        generator_module.generate_manifest(
+            tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+        )
+    assert not output.exists()
+    assert not checksums.exists()

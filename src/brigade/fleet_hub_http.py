@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
-from urllib.parse import parse_qs, urlencode
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from . import fleet_hub_enrollment as enrollment
 from . import (
@@ -52,7 +52,7 @@ from . import fleet_owners
 from . import fleet_owners_page
 from . import fleet_deck_pages_http
 from .fleet_deck_pages_http import control_plane_from_hub as control_plane_from_hub
-from . import fleet_policy_page
+from . import fleet_admin_explorer, fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
 from . import ui_theme
@@ -1029,6 +1029,7 @@ def make_handler(
                     worklore_enabled=worklore_http.enabled(),
                     extras=extras,
                     board_options=board_options,
+                    query=query,
                 )
             elif alerts_page:
                 page = fleet_deck_alerts.render_alerts_page(
@@ -1089,6 +1090,7 @@ def make_handler(
                 error=error,
                 submission=submission,
                 policy_csrf=fleet_policy_page.csrf_value(token) if editable else "",
+                query=urlsplit(self.path).query,
             )
             self._send_html(status, page, nonce=nonce)
 
@@ -1188,7 +1190,7 @@ def make_handler(
 
         def _serve_roster(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
-            params = parse_qs(query, keep_blank_values=False)
+            params = fleet_admin_explorer.query_params(query)
             authorized, editable = self._roster_auth()
             if not authorized:
                 self._send_html(
@@ -1250,12 +1252,13 @@ def make_handler(
                 plan=plan,
                 draft=draft,
                 review=review,
+                query=urlsplit(self.path).query,
             )
             self._send_html(status, page, nonce=nonce)
 
         def _serve_policy_page(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
-            params = parse_qs(query, keep_blank_values=False)
+            params = fleet_admin_explorer.query_params(query)
             authorized, editable = self._roster_auth()
             if not authorized:
                 self._send_html(

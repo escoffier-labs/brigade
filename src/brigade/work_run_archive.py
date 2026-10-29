@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import stat
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
@@ -422,6 +423,64 @@ def build_manifest_for_payload(
     return validate_manifest(manifest)
 
 
+def _promote_export(staging: Path, destination: Path, *, force: bool) -> None:
+    """Install a validated archive, retaining the previous tree until promotion."""
+    # Recheck after building: a destination may have appeared or changed type.
+    _reject_symlink_final_component(destination, label="destination")
+    if not destination.exists():
+        try:
+            os.rename(staging, destination)
+        except OSError as exc:
+            raise WorkRunArchiveError(f"could not install prepared archive: {exc}", category="io") from exc
+        return
+    if not force:
+        raise WorkRunArchiveError(f"destination already exists: {destination}", category="io")
+    if not destination.is_dir():
+        raise WorkRunArchiveError(f"destination is not a replaceable directory: {destination}", category="io")
+
+    try:
+        backup_root = Path(tempfile.mkdtemp(prefix=f".{destination.name}.backup-", dir=destination.parent))
+    except OSError as exc:
+        raise WorkRunArchiveError(
+            f"could not prepare archive replacement; destination left unchanged: {exc}", category="io"
+        ) from exc
+    backup = backup_root / "archive"
+    try:
+        os.rename(destination, backup)
+        os.rename(staging, destination)
+    except BaseException as exc:
+        try:
+            if backup.exists():
+                _reject_symlink_final_component(destination, label="destination")
+                if destination.exists():
+                    raise FileExistsError(f"destination appeared during replacement: {destination}")
+                os.rename(backup, destination)
+        except BaseException as restore_exc:
+            raise WorkRunArchiveError(
+                f"archive replacement failed: {exc}; restoration failed: {restore_exc}; "
+                f"any previous archive backup is preserved at {backup}",
+                category="io",
+            ) from exc
+        # The old archive was restored, or the first move failed without moving
+        # it. Never let failure to remove an empty container mask that error.
+        try:
+            backup_root.rmdir()
+        except OSError:
+            pass
+        if isinstance(exc, OSError):
+            raise WorkRunArchiveError(
+                f"archive replacement failed; previous archive left at {destination}: {exc}", category="io"
+            ) from exc
+        raise
+    try:
+        shutil.rmtree(backup_root)
+    except OSError as exc:
+        raise WorkRunArchiveError(
+            f"archive installed at {destination}; cleanup of previous archive incomplete at {backup}: {exc}",
+            category="io",
+        ) from exc
+
+
 def export_run(
     run_dir: Path,
     destination: Path,
@@ -442,12 +501,12 @@ def export_run(
         raise WorkRunArchiveError(f"run directory not found: {run_dir}", category="io")
     if not (run_dir / "run.json").is_file():
         raise WorkRunArchiveError(f"run directory has no run.json: {run_dir}", category="schema")
+    _assert_disjoint_trees(run_dir, destination)
     if destination.exists():
         if not force:
             raise WorkRunArchiveError(f"destination already exists: {destination}", category="io")
         if not destination.is_dir():
             raise WorkRunArchiveError(f"destination is not a replaceable directory: {destination}", category="io")
-        shutil.rmtree(destination)
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = destination.parent / f".{destination.name}.staging-{os.getpid()}"
@@ -490,12 +549,12 @@ def export_run(
             source_run_dir=str(run_dir),
         )
         localio.write_json(staging / WORK_RUN_MANIFEST_NAME, manifest)
-        os.rename(staging, destination)
+        validated = validate_archive(staging)
+        _promote_export(staging, destination, force=force)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 
-    validated = validate_archive(destination)
     return {
         "status": "exported",
         "archive_dir": str(destination),
@@ -526,6 +585,7 @@ def import_archive(
     run_id = str(manifest["run_id"])
     dest = runs_dir / run_id
     _reject_symlink_final_component(dest, label="destination run")
+    _assert_disjoint_trees(archive_dir, dest)
     if dest.exists():
         if not force:
             raise WorkRunArchiveError(f"destination run already exists: {dest}", category="io")
@@ -881,6 +941,36 @@ def _normalize_user_path(path: Path) -> Path:
     expanded = path.expanduser()
     _reject_symlink_final_component(expanded)
     return expanded.resolve()
+
+
+def _assert_disjoint_trees(source: Path, destination: Path) -> None:
+    """Reject overlapping resolved trees before replacement or staging writes."""
+    message = "source and destination directories overlap; both are left unchanged"
+    if source.is_relative_to(destination) or destination.is_relative_to(source):
+        raise WorkRunArchiveError(message, category="io")
+    # POSIX resolve() can preserve case aliases on case-insensitive volumes.
+    # Compare directory identities too, including ancestors above missing paths.
+    try:
+        checks = [(source.stat(), (destination, *destination.parents))]
+        try:
+            destination_stat = destination.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            checks.append((destination_stat, tuple(source.parents)))
+        for root_stat, candidates in checks:
+            for path in candidates:
+                try:
+                    candidate_stat = path.stat()
+                except FileNotFoundError:
+                    continue
+                if os.path.samestat(root_stat, candidate_stat):
+                    raise WorkRunArchiveError(message, category="io")
+    except OSError as exc:
+        raise WorkRunArchiveError(
+            f"cannot inspect source and destination directories; both are left unchanged: {exc}",
+            category="io",
+        ) from exc
 
 
 def _require_relative_payload_path(value: Any, name: str) -> str:

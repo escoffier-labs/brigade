@@ -173,7 +173,10 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
     for route, rendered in fleet_pages.items():
         markup = Markup(rendered)
         assert len(markup.elements("html")) == len(markup.elements("body")) == len(markup.elements("main")) == 1, route
-        assert len(markup.elements("aside")) == 1, route
+        explorer_label = {"/deck/roster": "roster", "/deck/policy": "policy"}.get(route)
+        assert len(markup.elements("aside")) == (2 if explorer_label else 1), route
+        if explorer_label:
+            assert markup.elements("aside")[1] == {"class": "explorer-list"}, route
         sidebar = next(index for index, (tag, _) in enumerate(markup.tags) if tag == "aside")
         assert markup.tags[sidebar][1]["class"] == "shell-sidebar", route
         assert [markup.tags[index][1] for index in markup.descendants(sidebar, "nav")] == [
@@ -189,6 +192,8 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
         ]
         if route.startswith("/view/"):
             expected_nav.append({"class": "board-nav", "aria-label": "Board views"})
+        if explorer_label:
+            expected_nav.append({"aria-label": explorer_label})
         assert markup.elements("nav") == expected_nav, route
         routes = {urlsplit(attrs["href"]).path for attrs in markup.elements("a") if "href" in attrs}
         assert {"/deck/projects", "/deck/roster", "/deck/activity"} <= routes, route

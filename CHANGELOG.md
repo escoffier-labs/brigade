@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
 - Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
 - Concurrent skill updates share a mutation lock so reviewed approvals cannot overwrite a newer baseline. Paired replay refuses redirected output paths, binds the replay transcript and reports offline apparatus outcomes explicitly.
+- Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
+- Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
+- Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
 
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
@@ -95,6 +98,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 
 - Native source builds add `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` entry points over the existing engines. Legacy commands, archive locations, protocol identities, and release assets remain compatible.
+- Native release bundles include canonical engine executables alongside legacy assets. Default setup retains legacy identities, with complete checksums and source-bound attestation checks.
+
+- Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
 
 ### Fixed
 
@@ -152,6 +158,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The content guard keeps JavaScript URL template fields such as `https://${cfg.db.host}/path` code-shaped while still detecting literal hosts in quoted expressions, escaped fields, comments, and ordinary strings.
 
 
+- Reviewed duplicate memory merges validate block links against their final card destinations and configured indexes, preserving unrelated anchors and refusing missing claim blocks (#1959).
+
 ### Added
 
 - A `duet` connector pack serves Claude Duet from the Dot connector code with its own runtime schema, Hub principal `agent:duet`, state, Access audience and handoff inbox. It exposes 22 memory, skills, inbox and read-only fleet tools; dispatch and T3 fleet tools are absent from discovery. `message_send` has its own `messaging_enabled` gate (optional for Dot) and a 20 per hour limit for Duet, and the call log records each client's name. See `docs/duet-connector.md`.
@@ -202,6 +210,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reviewed memory proposals preserve Markdown structures when anchoring claims, including list-contained quotations, code and headings. Exact duplicate comparison retains literal anchor tokens in excluded blocks.
 - Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
 
+- Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
 ## [0.30.0] - 2026-10-20
 

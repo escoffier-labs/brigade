@@ -66,13 +66,22 @@ Fetch `origin/main`, confirm its declared version, create an annotated tag on th
 )
 ```
 
-The publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
+The next publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
 `graphtrail-mcp`, `miseledger`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
-`darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It creates one Brigade release with
-exactly 25 native assets (5 components × 5 platforms) and exactly 27 total GitHub release files,
-counting the 25 native assets plus `component-manifest-v1.json` and `checksums.txt`.
+`darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It also builds the canonical aliases
+`brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` as separate targets
+for every platform. It creates one Brigade release with exactly 40 native assets
+(25 legacy + 15 canonical) and exactly 42 total GitHub release files, counting the
+native assets plus `component-manifest-v1.json` and `checksums.txt`. Checksums cover
+41 entries: all native assets and the primary manifest. Attestations cover those same files.
+The primary manifest retains the five legacy component IDs and executables for
+stable 0.30.0 upgrade and offline rollback compatibility. Validators still accept
+complete historical 25-asset releases (27 total files), but new production requires
+the complete additive inventory. Partial alias sets and unrelated extras are rejected.
+The checked-in historical manifest stays unchanged. Package assembly stages the
+new tag's generated legacy-primary manifest. Default installation identities stay legacy.
 The release body names `brigade-cli==<version>`. Rust builds run on the exact native runner
-for each platform; Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
+for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
 The generated manifest and all component URLs must point to
 `escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,
