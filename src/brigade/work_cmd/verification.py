@@ -22,6 +22,7 @@ from .. import (
     generated_patch_quarantine,
     graphtrail_delta,
     localio,
+    receipt_json,
     receipt_schema,
     receipt_signing,
     runguard,
@@ -1228,8 +1229,8 @@ def _verify_read_receipt(path: Path) -> dict[str, Any] | None:
     if not receipt.is_file():
         return None
     try:
-        data = json.loads(receipt.read_text())
-    except (OSError, json.JSONDecodeError):
+        data = receipt_json.read(receipt)
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(data, dict):
         return None

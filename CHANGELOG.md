@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
 - Preserve backslashes in TOML literal strings on Python 3.10, so Windows paths and trailing separators load correctly in local configuration, including arrays and inline tables. Generated TOML strings now round-trip through both supported parsers.
+- Corrupt local verification receipts no longer crash history, planning, or captured verification runs. Both local receipt readers handle encoding and decoder failures and reject JSON deeper than 128 containers; exports still report malformed inputs as failures and preserve the original files.
 
 - Concurrent local Repository Scout admissions refresh directory enumeration under the queue lock, so a waiting producer sees the preceding job and preserves the one-active-scout limit.
 

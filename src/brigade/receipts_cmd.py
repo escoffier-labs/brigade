@@ -19,6 +19,7 @@ from . import component_bins
 from . import localio
 from . import evidence_redaction
 from . import provenance
+from . import receipt_json
 from . import receipt_signing
 from . import trust_gate
 from .untrusted import scan_handoff_injection_heuristics
@@ -963,18 +964,7 @@ def _metadata_with_digest_signature(metadata: dict[str, Any], payload: dict[str,
 
 
 def _read_export_receipt(path: Path, target: Path) -> tuple[dict[str, Any] | None, str | None]:
-    try:
-        payload = json.loads(path.read_text())
-    except OSError as exc:
-        print(f"warning: skipped unreadable receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None, "unreadable"
-    except json.JSONDecodeError as exc:
-        print(f"warning: skipped malformed receipt {_rel(path, target)}: {exc}", file=sys.stderr)
-        return None, "malformed"
-    if not isinstance(payload, dict):
-        print(f"warning: skipped malformed receipt {_rel(path, target)}: JSON is not an object", file=sys.stderr)
-        return None, "malformed"
-    return payload, None
+    return receipt_json.read_for_export(path, label=_rel(path, target))
 
 
 def _timestamp_for_sort(payload: dict[str, Any], path: Path) -> str:
