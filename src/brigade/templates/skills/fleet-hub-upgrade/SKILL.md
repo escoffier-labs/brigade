@@ -43,7 +43,7 @@ Compare `<old-sha>` to `<target-sha>` before touching anything (`git diff <old-s
 5. Switch the service to the new venv (unit `ExecStart` or a stable symlink), reload the manager, and start `<hub-unit>`.
 6. Poll `/health` until it answers or a bounded deadline passes.
 7. On failure, stop the unit, then decide whether the snapshot is still safe to restore:
-   - If the new Hub never accepted a write (health never passed, and no node write is newer than the snapshot time), restore the snapshot, revert the venv switch, start, and re-check `/health`.
+   - If no node write is newer than the snapshot time, restore the snapshot, revert the venv switch, start, and re-check `/health`. This covers both a Hub that never became healthy and one that passed `/health` but failed a later check (`ExecStart`, process command line, `user_version`) before accepting writes.
    - If it accepted writes, restoring the snapshot discards them. With no schema change, revert the venv switch and keep the current database. With a schema bump, keep the new code and the current database and fix forward, because older code refuses the newer schema. Restore the snapshot only when the operator explicitly accepts losing those writes.
    Report the exact failure; do not retry blindly.
 
