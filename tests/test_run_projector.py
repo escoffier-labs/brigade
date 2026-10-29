@@ -900,3 +900,26 @@ def test_launch_claim_is_status_neutral_and_advances_cursor():
     projection = project_run_snapshot(_minimal_base_snapshot(), [created, claim], journal_present=True)
     assert projection.status == "started"
     assert projection.last_sequence == 2 and projection.last_event_digest == claim["event_digest"]
+
+
+def test_batch_acceptance_is_status_neutral_and_advances_cursor():
+    from brigade.run_task_journal import batch_membership_digest
+
+    created = _build_event(1, "run.created", {"status": "started"}, "create", RECORDED_AT, None)
+    members = [{"task_id": "one", "seat": "worker", "payload_digest": "a" * 64}]
+    batch = _build_event(
+        2,
+        "task.batch-accepted",
+        {
+            "descriptor_version": 1,
+            "request_id": "batch-one",
+            "members": members,
+            "membership_digest": batch_membership_digest(descriptor_version=1, members=members),
+        },
+        "batch",
+        RECORDED_AT,
+        created["event_digest"],
+    )
+    projection = project_run_snapshot(_minimal_base_snapshot(), [created, batch], journal_present=True)
+    assert projection.status == "started"
+    assert projection.last_sequence == 2 and projection.last_event_digest == batch["event_digest"]

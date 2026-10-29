@@ -368,7 +368,6 @@ def _validate_checkpoint_artifacts(
     snapshot: Mapping[str, Any],
     events: Sequence[run_journal.RunEvent],
 ) -> None:
-    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     checkpoint_events = [event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     latest = run_checkpoint.latest_checkpoint_event(list(events))
     if latest is None or not checkpoint_events:
@@ -398,6 +397,8 @@ def _validate_checkpoint_artifacts(
         raise
     except run_checkpoint.CheckpointError as exc:
         raise RedactionError("checkpoint verification failed") from exc
+    # Retain checkpoint diagnostics before validating the complete task pairs.
+    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     if (
         latest.payload.get("body_kind") != "base-stripped"
         or checkpoint_obj.get("run_journal_authority_requested") is not True
@@ -1991,10 +1992,12 @@ def _assert_affected_values_removed(
     start: int,
     end: int,
 ) -> None:
+    run_redaction_tasks.assert_affected_task_values_removed(original, rewritten, start, end, error_type=RedactionError)
     for prior, current in zip(original, rewritten, strict=True):
         if not start <= prior.sequence <= end or prior.event_type in {
             run_checkpoint.CHECKPOINT_EVENT_TYPE,
             "run.redaction.recorded",
+            "task.batch-accepted",
         }:
             continue
         for key, value in prior.payload.items():
@@ -2012,9 +2015,7 @@ def _assert_affected_values_removed(
                 )
             ):
                 continue
-            if value == REDACTED_VALUE or value == 0:
-                continue
-            if current.payload.get(key) == value:
+            if value != REDACTED_VALUE and value != 0 and current.payload.get(key) == value:
                 raise RedactionError("rewritten journal still contains affected private values")
 
 

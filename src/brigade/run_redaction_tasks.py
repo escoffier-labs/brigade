@@ -6,7 +6,7 @@ import hashlib
 from dataclasses import replace
 from typing import Any, Sequence
 
-from brigade import run_checkpoint, run_events, run_journal, run_tasks as tasks
+from brigade import run_checkpoint, run_events, run_journal, run_task_journal, run_tasks as tasks
 
 # Closed classifications describe state, not private correlation references.
 STRUCTURAL_FIELDS = frozenset({"status", "containment", "artifact_kind", "dispatch_attempt"})
@@ -14,11 +14,27 @@ CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
 
 
+def private_scalars(event: run_journal.RunEvent) -> list[tuple[str, str]]:
+    """Enumerate only the closed aggregate exception, never arbitrary nesting."""
+    if event.event_type == "task.batch-accepted":
+        return [
+            ("request_id", event.payload["request_id"]),
+            ("membership_digest", event.payload["membership_digest"]),
+            *((field, value) for row in event.payload["members"] for field, value in row.items()),
+        ]
+    return [(field, value) for field, value in event.payload.items() if isinstance(value, str)]
+
+
+def _rows(event: run_journal.RunEvent) -> list[dict[str, Any]]:
+    return event.payload["members"] if event.event_type == "task.batch-accepted" else [event.payload]
+
+
 def validate_history(events: Sequence[run_journal.RunEvent], *, error_type: type[RuntimeError]) -> None:
     """Refuse corrupt task histories before redaction can normalize them."""
     if not events:
         return
     try:
+        run_task_journal.validate_pairs(events)
         tasks._fold(events[0].run_id, list(events))
     except tasks.TaskJournalError as exc:
         raise error_type("task history verification failed") from exc
@@ -53,40 +69,12 @@ def prepare_requests(
     }
     selected = set(selected)
     selected_task_ids = {event.payload["task_id"] for event in events if event.sequence in selected_controls}
-    affected_task_ids = selected_task_ids | {
-        event.payload["task_id"]
-        for event in events
-        if event.event_type in run_events._TASK_EVENT_TYPES and event.sequence in selected
-    }
-    related_controls = [
-        event
-        for event in events
-        if event.event_type in control_types and event.payload.get("task_id") in affected_task_ids
-    ]
-    # Check complete request pairs only when their task identity will change.
-    # Unrelated legacy controls may already have generic redaction identities.
-    try:
-        run_checkpoint._verify_control_suffix(list(events), related_controls)
-    except run_checkpoint.CheckpointError as exc:
-        raise error_type("control history verification failed") from exc
-    accepted = {event.payload["task_id"] for event in events if event.event_type == "task.accepted"}
-    known_attempts = {
-        (event.payload["task_id"], event.payload["attempt_id"])
-        for event in events
-        if event.event_type == "task.attempt-prepared"
-    }
-    for event in related_controls:
-        task_id = event.payload["task_id"]
-        if task_id not in accepted or (
-            "attempt_id" in event.payload and (task_id, event.payload["attempt_id"]) not in known_attempts
-        ):
-            raise error_type("control history verification failed: unmatched durable task or attempt")
     selected.update(
         event.sequence
         for event in events
         if event.event_type == "task.accepted" and event.payload["task_id"] in selected_task_ids
     )
-    reserved = {value for e in events for value in e.payload.values() if isinstance(value, str)}
+    reserved = {value for event in events for _, value in private_scalars(event)}
     substitutions: dict[tuple[str, str, str], str] = {}
     selected_values: dict[str, set[str]] = {}
 
@@ -105,16 +93,23 @@ def prepare_requests(
         substitutions[key] = replacement
 
     for event in events:
-        if event.event_type not in run_events._TASK_EVENT_TYPES or event.sequence not in selected:
+        if event.event_type not in run_events._TASK_EVENT_TYPES:
             continue
-        task_id = event.payload["task_id"]
-        values = selected_values.setdefault(task_id, set())
-        values.update(
-            value for field, value in event.payload.items() if value is not None and field not in STRUCTURAL_FIELDS
-        )
-        for field, value in event.payload.items():
-            if value is not None and field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS:
-                substitute(task_id, field, value, event.sequence)
+        for row in _rows(event):
+            task_id = row["task_id"]
+            if event.sequence not in selected and not (
+                event.event_type == "task.batch-accepted" and task_id in selected_task_ids
+            ):
+                continue
+            values = selected_values.setdefault(task_id, set())
+            values.update(
+                value for field, value in row.items() if isinstance(value, str) and field not in STRUCTURAL_FIELDS
+            )
+            if event.event_type == "task.batch-accepted" and event.sequence in selected:
+                values.update((event.payload["request_id"], event.payload["membership_digest"]))
+            for field, value in row.items():
+                if isinstance(value, str) and field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS:
+                    substitute(task_id, field, value, event.sequence)
 
     # Control-only selection must seed aliases before task/provider rebuilding.
     for event in events:
@@ -125,38 +120,121 @@ def prepare_requests(
                 if value is not None and field not in CONTROL_STRUCTURAL_FIELDS
             )
 
-    # A private reference can be repeated under another field name (for
-    # example the logical task ID can also be the provider task ID). Scrub
-    # those aliases throughout the task, including unselected observations.
+    sensitive = set().union(*selected_values.values()) if selected_values else set()
+    # Equal-value aliases in retained descriptors and provider fields participate
+    # in the same selection closure. The outer token has its own namespace.
     for event in events:
         if event.event_type not in run_events._TASK_EVENT_TYPES:
             continue
-        task_id = event.payload["task_id"]
-        for field, value in event.payload.items():
-            if field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS and value in selected_values.get(task_id, set()):
-                substitute(task_id, field, value, event.sequence)
+        for row in _rows(event):
+            task_id = row["task_id"]
+            for field, value in row.items():
+                if isinstance(value, str) and field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS and value in sensitive:
+                    selected_values.setdefault(task_id, set()).add(value)
+                    substitute(task_id, field, value, event.sequence)
+    outer_requests: dict[int, str] = {}
+    for event in events:
+        if event.event_type != "task.batch-accepted":
+            continue
+        old_outer = event.payload["request_id"]
+        if event.sequence in selected or old_outer in sensitive:
+            namespace = f"batch:{event.sequence}"
+            substitute(namespace, "request_id", old_outer, event.sequence)
+            outer_requests[event.sequence] = substitutions[(namespace, "request_id", old_outer)]
 
     # First build every derived mapping, then rebuild nonstructural aliases.
-    # Provider aliases can alter result identity, so fold again rather than
-    # patching already-derived payloads. Controls still run after both folds.
+    # Provider and descriptor aliases can alter result or sibling identities.
+    # Repeat until their derived mappings stabilize. The journal bound also
+    # bounds this closure; a cycle refuses rather than publishing partial state.
     derived: dict[tuple[str, str], str] = {}
-    for _ in range(2):
+    aliases: dict[str, str] = {}
+
+    def remember(task_id: str, old: str, new: str) -> None:
+        derived[(task_id, old)] = new
+        if new != old:
+            aliases[old] = new
+
+    def mapped(task_id: str, field: str, value: Any) -> Any:
+        replacement = aliases.get(value, substitutions.get((task_id, field, value), value))
+        # One private string can name a token and a digest. Derived token
+        # aliases must still satisfy the destination's closed scalar type.
+        if field.endswith("digest") and replacement != value and not run_task_journal.digest(replacement):
+            substitute(task_id, field, value, descriptors.get(task_id, 0))
+            return substitutions[(task_id, field, value)]
+        return replacement
+
+    descriptors = {
+        row["task_id"]: event.sequence
+        for event in events
+        if event.event_type in {"task.accepted", "task.batch-accepted"}
+        for row in _rows(event)
+    }
+    for _ in range(len(events) + len(sensitive) + 2):
+        prior_derived = dict(derived)
         states: dict[str, tasks.TaskResult] = {}
         attempts: dict[tuple[str, str], str] = {}
         for index, event in enumerate(events):
-            if event.event_type not in run_events._TASK_EVENT_TYPES or event.payload["task_id"] not in selected_values:
+            if event.event_type not in run_events._TASK_EVENT_TYPES:
+                continue
+            if event.event_type == "task.batch-accepted":
+                old = event.payload
+                rows = []
+                outer = outer_requests.get(event.sequence, aliases.get(old["request_id"], old["request_id"]))
+                for row in _rows(event):
+                    task_id = row["task_id"]
+                    rewritten_row = {field: mapped(task_id, field, value) for field, value in row.items()}
+                    rows.append(rewritten_row)
+                    spec = tasks.TaskSpec(**rewritten_row)
+                    child = run_task_journal.batch_child_request_id(
+                        run_id=event.run_id, request_id=outer, task_id=spec.task_id
+                    )
+                    old_spec = tasks.TaskSpec(**row)
+                    remember(task_id, task_id, spec.task_id)
+                    old_child = run_task_journal.batch_child_request_id(
+                        run_id=event.run_id, request_id=old["request_id"], task_id=task_id
+                    )
+                    remember(task_id, old_spec.spec_digest, spec.spec_digest)
+                    remember(task_id, old_child, child)
+                    states[task_id] = tasks.TaskResult(tasks.TaskHandle(event.run_id, child, spec), "queued")
+                payload = {
+                    **old,
+                    "request_id": outer,
+                    "members": rows,
+                    "membership_digest": run_task_journal.batch_membership_digest(
+                        descriptor_version=old["descriptor_version"], members=rows
+                    ),
+                }
+                for row in _rows(event):
+                    task_id = row["task_id"]
+                    if payload != old:
+                        selected_values.setdefault(task_id, set())
+                    remember(task_id, old["request_id"], outer)
+                    remember(task_id, old["membership_digest"], payload["membership_digest"])
+                    remember(
+                        task_id,
+                        run_task_journal.batch_reference(
+                            run_id=event.run_id,
+                            request_id=old["request_id"],
+                            membership_digest=old["membership_digest"],
+                        ),
+                        run_task_journal.batch_reference(
+                            run_id=event.run_id, request_id=outer, membership_digest=payload["membership_digest"]
+                        ),
+                    )
+                if payload != old:
+                    requests[index] = (payload, f"redaction:{operation_id}:{event.sequence}")
                 continue
             old = event.payload
             task_id = old["task_id"]
             payload = {
-                field: derived.get((task_id, value), substitutions.get((task_id, field, value), value))
-                if field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS
-                else value
+                field: mapped(task_id, field, value) if field not in STRUCTURAL_FIELDS | _DERIVED_FIELDS else value
                 for field, value in old.items()
             }
             if event.event_type == "task.accepted":
                 spec = tasks.TaskSpec(payload["task_id"], payload["seat"], payload["payload_digest"])
                 payload["spec_digest"] = spec.spec_digest
+                remember(task_id, task_id, spec.task_id)
+                remember(task_id, old["request_id"], payload["request_id"])
                 states[task_id] = tasks.TaskResult(
                     tasks.TaskHandle(event.run_id, payload["request_id"], spec), "queued"
                 )
@@ -190,44 +268,151 @@ def prepare_requests(
                 states[task_id] = replace(current, acknowledged=True)
             for field in _DERIVED_FIELDS:
                 if old.get(field) is not None:
-                    derived[(task_id, old[field])] = payload[field]
-            requests[index] = (payload, f"redaction:{operation_id}:{event.sequence}")
+                    remember(task_id, old[field], payload[field])
+            if payload != old:
+                selected_values.setdefault(task_id, set())
+                requests[index] = (payload, f"redaction:{operation_id}:{event.sequence}")
+        # A selected alias must not reappear as a newly computed identity.
+        # Reseed the descriptor, retaining each rejected candidate in reserved.
+        collisions = {task_id for (task_id, old), new in derived.items() if new in sensitive}
+        if collisions:
+            for task_id in sorted(collisions):
+                substitutions.pop((task_id, "task_id", task_id), None)
+                substitute(task_id, "task_id", task_id, descriptors[task_id])
+            derived.clear()
+            aliases.clear()
+        elif derived == prior_derived:
+            break
+    else:
+        raise error_type("task redaction alias closure did not converge")
 
+    affected_task_ids = set(selected_values)
+    related_request_ids = {
+        event.payload["request_id"]
+        for event in events
+        if event.event_type in control_types
+        and (
+            event.payload.get("task_id") in affected_task_ids
+            or any(
+                field not in CONTROL_STRUCTURAL_FIELDS and (value in sensitive or value in aliases)
+                for field, value in private_scalars(event)
+            )
+        )
+    }
+    related_controls = [
+        event
+        for event in events
+        if event.event_type in control_types and event.payload["request_id"] in related_request_ids
+    ]
+    # Check both halves when either contains an affected identity, even if its
+    # target task is unchanged. Unrelated legacy controls stay untouched.
+    try:
+        run_checkpoint._verify_control_suffix(list(events), related_controls)
+    except run_checkpoint.CheckpointError as exc:
+        raise error_type("control history verification failed") from exc
+    accepted = {
+        row["task_id"]
+        for event in events
+        if event.event_type in {"task.accepted", "task.batch-accepted"}
+        for row in _rows(event)
+    }
+    known_attempts = {
+        (event.payload["task_id"], event.payload["attempt_id"])
+        for event in events
+        if event.event_type == "task.attempt-prepared"
+    }
+    for event in related_controls:
+        task_id = event.payload.get("task_id")
+        if task_id is None:
+            continue
+        if task_id not in accepted or (
+            "attempt_id" in event.payload and (task_id, event.payload["attempt_id"]) not in known_attempts
+        ):
+            raise error_type("control history verification failed: unmatched durable task or attempt")
     # Controls are status-neutral facts, but their selectors participate in the
     # same task identity graph. Rewrite both halves even across checkpoints.
-    private_control_fields: dict[tuple[str, str], Any] = {}
-    for index, event in enumerate(events):
-        if event.sequence in selected_controls:
-            for field, value in requests[index][0].items():
-                if field not in CONTROL_STRUCTURAL_FIELDS | {"task_id", "attempt_id", "request_id"}:
-                    private_control_fields[(event.payload["request_id"], field)] = (
-                        hashlib.sha256(f"redacted-{operation_id}-{event.sequence}-{field}".encode("ascii")).hexdigest()
-                        if field.endswith("digest")
-                        else value
-                    )
     control_requests: dict[str, str] = {}
+    for event in related_controls:
+        old = event.payload
+        task_id = old.get("task_id", f"control:{old['request_id']}")
+        if event.event_type == "control.requested":
+            substitute(task_id, "control_request_id", old["request_id"], event.sequence)
+            control_requests[old["request_id"]] = substitutions[(task_id, "control_request_id", old["request_id"])]
+        if event.sequence in selected_controls:
+            for field, value in old.items():
+                if isinstance(value, str) and field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
+                    substitute(task_id, field, value, event.sequence)
     for index, event in enumerate(events):
         if event.event_type not in control_types:
             continue
         old = event.payload
-        task_id = old.get("task_id")
-        if task_id not in selected_values:
+        if old["request_id"] not in related_request_ids:
             continue
+        task_id = old.get("task_id", f"control:{old['request_id']}")
         payload = dict(old)
-        for field in old:
-            if (old["request_id"], field) in private_control_fields:
-                payload[field] = private_control_fields[(old["request_id"], field)]
         for field, value in old.items():
             if field not in CONTROL_STRUCTURAL_FIELDS | {"attempt_id", "request_id"}:
-                if value in selected_values[task_id]:
+                if value in sensitive:
                     substitute(task_id, field, value, event.sequence)
-                payload[field] = derived.get(
-                    (task_id, value), substitutions.get((task_id, field, value), payload[field])
-                )
+                payload[field] = mapped(task_id, field, value)
         if old.get("attempt_id") is not None:
-            payload["attempt_id"] = attempts[(task_id, old["attempt_id"])]
-        request_id = old["request_id"]
-        if event.event_type == "control.requested":
-            control_requests[request_id] = f"redacted-{operation_id}-{event.sequence}-control"
-        payload["request_id"] = control_requests[request_id]
+            payload["attempt_id"] = attempts.get((task_id, old["attempt_id"]), old["attempt_id"])
+        payload["request_id"] = control_requests[old["request_id"]]
         requests[index] = (payload, f"{event.event_type}:{payload['request_id']}")
+
+
+def assert_affected_task_values_removed(
+    original: Sequence[run_journal.RunEvent],
+    rewritten: Sequence[run_journal.RunEvent],
+    start: int,
+    end: int,
+    *,
+    error_type: type[RuntimeError],
+) -> None:
+    """Check selected and derived task references throughout retained facts."""
+    selected_references = {
+        value
+        for event in original
+        if start <= event.sequence <= end
+        and (
+            event.event_type in run_events._TASK_EVENT_TYPES
+            or (
+                event.event_type in {"control.requested", "control.observed", "control.failed"}
+                and "task_id" in event.payload
+            )
+        )
+        for field, value in private_scalars(event)
+        if field not in STRUCTURAL_FIELDS | CONTROL_STRUCTURAL_FIELDS
+    }
+    # Derived task identities can change outside the selected range too.
+    # Every retained task/control alias must lose both selected references and
+    # identities rebuilt by the task rewrite, irrespective of target task.
+    for prior, current in zip(original, rewritten, strict=True):
+        if prior.event_type in run_events._TASK_EVENT_TYPES:
+            prior_rows = [prior.payload]
+            current_rows = [current.payload]
+            if prior.event_type == "task.batch-accepted":
+                prior_rows += prior.payload["members"]
+                current_rows += current.payload["members"]
+            for old_row, new_row in zip(prior_rows, current_rows, strict=True):
+                selected_references.update(
+                    value
+                    for field, value in old_row.items()
+                    if isinstance(value, str) and field not in STRUCTURAL_FIELDS and value != new_row.get(field)
+                )
+    for event in rewritten:
+        if event.event_type in run_events._TASK_EVENT_TYPES:
+            structural = STRUCTURAL_FIELDS
+        elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
+            structural = CONTROL_STRUCTURAL_FIELDS
+        else:
+            continue
+        if any(field not in structural and value in selected_references for field, value in private_scalars(event)):
+            raise error_type("rewritten journal still contains affected private values")
+    for prior, current in zip(original, rewritten, strict=True):
+        if start <= prior.sequence <= end and prior.event_type == "task.batch-accepted":
+            # Version, member count and row order are structural. Every string
+            # in the exact retained descriptor shape is a private reference.
+            remaining = {value for _, value in private_scalars(current)}
+            if any(value in remaining for _, value in private_scalars(prior)):
+                raise error_type("rewritten journal still contains affected private values")

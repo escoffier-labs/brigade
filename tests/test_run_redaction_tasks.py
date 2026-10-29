@@ -495,6 +495,7 @@ def test_targeted_control_redaction_refuses_unverifiable_history_atomically(clos
         payload["attempt_id"] = "private-external-attempt"
     elif identity == "external-task":
         payload["task_id"] = "private-external-task"
+        payload["attempt_id"] = "private-external-attempt"
     else:
         payload["op"] = "private-invalid-operation"
     # Put both control facts before the latest checkpoint. Suffix validation
