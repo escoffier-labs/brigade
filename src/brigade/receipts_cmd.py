@@ -22,6 +22,7 @@ from . import provenance
 from . import receipt_json
 from . import receipt_signing
 from . import trust_gate
+from .inbox_lock import held_file_lock
 from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
@@ -1478,11 +1479,28 @@ def _temporary_miseledger_export_path(target: Path) -> Path:
         return Path(handle.name)
 
 
-def _miseledger_import_summary(payload: object) -> tuple[object, object]:
+def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
+    """Require an affirmative completion summary before acknowledging receipts.
+
+    Legacy engines omit status and may encode already_known as 0/1. Brigade
+    exports contain valid adapter records, so even parse warnings leave rows
+    unacknowledged and available for replay.
+    """
     if not isinstance(payload, dict):
-        return "unknown", "unknown"
-    inserted = payload.get("inserted_items", payload.get("inserted", "unknown"))
-    known = payload.get("already_known", payload.get("known_items", "unknown"))
+        raise ValueError("import summary must be an object")
+    inserted = payload.get("inserted_items", payload.get("inserted"))
+    known = payload.get("already_known", payload.get("known_items"))
+    if type(inserted) is not int or inserted < 0:
+        raise ValueError("import summary requires a nonnegative inserted_items count")
+    if not isinstance(known, bool) and (type(known) is not int or known not in (0, 1)):
+        raise ValueError("import summary requires already_known")
+    if "status" in payload and payload["status"] not in ("complete", "already_known"):
+        raise ValueError("import summary does not report completion")
+    if payload.get("status") == "already_known" and (not known or inserted != 0):
+        raise ValueError("inconsistent already_known import summary")
+    for field in ("warnings", "errors", "error", "failed_items", "failed", "error_count", "warning_count"):
+        if payload.get(field):
+            raise ValueError(f"import summary reports {field}")
     return inserted, known
 
 
@@ -1537,10 +1555,12 @@ def _import_miseledger_file(
         print(f"warning: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
         return True, False
     try:
-        payload = json.loads(result.stdout or "{}")
-    except json.JSONDecodeError:
-        payload = {}
-    inserted, known = _miseledger_import_summary(payload)
+        payload = json.loads(result.stdout)
+        inserted, known = _miseledger_import_summary(payload)
+    except (ValueError, TypeError) as exc:
+        prefix = "error" if strict else "warning"
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
+        return True, True
     if not quiet:
         print(f"miseledger import: inserted_items={inserted} already_known={known}")
     return True, False
@@ -1653,7 +1673,12 @@ def _advance_miseledger_cursor(target: Path, cursor_hashes: set[str], written_ha
     if not written_hashes:
         return 0
     try:
-        _write_miseledger_cursor_hashes(target, cursor_hashes | set(written_hashes))
+        # All cursor acknowledgements use this shared writer lock. Re-read
+        # inside it because another export may have completed since snapshot.
+        cursor_path = _miseledger_cursor_path(target)
+        with held_file_lock(cursor_path.with_suffix(".lock"), deadline_seconds=5):
+            current = _read_miseledger_cursor_hashes(target)
+            _write_miseledger_cursor_hashes(target, current | cursor_hashes | set(written_hashes))
     except OSError as exc:
         print(f"error: could not write cursor {_miseledger_cursor_path(target)}: {exc}", file=sys.stderr)
         return 1

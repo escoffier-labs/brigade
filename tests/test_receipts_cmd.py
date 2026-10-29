@@ -2113,3 +2113,94 @@ def test_receipts_verify_reports_notify_failure_not_verified(tmp_path, monkeypat
     retry = receipts_cmd.verify_payload(tmp_path)
     assert [item.get("status") for item in retry["trust_upgrades"]] == ["verify-pending"]
     assert trust_gate.read_events(trust_gate.work_events_path(tmp_path)) == []
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "not-json",
+        "",
+        "{}",
+        "[]",
+        '{"inserted_items":1}',
+        '{"inserted_items":true,"already_known":false}',
+        '{"inserted_items":-1,"already_known":false}',
+        '{"inserted_items":0,"already_known":false,"warnings":["line 1: SQLITE_BUSY"]}',
+        '{"inserted_items":1,"already_known":false,"status":"partial"}',
+        '{"inserted_items":0,"already_known":false,"errors":["write failed"]}',
+        '{"inserted_items":0,"already_known":false,"failed_items":1}',
+    ],
+)
+def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path, monkeypatch, summary):
+    _write_verify_export_receipt(tmp_path, "summary-failure", started_at="2026-07-08T12:00:00Z")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(
+        receipts_cmd.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, summary, "")
+    )
+    result = receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)
+    assert result["status"] == "failed"
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+    exports = list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))
+    assert len(exports) == 1
+    assert len(_jsonl(exports[0].read_text())) == 1
+
+
+def test_index_timeout_retains_export_for_clean_replay(tmp_path, monkeypatch):
+    _write_verify_export_receipt(tmp_path, "timeout-replay", started_at="2026-07-08T12:00:00Z")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 120)
+
+    monkeypatch.setattr(receipts_cmd.subprocess, "run", timeout)
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "failed"
+    retained = list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))
+    assert len(retained) == 1
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, '{"status":"already_known","inserted_items":0,"already_known":true,"warnings":null}', ""
+        ),
+    )
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "indexed"
+    assert retained[0].is_file()
+    assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "nothing-new"
+
+
+def test_overlapping_export_cursor_updates_keep_both_completed_sets(tmp_path):
+    assert receipts_cmd._advance_miseledger_cursor(tmp_path, set(), ["sha256:first"]) == 0
+    # Both exporters took their snapshot before the first completion.
+    assert receipts_cmd._advance_miseledger_cursor(tmp_path, set(), ["sha256:second"]) == 0
+    assert receipts_cmd._read_miseledger_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
+
+
+def test_concurrent_cursor_acknowledgements_serialize_read_merge_write(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    first_writing = Event()
+    release_first = Event()
+    second_writing = Event()
+    write = receipts_cmd._write_miseledger_cursor_hashes
+
+    def controlled_write(target, hashes):
+        if "sha256:first" in hashes and "sha256:second" not in hashes:
+            first_writing.set()
+            assert release_first.wait(5)
+        else:
+            second_writing.set()
+        write(target, hashes)
+
+    monkeypatch.setattr(receipts_cmd, "_write_miseledger_cursor_hashes", controlled_write)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(receipts_cmd._advance_miseledger_cursor, tmp_path, set(), ["sha256:first"])
+        assert first_writing.wait(5)
+        second = pool.submit(receipts_cmd._advance_miseledger_cursor, tmp_path, set(), ["sha256:second"])
+        try:
+            assert not second_writing.wait(0.1), "second writer entered an active cursor update"
+        finally:
+            release_first.set()
+        assert first.result(timeout=5) == second.result(timeout=5) == 0
+    assert receipts_cmd._read_miseledger_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
