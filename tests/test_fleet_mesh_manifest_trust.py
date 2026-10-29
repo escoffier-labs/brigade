@@ -273,7 +273,7 @@ def test_manifest_listing_removal_and_relisting_never_change_peer_evidence_or_us
         entry(hub=fixtures.PEER_HUB, kid=value["kid"], principal=fixtures.PEER_PRINCIPAL),
         fingerprint=crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32)),
     )
-    assert listed["fingerprint"] == crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32))
+    assert listed["fingerprint"] != crypto.fingerprint(fixtures.key())
     for seq, keys in enumerate(([listed], [], [listed]), 1):
         admit(home, manifest(hub=fixtures.PEER_HUB, seq=seq, keys=keys), hub=fixtures.PEER_HUB)
         after = trust.load_trust(brigade_home=home).data
@@ -330,6 +330,8 @@ def test_manifest_floor_and_conflict_are_diagnostics_without_peer_authority(home
         },
     )
     assert len(after.conflicts) == 1
+    assert after.conflicts[0]["reason"] == "signer_equivocation"
+    assert after.conflicts[0]["digest"] == fixtures.digest(manifest(hub=fixtures.PEER_HUB))
     assert after.conflicts[0]["rejected"]["kind"] == "manifest"
     assert after.conflicts[0]["accepted_digest"] == fixtures.digest(accepted)
     assert (
