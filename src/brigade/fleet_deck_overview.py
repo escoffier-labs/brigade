@@ -116,7 +116,7 @@ def station_status(station: StationView, machine: MachineState | None) -> str:
         return "offline"
     if machine.state not in ("available", UNKNOWN) or machine.unused_reason in POLICY_LIMITS:
         return "limited"
-    return "working" if station.busy else "idle"
+    return "working" if station.busy or station.sessions else "idle"
 
 
 def free_seats(station: StationView, machine: MachineState | None) -> int:

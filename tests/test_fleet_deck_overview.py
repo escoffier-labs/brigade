@@ -1588,3 +1588,68 @@ def test_limited_machines_show_the_specific_reason_everywhere_with_the_code_in_a
 
 def fleet_deck_shell_sidebar(view):
     return overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+
+
+def _sessions_view(sessions, runs=()):
+    return deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Beta", 2))),
+        live_runs=list(runs),
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha", NODE_B: "Beta"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=sessions,
+    )
+
+
+def _live_session(node, session_id, **extra):
+    return {"node_id": node, "harness": "claude", "session_id": session_id, "repo_identity": "example/tool", **extra}
+
+
+def test_station_counts_live_sessions_per_node_without_touching_slots():
+    from brigade import fleet_admin_pages as pages
+    from tests.test_fleet_dot import v2_report
+    from brigade import fleet_dot
+
+    terminal = dict(fleet_dot.parse_report(v2_report(reported_state="completed")).snapshot.cloud_context)
+    view = _sessions_view(
+        [
+            _live_session(NODE_A, "s1"),
+            _live_session(NODE_A, "s2"),
+            _live_session(NODE_A, "old", presence_state="stale"),
+            _live_session(NODE_A, "done", cloud_context=terminal),
+            _live_session(NODE_B, "other"),
+        ]
+    )
+    alpha, beta = view.stations
+    assert (alpha.busy, alpha.sessions) == (0, 2)
+    assert (beta.busy, beta.sessions) == (0, 1)
+    machines = {NODE_A: _machine("alpha", NODE_A, state="available")}
+    plane = _plane([_machine("alpha", NODE_A, state="available"), _machine("beta", NODE_B, state="available")])
+    view = replace(view, control_plane=plane)
+    assert overview.station_status(alpha, machines[NODE_A]) == "working"
+    html = pages.render_overview_machines(view, NOW)
+    assert "<span>Agent sessions</span><b>2</b>" in html
+    assert "0/2 used" in html
+    page = pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True)
+    assert "Agent sessions" in page
+
+
+def test_station_without_jobs_or_sessions_stays_idle():
+    view = _sessions_view([_live_session(NODE_B, "other")])
+    alpha = view.stations[0]
+    assert (alpha.busy, alpha.sessions) == (0, 0)
+    assert overview.station_status(alpha, _machine("alpha", NODE_A, state="available")) == "idle"
+    from brigade import fleet_admin_pages as pages
+
+    assert "Agent sessions" not in pages.render_overview_machines(_sessions_view([]), NOW)
+
+
+def test_sessions_do_not_override_offline_or_unenrolled_state():
+    view = _sessions_view([_live_session(NODE_A, "s1")])
+    alpha = replace(view.stations[0], enrolled=False)
+    assert overview.station_status(alpha, None) == "offline"
+    assert overview.station_status(view.stations[0], None) == "unknown"

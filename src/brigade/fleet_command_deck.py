@@ -178,6 +178,7 @@ class StationView:
     busy: int
     last_heard: str | None
     tiles: tuple[Tile, ...]
+    sessions: int = 0
 
 
 @dataclass(frozen=True)
@@ -1297,6 +1298,7 @@ def build_view(
                 busy=len(tiles),
                 last_heard=last_heard.get(station.node_id),
                 tiles=tiles,
+                sessions=sum(row.node_id == station.node_id for row in session_rows_list),
             )
         )
     rail: list[RailEntry] = [
