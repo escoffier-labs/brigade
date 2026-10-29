@@ -102,6 +102,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     fence: str | None = None
     fence_base = 0
     comment = quote = opaque = table = False
+    empty_item = False
     index = 0
 
     def finish() -> None:
@@ -133,6 +134,9 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             continue
         if not raw.strip():
             finish()
+            if empty_item:
+                containers.pop()
+                empty_item = False
             quote = opaque = table = False
             index += 1
             continue
@@ -140,6 +144,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             index += 1
             continue
         line, bullet, base = _container_view(raw, containers, start is not None or quote)
+        empty_item = False
         marker = _FENCE.match(line)
         heading = _HEADING.match(line)
         thematic = _THEMATIC.fullmatch(line)
@@ -169,6 +174,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             index += 1
             continue
         if bullet and not line.strip():
+            empty_item = True
             index += 1
             continue
         if reference:

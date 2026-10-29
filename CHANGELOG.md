@@ -14,7 +14,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Security TOML literal strings preserve Windows path backslashes while double-quoted strings continue to decode escapes.
 - Reviewed memory consolidation derives each card's final cutoff from accepted evidence and preserves its existing cutoff across operation order.
-
 - Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
 - Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
 - Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.

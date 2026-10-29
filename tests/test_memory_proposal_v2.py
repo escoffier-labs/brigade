@@ -1075,6 +1075,7 @@ def test_oversized_cited_evidence_list_is_refused_not_skipped(tmp_path):
         "- > quoted ^c-{ident}\n  lazy text",
         "-     code ^c-{ident}",
         "- Title ^c-{ident}\n  =",
+        "-\n\n    code ^c-{ident}",
     ],
 )
 def test_reviewed_merge_preserves_literal_tokens_in_excluded_structure(tmp_path, structure):
@@ -1096,3 +1097,21 @@ def test_reviewed_merge_preserves_literal_tokens_in_excluded_structure(tmp_path,
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert other.read_bytes() == before[other]
     assert structure.format(ident="abcdef") in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+def test_reviewed_proposal_cannot_edit_code_after_empty_item(tmp_path, kind):
+    path = setup(tmp_path)
+    code = "    code ^c-abcdef"
+    path.write_text(path.read_text() + "\n\n-\n\n" + code + "\n")
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit.update(block_id="c-abcdef", expected_block_hash=hashlib.sha256(code.encode()).hexdigest())
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before
+    proposal = create(tmp_path, [edit, op("add_previously", text="Old cache wording.")])
+    assert [operation["type"] for operation in proposal["ops"]] == ["add_previously"]
+    assert len(proposal["dropped_ops"]) == 1
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert "\n\n-\n\n" + code + "\n" in path.read_text()

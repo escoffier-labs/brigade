@@ -232,3 +232,25 @@ def test_review_positive_claims(markdown, source, expected):
     anchored = delta.anchor_text(body, "memory/cards/example.md")
     assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
     assert delta.claim_body(anchored) == body
+
+
+@pytest.mark.parametrize("marker", ["-", "+", "*", "1.", "1)"])
+def test_empty_list_item_blank_ends_container(markdown, marker):
+    body = markdown(f"{marker}\n\n    code ^c-abcdef")
+    assert delta.blocks(body) == []
+    assert delta.claim_body(body) == body
+    assert delta.anchor_text(body, "memory/cards/example.md") == body
+    assert delta.claim_body(body) != delta.claim_body(body.replace("abcdef", "fedcba"))
+
+
+@pytest.mark.parametrize(
+    "source,expected",
+    [
+        ("-\n\n  Ordinary.", ["  Ordinary."]),
+        ("- Parent.\n  +\n\n    Ordinary.", ["- Parent.", "    Ordinary."]),
+        ("- Parent.\n\n    Ordinary.", ["- Parent.", "    Ordinary."]),
+    ],
+)
+def test_empty_item_reset_preserves_content_bearing_containers(markdown, source, expected):
+    body = markdown(source)
+    assert [b.text for b in delta.blocks(body)] == expected
