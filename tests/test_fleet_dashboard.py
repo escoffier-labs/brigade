@@ -1016,7 +1016,7 @@ def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_pa
         assert "<script>alert(1)</script>" not in activity
         status, _headers, capacity = _request(hub, "GET", "/deck/capacity", headers=_bearer())
         assert status == 200
-        assert "Use: 0 / 10 slots" in capacity
+        assert "Managed runs: 0 / 10 slots" in capacity
         status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert "sess-board" not in machines

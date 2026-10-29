@@ -402,8 +402,8 @@ def render_capacity(
                 '<div class="resource-bars">'
                 f"<span>Capacity: {capacity} configured slots</span>"
                 f'<progress class="capacity-bar" value="{capacity}" max="{max(1, capacity)}" aria-label="Configured slots"></progress>'
-                f"<span>Use: {station.busy} / {capacity} slots</span>"
-                f'<progress value="{station.busy}" max="{max(1, capacity)}" aria-label="Reported used slots"></progress></div>'
+                f"<span>Managed runs: {station.busy} / {capacity} slots</span>"
+                f'<progress value="{station.busy}" max="{max(1, capacity)}" aria-label="Managed runs"></progress></div>'
             )
             entries.append(
                 explorer.Entry(
@@ -421,7 +421,7 @@ def render_capacity(
                     + facts(
                         {
                             "Capacity": f"{capacity} slots",
-                            "In use": f"{station.busy} of {capacity} slots",
+                            "Managed runs": f"{station.busy} of {capacity} slots",
                             **({"Agent sessions": station.sessions} if station.sessions else {}),
                             "Load": overview._load_cell(machine).split("<", 1)[0],
                             "Last seen": overview.format_age(overview.seconds_since(machine.last_observed_at, now))
@@ -456,7 +456,7 @@ def render_capacity(
                                 "Status": status,
                                 "Enrolled": station.enrolled,
                                 "Configured slots": capacity,
-                                "Reported used slots": station.busy,
+                                "Managed runs": station.busy,
                                 "Agent sessions": station.sessions,
                                 "Telemetry age": overview.format_age(
                                     overview.seconds_since(machine.last_observed_at, now)
@@ -527,13 +527,18 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + str(capacity)
             + '" max="'
             + str(max(1, capacity))
-            + '" aria-label="Configured capacity"></progress><div><span>Reported use</span><b>'
-            + _esc(f"{station.busy}/{capacity} used")
+            + '" aria-label="Configured capacity"></progress><div><span>Managed runs</span><b>'
+            + _esc(f"{station.busy}/{capacity} slots")
             + '</b></div><progress class="overview-use-bar" value="'
             + str(station.busy)
             + '" max="'
             + str(max(1, capacity))
-            + '" aria-label="Reported used slots"></progress>'
+            + '" aria-label="Managed runs"></progress>'
+            + (
+                '<small class="overview-managed-hint">No managed runs. Agent sessions do not use slots.</small>'
+                if not station.busy and station.sessions
+                else ""
+            )
             + (f"<div><span>Agent sessions</span><b>{station.sessions}</b></div>" if station.sessions else "")
             + "</div>"
             '<div class="overview-machine-load"><span>Reported load</span><b>'
