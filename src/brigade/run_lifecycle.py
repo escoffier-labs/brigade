@@ -921,6 +921,9 @@ def _record_lifecycle_event_paired(
                 else None
             ),
             pairing_key=pairing_key,
+            following_task_request=(
+                (event_type, payload, idempotency_key) if event_type == "task.batch-accepted" else None
+            ),
         )
         if checkpoint is None:
             raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
