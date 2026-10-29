@@ -7,6 +7,7 @@ import json
 import os
 import ssl
 import subprocess
+import sys
 import urllib.error
 from pathlib import Path
 
@@ -2536,6 +2537,9 @@ def test_run_post_install_smoke_rejects_timeout(tmp_path):
 @pytest.mark.parametrize("reverse", [False, True])
 def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path, monkeypatch, reverse):
     env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    platform = "windows-amd64" if os.name == "nt" else "linux-amd64"
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: platform)
+    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
     old_payload = json.loads(manifest_path.read_text())
     aliases = {
         "graphtrail": "brigade-code-graph",
@@ -2544,7 +2548,7 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
     }
     new_payload = json.loads(manifest_path.read_text())
     new_payload["manifest_revision"] = "canonical-fixture"
-    downloads = all_fixture_payloads()
+    downloads = all_fixture_payloads(platform=platform)
     for old, new in aliases.items():
         record = new_payload["components"].pop(old)
         record["executable"] = new
@@ -2555,18 +2559,39 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
             if old_url in downloads:
                 downloads[asset["download_url"]] = downloads[old_url]
         new_payload["components"][new] = record
+    roots = resolve_roots(env=env)
+    fixture_paths = {
+        Path(component_paths.managed_executable_path(roots.data_root, cid))
+        for cid in (*old_payload["components"], *new_payload["components"])
+    }
+    smoke_calls: list[list[str]] = []
+
+    def fixture_runner(argv, **kwargs):
+        # Windows cannot execute these Python fixture bytes as a PE binary.
+        # Keep the managed path and original arguments, input and timeout real.
+        assert Path(argv[0]).is_absolute()
+        assert Path(argv[0]) in fixture_paths
+        smoke_calls.append(list(argv))
+        if os.name == "nt":
+            argv = [sys.executable, *argv]
+        return subprocess.run(argv, **kwargs)
+
     first, second = (new_payload, old_payload) if reverse else (old_payload, new_payload)
     for payload in (first, second):
         manifest_path.write_text(json.dumps(payload))
-        assert setup_native_components(env=env, opener=FakeOpener(downloads)) == 0
-    roots = resolve_roots(env=env)
+        assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     assert set(component_state.load_installed_state(state_path).components) == set(second["components"])
-    assert setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({})) == 0
+    assert (
+        setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({}), runner=fixture_runner) == 0
+    )
     restored = component_state.load_installed_state(state_path)
     assert set(restored.components) == set(first["components"])
+    suffix = ".exe" if os.name == "nt" else ""
     for cid, record in restored.components.items():
-        assert Path(record.executable).name == cid
+        assert Path(record.executable).name == f"{cid}{suffix}"
         assert Path(record.executable).read_bytes() == downloads[record.download_url]
+    assert len(smoke_calls) == 3 * len(first["components"])
+    assert {Path(argv[0]) for argv in smoke_calls} == fixture_paths
     for cid in set(second["components"]) - set(first["components"]):
         assert not Path(component_paths.managed_executable_path(roots.data_root, cid)).exists()

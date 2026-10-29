@@ -23,7 +23,7 @@ def _fleet_config(workspace: Path, repos: list[tuple[str, Path]]) -> None:
                 "[[repo]]\n"
                 f'id = "{repo_id}"\n'
                 f'label = "{repo_id} repo"\n'
-                f'path = "{repo.relative_to(workspace)}"\n'
+                f'path = "{repo.relative_to(workspace).as_posix()}"\n'
                 "enabled = true\n"
                 "expect_brigade = true\n\n"
             )

@@ -14,6 +14,8 @@ _SHA = "0" * 64
 
 
 def _write_executable(path: Path) -> Path:
+    if os.name == "nt":
+        path = path.with_suffix(".exe")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("#!/bin/sh\nexit 0\n")
     path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
@@ -49,6 +51,7 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "HOME": str(tmp_path),
         "USERPROFILE": str(tmp_path),
         "XDG_DATA_HOME": str(tmp_path / "data"),
+        "LOCALAPPDATA": str(tmp_path / "data"),
         **extra,
     }
 
@@ -118,7 +121,7 @@ def test_resolve_unknown_name_uses_path_only(tmp_path, monkeypatch):
 def test_resolve_override_tilde_uses_supplied_home(tmp_path, monkeypatch):
     override_bin = _write_executable(tmp_path / "supplied-home" / "tools" / "graphtrail")
     set_home(monkeypatch, str(tmp_path / "host-home"))
-    env = _env(tmp_path, GRAPHTRAIL_BIN="~/tools/graphtrail")
+    env = _env(tmp_path, GRAPHTRAIL_BIN=f"~/tools/{override_bin.name}")
     env["HOME"] = str(tmp_path / "supplied-home")
     env["USERPROFILE"] = str(tmp_path / "supplied-home")
     assert component_bins.resolve("graphtrail", env=env) == str(override_bin)
@@ -129,6 +132,7 @@ def test_resolve_argv_rewrites_engine_head(tmp_path, monkeypatch):
     _write_installed_state(tmp_path / "data", {"miseledger": managed})
     set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))
     assert component_bins.resolve_argv(("miseledger", "doctor", "--json")) == [
         str(managed),
         "doctor",
@@ -188,6 +192,7 @@ def test_resolve_argv_rewrites_agent_notify_head(tmp_path, monkeypatch):
     _write_installed_state(tmp_path / "data", {"agent-notify": managed})
     set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))
     assert component_bins.resolve_argv(("agent-notify", "version", "--json")) == [
         str(managed),
         "version",
@@ -256,6 +261,7 @@ def test_family_resolution_preserves_path_directory_order_and_requested_name_tie
 def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch):
     set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))
     for name, key in (("agent-notify", "AGENT_NOTIFY_BIN"), ("sessionfind", "SESSIONFIND_BIN")):
         binary = _write_executable(tmp_path / name / name)
         env = _env(tmp_path, PATH=str(binary.parent), **{key: ""})

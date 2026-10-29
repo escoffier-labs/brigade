@@ -772,7 +772,7 @@ def test_doctor_detail_includes_expected_and_installed_revisions(tmp_path, monke
 def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, monkeypatch):
     env = _install_fixture_manifest(tmp_path, monkeypatch)
     _write_healthy_install(env, component_manifest.manifest_path())
-    roots = resolve_roots(env=env)
+    roots = resolve_roots(env=env, system="linux")
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     raw = json.loads(state_path.read_text())
     record = raw["components"].pop("miseledger")
