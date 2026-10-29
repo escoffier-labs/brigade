@@ -12,7 +12,7 @@ import textwrap
 
 import pytest
 
-from tests.test_ci_workflow import _workflow_job_section, _workflow_step_section
+from tests.test_ci_workflow import _workflow_bash_command, _workflow_job_section, _workflow_step_section
 
 ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
@@ -92,7 +92,7 @@ def test_assembly_rejects_incomplete_or_duplicate_native_downloads(tmp_path, inv
         (tmp_path / "downloaded" / "native" / names.pop()).unlink()
     step = _workflow_step_section(workflow(), "assemble-release", "Generate and validate complete release inventory")
     script = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("python scripts/", 1)[0]
-    result = subprocess.run(["bash", "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True)
+    result = subprocess.run(_workflow_bash_command(script, "-e"), cwd=tmp_path, capture_output=True, text=True)
     assert (result.returncode == 0) == (inventory == "complete"), result.stderr
     if inventory == "complete":
         assert {path.name for path in (tmp_path / "release-assets").iterdir()} == native_names()
