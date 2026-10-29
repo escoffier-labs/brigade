@@ -239,11 +239,17 @@ def _refuse_dangling_block_links(
     target: Path,
     care: memory_cmd.MemoryCareConfig,
     texts: dict[str, str | None],
+    sources: list[dict[str, Any]],
     removed: dict[str, str],
 ) -> None:
     """Check block destinations against bounded final cards and configured indexes."""
     if not removed:
         return
+    originals = {source["path"]: source["text"] for source in sources}
+    gone: set[str] = set()
+    for loser, survivor in removed.items():
+        kept = set(re.findall(r"\^(c-[0-9a-f]{6})\b", texts[survivor] or ""))
+        gone.update(set(re.findall(r"\^(c-[0-9a-f]{6})\b", originals[loser])) - kept)
     documents: dict[str, str] = {}
     index: IdentityIndex[str] = IdentityIndex()
     anchors: dict[str, set[str]] = {}
@@ -264,31 +270,53 @@ def _refuse_dangling_block_links(
             index.claim_identity(identity, rel)
             for key in (identity.card_id, *identity.aliases):
                 index.claim(key.lower().removesuffix(".md").removeprefix("cards/"), rel)
-            # Reserved ids and anchor-shaped payloads are not addressable claims.
-            anchors[rel] = {block.block_id for block in delta.blocks(text) if block.block_id is not None}
 
-    def check(destination: str | None, fragment: str) -> None:
-        if re.fullmatch(r"\^c-[0-9a-f]{6}", fragment) and (
-            destination is None or fragment[1:] not in anchors.get(destination, set())
-        ):
+    def check(destination: str | None, fragment: str) -> bool:
+        if not re.fullmatch(r"\^c-[0-9a-f]{6}", fragment):
+            return False
+        if destination is None or destination not in documents:
             raise legacy.ProposalError("merge would break a link to a removed claim block")
+        if destination not in anchors:
+            # Inspect only referenced documents, including configured indexes.
+            # Reserved ids and anchor-shaped payloads do not grant addresses.
+            anchors[destination] = {
+                block.block_id for block in delta.blocks(documents[destination]) if block.block_id is not None
+            }
+        if fragment[1:] not in anchors[destination]:
+            raise legacy.ProposalError("merge would break a link to a removed claim block")
+        return True
 
     for rel, text in documents.items():
+        validated: list[tuple[int, int]] = []
         for link in legacy.WIKI.finditer(text):
             destination, sep, fragment = link[1].split("|", 1)[0].partition("#")
             if sep:
                 key = destination.lower().removesuffix(".md").removeprefix("cards/")
-                check(index.resolve(key) if key else rel, fragment)
+                if check(index.resolve(key) if key else rel, fragment):
+                    validated.append(link.span())
         # Keep v1's direct removed-path and safe-fragment restrictions. This
         # check only validates the addressable destination; it grants no rewrite.
         for link in legacy.LINK.finditer(text):
             parsed = urlsplit(link[1])
             if parsed.scheme or parsed.netloc:
+                validated.append(link.span())
                 continue
             destination = (
                 posixpath.normpath(posixpath.join(posixpath.dirname(rel), unquote(parsed.path))) if parsed.path else rel
             )
-            check(removed.get(destination, destination), unquote(parsed.fragment))
+            destination = removed.get(destination, destination)
+            if destination not in cards and destination not in care.index_paths:
+                # An unrelated note does not gain read or validation authority.
+                # Angle wrappers and other unparsed spellings stay fail-closed.
+                if not re.search(r"[\s<>\\]", link[1]):
+                    validated.append(link.span())
+            elif check(destination, unquote(parsed.fragment)):
+                validated.append(link.span())
+        # Preserve the old refusal for loser-only fragments in syntax the
+        # bounded parsers cannot validate, without rejecting proven other targets.
+        for fragment in re.finditer(r"#(?:\^|%5[eE])(c-[0-9a-f]{6})\b", text):
+            if fragment[1] in gone and not any(start <= fragment.start() < end for start, end in validated):
+                raise legacy.ProposalError("merge would break a link to a removed claim block")
 
 
 def _references(
@@ -454,7 +482,7 @@ def compose(
     evidence, _ = _evidence(target, accepted, sources)
     _consolidate_accepted(target, texts, sources, accepted)
     texts = _derived(texts, sources, removed, proposal_id)
-    _refuse_dangling_block_links(paths, target, care, texts, removed)
+    _refuse_dangling_block_links(paths, target, care, texts, sources, removed)
     references, fences = _references(target, care, paths, texts, removed)
     changes = [legacy._change(s["path"], s["text"], texts[s["path"]]) for s in sources if texts[s["path"]] != s["text"]]
     changes.extend(references)

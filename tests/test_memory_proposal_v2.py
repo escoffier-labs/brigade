@@ -1326,3 +1326,46 @@ def test_final_block_refuses_missing_or_unaddressable_destination(tmp_path, dest
             [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
             paths=[PATH, "memory/cards/other.md"],
         )
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "link", [r"[[other#^c-456def\|claim]]", "[claim](<other.md#^c-456def>)", "[[other#^c-456def ]]"]
+)
+def test_final_block_unparsed_removed_fragment_stays_fail_closed(tmp_path, in_index, link):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text("| ref |\n| --- |\n| " + link + " |\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("case", ["noncard", "index-self", "duplicate-unreferenced"])
+def test_final_block_unrelated_documents_do_not_expand_merge_scope(tmp_path, case):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    if case == "noncard":
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs/notes.md").write_text("A note. ^c-456def\n")
+        document = card(tmp_path, "linker", body="See [note](../../docs/notes.md#^c-456def).")
+    elif case == "index-self":
+        document = tmp_path / "MEMORY.md"
+        document.write_text("Pinned item. ^c-456def\n\n[jump](#^c-456def)\n")
+    else:
+        document = card(tmp_path, "dup", body="First. ^c-111111\n\nSecond. ^c-111111")
+    before = document.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert document.read_bytes() == before
