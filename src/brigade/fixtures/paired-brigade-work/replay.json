@@ -1,0 +1,322 @@
+{
+  "passing-verify": {
+    "requests": [
+      {
+        "id": 0,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "brief",
+          "arguments": {},
+          "callId": "fake-call-0",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 1,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "verify",
+          "arguments": {},
+          "callId": "fake-call-1",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 2,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "receipt",
+          "arguments": {},
+          "callId": "fake-call-2",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 3,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "scoreability",
+          "arguments": {},
+          "callId": "fake-call-3",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 4,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "capture",
+          "arguments": {},
+          "callId": "fake-call-4",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      }
+    ],
+    "final": {
+      "run_id": "$observed_run_id",
+      "status": "completed",
+      "eligible": false
+    }
+  },
+  "failing-verify": {
+    "requests": [
+      {
+        "id": 0,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "brief",
+          "arguments": {},
+          "callId": "fake-call-0",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 1,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "verify",
+          "arguments": {},
+          "callId": "fake-call-1",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 2,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "receipt",
+          "arguments": {},
+          "callId": "fake-call-2",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 3,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "scoreability",
+          "arguments": {},
+          "callId": "fake-call-3",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 4,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "capture",
+          "arguments": {},
+          "callId": "fake-call-4",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      }
+    ],
+    "final": {
+      "run_id": "$observed_run_id",
+      "status": "failed",
+      "eligible": false
+    }
+  },
+  "command-timeout": {
+    "requests": [
+      {
+        "id": 0,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "brief",
+          "arguments": {},
+          "callId": "fake-call-0",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 1,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "verify",
+          "arguments": {},
+          "callId": "fake-call-1",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 2,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "receipt",
+          "arguments": {},
+          "callId": "fake-call-2",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 3,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "scoreability",
+          "arguments": {},
+          "callId": "fake-call-3",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 4,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "capture",
+          "arguments": {},
+          "callId": "fake-call-4",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      }
+    ],
+    "final": {
+      "run_id": "$observed_run_id",
+      "status": "failed",
+      "eligible": false
+    }
+  },
+  "audit-only": {
+    "requests": [
+      {
+        "id": 0,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "brief",
+          "arguments": {},
+          "callId": "fake-call-0",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 1,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "verify",
+          "arguments": {},
+          "callId": "fake-call-1",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 2,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "receipt",
+          "arguments": {},
+          "callId": "fake-call-2",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 3,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "scoreability",
+          "arguments": {},
+          "callId": "fake-call-3",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 4,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "capture",
+          "arguments": {},
+          "callId": "fake-call-4",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      }
+    ],
+    "final": {
+      "run_id": "$observed_run_id",
+      "status": "completed",
+      "eligible": false
+    }
+  },
+  "hostile-response": {
+    "requests": [
+      {
+        "id": 0,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "brief",
+          "arguments": {},
+          "callId": "fake-call-0",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 1,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "verify",
+          "arguments": {},
+          "callId": "fake-call-1",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 2,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "receipt",
+          "arguments": {},
+          "callId": "fake-call-2",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 3,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "scoreability",
+          "arguments": {},
+          "callId": "fake-call-3",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      },
+      {
+        "id": 4,
+        "method": "item/tool/call",
+        "params": {
+          "tool": "capture",
+          "arguments": {},
+          "callId": "fake-call-4",
+          "threadId": "fake-fresh-thread",
+          "turnId": "fake-turn"
+        }
+      }
+    ],
+    "final": {
+      "run_id": "$observed_run_id",
+      "status": "completed",
+      "eligible": false
+    }
+  }
+}

@@ -23,13 +23,13 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade chat` (extras): 7 command path(s)
 - `brigade code`: 17 command path(s)
 - `brigade completions`: 1 command path(s)
-- `brigade context` (extras): 9 command path(s)
+- `brigade context` (extras): 10 command path(s)
 - `brigade daily`: 26 command path(s)
 - `brigade doctor`: 1 command path(s)
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 98 command path(s)
+- `brigade fleet`: 99 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -42,7 +42,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
 - `brigade memory`: 33 command path(s)
-- `brigade model`: 8 command path(s)
+- `brigade model`: 12 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade openclaw-fragments` (extras): 1 command path(s)
@@ -147,6 +147,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade context archive` (extras)
 - `brigade context build` (extras)
 - `brigade context doctor` (extras)
+- `brigade context handoff` (extras)
 - `brigade context import-issues` (extras)
 - `brigade context list` (extras)
 - `brigade context plan` (extras)
@@ -249,6 +250,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
 - `brigade fleet owners show`
+- `brigade fleet policy classify`
 - `brigade fleet policy delegation create`
 - `brigade fleet policy delegation show`
 - `brigade fleet policy history`
@@ -387,6 +389,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory vault-show`
 - `brigade model scorecard`
 - `brigade model trial drain`
+- `brigade model trial paired-live`
+- `brigade model trial paired-plan`
+- `brigade model trial paired-replay`
+- `brigade model trial paired-validate`
 - `brigade model trial plan`
 - `brigade model trial regrade`
 - `brigade model trial resume`

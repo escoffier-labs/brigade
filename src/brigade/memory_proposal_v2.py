@@ -498,6 +498,13 @@ def compose(
     evidence, _ = _evidence(target, accepted, sources)
     _consolidate_accepted(target, texts, sources, accepted)
     texts = _derived(texts, sources, removed, proposal_id)
+    # Per-op retention checks cannot see targets deleted by later accepted ops.
+    # Refuse the final packet rather than silently dropping part of its intent.
+    for text in texts.values():
+        if text is not None:
+            superseded_by = legacy._meta(text).get("superseded_by")
+            if isinstance(superseded_by, str) and superseded_by in removed:
+                raise legacy.ProposalError("superseded_by targets a removed source card")
     _refuse_dangling_block_links(paths, target, care, texts, sources, removed)
     references, fences = _references(target, care, paths, texts, removed)
     changes = [legacy._change(s["path"], s["text"], texts[s["path"]]) for s in sources if texts[s["path"]] != s["text"]]

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 from io import StringIO
+import pytest
 
 from brigade import cli, fleet_client, fleet_policy
 from brigade.fleet_client_policy import FleetPolicyClientError
@@ -581,3 +582,37 @@ def test_client_error_codes_are_bounded_and_do_not_echo_server_secrets():
     assert err.code != "sqlite-traceback"
     assert "super-secret-db" not in err.message
     assert "token=" not in err.message.lower()
+
+
+def test_classify_is_local_only(monkeypatch, tmp_path):
+    def no_network(*args, **kwargs):
+        raise AssertionError("classifier must not contact Hub")
+
+    monkeypatch.setattr("brigade.fleet_client_policy.post_policy", no_network)
+    monkeypatch.setattr("sys.stdin", StringIO("Draft a blog post about SQL"))
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", "-", "--json"])
+    assert rc == 0
+    assert err == ""
+    assert json.loads(out)["workload"] == "writing"
+    task = tmp_path / "task.txt"
+    task.write_text("Write unit tests for file writes")
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", str(task), "--json"])
+    assert rc == 0
+    assert json.loads(out)["status"] == "none"
+
+
+@pytest.mark.parametrize("json_flag", [[], ["--json"]])
+def test_classify_diagnostics_do_not_disclose_task_fragments(monkeypatch, json_flag):
+    fragment = "/customers/SyntheticOnlyDiagnostic42"
+    monkeypatch.setattr("sys.stdin", StringIO(f"Draft release notes and add {fragment} endpoint"))
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", "-", *json_flag])
+    assert rc == 0
+    assert fragment.lower() not in (out + err).lower()
+    assert "backend-request:endpoint" in out
+
+
+def test_classify_unreadable_input_does_not_echo_private_path(monkeypatch, tmp_path):
+    fragment = "SyntheticOnlyInputPath91"
+    rc, out, err = _run(monkeypatch, ["classify", "--task-file", str(tmp_path / fragment), "--json"])
+    assert rc != 0
+    assert fragment not in out + err

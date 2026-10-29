@@ -80,6 +80,13 @@ def register(sub: argparse._SubParsersAction) -> None:
         parser.add_argument("output_dir", type=Path, help="Trial artifact directory.")
         parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         parser.set_defaults(func=_dispatch_trial)
+    for command in ("paired-plan", "paired-replay", "paired-validate", "paired-live"):
+        parser = trial_sub.add_parser(command, help="Audit-only paired brigade-work pilot apparatus.")
+        parser.add_argument("manifest", type=Path)
+        parser.add_argument("--output-dir", type=Path)
+        parser.add_argument("--transcript", type=Path, help="Offline JSON protocol script; never live evidence.")
+        parser.add_argument("--evidence-sha256", help="Reviewed evidence digest required for validation.")
+        parser.set_defaults(func=_dispatch_paired)
     p_drain = trial_sub.add_parser(
         "drain",
         help="Ask a running trial to launch no more cells; in-flight cells finish and record results.",
@@ -161,3 +168,34 @@ def _dispatch_trial(args) -> int:
         roster,
         **execute_kwargs,
     )
+
+
+def _dispatch_paired(args) -> int:
+    import json
+    import sys
+
+    from .. import model_trials
+    from ..model_trial_paired import replay_session
+
+    try:
+        if args.trial_command == "paired-live":
+            raise ValueError(
+                "live paired trials require an exclusive tool adapter, which is not implemented. "
+                "No model was launched. Use paired-replay for offline apparatus checks."
+            )
+        if args.trial_command == "paired-plan":
+            result = model_trials.paired_plan(args.manifest)
+        elif args.trial_command == "paired-validate":
+            if args.output_dir is None or args.evidence_sha256 is None:
+                raise ValueError("validation needs --output-dir and reviewed --evidence-sha256")
+            result = model_trials.paired_validate(args.output_dir, args.evidence_sha256)
+        else:
+            if args.output_dir is None or args.transcript is None:
+                raise ValueError("offline replay needs --output-dir and --transcript")
+            script = json.loads(args.transcript.read_text(encoding="utf-8"))
+            result = model_trials.paired_execute(args.manifest, args.output_dir, replay_session(script))
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2

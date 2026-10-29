@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -347,6 +349,7 @@ def search(*, target: Path, query: str, json_output: bool = False) -> int:
     return 0
 
 
+@skill_command
 def import_skill(
     *,
     target: Path,

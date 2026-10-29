@@ -1,0 +1,668 @@
+{
+  "schema": "brigade.context_handoff.accounting_vectors.v1",
+  "status": "frozen-v1-accounting-only-see-separate-export-fixture",
+  "codex_version": "0.160.0",
+  "source_commit": "a956835d020762cb2b570053af06f643a11c0ecc",
+  "vectors": [
+    {
+      "id": "ascii",
+      "files": {
+        "AGENTS.md": "68656c6c6f"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 5,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 5,
+          "sha256": "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+          "cumulative_selected_bytes": 5,
+          "consumed_raw_bytes": 5,
+          "rendered_utf8_bytes": 5,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 5,
+        "consumed_raw_bytes": 5,
+        "rendered_utf8_bytes": 5
+      }
+    },
+    {
+      "id": "cap_exhausted_complete_source",
+      "files": {
+        "AGENTS.md": "616263",
+        "sub/AGENTS.md": "6e6f74207265616420627920636170"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 3,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 3,
+          "contribution": "loaded"
+        },
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 2,
+          "size_bytes": 15,
+          "sha256": "92fa3bbdb6b0dbff468d2370abbfc00ffc136d21137268b310746f70d88b1571",
+          "cumulative_selected_bytes": 18,
+          "consumed_raw_bytes": 0,
+          "rendered_utf8_bytes": 0,
+          "contribution": "cap_exhausted"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 18,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "multibyte_split",
+      "files": {
+        "AGENTS.md": "c3a978"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 1,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "75ffd91e9de1dcdd5f349e17f877dd3ea559667e1bdbf4c8f3560ca0b81a0b02",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 1,
+          "rendered_utf8_bytes": 3,
+          "contribution": "truncated"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 1,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "multibyte_exact",
+      "files": {
+        "AGENTS.md": "c3a978"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 2,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "75ffd91e9de1dcdd5f349e17f877dd3ea559667e1bdbf4c8f3560ca0b81a0b02",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 2,
+          "rendered_utf8_bytes": 2,
+          "contribution": "truncated"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 2,
+        "rendered_utf8_bytes": 2
+      }
+    },
+    {
+      "id": "whitespace_no_cap_consumption",
+      "files": {
+        "AGENTS.md": "200d0a",
+        "sub/AGENTS.md": "61626364"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 2,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "6bdf66b5bf2a44e658bea2ee86695ab150a06e600bf67cd5cce245ad54962c61",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 0,
+          "rendered_utf8_bytes": 0,
+          "contribution": "empty"
+        },
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 2,
+          "size_bytes": 4,
+          "sha256": "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589",
+          "cumulative_selected_bytes": 7,
+          "consumed_raw_bytes": 2,
+          "rendered_utf8_bytes": 2,
+          "contribution": "truncated"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 7,
+        "consumed_raw_bytes": 2,
+        "rendered_utf8_bytes": 2
+      }
+    },
+    {
+      "id": "empty_override_shadows",
+      "files": {
+        "AGENTS.override.md": "",
+        "AGENTS.md": "69676e6f726564",
+        "sub/AGENTS.md": "78"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 1,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.override.md",
+          "selection_order": 1,
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "cumulative_selected_bytes": 0,
+          "consumed_raw_bytes": 0,
+          "rendered_utf8_bytes": 0,
+          "contribution": "empty"
+        },
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 2,
+          "size_bytes": 1,
+          "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "cumulative_selected_bytes": 1,
+          "consumed_raw_bytes": 1,
+          "rendered_utf8_bytes": 1,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 1,
+        "consumed_raw_bytes": 1,
+        "rendered_utf8_bytes": 1
+      }
+    },
+    {
+      "id": "crlf_raw_preservation",
+      "files": {
+        "AGENTS.md": "610d0a620d0a"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 4,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 6,
+          "sha256": "58055bdcc73787eb88c78d36f0b4939e9c5dc1c3ad17e25cc85a6833cf1a0cab",
+          "cumulative_selected_bytes": 6,
+          "consumed_raw_bytes": 4,
+          "rendered_utf8_bytes": 4,
+          "contribution": "truncated"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 6,
+        "consumed_raw_bytes": 4,
+        "rendered_utf8_bytes": 4
+      }
+    },
+    {
+      "id": "invalid_utf8_replacement",
+      "files": {
+        "AGENTS.md": "ff61"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 2,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 2,
+          "sha256": "6446546190caef8efbaf9e738e2fe8ac30583ec4bf2c0f6468f8c4a47bda0e91",
+          "cumulative_selected_bytes": 2,
+          "consumed_raw_bytes": 2,
+          "rendered_utf8_bytes": 4,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 2,
+        "consumed_raw_bytes": 2,
+        "rendered_utf8_bytes": 4
+      }
+    },
+    {
+      "id": "rust_whitespace",
+      "files": {
+        "AGENTS.md": "c2a0e28083",
+        "sub/AGENTS.md": "7a"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 5,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 5,
+          "sha256": "285ede588110f20bf1a11041cbfc5d1d78a57252b4813728194d13dc029e0576",
+          "cumulative_selected_bytes": 5,
+          "consumed_raw_bytes": 0,
+          "rendered_utf8_bytes": 0,
+          "contribution": "empty"
+        },
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 2,
+          "size_bytes": 1,
+          "sha256": "594e519ae499312b29433b7dd8a97ff068defcba9755b6d5d00e84c524d67b06",
+          "cumulative_selected_bytes": 6,
+          "consumed_raw_bytes": 1,
+          "rendered_utf8_bytes": 1,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 6,
+        "consumed_raw_bytes": 1,
+        "rendered_utf8_bytes": 1
+      }
+    },
+    {
+      "id": "whitespace_split_not_blank",
+      "files": {
+        "AGENTS.md": "c2a0"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 1,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 2,
+          "sha256": "abfbd10daf8965c8860b3582af942d7a7cac972b31d1c50f382b67d9b6c07365",
+          "cumulative_selected_bytes": 2,
+          "consumed_raw_bytes": 1,
+          "rendered_utf8_bytes": 3,
+          "contribution": "truncated"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 2,
+        "consumed_raw_bytes": 1,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "fallback_order",
+      "files": {
+        "FIRST.md": "6162",
+        "SECOND.md": "69676e6f726564"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 8,
+      "fallback_filenames": [
+        "FIRST.md",
+        "SECOND.md"
+      ],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "FIRST.md",
+          "selection_order": 1,
+          "size_bytes": 2,
+          "sha256": "fb8e20fc2e4c3f248c60c39bd652f3c1347298bb977b8b4d5903b85055620603",
+          "cumulative_selected_bytes": 2,
+          "consumed_raw_bytes": 2,
+          "rendered_utf8_bytes": 2,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 2,
+        "consumed_raw_bytes": 2,
+        "rendered_utf8_bytes": 2
+      }
+    },
+    {
+      "id": "no_markers_cwd_only",
+      "files": {
+        "AGENTS.md": "69676e6f726564",
+        "sub/AGENTS.md": "796573"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 8,
+      "fallback_filenames": [],
+      "root_markers": [],
+      "expected_sources": [
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 3,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "nested_marker_boundary",
+      "files": {
+        "AGENTS.md": "69676e6f726564",
+        "sub/AGENTS.md": "796573"
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        ".",
+        "sub"
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 8,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "8a798890fe93817163b10b5f7bd2ca4d25d84c52739a645a889c173eee7d9d3d",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 3,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "no_selected_sources",
+      "files": {},
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 8,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [],
+      "expected_baseline": {
+        "selected_bytes": 0,
+        "consumed_raw_bytes": 0,
+        "rendered_utf8_bytes": 0
+      }
+    },
+    {
+      "id": "empty_after_cap_exhausted",
+      "files": {
+        "AGENTS.md": "78",
+        "sub/AGENTS.md": ""
+      },
+      "directories": [
+        "sub"
+      ],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": "sub",
+      "project_doc_max_bytes": 1,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 1,
+          "sha256": "2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881",
+          "cumulative_selected_bytes": 1,
+          "consumed_raw_bytes": 1,
+          "rendered_utf8_bytes": 1,
+          "contribution": "loaded"
+        },
+        {
+          "path": "sub/AGENTS.md",
+          "selection_order": 2,
+          "size_bytes": 0,
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "cumulative_selected_bytes": 1,
+          "consumed_raw_bytes": 0,
+          "rendered_utf8_bytes": 0,
+          "contribution": "cap_exhausted"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 1,
+        "consumed_raw_bytes": 1,
+        "rendered_utf8_bytes": 1
+      }
+    },
+    {
+      "id": "incomplete_four_byte_utf8",
+      "files": {
+        "AGENTS.md": "f09f98"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 3,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "b38af6aef10b9620ceb4fe55a4aaf8def5e4d9bd99bd1ebff06a0d44220546a2",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 3,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "encoded_surrogate_utf8",
+      "files": {
+        "AGENTS.md": "eda080"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 3,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "91a681b998555fb475479817b126c94e57e52011fa1842c5d188795a4a05226b",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 9,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 9
+      }
+    }
+  ],
+  "canonical_digest_vectors": [
+    {
+      "value": {
+        "b": "é",
+        "a": 1
+      },
+      "canonical_utf8_hex": "7b2261223a312c2262223a22c3a9227d",
+      "digest": "sha256:09ad9fd2fb648cb2f62141215828ea00a62c299db05d20aa9ade2f527a301cc6"
+    },
+    {
+      "value": {
+        "schema_version": 1,
+        "actual_session_observed": false,
+        "sources": []
+      },
+      "canonical_utf8_hex": "7b2261637475616c5f73657373696f6e5f6f62736572766564223a66616c73652c22736368656d615f76657273696f6e223a312c22736f7572636573223a5b5d7d",
+      "digest": "sha256:040d8e1cab38d8b630bf55619c3daace3aca987d02e2118b56df6c6e5004844a"
+    },
+    {
+      "value": {
+        "root_markers": [
+          ".git",
+          "other"
+        ],
+        "project_doc_max_bytes": 32768
+      },
+      "canonical_utf8_hex": "7b2270726f6a6563745f646f635f6d61785f6279746573223a33323736382c22726f6f745f6d61726b657273223a5b222e676974222c226f74686572225d7d",
+      "digest": "sha256:d26755d93c2ee4bd25cf77e2be17f448da6f66642d550f3d24203f0f8e28f2ff"
+    },
+    {
+      "value": {
+        "a": "quote\" backslash\\ newline\n 😀"
+      },
+      "canonical_utf8_hex": "7b2261223a2271756f74655c22206261636b736c6173685c5c206e65776c696e655c6e20f09f9880227d",
+      "digest": "sha256:1dc84c6be59a0efddc7dc8570d57a9697c023e09f9d633ec6dd06055a1095980"
+    }
+  ]
+}

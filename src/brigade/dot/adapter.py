@@ -99,7 +99,16 @@ class DotTools:
                         break
                 else:
                     raise DotError("bridge_unavailable")
+            # Bound report data before adding the connector-owned trust metadata.
+            if name == "fleet_sessions":
+                for entry in result.get("sessions", []):
+                    if isinstance(entry, dict):
+                        entry.pop("content_trust", None)
             result = bound_result(result)
+            if name == "fleet_sessions":
+                for entry in result.get("sessions", []):
+                    if isinstance(entry, dict) and entry.get("cloud_context") is not None:
+                        entry["content_trust"] = "untrusted"
             error_code = result.get("error")
             return result
         except DotError as error:

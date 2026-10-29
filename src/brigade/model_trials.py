@@ -1139,3 +1139,22 @@ def show(output_dir: Path, *, json_output: bool = False) -> int:
         for state, count in summary["counts"].items():
             print(f"{state}: {count}")
     return 0
+
+
+# Explicit audit-only pilot API. Ordinary trial execution and transports are unchanged.
+def paired_plan(path: Path) -> dict[str, Any]:
+    from .model_trial_paired import plan
+
+    return plan(path)
+
+
+def paired_execute(path: Path, output: Path, session: Any, *, cases: list[str] | None = None) -> dict[str, Any]:
+    from .model_trial_paired import execute
+
+    return execute(path, output, session, cases=cases)
+
+
+def paired_validate(output: Path, expected_digest: str) -> dict[str, Any]:
+    from .model_trial_paired import validate
+
+    return validate(output, expected_digest)

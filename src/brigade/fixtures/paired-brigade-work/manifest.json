@@ -1,0 +1,17 @@
+{
+  "schema": "brigade.paired_trial.v1",
+  "baseline": "baseline",
+  "candidate": "candidate",
+  "model": "offline-protocol-fixture",
+  "settings": {
+    "reasoning": "medium"
+  },
+  "repetitions": 1,
+  "cases": [
+    "passing-verify",
+    "failing-verify",
+    "command-timeout",
+    "audit-only",
+    "hostile-response"
+  ]
+}

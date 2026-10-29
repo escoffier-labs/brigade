@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -322,6 +324,7 @@ def serve_mcp(
     return 0
 
 
+@skill_command
 def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     scope_slug = _registry_mod._slug(scope)
@@ -373,6 +376,7 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
     return 0
 
 
+@skill_command
 def adapters_init(*, target: Path, force: bool = False, json_output: bool = False) -> int:
     target = target.expanduser().resolve()
     path = _registry_mod._adapters_config_path(target)

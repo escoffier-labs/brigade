@@ -517,3 +517,61 @@ canary fails until that evidence path exists.
 None block the first implementation. An asymmetric Hub signature and adjustable
 LKG age remain later choices if the zero-dependency or 900-second decisions
 change.
+
+## Writing and frontend task roles
+
+`brigade fleet policy classify --task-file PATH --json` classifies the first
+8,000 characters locally. Use `--task-file -` for standard input. Its
+`brigade.task_role.v1` result reports `matched`, `none`, or `ambiguous`, the
+workload and fixed categorical evidence for matched roles, ignored code/quoted/negated
+contexts, and extra implementation requests. Diagnostic categories never contain
+task fragments, file paths, or matched source text.
+Audience prose includes changelog entries, release notes, and commit/PR
+messages. Technical subject matter alone does not make prose or visual UI work
+ambiguous. A separate backend implementation request does. Split ambiguous
+tasks before dispatching their writing/frontend portion.
+
+Classification uses bounded action and object vocabularies, not full language
+understanding. Audience and visual objects need a supported phrase ending or
+complement. Using those words as modifiers of a different object does not
+qualify. Technical topics introduced by words such as `on`, `covering`, or
+`with` remain prose topics. Separate implementation actions, including `plus`
+and `but` clauses, report ambiguity. Explicit how-to topic steps and negated
+continuations remain within their clause. Indirect requests such as "Help me
+write", fully quoted requests, unfamiliar objects, and unsupported complements
+can return `none`. Use declared workloads or explicit workers for such cases.
+Each recognized action contributes a proven task role or fixed implementation
+evidence. An unsupported action object remains ordinary alone and makes the
+task ambiguous when combined with proven audience or visual work.
+
+The Hub consumes declared `writing` and `frontend` workloads through the
+existing effective policy roles of the same names. Declare their OS and
+capabilities with the existing `routing.workload_requirements` fields. Role
+resolution retains fleet, consumer, repository, and session policy precedence.
+These workloads consider only the selected role seat, with no seat fallback.
+An explicit eligible seat retains precedence. `general` and `windows-native`
+retain their existing routing. Task-role evidence stays in the stored decision
+JSON. The public route response has no new keys.
+
+With a configured Fleet Hub (`hub_url`), and without an explicit `--worker` or
+a named roster seat in the original task, `brigade run` classifies task intent
+and resolves a matched role through the central policy resolver. Without a
+configured Hub, standalone runs retain their existing ordinary routing and do
+not resolve central task roles. The local classification command still works
+without network access. A detached child already requiring a task role keeps
+that requirement if its Hub configuration disappears. It dispatches that seat directly under runtime
+admission, with both local seat fallback mechanisms removed (`fallback` and
+`invalid_final_fallback`). Missing policy, an unavailable
+role, a health failure, or admission refusal stops the run. It never substitutes
+an implementation seat or a planned run for matched work. Ambiguous tasks print
+the evidence and retain ordinary routing until the caller splits or explicitly
+selects a worker. Task evidence uses the existing `seat_routing` payload and remains alongside
+health decisions on both successful routing and strict health refusal.
+
+The existing T3 fleet consumer forwards a declared workload and launches the
+Hub-selected admitted seat. Legacy deployed controllers do not automatically
+classify omitted workloads. Native T3 `delegate_task` remains selected by the
+parent. Receipt enforcement for arbitrary native calls is outside this feature.
+Serving Hub code must support task workloads before operators configure those
+roles and workloads. This code change does not activate policy or change legacy
+role fields or authority migration state.

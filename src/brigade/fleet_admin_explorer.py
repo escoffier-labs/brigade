@@ -337,6 +337,7 @@ dl.fields dd { margin:0; min-width:0; text-align:right; font-size:13px; white-sp
 .overview-machine-capacity progress::-webkit-progress-bar, .overview-machine-load progress::-webkit-progress-bar { background:var(--bar-track); }
 .overview-machine-capacity progress.overview-capacity-bar::-webkit-progress-value { background:var(--idle); }
 .overview-machine-capacity progress.overview-use-bar::-webkit-progress-value, .overview-machine-load progress::-webkit-progress-value { background:var(--working); }
+.overview-machine-capacity > .overview-managed-hint { display:block; margin:-2px 0 4px; color:var(--muted); font-size:10px; }
 .overview-machine-load, .overview-machine-age { font-size:11px; }
 .overview-machine-load > span, .overview-machine-age > span { display:block; font-size:10px; }
 .overview-machines-empty { margin:8px 0 2px; color:var(--muted); font-size:12px; }
