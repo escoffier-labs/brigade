@@ -773,6 +773,57 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     return $manifest
 }
 
+function Invoke-CanonicalComponentSmoke {
+    param($Paths)
+    & ($Paths[0]) --version | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "canonical graph version smoke failed" }
+    $canonicalResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & ($Paths[1])
+    if ($LASTEXITCODE -ne 0) { throw "canonical graph MCP smoke failed" }
+    $response = $canonicalResponse | ConvertFrom-Json
+    if ($response.jsonrpc -ne "2.0" -or $response.id -ne 1 -or -not $response.PSObject.Properties["result"]) { throw "canonical graph MCP returned invalid initialize response" }
+    & ($Paths[2]) version | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "canonical evidence version smoke failed" }
+}
+
+function Invoke-VerifiedCanonicalSmoke {
+    param([string]$Version, [string]$ReleaseDirectory)
+    $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
+    if ($checksums.Count -eq 26) { return }
+    if ($checksums.Count -ne 41) { throw "invalid cached release inventory" }
+    $paths = @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence") | ForEach-Object {
+        $path = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "$_-windows-amd64.exe"))
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing canonical host asset in additive release" }
+        $path
+    }
+    $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
+    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    $revision = $null
+    foreach ($id in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+        $current = $manifest.components.$id.component_revision
+        if ($current -isnot [string] -or $current -cnotmatch '^[0-9a-f]{40}$' -or ($revision -and $revision -cne $current)) {
+            throw "primary manifest must contain one valid source commit for all components"
+        }
+        $revision = $current
+    }
+    # Verify exact local bytes, including the manifest that supplies the source.
+    foreach ($path in @($manifestPath) + @($paths)) {
+        & gh attestation verify $path --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml --source-digest $revision --source-ref "refs/tags/v$Version" | Out-Null
+        if ($LASTEXITCODE -ne 0) { throw "canonical attestation verification failed" }
+    }
+    $saved = @{}
+    try {
+        foreach ($key in @("GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN")) {
+            $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
+            [Environment]::SetEnvironmentVariable($key, $null, 'Process')
+        }
+        Invoke-CanonicalComponentSmoke -Paths $paths
+    } finally {
+        foreach ($key in $saved.Keys) {
+            [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process')
+        }
+    }
+}
+
 function Assert-ManagedComponentDigests {
     param(
         $Manifest,
@@ -1062,19 +1113,7 @@ try {
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
-        $canonicalGraph = Join-Path $acceptRoot "release-assets/brigade-code-graph-windows-amd64.exe"
-        if (Test-Path -LiteralPath $canonicalGraph) {
-            $canonicalMcp = Join-Path $acceptRoot "release-assets/brigade-code-graph-mcp-windows-amd64.exe"
-            $canonicalEvidence = Join-Path $acceptRoot "release-assets/brigade-evidence-windows-amd64.exe"
-            & $canonicalGraph --version | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "canonical graph version smoke failed" }
-            $canonicalResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $canonicalMcp
-            if ($LASTEXITCODE -ne 0) { throw "canonical graph MCP smoke failed" }
-            $response = $canonicalResponse | ConvertFrom-Json
-            if ($response.jsonrpc -ne "2.0" -or $response.id -ne 1 -or -not $response.PSObject.Properties["result"]) { throw "canonical graph MCP returned invalid initialize response" }
-            & $canonicalEvidence version | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "canonical evidence version smoke failed" }
-        }
+        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets")
     }
 
     $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe

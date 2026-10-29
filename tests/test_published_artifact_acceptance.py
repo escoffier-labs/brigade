@@ -494,7 +494,7 @@ def test_release_asset_verification_requires_one_tag_and_verifies_all_native_byt
         if name != base + "checksums.txt"
     }
     assets[base + "checksums.txt"] = "".join(
-        f"{digest}  {name}\n" for name, digest in sorted(checksums.items())
+        f"{digest}  {name}\r\n" for name, digest in sorted(checksums.items())
     ).encode()
 
     verified = acceptance_module.verify_release_assets(
@@ -504,7 +504,8 @@ def test_release_asset_verification_requires_one_tag_and_verifies_all_native_byt
     )
 
     assert set(verified["native_paths"]) == set(acceptance_module.COMPONENT_IDS)
-    assert len(list((tmp_path / "release-assets").iterdir())) == 26
+    assert len(list((tmp_path / "release-assets").iterdir())) == 27
+    assert (tmp_path / "release-assets" / "checksums.txt").read_bytes() == assets[base + "checksums.txt"]
 
 
 def test_release_asset_verification_marks_posix_assets_executable_but_not_windows(
@@ -1139,7 +1140,7 @@ def _verify_fixture(module, tmp_path, bodies, checksums):
 def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_return(acceptance_module, tmp_path):
     _, bodies, checksums = _release_fixture()
     result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
-    assert len(list((tmp_path / "release-assets").iterdir())) == 41
+    assert len(list((tmp_path / "release-assets").iterdir())) == 42
     assert set(result) == {"manifest", "native_paths"}
     assert set(result["native_paths"]) == {"agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
     for name, body in bodies.items():
@@ -1245,3 +1246,104 @@ def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
     checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
     with pytest.raises(acceptance_module.AcceptanceError):
         _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+
+
+@pytest.mark.parametrize(
+    "case", ["ok", "missing-one", "missing-all", "attestation", "manifest-attestation", "revision", "mixed", "legacy"]
+)
+def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, monkeypatch, case):
+    module = acceptance_module
+    _, bodies, checksums = _release_fixture(additive=case != "legacy")
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    for component in manifest["components"].values():
+        component["component_revision"] = "a" * 40
+    if case == "revision":
+        manifest["components"]["graphtrail"]["component_revision"] = "invalid"
+    if case == "mixed":
+        manifest["components"]["graphtrail"]["component_revision"] = "b" * 40
+    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
+    checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+    monkeypatch.setattr(module, "host_platform_key", lambda: "linux-amd64")
+    verifier = module.verify_release_assets
+
+    def download(version, root):
+        checksum_bytes = "".join(f"{digest}  {name}\n" for name, digest in checksums.items()).encode()
+        result = verifier(
+            version,
+            root,
+            fetch_bytes=lambda url: checksum_bytes if url.endswith("/checksums.txt") else bodies[url.rsplit("/", 1)[1]],
+        )
+        for name in ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence"):
+            if case == "missing-all" or (case == "missing-one" and name == "brigade-evidence"):
+                (root / "release-assets" / f"{name}-linux-amd64").unlink()
+        return result
+
+    monkeypatch.setattr(module, "verify_release_assets", download)
+    for name in (
+        "wait_for_github_release_tag",
+        "wait_for_pypi_version",
+        "assert_go_unavailable",
+        "smoke_managed_components",
+        "smoke_import_and_search",
+        "verify_managed_component_digests",
+    ):
+        monkeypatch.setattr(module, name, lambda *a, **kw: None)
+    monkeypatch.setattr(module, "build_go_free_path", lambda *a: os.environ.get("PATH", ""))
+
+    def install(version, **kwargs):
+        (Path(kwargs["env"]["PIPX_BIN_DIR"]) / "brigade").touch()
+
+    monkeypatch.setattr(module, "install_brigade_cli", install)
+    monkeypatch.setattr(module, "validate_component_report", lambda *a: {"miseledger": tmp_path / "miseledger"})
+    secrets = ("GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN")
+    for key in secrets:
+        monkeypatch.setenv(key, "fixture-only")
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if argv[0] == "gh":
+            assert all(kwargs["env"][key] == "fixture-only" for key in secrets)
+            assert Path(argv[3]).is_absolute()
+            assert "--repo" in argv and argv[argv.index("--repo") + 1] == "escoffier-labs/brigade"
+            assert argv[argv.index("--source-digest") + 1] == "a" * 40
+            assert argv[argv.index("--source-ref") + 1] == "refs/tags/v1.2.3"
+            assert argv[argv.index("--signer-workflow") + 1] == "escoffier-labs/brigade/.github/workflows/publish.yml"
+            failed = (case == "attestation" and "brigade-evidence-" in argv[3]) or (
+                case == "manifest-attestation" and argv[3].endswith(".json")
+            )
+            return subprocess.CompletedProcess(argv, int(failed), "", "fixture attestation rejected" if failed else "")
+        if Path(argv[0]).name.startswith("brigade-"):
+            assert not set(secrets) & set(kwargs["env"])
+        output = '{"jsonrpc":"2.0","id":1,"result":{}}' if len(argv) == 1 else "{}"
+        if argv[1:] == ["--version"] and Path(argv[0]).name == "brigade":
+            output = "brigade 1.2.3"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    if case in {"ok", "legacy"}:
+        module.run_acceptance("1.2.3", runner=runner)
+    else:
+        message = (
+            "missing canonical"
+            if case.startswith("missing")
+            else "attestation rejected"
+            if "attestation" in case
+            else "source commit"
+        )
+        with pytest.raises(module.AcceptanceError, match=message):
+            module.run_acceptance("1.2.3", runner=runner)
+    native = [argv for argv, _ in calls if Path(argv[0]).name.startswith("brigade-")]
+    attestations = [argv for argv, _ in calls if argv[0] == "gh"]
+    assert len(native) == (3 if case == "ok" else 0)
+    if case == "ok":
+        assert [Path(argv[3]).name for argv in attestations] == [
+            "component-manifest-v1.json",
+            "brigade-code-graph-linux-amd64",
+            "brigade-code-graph-mcp-linux-amd64",
+            "brigade-evidence-linux-amd64",
+        ]
+        assert all(
+            calls.index(next(call for call in calls if call[0] == argv))
+            < next(i for i, (cmd, _) in enumerate(calls) if cmd in native)
+            for argv in attestations
+        )

@@ -266,7 +266,8 @@ def verify_release_assets(
 
     checksums_url = _release_url(version, "checksums.txt")
     try:
-        checksums = _parse_checksums(fetch_bytes(checksums_url).decode("utf-8"))
+        checksums_bytes = fetch_bytes(checksums_url)
+        checksums = _parse_checksums(checksums_bytes.decode("utf-8"))
     except (OSError, UnicodeDecodeError) as exc:
         raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
@@ -308,6 +309,7 @@ def verify_release_assets(
             path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
         if component in native_paths:
             native_paths[component][platform] = path
+    (release_dir / "checksums.txt").write_bytes(checksums_bytes)
     return {"manifest": manifest, "native_paths": native_paths}
 
 
@@ -802,6 +804,56 @@ def _write_poison_binaries(poison_dir: Path, marker: Path) -> None:
         poison.chmod(poison.stat().st_mode | stat.S_IXUSR)
 
 
+def smoke_verified_canonical_release(
+    release_dir: Path, version: str, *, runner: Runner, env: Mapping[str, str]
+) -> None:
+    # The original validated inventory, not file presence, determines intent.
+    checksums = _parse_checksums((release_dir / "checksums.txt").read_text(encoding="utf-8"))
+    if len(checksums) == 26:
+        return
+    if len(checksums) != 41:
+        raise AcceptanceError("invalid cached release inventory")
+    platform = host_platform_key()
+    paths = {name: (release_dir / f"{name}-{platform}").resolve() for name in CANONICAL_IDS}
+    if not all(path.is_file() for path in paths.values()):
+        raise AcceptanceError("missing canonical host asset in additive release")
+    manifest_path = (release_dir / "component-manifest-v1.json").resolve()
+    manifest = json.loads(manifest_path.read_bytes(), object_pairs_hook=_unique_json_object)
+    revisions = [manifest["components"][name].get("component_revision") for name in COMPONENT_IDS]
+    if (
+        any(not isinstance(revision, str) or re.fullmatch(r"[0-9a-f]{40}", revision) is None for revision in revisions)
+        or len(set(revisions)) != 1
+    ):
+        raise AcceptanceError("primary manifest must contain one valid source commit for all components")
+    # Bind the manifest itself as well as the aliases to signed source identity.
+    # A checksum map alone is not provenance, and releases can be mutable.
+    for path in [manifest_path, *paths.values()]:
+        run_checked(
+            [
+                "gh",
+                "attestation",
+                "verify",
+                path,
+                "--repo",
+                REPOSITORY,
+                "--signer-workflow",
+                f"{REPOSITORY}/.github/workflows/publish.yml",
+                "--source-digest",
+                revisions[0],
+                "--source-ref",
+                f"refs/tags/v{version}",
+            ],
+            runner=runner,
+            env=env,
+        )
+    native_env = {
+        key: value
+        for key, value in env.items()
+        if key.upper() not in {"GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN"}
+    }
+    smoke_canonical_components(paths, runner=runner, env=native_env)
+
+
 def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_darwin_amd64: bool = False) -> None:
     if not version or version.startswith("v"):
         raise AcceptanceError("--brigade-version must be an exact PyPI version without a v prefix")
@@ -865,11 +917,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             verify_managed_component_digests(release["manifest"], managed_paths, host_platform_key())
             assert_go_unavailable(env=env)
             smoke_managed_components(managed_paths, version=version, runner=runner, env=env)
-            canonical_paths = {
-                name: root / "release-assets" / f"{name}-{host_platform_key()}" for name in CANONICAL_IDS
-            }
-            if all(path.is_file() for path in canonical_paths.values()):
-                smoke_canonical_components(canonical_paths, runner=runner, env=env)
+            smoke_verified_canonical_release(root / "release-assets", version, runner=runner, env=env)
             smoke_import_and_search(
                 managed_brigade,
                 managed_paths["miseledger"],
