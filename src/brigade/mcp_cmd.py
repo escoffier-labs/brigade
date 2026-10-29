@@ -477,9 +477,54 @@ def _plan_for_harness(
 ) -> list[dict[str, Any]]:
     adapter = ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, target)
-    scope = "user" if adapter.user_scope else "project"
     try:
         text = path.read_text() if path.is_file() else None
+    except OSError as exc:
+        return _plan_from_inputs(
+            target,
+            harness,
+            servers,
+            state,
+            None,
+            force=force,
+            prune=prune,
+            adopt=adopt,
+            name_filter=name_filter,
+            read_error=exc,
+        )
+    return _plan_from_inputs(
+        target,
+        harness,
+        servers,
+        state,
+        text,
+        force=force,
+        prune=prune,
+        adopt=adopt,
+        name_filter=name_filter,
+    )
+
+
+def _plan_from_inputs(
+    target: Path,
+    harness: str,
+    servers: dict[str, CanonicalServer],
+    state: dict[str, Any],
+    text: str | None,
+    *,
+    force: bool = False,
+    prune: bool = False,
+    adopt: bool = False,
+    name_filter: str | None = None,
+    read_error: OSError | None = None,
+) -> list[dict[str, Any]]:
+    """Compare explicit inputs without loading native config or ownership state."""
+    adapter = ADAPTERS[harness]
+    path = mcp_adapters.resolve_path(adapter, target)
+    scope = "user" if adapter.user_scope else "project"
+    try:
+        if read_error is not None:
+            raise read_error
         _validate_native_config(harness, text)
         live = adapter.read_file(text)
     except (OSError, ValueError) as exc:

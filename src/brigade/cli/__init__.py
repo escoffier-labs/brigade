@@ -258,6 +258,10 @@ def main(argv=None) -> int:
         # Offline custody must not persist global diagnostics or launch an
         # update refresh, including after invalid scope or a lost return.
         return func(args)
+    if args.command == "bug" and args.bug_command == "diagnose":
+        # A selected-project preview must not persist global failure state or
+        # read update caches and launch refreshes, including on safe refusal.
+        return func(args)
     from .. import bug_last_error
 
     command = bug_last_error.command_path(parser, parse_argv)

@@ -439,7 +439,14 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
         diagnostics=diagnostics,
         output=output,
     )
-    _check_security(collected, not_security=args.not_security)
+    return _prepare_collected(target, collected, not_security=args.not_security)
+
+
+def _prepare_collected(
+    target: Path, collected: dict[str, Any], *, not_security: bool = False
+) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
+    """Redact and persist an explicit report projection without collecting evidence."""
+    _check_security(collected, not_security=not_security)
     redactor = Redactor(target)
     bundle = redactor.project(collected)
     # Schema and package metadata are fixed public constants, not local input.
