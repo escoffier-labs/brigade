@@ -1992,62 +1992,13 @@ def _assert_affected_values_removed(
     start: int,
     end: int,
 ) -> None:
-    selected_references = {
-        value
-        for event in original
-        if start <= event.sequence <= end
-        and (
-            event.event_type in run_events._TASK_EVENT_TYPES
-            or (
-                event.event_type in {"control.requested", "control.observed", "control.failed"}
-                and "task_id" in event.payload
-            )
-        )
-        for field, value in run_redaction_tasks.private_scalars(event)
-        if field not in run_redaction_tasks.STRUCTURAL_FIELDS | run_redaction_tasks.CONTROL_STRUCTURAL_FIELDS
-    }
-    # Derived task identities can change outside the selected range too.
-    # Every retained task/control alias must lose both selected references and
-    # identities rebuilt by the task rewrite, irrespective of target task.
-    for prior, current in zip(original, rewritten, strict=True):
-        if prior.event_type in run_events._TASK_EVENT_TYPES:
-            prior_rows = [prior.payload]
-            current_rows = [current.payload]
-            if prior.event_type == "task.batch-accepted":
-                prior_rows += prior.payload["members"]
-                current_rows += current.payload["members"]
-            for old_row, new_row in zip(prior_rows, current_rows, strict=True):
-                selected_references.update(
-                    value
-                    for field, value in old_row.items()
-                    if isinstance(value, str)
-                    and field not in run_redaction_tasks.STRUCTURAL_FIELDS
-                    and value != new_row.get(field)
-                )
-    for event in rewritten:
-        if event.event_type in run_events._TASK_EVENT_TYPES:
-            structural = run_redaction_tasks.STRUCTURAL_FIELDS
-        elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
-            structural = run_redaction_tasks.CONTROL_STRUCTURAL_FIELDS
-        else:
-            continue
-        if any(
-            field not in structural and value in selected_references
-            for field, value in run_redaction_tasks.private_scalars(event)
-        ):
-            raise RedactionError("rewritten journal still contains affected private values")
+    run_redaction_tasks.assert_affected_task_values_removed(original, rewritten, start, end, error_type=RedactionError)
     for prior, current in zip(original, rewritten, strict=True):
         if not start <= prior.sequence <= end or prior.event_type in {
             run_checkpoint.CHECKPOINT_EVENT_TYPE,
             "run.redaction.recorded",
+            "task.batch-accepted",
         }:
-            continue
-        if prior.event_type == "task.batch-accepted":
-            # Version, member count and row order are structural. Every string
-            # in the exact retained descriptor shape is a private reference.
-            remaining = {value for _, value in run_redaction_tasks.private_scalars(current)}
-            if any(value in remaining for _, value in run_redaction_tasks.private_scalars(prior)):
-                raise RedactionError("rewritten journal still contains affected private values")
             continue
         for key, value in prior.payload.items():
             if (
@@ -2064,9 +2015,7 @@ def _assert_affected_values_removed(
                 )
             ):
                 continue
-            if value == REDACTED_VALUE or value == 0:
-                continue
-            if current.payload.get(key) == value:
+            if value != REDACTED_VALUE and value != 0 and current.payload.get(key) == value:
                 raise RedactionError("rewritten journal still contains affected private values")
 
 

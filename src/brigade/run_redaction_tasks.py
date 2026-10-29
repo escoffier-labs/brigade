@@ -359,3 +359,60 @@ def prepare_requests(
             payload["attempt_id"] = attempts.get((task_id, old["attempt_id"]), old["attempt_id"])
         payload["request_id"] = control_requests[old["request_id"]]
         requests[index] = (payload, f"{event.event_type}:{payload['request_id']}")
+
+
+def assert_affected_task_values_removed(
+    original: Sequence[run_journal.RunEvent],
+    rewritten: Sequence[run_journal.RunEvent],
+    start: int,
+    end: int,
+    *,
+    error_type: type[RuntimeError],
+) -> None:
+    """Check selected and derived task references throughout retained facts."""
+    selected_references = {
+        value
+        for event in original
+        if start <= event.sequence <= end
+        and (
+            event.event_type in run_events._TASK_EVENT_TYPES
+            or (
+                event.event_type in {"control.requested", "control.observed", "control.failed"}
+                and "task_id" in event.payload
+            )
+        )
+        for field, value in private_scalars(event)
+        if field not in STRUCTURAL_FIELDS | CONTROL_STRUCTURAL_FIELDS
+    }
+    # Derived task identities can change outside the selected range too.
+    # Every retained task/control alias must lose both selected references and
+    # identities rebuilt by the task rewrite, irrespective of target task.
+    for prior, current in zip(original, rewritten, strict=True):
+        if prior.event_type in run_events._TASK_EVENT_TYPES:
+            prior_rows = [prior.payload]
+            current_rows = [current.payload]
+            if prior.event_type == "task.batch-accepted":
+                prior_rows += prior.payload["members"]
+                current_rows += current.payload["members"]
+            for old_row, new_row in zip(prior_rows, current_rows, strict=True):
+                selected_references.update(
+                    value
+                    for field, value in old_row.items()
+                    if isinstance(value, str) and field not in STRUCTURAL_FIELDS and value != new_row.get(field)
+                )
+    for event in rewritten:
+        if event.event_type in run_events._TASK_EVENT_TYPES:
+            structural = STRUCTURAL_FIELDS
+        elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
+            structural = CONTROL_STRUCTURAL_FIELDS
+        else:
+            continue
+        if any(field not in structural and value in selected_references for field, value in private_scalars(event)):
+            raise error_type("rewritten journal still contains affected private values")
+    for prior, current in zip(original, rewritten, strict=True):
+        if start <= prior.sequence <= end and prior.event_type == "task.batch-accepted":
+            # Version, member count and row order are structural. Every string
+            # in the exact retained descriptor shape is a private reference.
+            remaining = {value for _, value in private_scalars(current)}
+            if any(value in remaining for _, value in private_scalars(prior)):
+                raise error_type("rewritten journal still contains affected private values")
