@@ -29,7 +29,7 @@ _NONTERMINAL_STATUSES = frozenset(
         "running",
     }
 )
-_SUCCESS_STATUSES = frozenset({"ok", "dry-run"})
+_SUCCESS_STATUSES = frozenset({"ok", "dry-run", "completed"})
 
 # Versioned read contracts for higher-level surfaces (issue #631). These are
 # browser-safe allowlisted views over run artifacts; the CLI stays the single
@@ -497,20 +497,12 @@ def _is_terminal(meta: dict[str, Any]) -> bool:
 
 
 def _run_display_is_terminal(run_dir: Path, meta: Mapping[str, Any]) -> bool:
-    """Display terminal state: a journal terminal event wins over stale run.json.
-
-    A crash after fsyncing a terminal lifecycle event but before replacing
-    ``run.json`` leaves a non-terminal snapshot. When a journal is present and
-    contains a terminal event, inspect/show/run-detail treat the run as
-    terminal so they never contradict the journal they also cite. Legacy runs
-    without a lifecycle journal still read terminal purely from ``run.json``.
-    """
-    if _is_terminal(dict(meta)):
-        return True
+    """Display the current verified state, including a later research reopen."""
     try:
-        return _terminal_lifecycle_event(run_dir) is not None
+        effective, _ = _read_run_state(run_dir, meta)
     except ValueError:
         return False
+    return _is_terminal(effective)
 
 
 def _terminal_label(meta: Mapping[str, Any], *, run_dir: Path | None = None) -> str:
@@ -519,28 +511,24 @@ def _terminal_label(meta: Mapping[str, Any], *, run_dir: Path | None = None) -> 
     return "terminal" if _is_terminal(dict(meta)) else "running"
 
 
+def _read_run_state(
+    run_dir: Path, meta: Mapping[str, Any], *, tolerate_io_errors: bool = False
+) -> tuple[dict[str, Any], Any | None]:
+    from .runs_read_state import read_run_state
+
+    return read_run_state(
+        run_dir,
+        meta,
+        nonterminal_statuses=_NONTERMINAL_STATUSES,
+        terminal_event_types=_TERMINAL_LIFECYCLE_EVENT_TYPES,
+        tolerate_io_errors=tolerate_io_errors,
+    )
+
+
 def _terminal_lifecycle_event(run_dir: Path):
-    """Return the first terminal lifecycle event, or None for legacy runs.
-
-    Raises ``ValueError`` when a recorded journal exists but is corrupt; runs
-    without a lifecycle journal are legacy roots and simply have no event.
-    """
-    from . import run_journal, run_lifecycle
-
-    journal_path = run_lifecycle._journal_path(run_dir)
-    try:
-        if not journal_path.is_file():
-            return None
-        report = run_journal.read_journal_bounded(journal_path)
-    except run_journal.RunJournalError as exc:
-        raise ValueError(f"lifecycle journal is unreadable: {exc.diagnostic}") from exc
-    except OSError as exc:
-        raise ValueError(f"lifecycle journal is unreadable: {exc}") from exc
-    if report.partial_tail is not None:
-        raise ValueError("lifecycle journal ends in a partial trailing record")
-    if report.chain_errors:
-        raise ValueError(f"lifecycle journal is corrupt: {report.chain_errors[0]}")
-    return next((event for event in report.events if event.event_type in _TERMINAL_LIFECYCLE_EVENT_TYPES), None)
+    """Return the effective terminal event, or None for legacy/reopened runs."""
+    _, terminal_event = _read_run_state(run_dir, {"status": "started"})
+    return terminal_event
 
 
 def _approval_resume_state(meta: Mapping[str, Any]) -> str | None:
@@ -1597,6 +1585,7 @@ def _poll_watch_artifacts(
         if run_meta is None:
             print(f"error: run.json not found in {run_dir}", file=sys.stderr)
             return None, 2
+        run_meta, _ = _read_run_state(run_dir, run_meta)
         run_sig = _artifact_signature(run_meta)
         if signatures.get("run") != run_sig:
             _emit_run(run_meta, json_output=json_output)
@@ -1970,7 +1959,7 @@ def _detail_run_section(run_dir: Path, meta: dict[str, Any]) -> dict[str, object
                 "error": _clean_str(meta.get("error"), _DETAIL_TEXT_LIMIT),
                 "suspected_noop": True if meta.get("suspected_noop") is True else None,
                 "resume_available": _resume_available(run_dir),
-                "terminal": _terminal_label(meta, run_dir=run_dir),
+                "terminal": _terminal_label(meta),
                 "lineage": _detail_lineage_section(run_dir, meta),
             },
         ),
@@ -2224,6 +2213,7 @@ def run_detail_contract(run_dir: Path) -> tuple[dict[str, object] | None, str | 
         run_meta = _read_json(run_dir / "run.json")
         if run_meta is None:
             return None, f"error: run.json not found in {run_dir}", 2
+        run_meta, _ = _read_run_state(run_dir, run_meta, tolerate_io_errors=True)
         roster = _read_json(run_dir / "roster.json")
         plan = _read_json(run_dir / "plan.json")
         worker_results = _read_json(run_dir / "worker-results.json")
@@ -3492,6 +3482,7 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
         if run_meta is None:
             print(f"error: run.json not found in {run_dir}", file=sys.stderr)
             return 2
+        run_meta, _ = _read_run_state(run_dir, run_meta, tolerate_io_errors=True)
         roster = _read_json(run_dir / "roster.json")
         plan = _read_json(run_dir / "plan.json")
         worker_results = _read_json(run_dir / "worker-results.json")
@@ -3502,7 +3493,7 @@ def show(run_dir: Path, *, json_output: bool = False) -> int:
 
     print(f"run: {run_dir}")
     _line("status", run_meta.get("status"))
-    print(f"terminal: {'yes' if _run_display_is_terminal(run_dir, run_meta) else 'no'}")
+    print(f"terminal: {'yes' if _is_terminal(run_meta) else 'no'}")
     _line("task", run_meta.get("task"))
     _line("cwd", run_meta.get("cwd"))
     mode = "read-only" if run_meta.get("read_only") else "normal"
@@ -3547,6 +3538,8 @@ def inspect(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     assert run_dir is not None
     try:
         meta = _read_json(run_dir / "run.json")
+        if meta is not None:
+            meta, terminal_event = _read_run_state(run_dir, meta)
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -3558,12 +3551,7 @@ def inspect(run: str | Path, *, cwd: Path, runs_dir: Path | None = None) -> int:
     _line("run id", run_dir.name)
     _line("status", meta.get("status"))
     _print_lineage(meta, run_dir=run_dir)
-    try:
-        terminal_event = _terminal_lifecycle_event(run_dir)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
-        return 2
-    is_terminal = _is_terminal(meta) or terminal_event is not None
+    is_terminal = _is_terminal(meta)
     print(f"terminal: {'yes' if is_terminal else 'no'}")
     if terminal_event is not None:
         _line("terminal event", terminal_event.event_id)

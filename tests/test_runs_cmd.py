@@ -20,6 +20,7 @@ from brigade import run_checkpoint
 from brigade import run_events
 from brigade import run_journal
 from brigade import run_lifecycle
+from brigade import run_projector
 from brigade import run_resume
 from brigade import run_redaction
 from brigade import runguard
@@ -4494,3 +4495,253 @@ def test_validate_child_branch_point_rejects_traversal_parent_id(tmp_path):
     assert parent_dir is None
     assert error is not None
     assert "malformed parent_run_id" in error
+
+
+def _write_reader_journal(run_dir, facts):
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    for sequence, (event_type, payload) in enumerate(facts, start=1):
+        run_journal.append_event(
+            journal,
+            run_id=run_dir.name,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=f"reader-fact-{sequence}",
+            expected_previous_sequence=sequence - 1,
+            recorded_at="2026-10-28T12:00:00.000000Z",
+        )
+    return journal
+
+
+@pytest.mark.parametrize(
+    "event_type,status,expected",
+    [
+        ("run.failed", "failed", 1),
+        ("run.failed", "timeout", 1),
+        ("run.failed", "incomplete", 1),
+        ("run.interrupted", "canceled", 1),
+        ("run.interrupted", "cancelled", 1),
+        ("run.orphaned", "orphaned", 1),
+        ("run.completed", "ok", 0),
+        ("run.completed", "dry-run", 0),
+        ("run.completed", "completed", 0),
+    ],
+)
+@pytest.mark.parametrize("json_output", [False, True])
+def test_show_and_latest_use_durable_terminal_outcome(tmp_path, capsys, event_type, status, expected, json_output):
+    run_dir = tmp_path / ".brigade" / "runs" / "stale-outcome"
+    _write_minimal_run(run_dir, task="synthetic task", status="dispatching", started_at="2026-10-28T11:00:00Z")
+    journal = _write_reader_journal(
+        run_dir,
+        [
+            ("run.created", {"status": "started"}),
+            (event_type, {"status": status}),
+            ("run.dispatch.completed", {"seat": "worker", "attempt": 1}),
+        ],
+    )
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+    for command in (["show", run_dir.name], ["latest"]):
+        argv = ["runs", *command, "--cwd", str(tmp_path)]
+        if json_output:
+            argv.append("--json")
+        assert cli.main(argv) == expected
+        output = capsys.readouterr().out
+        if json_output:
+            assert json.loads(output)["run"]["status"] == status
+            assert json.loads(output)["run"]["terminal"] == "terminal"
+        else:
+            assert f"status: {status}" in output
+            assert "terminal: yes" in output
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
+
+
+def test_readers_respect_reopen_and_later_terminal_outcome(tmp_path, capsys):
+    run_dir = tmp_path / ".brigade" / "runs" / "reopened"
+    _write_minimal_run(run_dir, task="synthetic task", status="failed", started_at="2026-10-28T11:00:00Z")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["finished_at"] = "2026-10-28T11:01:00Z"
+    meta["error"] = "previous failure"
+    meta["failure_phase"] = "stale-lock-recovery"
+    meta["failure_kind"] = "previous-failure"
+    meta["failure"] = {"phase": "stale-lock-recovery", "kind": "previous-failure", "detail": "previous failure"}
+    _write_json(run_dir / "run.json", meta)
+    facts = [
+        ("run.created", {"status": "started"}),
+        ("run.failed", {"status": "failed"}),
+        ("run.recovery.started", {"detail": "synthetic reopen"}),
+    ]
+    journal = _write_reader_journal(run_dir, facts)
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+
+    assert runs_cmd.show(run_dir) == 0
+    output = capsys.readouterr().out
+    assert "status: running" in output
+    assert "terminal: no" in output
+    assert "finished:" not in output
+    assert "duration:" not in output
+    assert "previous failure" not in output
+    assert "stale-lock-recovery" not in output
+    assert runs_cmd.inspect(run_dir, cwd=tmp_path) == 0
+    output = capsys.readouterr().out
+    assert "status: running" in output
+    assert "terminal: no" in output
+    assert "terminal event:" not in output
+    assert runs_cmd._run_display_is_terminal(run_dir, meta) is False
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
+
+    terminal = run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.completed",
+        payload={"status": "completed"},
+        idempotency_key="completed-after-reopen",
+        expected_previous_sequence=3,
+        recorded_at="2026-10-28T12:01:00.000000Z",
+    )
+    assert runs_cmd.show(run_dir) == 0
+    assert "status: completed" in capsys.readouterr().out
+    assert runs_cmd.inspect(run_dir, cwd=tmp_path) == 0
+    assert f"terminal event: {terminal.event_id}" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("damage", ["partial", "corrupt", "foreign-run", "invalid-status"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_show_rejects_unverified_terminal_outcomes(tmp_path, capsys, damage, json_output):
+    run_dir = tmp_path / "damaged"
+    _write_minimal_run(run_dir, task="synthetic task", status="running", started_at="2026-10-28T11:00:00Z")
+    journal = _write_reader_journal(
+        run_dir,
+        [
+            ("run.created", {"status": "started"}),
+            ("run.failed", {"status": "ok" if damage == "invalid-status" else "failed"}),
+        ],
+    )
+    if damage == "partial":
+        journal.write_bytes(journal.read_bytes() + b'{"partial":')
+    elif damage == "corrupt":
+        journal.write_bytes(journal.read_bytes().replace(b'"failed"', b'"error!"'))
+    elif damage == "foreign-run":
+        other = tmp_path / "other"
+        other.mkdir()
+        foreign = _write_reader_journal(other, [("run.failed", {"status": "failed"})])
+        journal.write_bytes(foreign.read_bytes())
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+
+    assert runs_cmd.show(run_dir, json_output=json_output) == 2
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "lifecycle journal" in captured.err
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
+
+
+def test_show_resolves_current_directory_for_journal_identity(tmp_path, capsys, monkeypatch):
+    run_dir = tmp_path / "relative-outcome"
+    _write_minimal_run(run_dir, task="synthetic task", status="dispatching", started_at="2026-10-28T11:00:00Z")
+    _write_reader_journal(run_dir, [("run.failed", {"status": "failed"})])
+    monkeypatch.chdir(run_dir)
+
+    assert runs_cmd.show(Path(".")) == 1
+    assert "status: failed" in capsys.readouterr().out
+
+
+def _stamp_reader_authority(run_dir, *, covered_sequence):
+    report = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta.update(
+        run_journal_authority_requested=True,
+        projector_version=run_projector.PROJECTOR_VERSION,
+        journal_present=True,
+        journal_last_sequence=covered_sequence,
+        journal_last_event_digest=report.events[covered_sequence - 1].event_digest,
+    )
+    _write_json(run_dir / "run.json", meta)
+    return meta
+
+
+@pytest.mark.parametrize("damage", ["missing", "empty", "prefix", "digest", "cursor", "metadata", "version", "io"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_readers_reject_authoritative_snapshot_without_verified_prefix(
+    tmp_path, capsys, monkeypatch, damage, json_output
+):
+    run_dir = tmp_path / "projected"
+    _write_minimal_run(run_dir, task="synthetic task", status="ok", started_at="2026-10-28T11:00:00Z")
+    journal = _write_reader_journal(
+        run_dir, [("run.created", {"status": "started"}), ("run.completed", {"status": "ok"})]
+    )
+    meta = _stamp_reader_authority(run_dir, covered_sequence=2)
+    if damage == "missing":
+        journal.unlink()
+    elif damage == "empty":
+        journal.write_bytes(b"")
+    elif damage == "prefix":
+        journal.write_bytes(journal.read_bytes().splitlines(keepends=True)[0])
+    elif damage == "digest":
+        meta["journal_last_event_digest"] = "0" * 64
+    elif damage == "cursor":
+        meta["journal_last_sequence"] = True
+    elif damage == "metadata":
+        del meta["journal_last_sequence"]
+    elif damage == "version":
+        meta["projector_version"] = "unknown"
+    elif damage == "io":
+
+        def unreadable(_path):
+            raise OSError("synthetic unavailable journal")
+
+        monkeypatch.setattr(run_journal, "read_journal_bounded", unreadable)
+    _write_json(run_dir / "run.json", meta)
+    original = (run_dir / "run.json").read_bytes()
+
+    assert runs_cmd.show(run_dir, json_output=json_output) == 2
+    assert "lifecycle journal" in capsys.readouterr().err
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0, json_output=json_output) == 2
+    captured = capsys.readouterr()
+    assert "lifecycle journal" in captured.err
+    if json_output:
+        assert all(json.loads(line)["type"] != "summary" for line in captured.out.splitlines())
+    else:
+        assert not any(line.startswith("summary:") for line in captured.out.splitlines())
+    assert original == (run_dir / "run.json").read_bytes()
+
+
+@pytest.mark.parametrize("version", [1, run_projector.PROJECTOR_VERSION])
+def test_saved_cursor_detects_same_status_later_outcome_and_preserves_current_metadata(tmp_path, capsys, version):
+    run_dir = tmp_path / "repeated-failure"
+    _write_minimal_run(run_dir, task="synthetic task", status="failed", started_at="2026-10-28T11:00:00Z")
+    journal = _write_reader_journal(
+        run_dir,
+        [
+            ("run.created", {"status": "started"}),
+            ("run.failed", {"status": "failed"}),
+            ("run.recovery.started", {"detail": "synthetic reopen"}),
+            ("run.failed", {"status": "failed"}),
+        ],
+    )
+    meta = _stamp_reader_authority(run_dir, covered_sequence=2)
+    meta.update(projector_version=version, finished_at="2026-10-28T11:01:00Z", duration_seconds=3, error="old failure")
+    _write_json(run_dir / "run.json", meta)
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+
+    assert runs_cmd.show(run_dir) == 1
+    output = capsys.readouterr().out
+    assert "finished:" not in output and "duration:" not in output and "old failure" not in output
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0) == 1
+    assert "summary: failed in unknown duration" in capsys.readouterr().out
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
+
+    current = _stamp_reader_authority(run_dir, covered_sequence=4)
+    current.update(projector_version=version, duration_seconds=9, error="current failure")
+    _write_json(run_dir / "run.json", current)
+    assert runs_cmd.show(run_dir) == 1
+    output = capsys.readouterr().out
+    assert "duration: 9s" in output and "current failure" in output
+
+
+def test_authority_request_without_projection_metadata_keeps_bootstrap_fallback(tmp_path, capsys):
+    run_dir = tmp_path / "bootstrap"
+    _write_minimal_run(run_dir, task="synthetic task", status="started", started_at="2026-10-28T11:00:00Z")
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["run_journal_authority_requested"] = True
+    _write_json(run_dir / "run.json", meta)
+
+    assert runs_cmd.show(run_dir) == 0
+    assert "status: started" in capsys.readouterr().out

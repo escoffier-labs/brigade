@@ -1,7 +1,10 @@
 import json
 import shlex
 
+import pytest
+
 from brigade import cli
+from brigade import run_journal
 from brigade import runs_cmd
 
 
@@ -351,3 +354,104 @@ def test_runs_show_cli_resolves_bare_run_id_and_path(tmp_path, capsys):
     by_path = capsys.readouterr()
     assert "run directory not found" not in by_path.err
     assert "failure phase: stale-lock-recovery" in by_path.out
+
+
+def _append_watch_lifecycle(run_dir, event_type, payload):
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    previous = len(run_journal.read_journal_bounded(journal).events)
+    return run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key=f"watch-fact-{previous + 1}",
+        expected_previous_sequence=previous,
+        recorded_at="2026-10-28T12:00:00.000000Z",
+    )
+
+
+@pytest.mark.parametrize(
+    "event_type,status,expected",
+    [
+        ("run.failed", "failed", 1),
+        ("run.failed", "timeout", 1),
+        ("run.interrupted", "canceled", 1),
+        ("run.orphaned", "orphaned", 1),
+        ("run.completed", "ok", 0),
+        ("run.completed", "completed", 0),
+    ],
+)
+@pytest.mark.parametrize("json_output", [False, True])
+def test_watch_terminates_on_durable_outcome_with_stale_snapshot(
+    tmp_path, capsys, monkeypatch, event_type, status, expected, json_output
+):
+    run_dir = tmp_path / "stale-outcome"
+    _write_run(run_dir, status="dispatching")
+    _append_watch_lifecycle(run_dir, "run.created", {"status": "started"})
+    _append_watch_lifecycle(run_dir, event_type, {"status": status})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+
+    def unexpected_sleep(_seconds):
+        pytest.fail("watch polled again after a durable terminal outcome")
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", unexpected_sleep)
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0, json_output=json_output) == expected
+    output = capsys.readouterr().out
+    if json_output:
+        records = [json.loads(line) for line in output.splitlines()]
+        assert next(row for row in records if row["type"] == "run")["status"] == status
+        summaries = [row for row in records if row["type"] == "summary"]
+        assert len(summaries) == 1
+        assert summaries[0]["status"] == status
+    else:
+        assert f"status: {status}" in output
+        assert f"summary: {status}" in output
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_watch_waits_through_reopen_until_new_terminal_event(tmp_path, capsys, monkeypatch, json_output):
+    run_dir = tmp_path / "reopened"
+    _write_run(run_dir, status="failed", finished=True)
+    _append_watch_lifecycle(run_dir, "run.created", {"status": "started"})
+    _append_watch_lifecycle(run_dir, "run.failed", {"status": "failed"})
+    _append_watch_lifecycle(run_dir, "run.recovery.started", {"detail": "synthetic reopen"})
+    snapshot = (run_dir / "run.json").read_bytes()
+    sleeps = []
+
+    def finish_reopened_run(_seconds):
+        sleeps.append(True)
+        assert len(sleeps) == 1, "watch ignored the new durable outcome"
+        _append_watch_lifecycle(run_dir, "run.failed", {"status": "incomplete"})
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", finish_reopened_run)
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0, json_output=json_output) == 1
+    assert len(sleeps) == 1
+    output = capsys.readouterr().out
+    if json_output:
+        records = [json.loads(line) for line in output.splitlines()]
+        assert [row["status"] for row in records if row["type"] == "run"] == ["running", "incomplete"]
+        assert [row["status"] for row in records if row["type"] == "summary"] == ["incomplete"]
+    else:
+        assert "status: running" in output
+        assert "summary: incomplete" in output
+        assert "summary: failed" not in output
+    assert snapshot == (run_dir / "run.json").read_bytes()
+
+
+def test_watch_reports_partial_terminal_journal_without_success_summary(tmp_path, capsys, monkeypatch):
+    run_dir = tmp_path / "partial"
+    _write_run(run_dir, status="ok", finished=True)
+    _append_watch_lifecycle(run_dir, "run.completed", {"status": "ok"})
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    journal.write_bytes(journal.read_bytes() + b'{"partial":')
+
+    def unexpected_sleep(_seconds):
+        pytest.fail("watch polled an invalid journal")
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", unexpected_sleep)
+    assert runs_cmd.watch(run_dir, cwd=tmp_path, interval=0, json_output=True) == 2
+    captured = capsys.readouterr()
+    assert "lifecycle journal" in captured.err
+    assert not any(json.loads(line)["type"] == "summary" for line in captured.out.splitlines())

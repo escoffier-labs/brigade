@@ -792,3 +792,44 @@ def test_allowlisted_rejects_allowlist_key_without_cleaned_counterpart():
         frozenset({"task", "secret"}),
     )
     assert payload == {"task": "clean-task"}
+
+
+def test_json_detail_and_watch_stream_share_durable_failed_outcome(tmp_path, capsys, monkeypatch):
+    from brigade import run_journal
+
+    run_dir = tmp_path / ".brigade" / "runs" / "stale-json-outcome"
+    _plant_sensitive_run(run_dir)
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["status"] = "dispatching"
+    _write_json(run_dir / "run.json", meta)
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.failed",
+        payload={"status": "failed", "detail": PLANTED_ABS_FAILURE},
+        idempotency_key="synthetic-json-failure",
+        expected_previous_sequence=0,
+        recorded_at="2026-10-28T12:00:00.000000Z",
+    )
+    original = (run_dir / "run.json").read_bytes(), journal.read_bytes()
+    for command in (["show", run_dir.name], ["latest"]):
+        assert cli.main(["runs", *command, "--cwd", str(tmp_path), "--json"]) == 1
+        raw = capsys.readouterr().out
+        payload = json.loads(raw)
+        assert payload["run"]["status"] == "failed"
+        assert payload["run"]["terminal"] == "terminal"
+        _assert_raw_clean(raw)
+        _assert_allowlist(payload)
+
+    def unexpected_sleep(_seconds):
+        pytest.fail("watch stream ignored the durable terminal outcome")
+
+    monkeypatch.setattr(runs_cmd.time, "sleep", unexpected_sleep)
+    records = list(runs_cmd.iter_watch_records(run_dir, interval=0))
+    assert next(row for row in records if row["type"] == "run")["status"] == "failed"
+    assert records[-1]["type"] == "summary"
+    assert records[-1]["status"] == "failed"
+    for record in records:
+        _assert_allowlist(record)
+    assert original == ((run_dir / "run.json").read_bytes(), journal.read_bytes())
