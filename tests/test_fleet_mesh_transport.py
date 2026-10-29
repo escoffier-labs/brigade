@@ -163,6 +163,9 @@ def test_strict_json(transport, raw):
 @pytest.mark.parametrize("body", [None, b'{"action":"identity"}'])
 def test_redirects_never_follow(transport, server, status, body, monkeypatch):
     monkeypatch.setenv("http_proxy", "http://proxy.invalid")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("no_proxy", "")
+    monkeypatch.setenv("NO_PROXY", "")
     server.callback = lambda body: (status, {})
     result, _ = transport._wire(
         origin=server.origin, token=None if body is None else "fixture-token", body=body, timeout=2, limit=65536
@@ -463,7 +466,9 @@ def test_missing_crypto_and_native_platform_are_explicit(transport, monkeypatch,
     with pytest.raises(crypto.MeshExtraMissing):
         transport.observe_hub_identity(brigade_home=tmp_path, authority=authority)
     monkeypatch.setattr(crypto, "probe_backend", lambda: None)
-    monkeypatch.setattr(identity.os, "name", "nt")
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(identity, "os", SimpleNamespace(name="nt"))
     with pytest.raises(crypto.MeshError, match="mesh_identity_platform_unsupported"):
         transport.observe_hub_identity(brigade_home=tmp_path, authority=authority)
     assert not server.calls
@@ -688,3 +693,132 @@ def test_conflict_requires_exact_active_readback(transport, prepared, server, re
         publish(transport, prepared)
     assert caught.value.remote_effect == "possible"
     assert sum(call[3]["action"] == "keys_publish" for call in server.calls) == 1
+
+
+@pytest.mark.parametrize("unsupported", ["manifest", "future-kind"])
+def test_unsupported_bundle_refuses_before_any_local_import(transport, prepared, server, monkeypatch, unsupported):
+    """A three-kind Hub bundle must not advance membership while blocking revocations."""
+    if prepared is None:
+        return
+    from brigade import fleet_mesh_statements as statements
+    from brigade import fleet_mesh_trust as trust
+
+    home, authority, _, signed = prepared
+    pin_anchor(home, signed["hub_id"])
+    bundle = {}
+    for kind, field in (("membership", "members"), ("manifest", "keys"), ("revocation", "revocations")):
+        bundle[kind] = statements.sign_statement(
+            {"v": 1, "hub": signed["hub_id"], "seq": 1, "created_at": "2026-01-02T00:00:00Z", field: []},
+            bytes(reversed(range(32))),
+            expected_kind=kind,
+        )
+    if unsupported != "manifest":
+        bundle[unsupported] = bundle.pop("manifest")
+    server.callback = lambda body: (
+        (200, {"principal": "node-a"}) if body["action"] == "identity" else (200, {"statements": bundle})
+    )
+    baseline = trust.load_trust(brigade_home=home)
+    files = {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()}
+    imports = []
+    original = trust.import_statement
+
+    def record_import(**kwargs):
+        imports.append(kwargs["kind"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(trust, "import_statement", record_import)
+    for _ in range(2):
+        with pytest.raises(transport.MeshTransportError) as caught:
+            transport.import_hub_statements(brigade_home=home, authority=authority, expected_principal="node-a")
+        assert imports == []
+        assert trust.load_trust(brigade_home=home) == baseline
+        assert {p.relative_to(home): p.read_bytes() for p in home.rglob("*") if p.is_file()} == files
+        assert caught.value.code == "mesh_transport_statements_unsupported"
+        assert caught.value.remote_effect == "none"
+
+
+@pytest.mark.parametrize("status", [200, 400])
+def test_operation_reports_oversized_reply_as_response_refusal(transport, prepared, server, status):
+    if prepared is None:
+        return
+    home, authority, _, _ = prepared
+    server.callback = lambda body: (status, b'{"error":"' + b"x" * 65536 + b'"}')
+    with pytest.raises(transport.MeshTransportError) as caught:
+        transport.observe_hub_identity(brigade_home=home, authority=authority)
+    assert caught.value.code == "mesh_transport_response"
+    assert caught.value.remote_effect == "none"
+
+
+def test_first_import_failure_preserves_fixed_cause(transport, prepared, server):
+    if prepared is None:
+        return
+    from brigade import fleet_mesh_crypto as crypto
+    from brigade import fleet_mesh_statements as statements
+    from brigade import fleet_mesh_trust as trust
+
+    home, authority, _, signed = prepared
+    pin_anchor(home, signed["hub_id"])
+    membership = statements.sign_statement(
+        {"v": 1, "hub": signed["hub_id"], "seq": 1, "created_at": "2026-01-02T00:00:00Z", "members": []},
+        bytes(reversed(range(32))),
+        expected_kind="membership",
+    )
+    server.callback = lambda body: (
+        (200, {"principal": "node-a"})
+        if body["action"] == "identity"
+        else (200, {"statements": {"membership": membership}})
+    )
+    newer = statements.sign_statement(
+        {"v": 1, "hub": signed["hub_id"], "seq": 2, "created_at": "2026-01-02T00:00:00Z", "members": []},
+        bytes(reversed(range(32))),
+        expected_kind="membership",
+    )
+    assert (
+        trust.import_statement(
+            brigade_home=home, hub=signed["hub_id"], kind="membership", raw=crypto.canonical(newer)
+        ).status
+        == "accepted"
+    )
+    baseline = trust.load_trust(brigade_home=home)
+    with pytest.raises(crypto.MeshError) as caught:
+        transport.import_hub_statements(brigade_home=home, authority=authority, expected_principal="node-a")
+    assert caught.value.code == "signed_statement_rollback"
+    assert trust.load_trust(brigade_home=home) == baseline
+
+
+def test_cross_origin_redirect_never_discloses_authority(transport, server):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import threading
+
+    hits = []
+
+    class Destination(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            hits.append(self.headers.get("Authorization"))
+            self.send_response(200)
+            self.end_headers()
+
+        do_GET = do_POST
+
+    destination = ThreadingHTTPServer(("localhost", 0), Destination)
+    worker = threading.Thread(target=destination.serve_forever, daemon=True)
+    worker.start()
+    try:
+        # The existing fixture builds Location from its mutable origin; keep
+        # the original request bound to the original listener's actual port.
+        origin = server.origin
+        server.origin = "http://localhost:" + str(destination.server_port)
+        server.callback = lambda body: (307, {})
+        status, _ = transport._wire(
+            origin=origin, token="synthetic-bearer", body=b'{"action":"identity"}', timeout=2, limit=65536
+        )
+        assert status == 307
+        assert len(server.calls) == 1
+        assert hits == []
+    finally:
+        destination.shutdown()
+        destination.server_close()
+        worker.join()

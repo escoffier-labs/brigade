@@ -49,11 +49,12 @@ _CODES = frozenset(
         "mesh_transport_key",
         "mesh_transport_local",
         "mesh_transport_partial_import",
+        "mesh_transport_statements_unsupported",
     }
 )
 _SMALL = 64 * 1024
 _BUNDLE = 8 * 1024 * 1024
-_ORDER = ("membership", "manifest", "revocation")
+_ORDER = ("membership", "revocation")
 
 
 class MeshTransportError(fleet_client.FleetClientError):
@@ -223,9 +224,9 @@ class _Operation:
 
     def check(self) -> None:
         try:
+            # validate() compares the current endpoint/credential scope with
+            # the captured authority; its hub field itself is immutable.
             self.authority.validate()
-            if statements.normalize_origin(self.authority.hub) != self.origin:
-                raise ValueError
             if self.load_identity() != self.selected:
                 raise ValueError
             if self.trusted is not None and trust.load_trust(brigade_home=self.home) != self.trusted:
@@ -266,7 +267,11 @@ class _Operation:
             raise MeshTransportError(error.code, remote_effect=self.effect) from None
         except TimeoutError:
             raise MeshTransportError("mesh_transport_timeout", remote_effect=self.effect) from None
-        except (OSError, ValueError, http.client.HTTPException, fleet_client.FleetClientError):
+        except fleet_client.FleetClientError:
+            # The wire reader uses fixed FleetClientError refusals for invalid
+            # or oversized response streams, not connection failures.
+            raise MeshTransportError("mesh_transport_response", remote_effect=self.effect) from None
+        except (OSError, ValueError, http.client.HTTPException):
             raise MeshTransportError("mesh_transport_unavailable", remote_effect=self.effect) from None
 
     def authenticate(self, expected: str) -> None:
@@ -354,8 +359,11 @@ def observe_hub_identity(
 def import_hub_statements(
     *, brigade_home: Path, authority: MessageAuthority, expected_principal: str, timeout: float = 12.0
 ) -> dict[str, trust.ImportResult]:
-    """Prevalidate the complete bundle, then import in fixed order.
+    """Import only membership/revocation bundles after complete prevalidation.
 
+    Any unsupported kind, including a key manifest, refuses the entire bundle
+    before a local import. A Hub serving manifests is unsupported by this
+    adapter until durable manifest admission has its own reviewed contract.
     Conflicts are returned honestly. Later failures preserve earlier imports;
     retries use the stores' existing idempotent replay behavior.
     """
@@ -368,13 +376,10 @@ def import_hub_statements(
     public = crypto.decode_binary(data["anchors"][signer]["public_key"], 32)
     op.authenticate(expected_principal)
     status, bundle, _ = op.request({"action": "manifests_get"}, limit=_BUNDLE)
-    if (
-        status != 200
-        or set(bundle) != {"statements"}
-        or not isinstance(bundle["statements"], dict)
-        or not bundle["statements"].keys() <= set(_ORDER)
-    ):
+    if status != 200 or set(bundle) != {"statements"} or not isinstance(bundle["statements"], dict):
         raise MeshTransportError("mesh_transport_response")
+    if not bundle["statements"].keys() <= set(_ORDER):
+        raise MeshTransportError("mesh_transport_statements_unsupported")
     prepared = {}
     for kind in _ORDER:
         if kind in bundle["statements"]:
@@ -389,8 +394,12 @@ def import_hub_statements(
         op.check()
         try:
             results[kind] = trust.import_statement(brigade_home=brigade_home, hub=op.hub, kind=kind, raw=raw)
-        except (ValueError, OSError):
-            raise MeshTransportError("mesh_transport_partial_import") from None
+        except (ValueError, OSError) as error:
+            if results:
+                raise MeshTransportError("mesh_transport_partial_import") from None
+            if isinstance(error, crypto.MeshError):
+                raise
+            raise MeshTransportError("mesh_transport_local") from None
         # Each store owns admission under its own lock. Accept only the intended
         # import transition; unrelated state must not be silently rebased.
         updated = trust.load_trust(brigade_home=brigade_home)

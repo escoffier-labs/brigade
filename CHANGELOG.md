@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
+
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
