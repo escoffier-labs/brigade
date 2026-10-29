@@ -131,6 +131,187 @@ def test_cap_bounds_attempts_and_observations(setup, monkeypatch):
     assert report["truncated"]
 
 
+def test_disabled_history_does_not_starve_first_live_renewal(setup, monkeypatch):
+    target, snapshot, _, sent, observe = setup
+    history = [replace(snapshot, session_id=f"ended-{index}") for index in range(200)]
+    for ended in history:
+        _invalidate(ended)
+    names = [state.record_name(s.harness, s.session_id) for s in [*history, snapshot]]
+    monkeypatch.setattr(heartbeat.dirfd, "child_names", lambda fd, limit: names[:limit])
+    report = observe(publish=True)
+    assert report["observed"] == report["live"] == report["published"] == 1
+    assert report["ok"] and not report["truncated"]
+    assert sent == [snapshot]
+    with anchored_io.session_directory(target) as anchor:
+        assert all(not (target / ".brigade/work/claude-hooks/sessions" / name).exists() for name in names[:-1])
+        assert state.read_record(anchor, names[-1])["enabled"] is True
+    assert str(target) not in json.dumps(report) and snapshot.session_id not in json.dumps(report)
+    assert all(isinstance(value, (bool, int)) for key, value in report.items() if key != "mode")
+
+
+def test_expired_unowned_records_are_pruned_but_live_and_recent_records_survive(setup):
+    target, snapshot, processes, sent, observe = setup
+    old = replace(snapshot, session_id="old-dead")
+    recent = replace(snapshot, session_id="recent-dead")
+    disabled_live = replace(snapshot, session_id="disabled-live")
+    for saved in (old, recent, disabled_live):
+        _remember(saved)
+        name = state.record_name(saved.harness, saved.session_id)
+        record = anchored_io.read_json(target, name)
+        if saved == disabled_live:
+            record["enabled"] = False
+        else:
+            record["process"]["start"] = "456"
+        anchored_io.write_json(target, name, record)
+    directory = target / ".brigade/work/claude-hooks/sessions"
+    for saved in (snapshot, old, disabled_live):
+        os.utime(directory / state.record_name(saved.harness, saved.session_id), (1, 1))
+    report = observe(publish=True)
+    assert report["live"] == 1 and sent == [snapshot]
+    assert not (directory / state.record_name(old.harness, old.session_id)).exists()
+    for saved in (snapshot, recent, disabled_live):
+        assert (directory / state.record_name(saved.harness, saved.session_id)).exists()
+    assert processes.alive(processes.rows[42].proof(), "claude")
+
+
+def test_newer_enabled_session_precedes_old_enabled_history(setup, monkeypatch):
+    target, snapshot, _, sent, observe = setup
+    older = []
+    for index in range(3):
+        saved = replace(snapshot, session_id=f"old-{index}")
+        _remember(saved)
+        name = state.record_name(saved.harness, saved.session_id)
+        record = anchored_io.read_json(target, name)
+        record["process"]["start"] = "456"
+        anchored_io.write_json(target, name, record)
+        os.utime(target / ".brigade/work/claude-hooks/sessions" / name, (1, 1))
+        older.append(name)
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    monkeypatch.setattr(heartbeat.dirfd, "child_names", lambda fd, limit: [*older, name][:limit])
+    monkeypatch.setattr(heartbeat, "SESSION_LIMIT", 1)
+    report = observe(publish=True)
+    assert report["observed"] == report["published"] == 1
+    assert report["truncated"] and sent == [snapshot]
+
+
+def test_expired_record_waits_for_ttl_and_obsolete_grace(setup, monkeypatch):
+    target, snapshot, _, _, observe = setup
+    saved = replace(snapshot, session_id="expiry-boundary", ttl_seconds=120)
+    _remember(saved)
+    name = state.record_name(saved.harness, saved.session_id)
+    record = anchored_io.read_json(target, name)
+    record["process"]["start"] = "456"
+    anchored_io.write_json(target, name, record)
+    path = target / ".brigade/work/claude-hooks/sessions" / name
+    now = 10000
+    monkeypatch.setattr(heartbeat.time, "time", lambda: now)
+    expiry = now - saved.ttl_seconds - state.OBSOLETE_GRACE_SECONDS
+    os.utime(path, (expiry + 1, expiry + 1))
+    assert observe()["live"] == 1 and path.exists()
+    os.utime(path, (expiry - 1, expiry - 1))
+    assert observe()["live"] == 1 and not path.exists()
+
+
+def test_inflight_hook_cannot_be_pruned(setup):
+    target, snapshot, _, _, observe = setup
+    newer = replace(snapshot, branch="newer-branch")
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+
+    def send():
+        assert anchored_io.read_json(target, name)["enabled"] is False
+        assert observe()["published"] == 0
+        assert anchored_io.read_json(target, name)["snapshot"]["branch"] == newer.branch
+        return True
+
+    assert state.publish_tracked(newer, send, successful=bool)
+    assert observe(publish=True)["published"] == 1
+
+
+def test_pruning_rereads_record_under_publication_lock(setup, monkeypatch):
+    from contextlib import contextmanager
+
+    target, snapshot, _, sent, observe = setup
+    _invalidate(snapshot)
+    newer = replace(snapshot, branch="newer-branch")
+    original = anchored_io.SessionDirectory.held_lock
+    raced = []
+
+    @contextmanager
+    def racing_lock(anchor, name, *, deadline_seconds):
+        if not raced:
+            raced.append(True)
+            _remember(newer)
+        with original(anchor, name, deadline_seconds=deadline_seconds):
+            yield
+
+    monkeypatch.setattr(anchored_io.SessionDirectory, "held_lock", racing_lock)
+    assert observe(publish=True)["published"] == 1
+    assert sent == [newer]
+    assert anchored_io.read_json(target, state.record_name(snapshot.harness, snapshot.session_id))["enabled"]
+
+
+def test_prune_holds_same_lock_as_hook_publication(setup, monkeypatch):
+    import threading
+
+    target, snapshot, _, _, observe = setup
+    _invalidate(snapshot)
+    original = heartbeat.dirfd.unlink_child
+    pruned = []
+
+    def unlink(fd, name):
+        if name.endswith(state.SUFFIX):
+            blocked = []
+
+            def hook():
+                try:
+                    _remember(snapshot)
+                except OSError:
+                    blocked.append(True)
+
+            worker = threading.Thread(target=hook)
+            worker.start()
+            worker.join(3)
+            assert not worker.is_alive() and blocked == [True]
+            pruned.append(name)
+        return original(fd, name)
+
+    monkeypatch.setattr(heartbeat.dirfd, "unlink_child", unlink)
+    assert observe()["observed"] == 0
+    assert pruned == [state.record_name(snapshot.harness, snapshot.session_id)]
+    _remember(snapshot)
+    assert observe(publish=True)["published"] == 1
+
+
+def test_disabled_reads_remain_bounded_by_directory_cap_and_deadline(setup, monkeypatch):
+    target, snapshot, _, _, observe = setup
+    _invalidate(snapshot)
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    monkeypatch.setattr(heartbeat, "DIRECTORY_LIMIT", 2)
+    monkeypatch.setattr(heartbeat.dirfd, "child_names", lambda fd, limit: [name] * limit)
+    original = anchored_io.SessionDirectory.read_bytes
+    reads = []
+
+    def read(anchor, name, max_bytes=None):
+        reads.append(max_bytes)
+        return original(anchor, name, max_bytes)
+
+    monkeypatch.setattr(anchored_io.SessionDirectory, "read_bytes", read)
+    assert observe()["truncated"]
+    assert len(reads) <= 2 and all(limit <= state.MAX_RECORD_BYTES + 1 for limit in reads)
+    _invalidate(snapshot)
+    clock = [100.0]
+    monkeypatch.setattr(heartbeat.time, "monotonic", lambda: clock[0])
+
+    def slow_read(anchor, name, max_bytes=None):
+        clock[0] += heartbeat.OBSERVATION_BUDGET_SECONDS
+        return original(anchor, name, max_bytes)
+
+    monkeypatch.setattr(anchored_io.SessionDirectory, "read_bytes", slow_read)
+    report = observe()
+    assert report["error"] == "observation_timeout" and report["truncated"]
+    assert (target / ".brigade/work/claude-hooks/sessions" / name).exists()
+
+
 def test_budget_reserves_entire_network_call(setup, monkeypatch):
     _, _, _, sent, observe = setup
     # Enough to read local metadata, too little for a two-second publication.

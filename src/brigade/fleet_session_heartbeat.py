@@ -12,7 +12,13 @@ from typing import Callable, Sequence
 from . import dirfd, fleet_client, proc
 from .claude_hooks import anchored_io
 from .fleet_openclaw_observer import ObservationError, _remaining, _require_node_auth
-from .fleet_session_heartbeat_state import LOCK_SECONDS, SUFFIX, read_record, snapshot_from_record
+from .fleet_session_heartbeat_state import (
+    LOCK_SECONDS,
+    OBSOLETE_GRACE_SECONDS,
+    SUFFIX,
+    read_record,
+    snapshot_from_record,
+)
 from .fleet_session_presence import SessionSnapshot, _hub_url_configured
 from .fleet_session_process import ProcessTable
 from .wiring import resolve_wired_target
@@ -25,6 +31,34 @@ WORKTREE_ENTRY_LIMIT = 512
 WORKTREE_TIMEOUT_SECONDS = 2
 OBSERVATION_BUDGET_SECONDS = 15
 Publisher = Callable[[SessionSnapshot], fleet_client.SessionWriteResult]
+
+
+def _ordered_records(anchor: anchored_io.SessionDirectory, names: list[str], deadline: float) -> list[str]:
+    """Prefer recent hook activity within the existing entry and time bounds."""
+    candidates = []
+    for name in names:
+        _remaining(deadline, cap=1)
+        if not name.endswith(SUFFIX):
+            continue
+        try:
+            with anchor.open_file(name, os.O_RDONLY) as fd:
+                candidates.append((os.fstat(fd).st_mtime_ns, name))
+        except OSError:
+            continue
+    return [name for _, name in sorted(candidates, reverse=True)]
+
+
+def _prune_record(
+    anchor: anchored_io.SessionDirectory, name: str, snapshot: SessionSnapshot, *, enabled: bool, deadline: float
+) -> None:
+    """Caller holds the publication lock and has ruled out a proven live owner."""
+    _remaining(deadline, cap=1)
+    with anchor.open_file(name, os.O_RDONLY) as fd:
+        info = anchor.validate_file(name, fd)
+        if not enabled or time.time() - info.st_mtime > snapshot.ttl_seconds + OBSOLETE_GRACE_SECONDS:
+            anchor.validate()
+            # Keep the lock inode: unlinking it could split concurrent lockers.
+            dirfd.unlink_child(anchor.fd, name)
 
 
 def _presence_mtime(target: Path, deadline: float) -> tuple[int | None, bool]:
@@ -164,25 +198,31 @@ def observe(
                     names = dirfd.child_names(anchor.fd, DIRECTORY_LIMIT + 1)
                     if len(names) > DIRECTORY_LIMIT:
                         report["truncated"] = True
-                    for name in names[:DIRECTORY_LIMIT]:
+                    for name in _ordered_records(anchor, names[:DIRECTORY_LIMIT], deadline):
                         _remaining(deadline, cap=1)
-                        if not name.endswith(SUFFIX):
-                            continue
                         if observed >= SESSION_LIMIT or (publish and attempted >= PUBLISH_LIMIT):
                             report["truncated"] = True
                             break
-                        observed += 1
                         try:
-                            with anchor.held_lock(name + ".lock", deadline_seconds=LOCK_SECONDS):
+                            with anchor.held_lock(
+                                name + ".lock", deadline_seconds=_remaining(deadline, cap=LOCK_SECONDS)
+                            ):
+                                # Every probe reads at most MAX_RECORD_BYTES + 1,
+                                # bounded separately by DIRECTORY_LIMIT and deadline.
                                 record = read_record(anchor, name)
                                 if record is None:
                                     continue
+                                enabled = record["enabled"]
+                                if enabled:
+                                    observed += 1
                                 snapshot = snapshot_from_record(record, target, name)
-                                if (
-                                    snapshot is None
-                                    or resolve_wired_target(str(target), harness=snapshot.harness) != target
-                                    or not table.alive(record["process"], snapshot.harness)
-                                ):
+                                if snapshot is None:
+                                    continue
+                                owner_alive = table.alive(record.get("process"), snapshot.harness)
+                                if not owner_alive:
+                                    _prune_record(anchor, name, snapshot, enabled=enabled, deadline=deadline)
+                                    continue
+                                if not enabled or resolve_wired_target(str(target), harness=snapshot.harness) != target:
                                     continue
                                 live += 1
                                 if publish:

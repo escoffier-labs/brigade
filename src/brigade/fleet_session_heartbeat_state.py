@@ -9,12 +9,15 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .claude_hooks import anchored_io
-from .fleet_session_presence import SessionSnapshot
+from .fleet_session_presence import DEFAULT_TTL_SECONDS, SessionSnapshot
 from .fleet_session_process import ProcessTable
 
 SUFFIX = ".presence"
 MAX_RECORD_BYTES = 65536
 LOCK_SECONDS = 0.05
+# Allow four default presence windows after expiry before collecting unowned
+# records. Quiet, long-running sessions are retained by process proof, not age.
+OBSOLETE_GRACE_SECONDS = 4 * DEFAULT_TTL_SECONDS
 T = TypeVar("T")
 
 
@@ -56,7 +59,7 @@ def read_record(anchor: anchored_io.SessionDirectory, name: str) -> dict[str, An
         value = json.loads(raw)
     except (ValueError, UnicodeError, RecursionError):
         return None
-    if not isinstance(value, dict) or value.get("version") != 1 or value.get("enabled") is not True:
+    if not isinstance(value, dict) or value.get("version") != 1 or type(value.get("enabled")) is not bool:
         return None
     return value
 
