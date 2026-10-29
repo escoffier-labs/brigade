@@ -422,6 +422,7 @@ def render_capacity(
                         {
                             "Capacity": f"{capacity} slots",
                             "In use": f"{station.busy} of {capacity} slots",
+                            **({"Agent sessions": station.sessions} if station.sessions else {}),
                             "Load": overview._load_cell(machine).split("<", 1)[0],
                             "Last seen": overview.format_age(overview.seconds_since(machine.last_observed_at, now))
                             if machine
@@ -456,6 +457,7 @@ def render_capacity(
                                 "Enrolled": station.enrolled,
                                 "Configured slots": capacity,
                                 "Reported used slots": station.busy,
+                                "Agent sessions": station.sessions,
                                 "Telemetry age": overview.format_age(
                                     overview.seconds_since(machine.last_observed_at, now)
                                 )
@@ -523,7 +525,9 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + str(station.busy)
             + '" max="'
             + str(max(1, capacity))
-            + '" aria-label="Reported used slots"></progress></div>'
+            + '" aria-label="Reported used slots"></progress>'
+            + (f"<div><span>Agent sessions</span><b>{station.sessions}</b></div>" if station.sessions else "")
+            + "</div>"
             '<div class="overview-machine-load"><span>Reported load</span><b>'
             + _esc(load)
             + "</b>"

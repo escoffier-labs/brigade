@@ -197,6 +197,24 @@ def list_sessions(
     return [_session_payload(row, now=now) for row in rows]
 
 
+def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[str, int]:
+    """Live sessions per node with no row limit, for capacity views.
+
+    Same live set as the Activity rows: active, unexpired, and not a terminal
+    v2 cloud report. The Activity list itself stops at ``LIST_ACTIVE_LIMIT``.
+    """
+    rows = conn.execute(
+        "SELECT node_id, COUNT(*) FROM interactive_sessions "
+        "WHERE state = 'active' AND expires_at > ? "
+        "AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
+        "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
+        "IN ('completed', 'failed', 'cancelled')) "
+        "GROUP BY node_id",
+        (now_epoch,),
+    ).fetchall()
+    return {str(node_id): int(count) for node_id, count in rows}
+
+
 def list_cloud_reports(
     conn: sqlite3.Connection,
     *,

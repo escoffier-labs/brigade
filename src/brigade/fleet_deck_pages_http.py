@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from . import fleet_command_deck, fleet_hub as _hub, fleet_hub_routing
+from . import fleet_command_deck, fleet_hub as _hub, fleet_hub_routing, fleet_hub_sessions
 from .fleet_hub import FleetHubError
 
 CAPACITY_TABS = {
@@ -79,6 +79,8 @@ def build_view(
         cloud_workers=deck.cloud_workers_from_snapshot(_hub.cloud_snapshot(conn, config)),
         interactive_sessions=interactive_sessions,
         control_plane=control_plane_from_hub(conn),
+        # Uncapped per-node counts: the Activity list above stops at a row limit.
+        session_counts=fleet_hub_sessions.count_live_by_node(conn, now_epoch=now.timestamp()),
     )
     return view, live_runs, interactive_sessions
 
