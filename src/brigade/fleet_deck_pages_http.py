@@ -130,12 +130,13 @@ def render(
     worklore_enabled: bool,
     extras: AdminExtras,
     board_options: Any,
+    query: str = "",
 ) -> str:
     from . import fleet_admin_pages
 
     if path in CAPACITY_TABS:
         return fleet_admin_pages.render_capacity(
-            view, now, nonce=nonce, worklore_enabled=worklore_enabled, tab=CAPACITY_TABS[path]
+            view, now, nonce=nonce, worklore_enabled=worklore_enabled, tab=CAPACITY_TABS[path], query=query
         )
     if path == "/deck/reporting":
         return fleet_admin_pages.render_reporting(

@@ -314,7 +314,7 @@ def render_activity(view: deck.DeckView, now: datetime, *, nonce: str, worklore_
 
 
 def render_capacity(
-    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity"
+    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity", query: str = ""
 ) -> str:
     if tab == "github-reads":
         # This dedicated tab intentionally shows the whole bounded observation.
@@ -478,7 +478,7 @@ def render_capacity(
         content = (
             '<div id="machines-table">'
             + explorer.render(
-                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1]
+                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1], query=query
             )
             + "</div>"
         )
