@@ -464,3 +464,37 @@ def test_observer_links_a_batch_within_the_native_budget(native_t3, capsys, monk
     capsys.readouterr()
     assert len(published) == 50
     assert all(s.provider_link is not None for s in published)
+
+
+def test_stalled_detail_read_does_not_block_publication(native_t3, capsys, monkeypatch):
+    import time
+
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "30")
+    configure(
+        [
+            {
+                "id": "app-thread-stalled",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-stalled",
+                "providerThreads": [
+                    {
+                        "id": "provider-stalled",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": "native-stalled", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    started = time.monotonic()
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert time.monotonic() - started < 8
+    assert len(published) == 1
+    assert published[0].provider_link is None

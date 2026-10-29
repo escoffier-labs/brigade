@@ -119,6 +119,11 @@ try:
     print(output)
 except Exception:
     print('{"error":"native_metadata_failed"}')
+# Exit without joining detail workers: a stalled optional lookup must not
+# hold the subprocess past its budget after the snapshot is printed.
+import sys
+sys.stdout.flush()
+os._exit(0)
 """
 
 
