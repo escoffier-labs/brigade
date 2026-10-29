@@ -34,13 +34,15 @@ _ACTION_WORDS = (
     r"design|redesign|restyle|style|mock up|lay out|critique|improve|make|implement|build|"
     r"add|fix|create|migrate|alter|remove|refactor|optimize|wire|bump|configure"
 )
-_ACTION = re.compile(r"^\s*(?:(?:please|only)\s+)?(?P<verb>" + _ACTION_WORDS + r")\b")
+_ACTION_START = r"(?:(?:please|only)\s+)?(?P<verb>" + _ACTION_WORDS + r")\b"
+_NEGATED_START = r"(?:please\s+)?(?:do not|don't|never|avoid)\b"
+_ACTION = re.compile(r"^\s*" + _ACTION_START)
 _CLAUSE_BOUNDARY = re.compile(
     r"[.!?;\n]+(?!\w)|(?:,\s*(?:(?:and(?:\s+also)?|then|also|plus|but)\s+)?|\s+(?:and(?:\s+also)?|then|also|plus|but)\s+)"
-    r"(?=(?:please\s+)?(?:(?:do not|don't|never|avoid)\b|(?:" + _ACTION_WORDS + r")\b))"
+    r"(?=(?:" + _NEGATED_START + "|" + _ACTION_START + "))"
 )
 _QUOTED = re.compile(r"\"[^\"\n]*\"|(?<!\w)'[^'\n]*'(?!\w)")
-_NEGATED = re.compile(r"^\s*(?:please\s+)?(?:do not|don't|never|avoid)\b")
+_NEGATED = re.compile(r"^\s*" + _NEGATED_START)
 _TOPIC = re.compile(
     r"\b(?:about|explaining|describing|discussing|titled|called|for|on|of|covering|announcing|with|in|to)\b"
 )

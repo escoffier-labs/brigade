@@ -335,3 +335,14 @@ def test_recognized_action_with_unsupported_object_retains_fixed_evidence(verb):
     assert decision.status == "ambiguous"
     assert decision.markers == ("backend-request:code",)
     assert "syntheticonly" not in str(decision.payload()).lower()
+
+
+@pytest.mark.parametrize("prefix", ["", "please ", "only "])
+@pytest.mark.parametrize("separator", [" and ", " plus ", " but ", ", then ", " and also "])
+@pytest.mark.parametrize("audience", ["Draft release notes about the API", "Redesign the login page for the API"])
+def test_action_boundaries_accept_the_same_prefixes_as_actions(prefix, separator, audience):
+    for backend in ["bump the version", "write the email-to-post converter"]:
+        for left, right in [(audience, backend), (backend, audience)]:
+            decision = task_roles.classify(left + separator + prefix + right)
+            assert (decision.status, decision.workload) == ("ambiguous", "general")
+            assert decision.markers
