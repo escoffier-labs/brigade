@@ -299,6 +299,11 @@ class Machine:
         """Distinct servers on this machine that drift, are missing, or are unmanaged."""
         return len({row.name for row in self.rows if row.label in NEEDS_ATTENTION})
 
+    @property
+    def unreadable(self) -> int:
+        """Harness configs that exist but could not be read, so nothing in them was checked."""
+        return sum(1 for config in self.harnesses if not config.readable)
+
 
 @dataclass(frozen=True)
 class Server:
@@ -463,6 +468,8 @@ def machine_verdict(machine: Machine) -> str:
         sentence += (
             f" {_plural(machine.attention, 'server')} {'needs' if machine.attention == 1 else 'need'} attention."
         )
-    else:
+    elif not machine.unreadable:
         sentence += " Everything matches the Brigade catalog."
+    if machine.unreadable:
+        sentence += f" {_plural(machine.unreadable, 'config')} could not be read, so {'it was' if machine.unreadable == 1 else 'they were'} not checked."
     return sentence

@@ -46,11 +46,11 @@ def remote_host(url: Any) -> str | None:
     return host if host and len(host) <= 253 and _HOST.fullmatch(host) else None
 
 
-def _split_harness(name: str) -> tuple[str, str]:
-    """``codex-user`` is the user scope of ``codex``; every other adapter is project scoped or has its own name."""
+def _split_harness(name: str, user_scope: bool) -> tuple[str, str]:
+    """``codex-user`` is the user scope of ``codex``; other adapters keep their name and the adapter's own scope."""
     if name.endswith("-user"):
         return name[: -len("-user")], "user"
-    return name, "user" if name in {"openclaw", "hermes"} else "project"
+    return name, "user" if user_scope else "project"
 
 
 def _native_row(adapter: Any, name: str, raw: dict[str, Any]) -> dict[str, Any]:
@@ -78,12 +78,13 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
     catalog_present = not errors
     state = mcp_cmd._load_state(target)
     project, _notes = mcp_cmd.active_targets(target, harness=None, user_scope=False)
-    # Sync targets decide where Brigade writes, not what exists: a project config
-    # outside them is still inventoried, without catalog-derived missing rows.
+    # Sync targets decide where Brigade writes, not what exists. User configs (a
+    # default sync never writes them) and project configs outside the targets are
+    # still inventoried, without catalog-derived missing or disabled rows.
     inventory_only = {
         n
         for n, a in mcp_adapters.ADAPTERS.items()
-        if n not in project and not a.user_scope and mcp_adapters.resolve_path(a, target).is_file()
+        if n not in project and (a.user_scope or mcp_adapters.resolve_path(a, target).is_file())
     }
     names = list(project) + [
         n for n, a in mcp_adapters.ADAPTERS.items() if n not in project and (a.user_scope or n in inventory_only)
@@ -92,7 +93,7 @@ def build_servers(target: Path) -> tuple[bool, list[dict[str, Any]], list[dict[s
     harnesses: dict[tuple[str, str], dict[str, Any]] = {}
     for adapter_name in names:
         adapter = mcp_adapters.ADAPTERS[adapter_name]
-        harness, scope = _split_harness(adapter_name)
+        harness, scope = _split_harness(adapter_name, adapter.user_scope)
         path = mcp_adapters.resolve_path(adapter, target)
         found = path.is_file()
         readable = True

@@ -206,8 +206,8 @@ def _machine_detail(machine: Machine) -> str:
             + f'<p class="mcp-verdict">{_esc(inventory.machine_verdict(machine))}</p>'
             + _publish_hint()
         )
-    kind = "warn" if machine.attention or not machine.catalog_present else "ok"
-    status = inventory.attention_text(machine.attention) if machine.attention else "ok"
+    kind = "warn" if machine.attention or machine.unreadable or not machine.catalog_present else "ok"
+    status = _health_status(machine)
     body = _table(
         ("Harness", "Servers"),
         [
@@ -323,9 +323,14 @@ def _machine_status(machine: Machine) -> str:
     return f"{servers} server{'' if servers == 1 else 's'}, {harnesses} harness{'' if harnesses == 1 else 'es'}"
 
 
+def _health_status(machine: Machine) -> str:
+    if machine.attention:
+        return inventory.attention_text(machine.attention)
+    return "unreadable config" if machine.unreadable else "ok"
+
+
 def _machine_pill(machine: Machine) -> str:
     if not machine.reported:
         return explorer.pill("No MCP report", "warn")
-    if machine.attention:
-        return explorer.pill(inventory.attention_text(machine.attention), "warn")
-    return explorer.pill("ok", "ok")
+    status = _health_status(machine)
+    return explorer.pill(status, "ok" if status == "ok" else "warn")

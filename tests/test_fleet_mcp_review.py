@@ -796,3 +796,40 @@ def test_existing_config_outside_the_selected_harnesses_is_still_inventoried(wor
     assert [(r["name"], r["status"], r["managed"]) for r in cursor_rows] == [("sample-cursor", "unmanaged", False)]
     cursor = next(h for h in report["harnesses"] if (h["harness"], h["scope"]) == ("cursor", "project"))
     assert cursor["config_found"] is True and cursor["readable"] is True
+
+
+def test_user_configs_are_inventoried_but_not_treated_as_sync_targets(workspace):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    write_config(workspace, Config(version=1, selection=Selection(depth="repo", harnesses=["claude"])))
+    catalog = {"version": 1, "servers": {"sample-local": {"transport": "stdio", "command": "run-sample"}}}
+    (workspace / ".brigade" / "mcp.json").write_text(json.dumps(catalog))
+    report = fleet_mcp_report.build_report(workspace, now=NOW)
+    assert [r for r in report["servers"] if r["scope"] == "user"] == []
+    assert {(h["harness"], h["scope"]) for h in report["harnesses"] if h["scope"] == "user"}  # markers still reported
+
+
+def test_antigravity_scope_comes_from_its_adapter(workspace):
+    from brigade import mcp_adapters
+
+    adapter = mcp_adapters.ADAPTERS["antigravity"]
+    assert adapter.user_scope is True
+    report = fleet_mcp_report.build_report(workspace, now=NOW)
+    assert ("antigravity", "user") in {(h["harness"], h["scope"]) for h in report["harnesses"]}
+    assert ("antigravity", "project") not in {(h["harness"], h["scope"]) for h in report["harnesses"]}
+
+
+def test_unreadable_config_is_never_reported_as_healthy():
+    machine = inventory.Machine(
+        node_id="node-a",
+        label="sample-machine",
+        reported=True,
+        catalog_present=True,
+        harnesses=(inventory.HarnessConfig("claude", "project", config_found=True, readable=False),),
+    )
+    assert machine.attention == 0 and machine.unreadable == 1
+    pill = page_mod._machine_pill(machine)
+    assert "unreadable config" in pill and "pill--ok" not in pill
+    verdict = inventory.machine_verdict(machine)
+    assert "Everything matches" not in verdict and "1 config could not be read" in verdict
