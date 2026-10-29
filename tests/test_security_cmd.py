@@ -1347,19 +1347,19 @@ def test_security_config_rejects_unknown_top_level_key(tmp_path):
 def test_security_config_preserves_toml_string_backslashes(tmp_path):
     config = tmp_path / ".brigade" / "security.toml"
     config.parent.mkdir(parents=True)
-    config.write_text("output_path = 'D:\\a\\security\\out\\tab\\thing'\n")
+    config.write_text("output_path = 'reports\\audit\\tab\\bin'\n")
 
     loaded = security_cmd.load_config(tmp_path)
 
     assert loaded is not None
-    assert loaded.output_path == r"D:\a\security\out\tab\thing"
+    assert loaded.output_path == r"reports\audit\tab\bin"
 
-    config.write_text('output_path = "D:\\\\a\\\\security\\\\out\\\\tab\\\\thing"\n')
+    config.write_text('output_path = "reports\\\\audit\\\\tab\\\\bin"\n')
 
     loaded = security_cmd.load_config(tmp_path)
 
     assert loaded is not None
-    assert loaded.output_path == r"D:\a\security\out\tab\thing"
+    assert loaded.output_path == r"reports\audit\tab\bin"
 
 
 def test_security_config_rejects_unknown_suppressions_key(tmp_path):
