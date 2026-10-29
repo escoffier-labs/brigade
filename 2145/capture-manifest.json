@@ -1,13 +1,26 @@
 {
-  "base": "994468e0fb06c87f7549b6d669c0e2755ac7a9e2",
-  "head": "48ca4d2b105e0d7219d2ff95fababe9fc3fc45dc",
-  "terminal_geometry": "128x48",
-  "window_pixels": "1026x818",
-  "mcp_output_sha256": "94765f8fe85c4789a15d2667677ad28fcdcb5fecd167eb62406e257dcd5c8d59",
-  "mcp_identical": true,
+  "base": "6130511e34a0d93ef54487ec219bad52a193e74f",
+  "head": "07cbfd0954663e2a2dbbd2fe50e99d6011fba9bb",
+  "geometry": "128x48",
+  "dimensions": {
+    "after-instructions.png": [
+      1026,
+      818
+    ],
+    "before-instructions.png": [
+      1026,
+      818
+    ],
+    "unchanged-mcp.png": [
+      1026,
+      818
+    ]
+  },
   "images": {
-    "unchanged-mcp.png": "fc8084978b18269dd0cc4f5507a3f6ec9eaac54239158b39a1155cf6fa4de430",
-    "before-instructions.png": "b13e8083ba769067e3c83df659764ae611a386c1c9dc78ea2670729072131476",
-    "after-instructions.png": "51481670365a54e79391b36e8b350507b8cec0fce9c76c712b8184a84a7859f5"
-  }
+    "after-instructions.png": "51481670365a54e79391b36e8b350507b8cec0fce9c76c712b8184a84a7859f5",
+    "before-instructions.png": "6fd0915a6ed81b35a93e6e17fa1d0433b30987d69dd3a61d2910d8e9cb00c348",
+    "unchanged-mcp.png": "fc8084978b18269dd0cc4f5507a3f6ec9eaac54239158b39a1155cf6fa4de430"
+  },
+  "unchanged_mcp_sha256": "94765f8fe85c4789a15d2667677ad28fcdcb5fecd167eb62406e257dcd5c8d59",
+  "unchanged_mcp_bytes_equal": true
 }
