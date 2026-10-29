@@ -17,12 +17,7 @@ def _check_directory(metadata: os.stat_result, *, private: bool) -> None:
     if os.name == "posix":
         if private and (metadata.st_uid != os.getuid() or metadata.st_mode & 0o022):
             raise OSError("paired output must be owned by current user and not writable by others")
-        if (
-            not private
-            and metadata.st_uid != os.getuid()
-            and metadata.st_mode & 0o022
-            and not metadata.st_mode & stat.S_ISVTX
-        ):
+        if not private and metadata.st_mode & 0o022 and not metadata.st_mode & stat.S_ISVTX:
             raise OSError("paired output ancestor is writable by others")
 
 
@@ -33,6 +28,8 @@ def safe_output(path: Path) -> Iterator[run_dirfd.BoundRunDir]:
     if ".." in path.parts:
         raise OSError("paired output must not contain parent traversal")
     path = Path(os.path.abspath(path.expanduser()))
+    if path == Path(path.anchor):
+        raise OSError("paired output must not be a filesystem anchor")
     fd = dirfd.open_directory_nofollow(Path(path.anchor))
     try:
         parts = path.parts[1:]

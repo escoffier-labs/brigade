@@ -1,6 +1,7 @@
 """Owning boundary: actual receipts and recorded tool protocol, never model booleans."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -8,6 +9,24 @@ import pytest
 from brigade import model_trials
 
 FIXTURE = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work/manifest.json"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX ancestor permissions")
+def test_paired_refuses_owned_writable_nonsticky_ancestor(tmp_path):
+    ancestor = tmp_path / "unsafe-parent"
+    ancestor.mkdir(mode=0o777)
+    ancestor.chmod(0o777)
+    with pytest.raises(OSError, match="ancestor is writable by others"):
+        model_trials.paired_execute(FIXTURE, ancestor / "evidence", protocol, cases=["audit-only"])
+    assert list(ancestor.iterdir()) == []
+
+
+def test_paired_refuses_filesystem_anchor_as_output():
+    from brigade.paired_output import safe_output
+
+    with pytest.raises(OSError, match="filesystem anchor"):
+        with safe_output(Path(Path.cwd().anchor)):
+            pass
 
 
 def test_paired_identity_and_snapshot(tmp_path):
