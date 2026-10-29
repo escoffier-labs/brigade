@@ -197,6 +197,30 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     return stamp
 
 
+def _consolidate_accepted(
+    target: Path, texts: dict[str, str | None], sources: list[dict[str, Any]], ops: list[dict[str, Any]]
+) -> None:
+    """Derive each requested cutoff from accepted support and the original floor."""
+    from .memory_reflect_candidates import _sort_timestamp, _timestamp
+
+    for source in sources:
+        path = source["path"]
+        text = texts[path]
+        appends = [op for op in ops if op["type"] == "append_evidence" and op["card_path"] == path]
+        if text is None or not any("last_consolidated" in op for op in appends):
+            continue
+        # Keep validation and receipt bindings on the original source. Only
+        # accepted appends can account for pending evidence or advance the cutoff.
+        refs = sorted({ref for op in appends for ref in op["evidence_ids"]})
+        stamp = _consolidated_at(target, source, refs)
+        assert stamp is not None  # At least one accepted op validated a cutoff.
+        original = source["metadata"].get("last_consolidated")
+        floor = _timestamp(original)
+        if floor is not None and floor >= _sort_timestamp(stamp):
+            stamp = original
+        texts[path] = legacy._update_metadata(text, {"last_consolidated": stamp})
+
+
 def _refuse_dangling_block_links(
     paths: list[Path],
     target: Path,
@@ -383,6 +407,7 @@ def compose(
     if not accepted and (ops or not any(texts[s["path"]] != s["text"] for s in sources)):
         raise legacy.ProposalError("no valid delta ops remain")
     evidence, _ = _evidence(target, accepted, sources)
+    _consolidate_accepted(target, texts, sources, accepted)
     texts = _derived(texts, sources, removed, proposal_id)
     _refuse_dangling_block_links(paths, target, texts, sources, removed)
     references, fences = _references(target, care, paths, texts, removed)
