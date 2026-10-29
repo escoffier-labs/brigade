@@ -30,7 +30,7 @@ COPY: dict[str, tuple[str, str]] = {
     ),
     "blocked_unknown": (
         "Blocked reasons unknown",
-        "The queue section did not say whether anything is blocked, so an empty list is not a clean bill.",
+        "The queue section did not report blocked reasons, so an empty list does not mean nothing is held.",
     ),
     "integrations_none": (
         "No integration readiness reports",

@@ -141,7 +141,7 @@ def test_blocked_reasons_unknown_and_none_reported_differ():
     _assert_copy(
         unknown,
         "Blocked reasons unknown",
-        "The queue section did not say whether anything is blocked, so an empty list is not a clean bill.",
+        "The queue section did not report blocked reasons, so an empty list does not mean nothing is held.",
     )
 
 

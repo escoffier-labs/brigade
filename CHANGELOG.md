@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Security TOML literal strings preserve Windows path backslashes while double-quoted strings continue to decode escapes.
 - Claude Stop hooks attribute shell writes to each affected worktree and accept verification receipts there, without requiring a receipt in an unchanged session directory.
+- Fleet Hub empty states show a short title and one line of page-specific guidance, such as the command that fills the section, through a shared `empty_state` helper (#2056).
+
 - Claude work-loop hooks retain explicit source-write attribution beside routed verification and Brigade run commands, while preserving internal logging and final handoff behavior.
 - Native null-device redirects are excluded from Claude hook write detection on Windows as well as POSIX.
 - Final handoff writes preserve the source-verification boundary when verification output also streams through Brigade-internal log pipelines.
