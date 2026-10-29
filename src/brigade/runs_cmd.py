@@ -1684,7 +1684,7 @@ def _collect_runs(root: Path) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
             continue
         try:
             meta = _read_json(child / "run.json")
-        except ValueError:
+        except (OSError, ValueError):
             skipped += 1
             continue
         if meta is None:

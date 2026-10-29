@@ -6,6 +6,7 @@ these payloads and must not grow a second run-artifact reader.
 
 from __future__ import annotations
 
+import errno
 import json
 from pathlib import Path
 
@@ -591,6 +592,54 @@ def test_runs_list_json_counts_skipped_invalid(tmp_path, capsys):
     assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
     assert payload["skipped_invalid"] == 2
     assert [run["run_id"] for run in payload["runs"]] == ["20260526-140000-valid1"]
+
+
+@pytest.mark.parametrize("command", ["list", "latest"])
+@pytest.mark.parametrize("read_error", ["disappeared", "permission", "io"])
+def test_runs_inventory_json_skips_record_read_errors(tmp_path, monkeypatch, capsys, command, read_error):
+    runs_root = tmp_path / ".brigade" / "runs"
+    faulty = runs_root / "20260526-130000-faulty"
+    healthy = runs_root / "20260526-140000-healthy"
+    _write_legacy_run(faulty)
+    _write_legacy_run(healthy)
+    faulty_record = faulty / "run.json"
+    original_bytes = faulty_record.read_bytes()
+    original_read_text = Path.read_text
+    failed_reads = []
+
+    def fail_record_read(path, *args, **kwargs):
+        if path == faulty_record:
+            failed_reads.append(path)
+            if read_error == "disappeared":
+                # Remove it after _read_json's existence check, before its read.
+                path.unlink()
+            elif read_error == "permission":
+                raise PermissionError(errno.EACCES, "record is unreadable", str(path))
+            else:
+                raise OSError(errno.EIO, "record read failed", str(path))
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_record_read)
+    args = ["runs", command, "--cwd", str(tmp_path), "--json"]
+    if command == "list":
+        args.extend(["--limit", "1"])
+
+    assert cli.main(args) == 0
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert failed_reads
+    if command == "list":
+        assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
+        assert payload["skipped_invalid"] == 1
+        assert [run["run_id"] for run in payload["runs"]] == [healthy.name]
+        assert captured.err == ""
+    else:
+        assert payload["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
+        assert payload["run"]["run_id"] == healthy.name
+        assert "skipped 1 invalid run directory" in captured.err
+    if read_error != "disappeared":
+        assert faulty_record.read_bytes() == original_bytes
 
 
 def test_legacy_run_without_lineage_still_serializes(tmp_path, capsys):

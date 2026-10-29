@@ -1550,6 +1550,80 @@ def test_runs_latest_json_shares_detail_contract(tmp_path, capsys):
     assert payload["run"]["run_id"] == "20260526-140000-bbbb"
 
 
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0, reason="requires unprivileged POSIX permissions")
+@pytest.mark.parametrize("command", ["list", "latest"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_runs_inventory_skips_unreadable_record(tmp_path, capsys, command, json_output):
+    runs_root = tmp_path / ".brigade" / "runs"
+    unreadable = runs_root / "20260526-130000-private"
+    healthy = runs_root / "20260526-140000-healthy"
+    for run_dir, hour in ((unreadable, 13), (healthy, 14)):
+        _write_minimal_run(
+            run_dir,
+            task="inventory permission regression",
+            status="ok",
+            started_at=f"2026-05-26T{hour}:00:00Z",
+        )
+    record = unreadable / "run.json"
+    original_bytes = record.read_bytes()
+    original_mode = record.stat().st_mode & 0o777
+    args = ["runs", command, "--cwd", str(tmp_path)]
+    if command == "list":
+        args.extend(["--limit", "1"])
+    if json_output:
+        args.append("--json")
+
+    record.chmod(0)
+    try:
+        with pytest.raises(PermissionError):
+            record.read_text()
+
+        assert cli.main(args) == 0
+
+        captured = capsys.readouterr()
+        assert record.stat().st_mode & 0o777 == 0
+        if json_output:
+            payload = json.loads(captured.out)
+            if command == "list":
+                assert payload["schema"] == runs_cmd.RUNS_LIST_SCHEMA
+                assert payload["skipped_invalid"] == 1
+                assert [run["run_id"] for run in payload["runs"]] == [healthy.name]
+                assert captured.err == ""
+            else:
+                assert payload["schema"] == runs_cmd.RUN_DETAIL_SCHEMA
+                assert payload["run"]["run_id"] == healthy.name
+                assert "skipped 1 invalid run directory" in captured.err
+        else:
+            assert healthy.name in captured.out
+            assert unreadable.name not in captured.out
+            assert "skipped 1 invalid run directory" in captured.err
+    finally:
+        record.chmod(original_mode)
+    assert record.read_bytes() == original_bytes
+
+
+@pytest.mark.parametrize("command", ["list", "latest"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_runs_inventory_preserves_root_read_error(tmp_path, monkeypatch, capsys, command, json_output):
+    runs_root = tmp_path / ".brigade" / "runs"
+    runs_root.mkdir(parents=True)
+    original_iterdir = Path.iterdir
+
+    def denied_iterdir(path):
+        if path == runs_root:
+            raise PermissionError(errno.EACCES, "inventory root is unreadable", str(path))
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", denied_iterdir)
+    args = ["runs", command, "--cwd", str(tmp_path)]
+    if json_output:
+        args.append("--json")
+
+    with pytest.raises(PermissionError, match="inventory root is unreadable"):
+        cli.main(args)
+    assert capsys.readouterr().out == ""
+
+
 def test_runs_list_json_emits_versioned_contract(tmp_path, capsys):
     runs_root = tmp_path / ".brigade" / "runs"
     runs_root.mkdir(parents=True)
