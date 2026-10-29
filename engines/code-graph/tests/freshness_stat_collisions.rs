@@ -137,6 +137,29 @@ fn equal_size_edit_with_the_exact_timestamp_restored_is_detected() {
 }
 
 #[test]
+fn large_file_tail_changes_are_detected_with_colliding_stats() {
+    let (dir, conn) = fixture();
+    let root = dir.path();
+    let source = root.join("sample.py");
+    let padding = "    # unchanged padding\n".repeat(6_000);
+    let before = format!("def helper():\n{padding}    return 1\n");
+    let after = format!("def helper():\n{padding}    return 2\n");
+    assert!(before.len() > 128 * 1024);
+    fs::write(&source, before).unwrap();
+    set_modified(
+        &source,
+        UNIX_EPOCH + Duration::new(1_700_000_000, 100_000_000),
+    );
+    sync_repo(&conn, root).unwrap();
+    assert!(sync_repo(&conn, root).unwrap().unchanged);
+
+    edit_in_same_second(root, after.as_bytes());
+    assert_eq!(freshness(&conn, root).unwrap().pending_files, 1);
+    assert!(!sync_repo(&conn, root).unwrap().unchanged);
+    assert_eq!(freshness(&conn, root).unwrap().pending_files, 0);
+}
+
+#[test]
 fn same_second_invalid_utf8_replaces_the_old_graph_with_a_skip() {
     let (dir, conn) = fixture();
     let root = dir.path();

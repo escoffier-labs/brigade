@@ -2,12 +2,14 @@
 
 use std::collections::HashMap;
 use std::fs;
+use std::io::{self, Read};
 use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::{Connection, params};
+use sha2::{Digest, Sha256};
 
-use crate::extractors::common::{MODULE_SYMBOL_KIND, MODULE_SYMBOL_NAME, hex_hash};
+use crate::extractors::common::{MODULE_SYMBOL_KIND, MODULE_SYMBOL_NAME};
 use crate::extractors::{extractor_fingerprint_for, language_for};
 use crate::store::skipped::SkippedStat;
 use crate::store::walk::Entry;
@@ -207,16 +209,32 @@ pub(super) fn entry_freshness(
     };
     // Size and whole-second mtime can stay the same after an edit. Validate
     // the content even when those stats match before declaring the index fresh.
-    // Hash raw bytes so invalid UTF-8 or unreadable files count as changed;
-    // sync then retries them and records the failure instead of aborting here.
-    match fs::read(&entry.path) {
-        Ok(bytes) if hex_hash(&bytes) == db_file.content_hash => {}
+    // Stream raw bytes with bounded memory. Invalid UTF-8 or unreadable files
+    // count as changed; sync retries them and records any indexing failure.
+    match file_content_matches(&entry.path, &db_file.content_hash) {
+        Ok(true) => {}
         _ => return Ok(EntryFreshness::Changed),
     }
     if db_file.extractor_fingerprint.as_deref() != Some(extractor_fingerprint_for(entry.lang)) {
         return Ok(EntryFreshness::FingerprintStale);
     }
     Ok(EntryFreshness::Fresh)
+}
+
+fn file_content_matches(path: &Path, expected_hash: &str) -> io::Result<bool> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        let length = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(length) => length,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        hasher.update(&buffer[..length]);
+    }
+    Ok(format!("{:x}", hasher.finalize()) == expected_hash)
 }
 
 /// Map file path -> freshness metadata from the `files` table.
