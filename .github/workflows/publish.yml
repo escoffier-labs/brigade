@@ -437,6 +437,9 @@ jobs:
 
   published-artifact-acceptance:
     name: published-artifact-acceptance (${{ matrix.platform }})
+    permissions:
+      contents: read
+      attestations: read
     needs: build-and-publish
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
     runs-on: ${{ matrix.runner }}
@@ -484,6 +487,7 @@ jobs:
         shell: powershell
         env:
           BRIGADE_VERSION: ${{ github.ref_name }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           $version = $env:BRIGADE_VERSION.Substring(1)
           & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode pypi -BrigadeVersion $version

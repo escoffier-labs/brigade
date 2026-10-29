@@ -213,22 +213,22 @@ def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadat
     assert "if-no-files-found: error" in section
 
 
-def test_publish_workflow_assemble_release_counts_25_native_assets_and_27_release_files():
+def test_publish_workflow_assemble_release_counts_40_native_assets_and_42_release_files():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     assemble = text[text.index("  assemble-release:") : text.index("  create-release:")]
 
-    assert 'test "$(find downloaded -type f | wc -l)" -eq 25' in assemble
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27' in assemble
+    assert 'test "$(find downloaded -type f | wc -l)" -eq 40' in assemble
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42' in assemble
     assert "pattern: agent-notify-*" in assemble
     # assemble-release waits on the agent-notify native job.
     needs_line = next(line for line in assemble.splitlines() if line.strip().startswith("needs:"))
     assert "build-agent-notify-native" in needs_line
 
 
-def test_publish_release_gate_requires_27_release_assets():
+def test_publish_release_gate_requires_42_release_assets():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     gate = text[text.index("  release-asset-gate:") : text.index("  build-and-publish:")]
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27' in gate
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42' in gate
 
 
 def _load_workflow_yaml(path: Path):
@@ -905,3 +905,13 @@ def test_npm_revalidation_requires_complete_native_receipt(tmp_path, mutation):
         timeout=10,
     )
     assert (result.returncode == 0) == (mutation is None), result.stderr
+
+
+def test_published_acceptance_has_read_only_attestation_access():
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/publish.yml")
+    job = workflow["jobs"]["published-artifact-acceptance"]
+    assert job.get("permissions") == {"contents": "read", "attestations": "read"}
+    steps = {step.get("name"): step for step in job["steps"]}
+    for name in ("Run published artifact acceptance (Unix)", "Run Windows native acceptance (published CLI)"):
+        env = steps[name]["env"]
+        assert any(env.get(key) == "${{ github.token }}" for key in ("GITHUB_TOKEN", "GH_TOKEN")), name
