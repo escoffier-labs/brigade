@@ -31,9 +31,23 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Override vulnerability keyword matches for an ordinary bug. Required for non-interactive --yes.",
     )
     report.set_defaults(func=dispatch)
+    diagnose = verbs.add_parser("diagnose", help="Compare selected project MCP configuration without running servers.")
+    diagnose.add_argument("--target", "-t", type=Path, default=Path("."))
+    diagnose.add_argument("--harness", required=True)
+    diagnose.add_argument("--summary", required=True)
+    diagnose.add_argument("--name")
+    diagnose.add_argument("--json", action="store_true")
+    action = diagnose.add_mutually_exclusive_group()
+    action.add_argument("--save-finding", type=Path, metavar="NEW_PATH")
+    action.add_argument("--prepare-report", action="store_true")
+    diagnose.set_defaults(func=dispatch)
 
 
 def dispatch(args: argparse.Namespace) -> int:
+    if args.bug_command == "diagnose":
+        from ..bug_diagnose import diagnose
+
+        return diagnose(args)
     from ..bug_cmd import report
 
     return report(args)
