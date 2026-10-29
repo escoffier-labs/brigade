@@ -115,6 +115,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     empty_item = False
     raw_end: re.Pattern[str] | None = None
     raw_base = 0
+    raw_comment = raw_blank = False
     index = 0
 
     def finish() -> None:
@@ -146,7 +147,12 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
                 # dedented line so outer claims retain their original spans.
                 raw_end = None
             else:
+                raw_blank = raw_blank or not raw.strip()
                 if raw_end.search(raw):
+                    # In a list, a blank can end the HTML block before its
+                    # closer. Do not expose only the following paragraph suffix.
+                    if raw_comment and raw_blank and raw_base:
+                        opaque = True
                     raw_end = None
                 index += 1
                 continue
@@ -221,6 +227,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             finish()
             raw_end = None if opened.search(line) else opened
             raw_base = base
+            raw_comment, raw_blank = line.lstrip().startswith("<!--"), False
             index += 1
             continue
         if "<!--" in line:

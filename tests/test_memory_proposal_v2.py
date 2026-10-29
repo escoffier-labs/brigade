@@ -1192,3 +1192,19 @@ def test_reviewed_edit_after_list_comment_dedent(tmp_path, kind):
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert payload in path.read_text()
     assert CLAIM not in path.read_text()
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_reviewed_edit_cannot_target_blank_separated_comment_suffix(tmp_path, kind, nested):
+    path = setup(tmp_path)
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    suffix = f"{indent}Same-list claim. ^c-123abc"
+    structure = f"{prefix}<!-- note\n{indent}hidden ^c-abcdef\n\n{indent}-->\n{suffix}"
+    path.write_text(path.read_text().replace(CLAIM, structure))
+    before = path.read_bytes()
+    edit = op(kind, **({"text": "Changed claim."} if kind == "replace_block" else {}))
+    edit["expected_block_hash"] = hashlib.sha256(suffix.encode()).hexdigest()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [edit])
+    assert path.read_bytes() == before

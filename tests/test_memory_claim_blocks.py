@@ -335,3 +335,15 @@ def test_list_comment_ends_at_container_dedent(markdown, nested):
     body = markdown(f"{prefix}<!-- note\n{indent}hidden ^c-abcdef\n\nOuter. ^c-123abc\n\nAfter.")
     assert [b.text for b in delta.blocks(body)] == (["- Parent."] if nested else []) + ["Outer. ^c-123abc", "After."]
     assert delta.claim_body(body) == body.replace("Outer. ^c-123abc", "Outer.")
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_list_comment_closer_after_blank_keeps_suffix_opaque(markdown, nested):
+    prefix, indent = ("- Parent.\n  - ", "    ") if nested else ("- ", "  ")
+    structure = f"{prefix}<!-- note\n{indent}hidden ^c-abcdef\n\n{indent}-->\n{indent}Same-list claim. ^c-123abc"
+    body = markdown(structure + "\n\nAfter.")
+    assert [b.text for b in delta.blocks(body)] == (["- Parent."] if nested else []) + ["After."]
+    assert delta.claim_body(body) == body
+    anchored = delta.anchor_text(body, "memory/cards/example.md")
+    assert delta.claim_body(anchored) == body
+    assert delta.anchor_text(anchored, "memory/cards/example.md") == anchored
