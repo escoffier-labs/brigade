@@ -980,7 +980,7 @@ def test_sidebar_shows_compact_machine_and_cloud_destinations_and_capacity_keeps
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
     assert "data-tree-filter" not in sidebar
     assert "telemetry 1m" in sidebar
-    assert f"/deck/capacity#{fleet_admin_explorer.anchor(NODE_A)}" in sidebar
+    assert f"/deck/capacity{fleet_admin_explorer.selection_href(NODE_A)}" in sidebar
     assert f"/deck/capacity/cloud#{fleet_admin_explorer.anchor('claude')}" in sidebar
     assert "0/4" in sidebar and "1/3" in sidebar
     assert sidebar.index("linux-a") < sidebar.index("claude") < sidebar.index("Resources")

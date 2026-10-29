@@ -6,6 +6,7 @@ import hashlib
 import html
 from dataclasses import dataclass
 from typing import Mapping, Sequence
+from urllib.parse import parse_qs, urlencode
 
 from .ui_theme import empty_state
 
@@ -112,6 +113,32 @@ def search_box(label: str, extra_class: str = "") -> str:
     )
 
 
+def query_params(query: str) -> dict[str, list[str]]:
+    """Bound query parsing before selection or link construction."""
+    if len(query) > 8192:
+        return {}
+    try:
+        return parse_qs(query, keep_blank_values=True, max_num_fields=32)
+    except ValueError:
+        return {}
+
+
+def selection_id(key: str) -> str:
+    """Keep ordinary keys readable and long stored identities addressable."""
+    return key if len(key) <= 256 else anchor(key)
+
+
+def selection_href(key: str) -> str:
+    return "?" + urlencode({"selected": selection_id(key)})
+
+
+def selected_key(query: str) -> str:
+    values = query_params(query).get("selected", [])
+    if len(values) != 1 or len(values[0]) > 256:
+        return ""
+    return values[0]
+
+
 def render(
     entries: Sequence[Entry],
     *,
@@ -119,29 +146,42 @@ def render(
     empty: str = "No records reported.",
     empty_hint: str = "",
     toolbar: str = "",
+    query: str | None = None,
+    searchable: bool = True,
 ) -> str:
     """*toolbar* is trusted, already-escaped HTML shown under the list header (filter chips, notes).
 
     *empty* is the empty-state title and *empty_hint* its one-line guidance, both plain text."""
     esc = html.escape
     links, details = [], []
-    for entry, identifier in zip(entries, identifiers([entry.key for entry in entries]), strict=True):
+    keys = [entry.key for entry in entries]
+    selected = selected_key(query or "")
+    selections = [selection_id(key) for key in keys]
+    chosen = selections.index(selected) if selected in selections else 0
+    params = query_params(query or "")
+    for index, (entry, identifier) in enumerate(zip(entries, identifiers(keys), strict=True)):
+        href = "#" + identifier
+        current = hidden = ""
+        if query is not None:
+            href = "?" + urlencode({**params, "selected": [selection_id(entry.key)]}, doseq=True)
+            current = ' aria-current="true"' if index == chosen else ""
+            hidden = " hidden" if index != chosen else ""
         links.append(
-            f'<a href="#{identifier}" data-record-link="{identifier}">'
+            f'<a href="{esc(href, quote=True)}" data-record-link="{identifier}"{current}>'
             f'<strong title="{esc(entry.title, quote=True)}">{esc(entry.title[:120])}</strong>'
             f"<span>{esc(entry.status[:160])}</span>{entry.summary_html}</a>"
         )
         details.append(
-            f'<article id="{identifier}" data-record-detail tabindex="-1">'
+            f'<article id="{identifier}"{hidden} data-record-detail tabindex="-1">'
             f'<div class="detail-bar"><span>{esc(entry.title[:120])}</span></div>'
             f'<div class="detail-body">{entry.detail}</div></article>'
         )
     return (
-        '<section class="admin-explorer" data-explorer>'
+        '<section class="admin-explorer" data-explorer' + (" data-query-selection" if query is not None else "") + ">"
         '<aside class="explorer-list"><div class="explorer-head">'
         f'<span class="explorer-title">{esc(label[:1].upper() + label[1:])}</span>'
         f'<span class="explorer-count" data-explorer-count>{len(entries)}</span></div>'
-        f"{toolbar}{search_box(label)}"
+        f"{toolbar}{search_box(label) if searchable else ''}"
         f'<nav aria-label="{esc(label, quote=True)}">{"".join(links)}</nav></aside>'
         '<div class="explorer-details">'
         + "".join(details)
@@ -196,6 +236,7 @@ function start() {
   links.forEach(function(link) {
    link.addEventListener('click', function(event) {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) { return; }
+    if (root.hasAttribute('data-query-selection')) { return; }
     event.preventDefault();
     apply(link.dataset.recordLink);
     history.replaceState(null, '', '#' + chosen);
@@ -221,7 +262,8 @@ function start() {
   root.classList.add('is-enhanced');
   input.disabled = false;
   root.querySelector('.explorer-search').hidden = false;
-  apply(location.hash.slice(1));
+  var initial = root.querySelector('[data-record-link][aria-current]');
+  apply(location.hash.slice(1) || (initial ? initial.dataset.recordLink : ''));
  });
 }
 (typeof window!=='undefined'&&window.fleetOnInit||function(f){if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',f);else f();})(start);
@@ -241,10 +283,10 @@ CSS = """
 .explorer-list a strong { display:block; font-size:13px; font-weight:500; line-height:1.3; }
 .explorer-list a span { display:block; color:var(--muted); font-size:12px; margin-top:1px; line-height:1.3; }
 .explorer-list a:hover, .explorer-list a[aria-current] { background:var(--surface-raised); }
-.explorer-details { min-width:0; overflow-wrap:anywhere; }
+.explorer-details { min-width:0; max-width:100%; overflow-wrap:anywhere; }
 .detail-bar { display:flex; align-items:center; height:40px; padding:0 20px; border-bottom:1px solid var(--line); color:var(--muted); font-family:var(--font-mono); font-size:13px; overflow:hidden; white-space:nowrap; }
 .detail-bar span { overflow:hidden; text-overflow:ellipsis; }
-.detail-body { padding:20px 24px 28px; }
+.detail-body { min-width:0; padding:20px 24px 28px; }
 .explorer-details > article + article { margin-top:0; border-top:1px solid var(--line); }
 .explorer-details > .empty { padding:28px; }
 .detail-hero { display:flex; align-items:center; flex-wrap:wrap; gap:10px; margin:0 0 16px; }
@@ -258,6 +300,8 @@ dl.fields > div { display:flex; justify-content:space-between; align-items:basel
 dl.fields > div:first-child { border-top:0; }
 dl.fields dt { color:var(--muted); font-size:13px; flex:0 0 auto; }
 dl.fields dd { margin:0; min-width:0; text-align:right; font-size:13px; white-space:pre-wrap; overflow-wrap:anywhere; }
+.explorer-details input:not([type="checkbox"]), .explorer-details select, .explorer-details textarea { min-width:0; max-width:100%; box-sizing:border-box; }
+.explorer-details .roster-grid { grid-template-columns:repeat(auto-fit,minmax(min(240px,100%),1fr)); }
 .explorer-details a:not(.button) { color:var(--ink); }
 .explorer-footer { margin-top:16px; }
 .explorer-details .work-item.panel { padding:0; border:0; background:transparent; }
@@ -319,7 +363,7 @@ dl.fields dd { margin:0; min-width:0; text-align:right; font-size:13px; white-sp
  .overview-machine-age > span { display:inline; }
  .admin-explorer { grid-template-columns:minmax(0,1fr); }
  .explorer-list { border-right:0; border-bottom:1px solid var(--line); }
- .detail-body { padding:16px; }
+ .detail-body { min-width:0; padding:16px; }
  .detail-bar { padding:0 16px; }
  .admin-explorer.is-enhanced .explorer-list { max-height:none; overflow:visible; }
  .explorer-details article { scroll-margin-top:12px; }
