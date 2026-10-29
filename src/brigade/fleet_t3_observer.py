@@ -79,7 +79,7 @@ try:
             active.append(row)
     # Bounded detail reads expose only a strong native resume ID, never messages.
     # Rotate the lookup window so large fleets eventually link every thread.
-    linked = sorted(active, key=lambda r: r["id"])
+    linked = sorted((row for row in active if isinstance(row.get("id"), str)), key=lambda r: r["id"])
     offset = (int(time.time()) // 60) % len(linked) if linked else 0
     def provider_link(row):
         active_provider = row.get("activeProviderThreadId")

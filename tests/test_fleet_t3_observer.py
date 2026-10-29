@@ -277,6 +277,8 @@ def test_large_idle_shell_projects_only_current_active_metadata(native_t3, capsy
         {"worktreePath": "/definitely-missing-observer-worktree"},
         {"worktreePath": "/" + "x" * 300},
         {"id": "bad id"},
+        {"id": None},
+        {"id": 27},
         {"projectId": "orphan", "worktreePath": None},
         {"projectId": [], "worktreePath": None},
     ],
