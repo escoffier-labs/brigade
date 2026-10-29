@@ -299,6 +299,26 @@ def test_changed_during_read(repo, monkeypatch):
     refused(export(repo), "inspection_changed")
 
 
+@pytest.mark.parametrize("stage", ["read", "final"])
+def test_same_size_mutation_with_unchanged_timestamps_is_rehashed(repo, monkeypatch, stage):
+    producer()
+    monkeypatch.setattr(cp, "_fingerprint", lambda info: (info.st_dev, info.st_ino, 0, 0, info.st_size))
+    original = os.read if stage == "read" else cp._revalidate
+
+    def change(*args):
+        result = original(*args)
+        (repo / "AGENTS.md").write_bytes(b"ROOT")
+        return result
+
+    monkeypatch.setattr(os if stage == "read" else cp, "read" if stage == "read" else "_revalidate", change)
+    refused(export(repo), "inspection_changed")
+
+
+def test_negative_source_timestamp_has_an_identity_refusal(repo):
+    os.utime(repo / "AGENTS.md", ns=(0, -1_000_000_000))
+    refused(export(repo), "identity_not_established")
+
+
 def test_unreadable_has_no_raw_exception(repo, monkeypatch):
     producer()
 
@@ -589,6 +609,10 @@ def test_portable_export_fixture_materializes_local_identity_expectations(tmp_pa
     for name, content in fixture["setup"]["files"].items():
         (tmp_path / name).write_bytes(bytes.fromhex(content))
     expected = fixture["expected_export"]
+    from brigade import __version__
+
+    assert expected["producer"]["version"] == "${producer_version}"
+    expected["producer"]["version"] = __version__
 
     def materialize_identity(record, path):
         info = path.stat(follow_symlinks=False)

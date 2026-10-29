@@ -18,7 +18,7 @@
     "schema_version": 1,
     "producer": {
       "name": "brigade",
-      "version": "0.31.0"
+      "version": "${producer_version}"
     },
     "consumer": {
       "name": "codex",

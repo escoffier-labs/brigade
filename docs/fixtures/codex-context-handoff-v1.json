@@ -560,6 +560,72 @@
         "consumed_raw_bytes": 1,
         "rendered_utf8_bytes": 1
       }
+    },
+    {
+      "id": "incomplete_four_byte_utf8",
+      "files": {
+        "AGENTS.md": "f09f98"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 3,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "b38af6aef10b9620ceb4fe55a4aaf8def5e4d9bd99bd1ebff06a0d44220546a2",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 3,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 3
+      }
+    },
+    {
+      "id": "encoded_surrogate_utf8",
+      "files": {
+        "AGENTS.md": "eda080"
+      },
+      "directories": [],
+      "marker_directories": [
+        "."
+      ],
+      "cwd": ".",
+      "project_doc_max_bytes": 3,
+      "fallback_filenames": [],
+      "root_markers": [
+        ".git"
+      ],
+      "expected_sources": [
+        {
+          "path": "AGENTS.md",
+          "selection_order": 1,
+          "size_bytes": 3,
+          "sha256": "91a681b998555fb475479817b126c94e57e52011fa1842c5d188795a4a05226b",
+          "cumulative_selected_bytes": 3,
+          "consumed_raw_bytes": 3,
+          "rendered_utf8_bytes": 9,
+          "contribution": "loaded"
+        }
+      ],
+      "expected_baseline": {
+        "selected_bytes": 3,
+        "consumed_raw_bytes": 3,
+        "rendered_utf8_bytes": 9
+      }
     }
   ],
   "canonical_digest_vectors": [
@@ -590,6 +656,13 @@
       },
       "canonical_utf8_hex": "7b2270726f6a6563745f646f635f6d61785f6279746573223a33323736382c22726f6f745f6d61726b657273223a5b222e676974222c226f74686572225d7d",
       "digest": "sha256:d26755d93c2ee4bd25cf77e2be17f448da6f66642d550f3d24203f0f8e28f2ff"
+    },
+    {
+      "value": {
+        "a": "quote\" backslash\\ newline\n 😀"
+      },
+      "canonical_utf8_hex": "7b2261223a2271756f74655c22206261636b736c6173685c5c206e65776c696e655c6e20f09f9880227d",
+      "digest": "sha256:1dc84c6be59a0efddc7dc8570d57a9697c023e09f9d633ec6dd06055a1095980"
     }
   ]
 }

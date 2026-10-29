@@ -171,6 +171,8 @@ def _identity(info: os.stat_result) -> dict[str, Any]:
     result = {"device": info.st_dev, "inode": info.st_ino, "kind": kind}
     if kind != "directory":
         result.update(size_bytes=info.st_size, mtime_ns=info.st_mtime_ns, ctime_ns=info.st_ctime_ns)
+    if any(type(value) is not int or not 0 <= value <= 2**64 - 1 for key, value in result.items() if key != "kind"):
+        raise _Refusal("identity_not_established")
     return result
 
 
@@ -199,9 +201,29 @@ def _finish_validation(
     cp._revalidate_markers(markers)
     cp._revalidate_markers(evidence.observations)
     cp._revalidate(selections)
-    for fd, before in evidence.held_sources:
+    for (fd, before), source in zip(evidence.held_sources, evidence.sources, strict=True):
         if cp._fingerprint(os.fstat(fd)) != cp._fingerprint(before):
             raise cp._Boundary("file_changed")
+        digest = sha256()
+        offset = 0
+        remaining = before.st_size + 1
+        while remaining:
+            chunk = os.pread(fd, min(65536, remaining), offset)
+            if not chunk:
+                break
+            digest.update(chunk)
+            offset += len(chunk)
+            remaining -= len(chunk)
+        if (
+            offset != before.st_size
+            or digest.hexdigest() != source["sha256"]
+            or cp._fingerprint(os.fstat(fd)) != cp._fingerprint(before)
+        ):
+            raise cp._Boundary("file_changed")
+    cp._revalidate_directories(bindings)
+    cp._revalidate_markers(markers)
+    cp._revalidate_markers(evidence.observations)
+    cp._revalidate(selections)
 
 
 def export(

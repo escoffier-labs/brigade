@@ -71,6 +71,8 @@ itself is never exported. The explicit consumer repository must have the same
 location digest and directory identity. A clone,
 replacement directory, moved worktree or alternate checkout requires a new
 inspection. This identity is local, not portable or authenticated.
+Handoffs are local artifacts, not anonymized telemetry. Digests can confirm
+guessed paths or short source contents and do not make the data confidential.
 
 Every relative path uses `/`. It must have no absolute prefix, empty segment,
 `.` segment except the entire cwd/directory path `.`, `..`, backslash, colon,
@@ -129,6 +131,8 @@ has `identity: null`. A directory identity has `{device, inode, kind}`. Every
 other present identity has `{device, inode, kind, size_bytes, mtime_ns, ctime_ns}`,
 with `kind` equal to `state`. A symlink, unsupported type, metadata failure or
 changed observation invalidates the inspection. Never open a nonregular source.
+Version 1 does not support negative identity integers, including pre-1970
+timestamps. These inputs refuse with `identity_not_established`.
 
 Root search walks cwd toward target using supplied markers in order. Record
 each absence/type up to and including the first present marker, then stop.
@@ -152,6 +156,13 @@ without searching for another winner. If the trace is missing, contradictory,
 or stale, validation fails. Inserting an override or root marker, replacing a
 nonregular candidate with a regular file, or rebinding any directory requires
 another producer inspection. A digest alone cannot justify missing assertions.
+For nonempty markers, the final marker observation must be present and its
+directory defines the root boundary. With no markers, the boundary is cwd.
+Each searched directory with a regular winner must correspond to exactly one
+source in root-to-cwd order. That source's path is the winner's directory joined
+to its name, and its identity must equal the winner observation's identity.
+At directory `.`, the source path is just the winner's name. Missing, extra,
+reordered or contradictory sources invalidate the handoff.
 
 ## Complete source acquisition and accounting
 
@@ -168,6 +179,11 @@ flags, require a regular file, compare nofollow selection metadata with fstat,
 read its complete bytes under independent ceilings, then compare held and
 named fingerprints again. Derive accounting and hashing from these same
 bytes. Keep the complete hash for files with `contribution: "cap_exhausted"`.
+At final validation, re-read each held source descriptor with bounded positional
+reads of at most the recorded size plus one overflow byte and compare its hash
+again. Recheck metadata and all selection bindings after those reads. This catches
+persistent same-size changes even when timestamps do not advance. It does not
+provide an atomic snapshot or detect content changed and restored between reads.
 Revalidate selections, candidate observations, root markers and all held
 directory bindings before returning any export. A final failure discards the
 whole export, including previously computed rows.
@@ -270,7 +286,7 @@ These are accounting vectors, not claimed producer export fixtures.
 [Export fixture](fixtures/codex-context-handoff-export-v1.json) is a complete
 producer export template generated from synthetic files. Its wrapper is
 `brigade.context_handoff.export_fixture.v1` and explicitly marks it
-`portable-test-template-not-a-consumable-handoff`. Only identity fields,
+`portable-test-template-not-a-consumable-handoff`. The producer version, identity fields,
 repository location digest and integrity digest are placeholders. The tests
 materialize these expectations from a newly generated local filesystem, then
 compare the entire export, including its digest. Source hex is fixture setup,
