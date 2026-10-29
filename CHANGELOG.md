@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
+
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
 - Removed Jules cloud provider
 
