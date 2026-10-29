@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 
 from brigade import work_cmd
 from brigade.work_cmd import verify_ranking
@@ -133,7 +134,14 @@ def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, cap
     payload = json.loads(capsys.readouterr().out)
     assert payload["suggested_from_graph_impact"] is True
     assert payload["ranked_candidates"][0]["test_path"] == "tests/test_a.py"
-    assert 'brigade work verify run --command "' in payload["suggested_command"]
+    assert shlex.split(payload["suggested_command"]) == [
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        f"--target={tmp_path.resolve()}",
+        "--command=PYTHONPATH=src python3 -m pytest -q tests/test_a.py",
+    ]
     assert "tests/test_a.py" in payload["suggested_command"]
     # Default full-suite command remains in the plan; ranking is advisory.
     assert payload["commands"] == ["PYTHONPATH=src python3 -m pytest -q"]
@@ -168,7 +176,14 @@ def test_verify_plan_explicit_command_keeps_worker_choice(tmp_path, monkeypatch,
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["commands"] == ["python3 -m pytest -q tests/custom.py"]
-    assert payload["suggested_command"] == "brigade work verify run"
+    assert shlex.split(payload["suggested_command"]) == [
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        f"--target={tmp_path.resolve()}",
+        "--command=python3 -m pytest -q tests/custom.py",
+    ]
     assert "suggested_from_graph_impact" not in payload
     assert payload["ranked_candidates"][0]["test_path"] == "tests/test_a.py"
 
@@ -302,7 +317,14 @@ def test_verify_plan_npm_default_does_not_promote_pytest_graph_impact(tmp_path, 
     assert work_cmd.verify_plan(target=tmp_path, files=["src/mod.js"], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["commands"] == ["npm test"]
-    assert payload["suggested_command"] == "brigade work verify run"
+    assert shlex.split(payload["suggested_command"]) == [
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        f"--target={tmp_path.resolve()}",
+        "--command=npm test",
+    ]
     assert "suggested_from_graph_impact" not in payload
     assert payload["ranked_candidates"][0]["test_path"] == "src/mod.test.js"
     assert payload["ranked_candidates"][0]["command"] == "npm test -- src/mod.test.js"
