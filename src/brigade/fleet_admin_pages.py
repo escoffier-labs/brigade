@@ -493,6 +493,14 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         status = overview.station_status(station, machine)
         capacity = station.station.capacity
         age = overview.format_age(overview.seconds_since(machine.last_observed_at, now)) if machine else "unknown"
+        last_report = ""
+        if status == "idle":
+            report_age = (
+                "never"
+                if station.last_heard is None
+                else overview.format_age(overview.seconds_since(station.last_heard, now))
+            )
+            last_report = f"<span>Last run report: <b>{_esc(report_age)}</b></span>"
         if not station.enrolled:
             state = "not enrolled · offline"
         elif status == "unknown":
@@ -534,7 +542,9 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + load_bar
             + '</div><div class="overview-machine-age"><span>Telemetry</span><b>'
             + _esc(age)
-            + "</b></div></div>"
+            + "</b>"
+            + last_report
+            + "</div></div>"
         )
     body = "".join(rows) or '<p class="overview-machines-empty">No machines configured.</p>'
     return (
