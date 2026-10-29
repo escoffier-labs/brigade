@@ -870,3 +870,55 @@ class SessionReportTrustChecks(Fixture):
         self.assertNotIn("content_trust", result["sessions"][1])
         self.assertNotIn("content_trust", sessions[0])
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "sessions", "--all", "--json"]])
+
+    @requires_local_state
+    def test_report_trust_preserves_sessions_at_existing_result_budget(self):
+        from brigade.dot.contracts import encoded_size
+        from brigade.dot.process import MAX_RESULT_BYTES
+
+        for count in (50, 100):
+            with self.subTest(count=count):
+                sessions = [
+                    {"session_id": f"session-{i:02}", "cloud_context": {"result": ""}, "state": "running"}
+                    for i in range(count)
+                ]
+                self.runner.handler = reply(sessions)
+                original = self.adapter.hub.fleet_sessions(limit=count)
+                for row in original["sessions"]:
+                    row.pop("content_trust", None)
+                padding = (65000 - encoded_size(original)) // count
+                self.assertGreater(padding, 0)
+                for row in sessions:
+                    row["cloud_context"]["result"] = "x" * padding
+                result = self.call("fleet_sessions", limit=count)
+                self.assertEqual(result["session_count"], count)
+                self.assertEqual(len(result["sessions"]), count)
+                self.assertEqual(
+                    [row["session_id"] for row in result["sessions"]], [row["session_id"] for row in sessions]
+                )
+                self.assertTrue(all(row["content_trust"] == "untrusted" for row in result["sessions"]))
+                self.assertEqual(
+                    [row["cloud_context"] for row in result["sessions"]], [row["cloud_context"] for row in sessions]
+                )
+                self.assertNotIn("truncated", result)
+                self.assertLessEqual(encoded_size(result), MAX_RESULT_BYTES + 28 * count)
+
+    @requires_local_state
+    def test_report_trust_keeps_oversized_data_bounded_and_redacted(self):
+        from brigade.dot.contracts import encoded_size
+        from brigade.dot.process import MAX_RESULT_BYTES
+
+        sessions = [
+            {"session_id": f"session-{i:02}", "cloud_context": {"result": "password=fixture-example " + "x" * 4000}}
+            for i in range(100)
+        ]
+        self.runner.handler = reply(sessions)
+        result = self.call("fleet_sessions", include_ended=True, limit=100)
+        self.assertTrue(result["truncated"])
+        self.assertLess(len(result["sessions"]), 100)
+        rows = [row for row in result["sessions"] if isinstance(row, dict)]
+        self.assertTrue(rows)
+        self.assertTrue(all(row["content_trust"] == "untrusted" for row in rows))
+        self.assertNotIn("fixture-example", json.dumps(result))
+        self.assertIn("[redacted-credential]", json.dumps(result))
+        self.assertLessEqual(encoded_size(result), MAX_RESULT_BYTES + 28 * len(rows))

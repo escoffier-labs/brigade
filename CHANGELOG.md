@@ -216,6 +216,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
+- Dot session trust labels preserve the existing session and report data budget near the response limit.
+
 ## [0.30.0] - 2026-10-20
 
 ### Added
