@@ -148,6 +148,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The content guard keeps JavaScript URL template fields such as `https://${cfg.db.host}/path` code-shaped while still detecting literal hosts in quoted expressions, escaped fields, comments, and ordinary strings.
 
 
+- Reviewed duplicate memory merges validate block links against their final card destinations and configured indexes, preserving unrelated anchors and refusing missing claim blocks (#1959).
+
 ### Added
 
 - A `duet` connector pack serves Claude Duet from the Dot connector code with its own runtime schema, Hub principal `agent:duet`, state, Access audience and handoff inbox. It exposes 22 memory, skills, inbox and read-only fleet tools; dispatch and T3 fleet tools are absent from discovery. `message_send` has its own `messaging_enabled` gate (optional for Dot) and a 20 per hour limit for Duet, and the call log records each client's name. See `docs/duet-connector.md`.

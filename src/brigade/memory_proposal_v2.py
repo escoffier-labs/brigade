@@ -237,26 +237,58 @@ def _consolidate_accepted(
 def _refuse_dangling_block_links(
     paths: list[Path],
     target: Path,
+    care: memory_cmd.MemoryCareConfig,
     texts: dict[str, str | None],
-    sources: list[dict[str, Any]],
     removed: dict[str, str],
 ) -> None:
-    """Refuse a merge when a retained card links to a block anchor the survivor body lacks."""
-    originals = {s["path"]: s["text"] for s in sources}
-    gone: set[str] = set()
-    for loser, survivor in removed.items():
-        survivor_text = texts[survivor] or ""
-        kept = set(re.findall(r"\^(c-[0-9a-f]{6})\b", survivor_text))
-        gone |= set(re.findall(r"\^(c-[0-9a-f]{6})\b", originals[loser])) - kept
-    if not gone:
+    """Check block destinations against bounded final cards and configured indexes."""
+    if not removed:
         return
-    for path in paths:
-        rel = path.relative_to(target).as_posix()
+    documents: dict[str, str] = {}
+    index: IdentityIndex[str] = IdentityIndex()
+    anchors: dict[str, set[str]] = {}
+    cards = {p.relative_to(target).as_posix() for p in paths}
+    total = 0
+    for rel in sorted(cards | set(care.index_paths)):
         if rel in removed:
             continue
-        text = texts[rel] if rel in texts else io.text(path, limit=io.MAX_CARD_BYTES, absent=True)
-        if text and gone & set(re.findall(r"#\^(c-[0-9a-f]{6})\b", text)):
+        text = texts[rel] if rel in texts else io.text(target / rel, limit=io.MAX_CARD_BYTES, absent=True)
+        if text is None:
+            continue
+        total += len(text.encode())
+        if total > io.MAX_CORPUS_BYTES:
+            raise legacy.ProposalError("reference corpus byte limit exceeded")
+        documents[rel] = text
+        if rel in cards:
+            identity = card_identity(legacy._meta(text), rel)
+            index.claim_identity(identity, rel)
+            for key in (identity.card_id, *identity.aliases):
+                index.claim(key.lower().removesuffix(".md").removeprefix("cards/"), rel)
+            # Reserved ids and anchor-shaped payloads are not addressable claims.
+            anchors[rel] = {block.block_id for block in delta.blocks(text) if block.block_id is not None}
+
+    def check(destination: str | None, fragment: str) -> None:
+        if re.fullmatch(r"\^c-[0-9a-f]{6}", fragment) and (
+            destination is None or fragment[1:] not in anchors.get(destination, set())
+        ):
             raise legacy.ProposalError("merge would break a link to a removed claim block")
+
+    for rel, text in documents.items():
+        for link in legacy.WIKI.finditer(text):
+            destination, sep, fragment = link[1].split("|", 1)[0].partition("#")
+            if sep:
+                key = destination.lower().removesuffix(".md").removeprefix("cards/")
+                check(index.resolve(key) if key else rel, fragment)
+        # Keep v1's direct removed-path and safe-fragment restrictions. This
+        # check only validates the addressable destination; it grants no rewrite.
+        for link in legacy.LINK.finditer(text):
+            parsed = urlsplit(link[1])
+            if parsed.scheme or parsed.netloc:
+                continue
+            destination = (
+                posixpath.normpath(posixpath.join(posixpath.dirname(rel), unquote(parsed.path))) if parsed.path else rel
+            )
+            check(removed.get(destination, destination), unquote(parsed.fragment))
 
 
 def _references(
@@ -422,7 +454,7 @@ def compose(
     evidence, _ = _evidence(target, accepted, sources)
     _consolidate_accepted(target, texts, sources, accepted)
     texts = _derived(texts, sources, removed, proposal_id)
-    _refuse_dangling_block_links(paths, target, texts, sources, removed)
+    _refuse_dangling_block_links(paths, target, care, texts, removed)
     references, fences = _references(target, care, paths, texts, removed)
     changes = [legacy._change(s["path"], s["text"], texts[s["path"]]) for s in sources if texts[s["path"]] != s["text"]]
     changes.extend(references)
@@ -476,6 +508,11 @@ def validate_live(target: Path, proposal: dict[str, Any]) -> None:
         raise legacy.ProposalError("owner, scope or config drift")
     legacy._outside_roots(legacy._root(target), target, care)
     legacy._outside_roots(target / io.relative(proposal["handoff_path"]), target, care)
+    for rel, digest in proposal["index_fences"].items():
+        raw = io.read_bytes(target / io.relative(rel), absent=True)
+        if (io.sha256(raw) if raw is not None else "absent") != digest:
+            raise legacy.ProposalError("index before-state drift")
+    # Refuse stale reviewed indexes before interpreting their new references.
     fresh = compose(
         target=target,
         care=care,
@@ -490,10 +527,6 @@ def validate_live(target: Path, proposal: dict[str, Any]) -> None:
     )
     if any(fresh[key] != proposal[key] for key in fresh if key != "dropped_ops"):
         raise legacy.ProposalError("proposal source, block, evidence or reference drift")
-    for rel, digest in proposal["index_fences"].items():
-        raw = io.read_bytes(target / io.relative(rel), absent=True)
-        if (io.sha256(raw) if raw is not None else "absent") != digest:
-            raise legacy.ProposalError("index before-state drift")
 
 
 def create_payload(
