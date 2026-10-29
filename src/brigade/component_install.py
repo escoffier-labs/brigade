@@ -754,7 +754,9 @@ def run_post_install_smoke(
     run = runner if runner is not None else _default_smoke_runner
 
     for component_id in expected_components:
-        _SMOKE_DISPATCH[component_id](paths[component_id], run)
+        _SMOKE_DISPATCH[
+            next(name for name in component_manifest.family_names(component_id) if name in _SMOKE_DISPATCH)
+        ](paths[component_id], run)
 
 
 def _load_rollback_state(
@@ -778,7 +780,7 @@ def _load_rollback_state(
 def _ordered_component_ids(state: component_state.InstalledState) -> tuple[str, ...]:
     """Return the state's component ids in :data:`KNOWN_COMPONENT_IDS` order."""
     present = set(state.components)
-    return tuple(cid for cid in component_manifest.KNOWN_COMPONENT_IDS if cid in present)
+    return tuple(cid for cid in component_manifest.ACCEPTED_COMPONENT_IDS if cid in present)
 
 
 def _validate_rollback_component_sets(
@@ -793,15 +795,21 @@ def _validate_rollback_component_sets(
     """
     current_ids = set(current.components)
     previous_ids = set(previous.components)
-    known = set(component_manifest.KNOWN_COMPONENT_IDS)
+    known = set(component_manifest.ACCEPTED_COMPONENT_IDS)
     if not previous_ids or not previous_ids <= known:
         raise ComponentInstallError("previous installed state lists unknown or no components; cannot roll back")
     if not current_ids or not current_ids <= known:
         raise ComponentInstallError("current installed state lists unknown or no components; cannot roll back")
+    try:
+        for state in (current, previous):
+            for cid in state.components:
+                component_manifest.wire_id(state.components, cid)
+    except ValueError as exc:
+        raise ComponentInstallError(str(exc)) from exc
     restore_ids = _ordered_component_ids(previous)
     remove_ids = tuple(
         component_id
-        for component_id in component_manifest.KNOWN_COMPONENT_IDS
+        for component_id in component_manifest.ACCEPTED_COMPONENT_IDS
         if component_id in current_ids and component_id not in previous_ids
     )
     return restore_ids, remove_ids

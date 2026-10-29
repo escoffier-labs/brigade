@@ -439,3 +439,16 @@ def test_installed_state_is_frozen():
     state = _sample_state()
     with pytest.raises(AttributeError):
         state.manifest_revision = "2026-07-20"
+
+
+def test_family_state_retains_wire_keys_and_rejects_duplicate_aliases(tmp_path):
+    path = tmp_path / "installed.json"
+    record = _minimal_record(executable="/tmp/fixture/brigade-evidence")
+    payload = _minimal_payload(components={"brigade-evidence": record})
+    _write_installed_state(path, payload)
+    state = load_installed_state(path)
+    assert state is not None
+    assert render_installed_state(state) == payload
+    payload["components"]["miseledger"] = record
+    _write_installed_state(path, payload)
+    assert load_installed_state(path) is None
