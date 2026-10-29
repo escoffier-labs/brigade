@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
 - `brigade dogfood` reads the TOML literal strings it now writes without applying escapes, so Windows paths in `.brigade/dogfood.toml` keep their backslashes.
 
