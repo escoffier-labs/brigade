@@ -343,6 +343,15 @@ def test_batch_version_and_hostile_history_refuse_boundedly(task_run, damage):
     else:
         if damage in {"version", "boolean-version"}:
             payload["descriptor_version"] = 2 if damage == "version" else True
+            if damage == "version":
+                # Isolate the version guard from membership-commitment refusal.
+                payload["membership_digest"] = _wire_digest(
+                    {
+                        "domain": "brigade.task-batch.members.v1",
+                        "descriptor_version": payload["descriptor_version"],
+                        "members": payload["members"],
+                    }
+                )
         elif damage == "nested-row":
             payload["members"][0]["seat"] = {"execution": "unsupported"}
         else:
