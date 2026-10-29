@@ -1,0 +1,217 @@
+{
+  "base": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+  "head": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+  "method": "Exact Git objects rendered by GitHub Markdown API in a fixed local wrapper. Missing base documents show the actual git-show diagnostic. No server.",
+  "captures": [
+    {
+      "file": "runbook-before-desktop.png",
+      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "808ec410217ae36887a03d51064d9559127531fb1e11b65395efff5328bdd851"
+    },
+    {
+      "file": "runbook-before-mobile.png",
+      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "fc7ffb9e959ff423f6c2edf5401ee3272a49a2887b6c69747c212fda809fe1a8"
+    },
+    {
+      "file": "runbook-after-desktop.png",
+      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "bf6cea891832b4b0bb8740ef4b4f2205dea4e8cd",
+      "source_sha256": "33f7dc7bf9cbc9f3891e057a17a814c0033a57f0f9e28b4124a4554d547e8377",
+      "source_present": true,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "85f5702843540c92577fd57d3f33f110cdf62671917b915a3ec157698a9540dc"
+    },
+    {
+      "file": "runbook-after-mobile.png",
+      "source_path": "docs/runbooks/native-t3-assisted-closeout.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "bf6cea891832b4b0bb8740ef4b4f2205dea4e8cd",
+      "source_sha256": "33f7dc7bf9cbc9f3891e057a17a814c0033a57f0f9e28b4124a4554d547e8377",
+      "source_present": true,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "fbf6e947871785b3cdc12943a9757cd184f896f697cd738846e253c1a12c33f6"
+    },
+    {
+      "file": "design-before-desktop.png",
+      "source_path": "docs/phase-2046-native-closeout-design.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "67ae00cafbd4a946f6ccb2cfc5facab84d9051dca690f9ec8e8ad439b65c8801"
+    },
+    {
+      "file": "design-before-mobile.png",
+      "source_path": "docs/phase-2046-native-closeout-design.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "70a185ffc4b790218f92075554e1be1a85f3951c0b33adc5d75f413877258f09"
+    },
+    {
+      "file": "design-after-desktop.png",
+      "source_path": "docs/phase-2046-native-closeout-design.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "b5fcff79c35b7b704a68d78c5fa6fe887019de47",
+      "source_sha256": "a94a66b60b1847cbac60e7e5ac0058ff95c2142adbaeefe3c481961a5fc81b77",
+      "source_present": true,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "850740fac60484857916dc5d945bab2d5bdf9609516358a0a1f72f5fced45bfa"
+    },
+    {
+      "file": "design-after-mobile.png",
+      "source_path": "docs/phase-2046-native-closeout-design.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "b5fcff79c35b7b704a68d78c5fa6fe887019de47",
+      "source_sha256": "a94a66b60b1847cbac60e7e5ac0058ff95c2142adbaeefe3c481961a5fc81b77",
+      "source_present": true,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "d45bb35357e9106e3a42604c36bf13f1cc14041b2639e8dd7badfea7d7b5de67"
+    },
+    {
+      "file": "plan-before-desktop.png",
+      "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "27cc3ebe4b4dce586dfc2aef79a25495f16f0ee1a2d6166810170c348d92fcf4"
+    },
+    {
+      "file": "plan-before-mobile.png",
+      "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
+      "commit": "97b9137329ae67dd6122d36e6eb33bc831315d79",
+      "blob": null,
+      "source_sha256": null,
+      "source_present": false,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "49690d21537ed8ef443cd6f3df18f9ce105dc1173e68eb4fd7cd4c439afd9b65"
+    },
+    {
+      "file": "plan-after-desktop.png",
+      "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "5ccf131e5902b84dfb6701ec6205ece87c651796",
+      "source_sha256": "bd5389237ad02a4dc4badeed154fb4198c23b278cd251f55997053eac33225ea",
+      "source_present": true,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "857639486061b38a6e20383bed61b4a7f7c1ddf8259e01bc49f9d1728bcd2bdd"
+    },
+    {
+      "file": "plan-after-mobile.png",
+      "source_path": "docs/superpowers/plans/2026-10-29-native-t3-assisted-closeout.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "5ccf131e5902b84dfb6701ec6205ece87c651796",
+      "source_sha256": "bd5389237ad02a4dc4badeed154fb4198c23b278cd251f55997053eac33225ea",
+      "source_present": true,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "6b141758ab79b55ad0e8afd37bbded18ae6e344bee4e492567a5403689a3b88b"
+    },
+    {
+      "file": "unchanged-after-desktop.png",
+      "source_path": "docs/runbooks/research-live-acceptance.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "fc2de088e28039dc264c5e10b999e458d4b714fd",
+      "source_sha256": "09fdcfcedaae464b8431df6d133cdc335e63a63e961a4a706842cc5dca8f458b",
+      "source_present": true,
+      "viewport": [
+        1440,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "93db100537aae286470cae268259864f324b73fc86fa1ee8e55969fd7aa6ede6"
+    },
+    {
+      "file": "unchanged-after-mobile.png",
+      "source_path": "docs/runbooks/research-live-acceptance.md",
+      "commit": "d75f02b5ce8e9acf45f6700591d8322680ef404f",
+      "blob": "fc2de088e28039dc264c5e10b999e458d4b714fd",
+      "source_sha256": "09fdcfcedaae464b8431df6d133cdc335e63a63e961a4a706842cc5dca8f458b",
+      "source_present": true,
+      "viewport": [
+        390,
+        1000
+      ],
+      "theme": "light",
+      "scroll": 0,
+      "sha256": "ac5eef4ea53393a773e8b2ec7375dd34c1fd71a98138c5d7680fc52c8d93d634"
+    }
+  ]
+}
