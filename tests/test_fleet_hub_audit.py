@@ -683,3 +683,58 @@ def test_legacy_implicit_transaction_remains_caller_owned(tmp_path, isolation):
     finally:
         connection.close()
         reader.close()
+
+
+@pytest.mark.parametrize(
+    "identity", ["sk-gpu1", "hf_box", "npm_ci", "token.runner", "agent:token.bot", "agent:secret.helper"]
+)
+def test_known_public_identity_context_is_exact_and_not_stored(conn, identity):
+    audit.append(
+        conn,
+        actor="admin",
+        action="grants.change",
+        subject=identity,
+        detail={"principal_id": identity, "grants": [identity, "sk-future", "*"]},
+        known_public_identifiers=frozenset({identity, "sk-future"}),
+    )
+    row = audit.page(conn)[0]
+    assert row["subject"] == identity
+    assert row["detail"] == {"principal_id": identity, "grants": [identity, "sk-future", "*"]}
+    assert set(row) == {"id", "at", "actor", "action", "subject", "detail"}
+
+
+@pytest.mark.parametrize("field", ["actor", "invite_id", "hub_id", "key_id", "statement_id", "extra", "unlisted"])
+def test_known_public_identity_context_cannot_exempt_other_fields(conn, field):
+    args = dict(actor="admin", action="grants.change", subject="token.runner", detail={})
+    if field == "actor":
+        args["actor"] = "token.runner"
+    elif field == "extra":
+        args["detail"] = {"token": "token.runner"}
+    elif field == "unlisted":
+        args["detail"] = {"grants": ["sk-unlisted"]}
+    else:
+        args["detail"] = {field: "token.runner"}
+    with pytest.raises(ValueError):
+        audit.append(conn, **args, known_public_identifiers=frozenset({"token.runner"}))
+    assert audit.page(conn) == []
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        None,
+        [],
+        set(),
+        frozenset({"unlisted"}),
+        frozenset({"*"}),
+        frozenset({"unknown"}),
+        frozenset({7}),
+        frozenset({"x" * 129}),
+    ],
+)
+def test_known_public_identity_context_must_be_structural_and_used(conn, context):
+    with pytest.raises(ValueError):
+        audit.append(
+            conn, actor="admin", action="grants.change", subject="fixture", detail={}, known_public_identifiers=context
+        )
+    assert audit.page(conn) == []

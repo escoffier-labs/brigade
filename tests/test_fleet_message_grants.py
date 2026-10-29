@@ -263,7 +263,10 @@ def test_authorization_upgrade_from_intact_v45_via_init_db(tmp_path):
     for column in ("authorization_enrollment_epoch", "grant_epoch"):
         if column in columns:
             conn.execute(f"ALTER TABLE fleet_message_principals DROP COLUMN {column}")
-    prior_principals = conn.execute("SELECT * FROM fleet_message_principals ORDER BY name").fetchall()
+    prior_principals = conn.execute(
+        "SELECT principal_id,name,label,token_hash,created_at,revoked_at,enrollment_id "
+        "FROM fleet_message_principals ORDER BY name"
+    ).fetchall()
     prior_grants = conn.execute("SELECT * FROM fleet_message_send_grants").fetchall()
     prior_messages = conn.execute("SELECT * FROM fleet_messages ORDER BY id").fetchall()
     conn.execute("PRAGMA user_version=45")
@@ -291,7 +294,7 @@ def test_authorization_upgrade_from_intact_v45_via_init_db(tmp_path):
         )
         assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == prior_grants
         assert conn.execute("SELECT * FROM fleet_messages ORDER BY id").fetchall() == prior_messages
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 46
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 47
     finally:
         conn.close()
     conn = fleet_hub.init_db(db)
@@ -516,7 +519,7 @@ def test_authorization_migration_rollback_and_concurrent_startup(tmp_path, monke
         left, right = pool.submit(initialize), pool.submit(initialize)
         result = left.result(timeout=10)
         assert right.result(timeout=10) == result
-    assert result[1] == 46 and all(isinstance(value, str) for value in result[0])
+    assert result[1] == 47 and all(isinstance(value, str) for value in result[0])
 
 
 def test_authorization_backfill_preserves_nonnull_metadata(tmp_path):
@@ -598,3 +601,12 @@ def test_epoch_replacements_retry_current_values_and_fail_atomically(tmp_path, m
         assert not conn.in_transaction
     finally:
         conn.close()
+
+
+def test_node_admin_grants_require_active_exact_target_and_keep_pattern_limit(hub):
+    base, node_token, _, _ = hub
+    raw = {"action": "grants", "node_id": NODE_A, "may_send_to": ["agent:peer"]}
+    assert _post_path(base, ADMIN, "/message-principals", raw)[0] == 200
+    assert _post_path(base, node_token, "/message-principals", raw)[0] == 403
+    for change in ({"name": "peer"}, {"node_id": "absent"}, {"may_send_to": [str(i) for i in range(65)]}):
+        assert _post_path(base, ADMIN, "/message-principals", {**raw, **change})[0] == 400

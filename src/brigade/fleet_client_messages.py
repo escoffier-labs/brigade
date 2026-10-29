@@ -947,8 +947,35 @@ def manage_principal(
     return payload
 
 
-def set_principal_grants(name: str, patterns: list[str]) -> dict[str, Any]:
-    return manage_principal("grants", name=name, may_send_to=patterns)
+def set_principal_grants(name: str | None, patterns: list[str], *, node_id: str | None = None) -> dict[str, Any]:
+    if (
+        (name is not None and (not isinstance(name, str) or not name))
+        or (node_id is not None and (not isinstance(node_id, str) or not node_id))
+        or (name is None) == (node_id is None)
+    ):
+        raise fleet_client.FleetClientError("principal grants requires exactly one nonempty target")
+    if name is not None:
+        return manage_principal("grants", name=name, may_send_to=patterns)
+    settings = fleet_client.load_fleet_settings()
+    if not settings["hub_url"]:
+        raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    if not settings["admin_token"]:
+        raise fleet_client.FleetClientError("no fleet admin token configured")
+    fleet_client._require_encrypted_or_loopback_hub(settings["hub_url"])
+    from .fleet_hub_message_grants import normalize_patterns
+
+    try:
+        normalized = normalize_patterns(patterns)
+    except _message_limits.MessageError as exc:
+        raise fleet_client.FleetClientError(str(exc)) from exc
+    status, payload = _principal_admin_request(
+        settings["hub_url"],
+        settings["admin_token"],
+        {"action": "grants", "node_id": node_id, "may_send_to": normalized},
+    )
+    if not 200 <= status < 300:
+        raise FleetMessageHubError(_rejection(status, payload), status=status, code=payload.get("code"))
+    return payload
 
 
 def show_principal(name: str) -> dict[str, Any]:

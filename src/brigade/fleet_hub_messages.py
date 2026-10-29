@@ -214,6 +214,9 @@ def ensure_schema(
         ).fetchmany(1000)
     conn.execute(_PRINCIPAL_SCHEMA)
     principal_columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(fleet_message_principals)")}
+    for column, definition in (("role", "TEXT NOT NULL DEFAULT 'agent'"), ("person", "TEXT")):
+        if column not in principal_columns:
+            conn.execute(f"ALTER TABLE fleet_message_principals ADD COLUMN {column} {definition}")
     if "enrollment_id" not in principal_columns:
         conn.execute("ALTER TABLE fleet_message_principals ADD COLUMN enrollment_id TEXT")
     from . import fleet_hub_message_grants
@@ -655,7 +658,7 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
             return None
         if existing[0] != expected_enrollment_id:
             raise MessageConflict("principal enrollment generation changed", code="principal_enrollment_changed")
-        conn.execute(
+        changed = conn.execute(
             "UPDATE fleet_message_principals SET revoked_at=? "
             "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
             (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
@@ -663,6 +666,17 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
         from . import fleet_hub_message_keys
 
         fleet_hub_message_keys.revoke(conn, principal_id)
+        from . import fleet_hub_audit
+
+        if changed.rowcount == 1:
+            fleet_hub_audit.append(
+                conn,
+                actor="admin",
+                action="member.remove",
+                subject=principal_id,
+                detail={"principal_id": principal_id},
+                known_public_identifiers=frozenset({principal_id}),
+            )
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1170,26 +1184,53 @@ def _station_read(
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
         raise MessageError("invalid station read arguments")
 
+    role = grants.classify_principal(conn, caller)
+    if role is None:
+        raise MessageAuthError("sender is not an active hub principal")
+    if role == "teammate" and action == "claims":
+        raise MessageForbidden("teammates cannot read claims", code="principal_role_forbidden")
+
+    def project(result: dict[str, Any]) -> dict[str, Any]:
+        if role == "teammate":
+            from .fleet_mesh_crypto import decode_binary, fingerprint
+
+            result["sessions"] = []
+            if isinstance(result.get("total"), dict):
+                result["total"]["sessions"] = 0
+            for kind in ("nodes", "principals"):
+                for row in result.get(kind, []):
+                    if "keys" in row:
+                        row["keys"] = [
+                            {
+                                "kid": key["record"]["kid"],
+                                "fingerprint": fingerprint(decode_binary(key["record"]["sig_pub"], 32)),
+                            }
+                            for key in row["keys"]
+                        ]
+        return result
+
     limit = paging.page_limit(raw)
     snapshot = paging.load(conn, raw, caller=caller)
 
     if snapshot is not None:
         stored_snapshot, offsets, snapshot_id = snapshot
-        return paging.snapshot_page(
-            conn,
-            stored_snapshot,
-            offsets,
-            snapshot_id,
-            limit=limit,
-            snapshot_write=snapshot_write,
+        return project(
+            paging.snapshot_page(
+                conn,
+                stored_snapshot,
+                offsets,
+                snapshot_id,
+                limit=limit,
+                snapshot_write=snapshot_write,
+            )
         )
 
     # Load the caller's grants once; checking every row with require_granted
     # would issue one query per claim or session.
-    patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
+    patterns = frozenset(grants.grants_for(conn, caller)) if role != "node" else frozenset()
 
     def permitted(recipient: str) -> bool:
-        return grants.permits(patterns, caller, recipient)
+        return grants.permits(conn, patterns, caller, recipient)
 
     active_nodes = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL")}
     active_principals = {
@@ -1205,7 +1246,7 @@ def _station_read(
         return identity in active and permitted(identity)
 
     if action == "claims":
-        if not caller.startswith("agent:"):
+        if role == "node":
             rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
         else:
             rows = [
@@ -1226,23 +1267,28 @@ def _station_read(
     principals = [
         {"principal_id": str(row[0]), "label": str(row[1])}
         for row in conn.execute(
-            "SELECT principal_id,label FROM fleet_message_principals WHERE revoked_at IS NULL ORDER BY principal_id"
+            "SELECT principal_id,label FROM fleet_message_principals WHERE revoked_at IS NULL "
+            "AND role IN ('agent','teammate') ORDER BY principal_id"
         )
         if permitted(str(row[0]))
     ]
     # Only an agent limited to named nodes needs a bound node list, and that list
     # is bounded by its grants. Everyone else filters to active nodes by subquery.
-    all_nodes_visible = not caller.startswith("agent:") or bool({"*", "node:*"} & patterns)
+    all_nodes_visible = role == "node" or bool({"*", "node:*"} & patterns)
     node_ids = None if all_nodes_visible else {node["node_id"] for node in nodes}
     fields = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
     sessions = [
         {field: row[field] for field in fields}
-        for row in fleet_hub_sessions.list_sessions(
-            conn,
-            include_all=include_all,
-            node_ids=node_ids,
-            text_filter=query or None,
-            active_nodes_only=True,
+        for row in (
+            []
+            if role == "teammate"
+            else fleet_hub_sessions.list_sessions(
+                conn,
+                include_all=include_all,
+                node_ids=node_ids,
+                text_filter=query or None,
+                active_nodes_only=True,
+            )
         )
     ]
     needle = query.casefold()
@@ -1250,7 +1296,9 @@ def _station_read(
         key: [row for row in rows if any(needle in str(value).casefold() for value in row.values())]
         for key, rows in (("nodes", nodes), ("principals", principals), ("sessions", sessions))
     }
-    return paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
+    return project(
+        paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
+    )
 
 
 def handle(
