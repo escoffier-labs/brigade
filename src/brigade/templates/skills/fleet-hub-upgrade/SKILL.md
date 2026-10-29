@@ -30,6 +30,7 @@ The Hub validates node writes strictly. `_validate_session_request` in `src/brig
 Compare `<old-sha>` to `<target-sha>` before touching anything (`git diff <old-sha>..<target-sha> -- src/brigade/`).
 
 - **Payload keys.** Look for new keys in client request bodies: `src/brigade/fleet_client.py`, observers, session presence, telemetry publishers. For each, confirm the target Hub's validator accepts it and note whether the old Hub rejects it. A rejected key fixes the ordering in step 1; it is not optional.
+- **Old nodes against the new Hub.** Check the reverse direction too: fields the target Hub no longer accepts, and fields it now requires. Either one means nodes still on their current commit are refused as soon as the Hub upgrades. Compare each deployed node commit against the target validators. If any node would be refused, stop: Hub-first ordering cannot work for that release, so plan a coordinated upgrade instead.
 - **Schema version.** Check `SCHEMA_VERSION` in `src/brigade/fleet_hub.py`. A bump means older code refuses the newer database (`_refuse_newer_schema`), so rollback needs a database restore plus the code revert, not the code revert alone. Say so in the plan before you start.
 - **Disk headroom.** The Hub host needs room for a new venv, a wheel build, and a full database snapshot. Check free space against the database size, with margin.
 
@@ -41,11 +42,14 @@ Compare `<old-sha>` to `<target-sha>` before touching anything (`git diff <old-s
 4. Snapshot `<hub-db>` with the SQLite backup API (`sqlite3` `.backup` or `Connection.backup`), not `cp` of a live file. Run `PRAGMA integrity_check` on the snapshot and require `ok`. Record when the snapshot was taken.
 5. Switch the service to the new venv (unit `ExecStart` or a stable symlink), reload the manager, and start `<hub-unit>`.
 6. Poll `/health` until it answers or a bounded deadline passes.
-7. On failure: stop the unit, restore the snapshot, revert the venv switch, start, and re-check `/health`. Report the exact failure; do not retry blindly.
+7. On failure, stop the unit, then decide whether the snapshot is still safe to restore:
+   - If the new Hub never accepted a write (health never passed, and no node write is newer than the snapshot time), restore the snapshot, revert the venv switch, start, and re-check `/health`.
+   - If it accepted writes, restoring the snapshot discards them. With no schema change, revert the venv switch and keep the current database. With a schema bump, keep the new code and the current database and fix forward, because older code refuses the newer schema. Restore the snapshot only when the operator explicitly accepts losing those writes.
+   Report the exact failure; do not retry blindly.
 
 Verify the new code is what runs, not just that health is green:
 
-- `systemctl show <hub-unit> -p ExecStart` names the new venv.
+- `systemctl show <hub-unit> -p ExecStart` names the new venv. If it names a stable symlink, resolve it (`readlink -f`) and require the resolved path to be `/opt/brigade/releases/<target-sha>`.
 - The running process command line (`ps` or `/proc/<pid>/cmdline`) names the new venv.
 - `PRAGMA user_version` on `<hub-db>` equals `SCHEMA_VERSION` from `<target-sha>`.
 
@@ -58,7 +62,7 @@ For each `<node-host>`:
 1. Upgrade the node's Brigade install to `<target-sha>`.
 2. Restart every unit that imports that install.
 3. Trigger one telemetry publish through the node's usual publisher, or `brigade fleet policy observe --file <snapshot.json>`. Require exit 0: a refused write fails the command.
-4. Confirm the write landed on the telemetry surface: no `unsupported field` errors in the unit journal since the restart, and the node's telemetry age on the Hub's machine views (Overview or Capacity) is newer than the restart. If the release changed session publishing, `brigade fleet sessions` should list the node's open sessions with fresh heartbeat times.
+4. Confirm the write landed on the telemetry surface: no refused writes in the unit journal since the restart (`unsupported field`, or an HTTP 400 from the Hub), and the node's telemetry age on the Hub's machine views (Overview or Capacity) is newer than the restart. If the release changed session publishing, `brigade fleet sessions --json` should list the node's open sessions with heartbeat times newer than the restart.
 
 Do not use `brigade fleet status` for this. It lists run events, not telemetry, so an idle node can be missing from it and an unrelated recent run can look fresh after a failed publish.
 
@@ -67,7 +71,7 @@ Do not mark a node done on install success alone. Freshness on the Hub is the ev
 ## 5. Never
 
 - Never run older code against a newer schema. If `user_version` is ahead of the code, upgrade the code; do not edit the version.
-- Never replace the Hub database with a snapshot without accounting for writes made since the snapshot was taken. Node writes between snapshot and restore are lost; say how many minutes that is and whether nodes will republish.
+- Never replace the Hub database with a snapshot that is older than accepted writes unless the operator explicitly accepts losing them (see step 3.7). Say how many minutes of writes would be lost and whether nodes will republish.
 - Never edit the Hub database directly (no ad hoc `UPDATE`, no `PRAGMA user_version=` surgery). Use Brigade commands or a restore.
 - Never upgrade nodes first when the pre-flight diff found a new payload key.
 
