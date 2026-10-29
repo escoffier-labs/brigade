@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add `context handoff --json` for body-free, locally bound Codex instruction accounting, complete source hashes, and selection observations.
+
 - Dot session views mark reported task content as untrusted data and warn against treating it as instructions.
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
