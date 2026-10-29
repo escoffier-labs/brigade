@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+from .mutation import skill_command
+
 import contextlib
 import difflib
 import hashlib
@@ -418,6 +420,113 @@ def _drift_payload(
     }
 
 
+def _review_binding(
+    workspace: Path,
+    skill_id: str,
+    harness: str,
+    selector: str | None,
+    *,
+    anchor: Any = None,
+    source_files: dict[tuple[str, ...], bytes] | None = None,
+    rollback_files: dict[tuple[str, ...], bytes] | None = None,
+    installed_files: dict[tuple[str, ...], bytes] | None = None,
+    target_files: dict[tuple[str, ...], bytes] | None = None,
+) -> dict[str, Any] | None:
+    """Observe exact bytes through existing no-follow collectors, never receipt hashes."""
+    from ..localio import canonical_json_digest
+    from ..fleet_client import resolve_node_id
+
+    node_id = resolve_node_id()
+    if node_id == "unknown":
+        return None
+
+    if anchor is None:
+        with registry._held_state_root(workspace, writable=False) as held:
+            return _review_binding(
+                workspace,
+                skill_id,
+                harness,
+                selector,
+                anchor=held,
+                source_files=source_files,
+                rollback_files=rollback_files,
+                installed_files=installed_files,
+                target_files=target_files,
+            )
+    receipt = _previous_install_receipt(anchor, skill_id=skill_id, harness=harness)
+    if not _valid_receipt_contract(receipt, skill_id=skill_id, harness=harness):
+        return None
+    from .adapters import _fleet_source_selector
+
+    if _fleet_source_selector(skill_id, receipt) != selector:
+        return None
+    if selector not in {"registry:" + skill_id, "bundled:" + skill_id}:
+        return None
+    if source_files is None:
+        if selector.startswith("registry:"):
+            _dirs, source_files = registry._read_registry_entry_tree(anchor, skill_id)
+        else:
+            _dirs, source_files = registry._collect_source_tree(registry._bundled_skill_path(skill_id))
+    dest = _install_dir(workspace, harness, skill_id)
+    if installed_files is None:
+        _dirs, installed_files = _installed_tree_snapshot(workspace, dest, anchor=anchor)
+    rollback = None
+    snapshot = receipt.get("rollback_snapshot")
+    if snapshot is not None:
+        try:
+            relative = Path(snapshot).relative_to(registry._rollback_root(workspace, skill_id, harness))
+        except (ValueError, TypeError):
+            return None
+        if len(relative.parts) != 1 or relative.parts[0] in {"", ".", ".."}:
+            return None
+        if rollback_files is None:
+            _dirs, rollback_files = registry._read_tree_from_anchor(
+                anchor, "skills", "rollback", skill_id, harness, relative.parts[0]
+            )
+        rollback = canonical_json_digest(
+            {"snapshot": relative.parts[0], "package": registry._package_identity(rollback_files)}
+        )
+    metadata = registry._metadata_from_collected(source_files)
+    if target_files is None:
+        target_files = dict(source_files)
+        raw = source_files.get(("SKILL.md",), b"")
+        rendered = registry._render_skill_text_for_harness(
+            raw.decode("utf-8", errors="replace"), metadata, skill_id, harness
+        )
+        target_files[("SKILL.md",)] = rendered.encode("utf-8")
+    contract = metadata.get("behavioral_contract")
+    # Future paired evaluation publishes a validated digest here; absence remains null.
+    evaluation = metadata.get("evaluation_evidence_sha256")
+    result = {
+        "schema_version": 1,
+        "node": node_id,
+        "workspace": registry._text_fingerprint(str(workspace.resolve())),
+        "skill_id": skill_id,
+        "harness": harness,
+        "source_selector": selector,
+        "installed": registry._package_identity(installed_files),
+        "source": registry._package_identity(source_files),
+        "target": registry._package_identity(target_files),
+        "rollback": rollback,
+        "contract": canonical_json_digest(contract) if contract is not None else None,
+        "evaluation": evaluation,
+    }
+    return registry._validate_expected_binding(result)
+
+
+def _check_review_binding(
+    expected: dict[str, Any], workspace: Path, skill_id: str, harness: str, **kwargs: Any
+) -> None:
+    try:
+        registry._validate_expected_binding(expected)
+        observed = _review_binding(workspace, skill_id, harness, expected["source_selector"], **kwargs)
+    except (ValueError, OSError, registry.SkillsStatePathError) as exc:
+        raise registry.SkillsStatePathError("review-stale: package provenance unavailable") from exc
+    if observed != expected:
+        raise registry.SkillsStatePathError("review-stale: expected package binding changed; review again")
+
+
+@skill_command
 def install(
     *,
     workspace: Path,
@@ -425,6 +534,7 @@ def install(
     harness: str,
     force: bool = False,
     json_output: bool = False,
+    expected_binding: dict[str, Any] | None = None,
 ) -> int:
     workspace = workspace.expanduser().resolve()
     install_targets = _install_targets(workspace)
@@ -567,6 +677,9 @@ def install(
             path_text = container.get("path")
             if staging_root is not None and isinstance(path_text, str) and path_text.startswith(staging_root):
                 container["path"] = str(source_dir / Path(path_text).relative_to(staging_root))
+    if expected_binding is not None and harness == "all":
+        print("error: review-stale: expected binding requires one explicit harness", file=sys.stderr)
+        return 2
     targets = install_targets if harness == "all" else (harness,)
     receipts: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
@@ -606,6 +719,8 @@ def install(
                     for error in render_errors:
                         print(f"error: {install_target}: {error}", file=sys.stderr)
                 return 1
+            install_files = dict(snapshot_files)
+            install_files[("SKILL.md",)] = rendered_text.encode("utf-8")
             install_rel = str(_adapter_map(workspace)[install_target]["install_path"]).format(skill_id=skill_id)
             under_state_root = install_rel.startswith(".brigade/")
             state_parts = tuple(part for part in install_rel.split("/") if part)[1:]
@@ -624,6 +739,18 @@ def install(
             # Refuse redirected state paths before anything is mutated.
             registry._require_plain_state_dirs(state_anchor, "skills", "installs")
             registry._require_plain_state_dirs(state_anchor, "skills", "rollback")
+            if expected_binding is not None:
+                if skill != expected_binding.get("source_selector"):
+                    raise registry.SkillsStatePathError("review-stale: source selector changed")
+                _check_review_binding(
+                    expected_binding,
+                    workspace,
+                    skill_id,
+                    install_target,
+                    anchor=state_anchor,
+                    source_files=snapshot_files,
+                    target_files=install_files,
+                )
             previous_receipt = _previous_install_receipt(state_anchor, skill_id=skill_id, harness=install_target)
             rollback_snapshot: str | None = None
             rollback_snapshot_fingerprint: str | None = None
@@ -641,17 +768,28 @@ def install(
                         replaced_dirs, replaced_files = [], {}
                 else:
                     replaced_dirs, replaced_files = registry._collect_source_tree(dest)
+                if expected_binding is not None:
+                    _check_review_binding(
+                        expected_binding,
+                        workspace,
+                        skill_id,
+                        install_target,
+                        anchor=state_anchor,
+                        source_files=snapshot_files,
+                        installed_files=replaced_files,
+                        target_files=install_files,
+                    )
                 registry._write_collected_tree_into_anchor(
                     replaced_dirs, replaced_files, state_anchor, "skills", "rollback", skill_id, install_target, stamp
                 )
                 rollback_snapshot = str(rollback_dir)
                 rollback_snapshot_fingerprint = registry._files_fingerprint(replaced_files)
+                if expected_binding is not None:
+                    _check_review_binding(expected_binding, workspace, skill_id, install_target, anchor=state_anchor)
                 if under_state_root:
                     registry._remove_tree_in_anchor(state_anchor, *state_parts)
                 else:
                     shutil.rmtree(dest)
-            install_files = dict(snapshot_files)
-            install_files[("SKILL.md",)] = rendered_text.encode("utf-8")
             if under_state_root:
                 registry._write_collected_tree_into_anchor(snapshot_dirs, install_files, state_anchor, *state_parts)
             else:

@@ -61,7 +61,7 @@ brigade-hook = "brigade.claude_hooks.entry:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json", "fixtures/*.json", "runs_view.html", "assets/fleet_hub/*"]
+brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json", "fixtures/*.json", "fixtures/**/*", "runs_view.html", "assets/fleet_hub/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

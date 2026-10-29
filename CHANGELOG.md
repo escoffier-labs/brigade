@@ -220,6 +220,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
+- Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
+- Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
+- Concurrent skill updates share a mutation lock so reviewed approvals cannot overwrite a newer baseline. Paired replay refuses redirected output paths, binds the replay transcript and reports offline apparatus outcomes explicitly.
 - Dot session trust labels preserve the existing session and report data budget near the response limit.
 
 ## [0.30.0] - 2026-10-20
