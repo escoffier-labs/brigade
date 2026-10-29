@@ -280,3 +280,25 @@ def test_copy_destinations_with_options_are_attributed(worktrees, command):
     assert replacement(second) in blocked["reason"]
     verify(first, first)
     assert event(first, "Stop", stop_hook_active=False)["decision"] == "block"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "if true; then cd {other}; fi; printf after > source.py",
+        "for name in one; do cd {other}; done; printf after > source.py",
+        "{{ cd {other}; }}; printf after > source.py",
+    ],
+)
+def test_directory_changes_after_shell_keywords_are_observed(worktrees, command):
+    first, second = worktrees
+    command = command.format(other=shlex.quote(str(second)))
+    fields = {"tool_name": "Bash", "tool_input": {"command": command}}
+    event(first, "PreToolUse", **fields)
+    (second / "source.py").write_text("after\n")
+    event(first, "PostToolUse", **fields)
+    blocked = event(first, "Stop", stop_hook_active=False)
+    assert blocked is not None and blocked.get("decision") == "block"
+    assert replacement(second) in blocked["reason"]
+    verify(first, first)
+    assert event(first, "Stop", stop_hook_active=False)["decision"] == "block"

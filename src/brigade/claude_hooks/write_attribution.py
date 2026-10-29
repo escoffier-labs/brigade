@@ -54,6 +54,8 @@ def _git_command(tokens: list[str], cwd: Path) -> tuple[list[str], Path]:
 # dropped as options.
 _OPTION_VALUES = {"touch": "rdt", "truncate": "rs", "mkdir": "m", "mv": "St", "cp": "St", "install": "gmoSt"}
 _TARGET_DIRECTORY_COMMANDS = {"cp", "install", "mv"}
+# Reserved words that can open a segment before the real command name.
+_SHELL_KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until", "time"}
 
 
 def _target_directory(tokens: list[str]) -> str | None:
@@ -153,6 +155,15 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
         elif not rt._path_targets_brigade_internal_artifact(resolve_wired_target(str(path)) or effective, str(path)):
             add(path, True)
 
+    # Never observe less than the pre-attribution discovery did: every directory
+    # it found stays an observation root, so a fingerprint catches what the
+    # segment parser below cannot place.
+    try:
+        for candidate in rt._command_candidate_paths(command, cwd):
+            add(candidate)
+    except ValueError:
+        pass
+
     segments: list[list[str]] = [[]]
     separators: list[str] = []
     for token in tokens:
@@ -164,6 +175,8 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
     effective = cwd
     for index, segment in enumerate(segments):
         stripped = rt._strip_command_prefixes(segment)
+        while stripped and stripped[0] in _SHELL_KEYWORDS:
+            stripped = rt._strip_command_prefixes(stripped[1:])
         if not stripped:
             continue
         add(effective)
