@@ -29,6 +29,7 @@ from .fleet_openclaw_observer import (
 )
 
 NATIVE_TIMEOUT_SECONDS = 8
+DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
 MAX_PROJECTS = 2_000
 MAX_METADATA_BYTES = 262_144
@@ -41,6 +42,7 @@ _TERMINAL = frozenset({"completed", "interrupted", "failed", "cancelled", "rolle
 _NATIVE_PROGRAM = r"""
 import json, os, time
 from concurrent.futures import ThreadPoolExecutor, wait
+STARTED = time.monotonic()
 try:
     from t3_fleet.agent import _build_agent
     client = _build_agent(os.environ).t3
@@ -97,9 +99,12 @@ try:
         except Exception:
             pass  # An unavailable link leaves a separate observation, never a guessed match.
         return None
+    # Optional links get at most 4s, and never the slack reserved to print the snapshot.
+    detail_wait = min(4.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))
     pool = ThreadPoolExecutor(max_workers=8)
-    futures = {pool.submit(provider_link, row): row for row in (linked[offset:] + linked[:offset])[:50]}
-    done, _ = wait(futures, timeout=4)
+    window = (linked[offset:] + linked[:offset])[:50] if detail_wait > 0 else []
+    futures = {pool.submit(provider_link, row): row for row in window}
+    done, _ = wait(futures, timeout=max(detail_wait, 0)) if futures else (set(), set())
     for future in done:
         link = future.result()
         if link is not None:
@@ -131,10 +136,12 @@ def _native_metadata(interpreter: str, deadline: float) -> object:
     path = Path(interpreter)
     if not path.is_absolute() or not path.is_file() or not os.access(path, os.X_OK):
         raise ObservationError("t3_python_unavailable")
+    timeout = _remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS)
+    program = f"BUDGET_SECONDS = {float(timeout)!r}\nRESERVE_SECONDS = {DETAIL_RESERVE_SECONDS!r}\n" + _NATIVE_PROGRAM
     result = proc.run(
-        [str(path), "-c", _NATIVE_PROGRAM],
+        [str(path), "-c", program],
         cwd=path.parent,
-        timeout=_remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS),
+        timeout=timeout,
         supervise_group=True,
     )
     _remaining(deadline, cap=1)

@@ -29,6 +29,7 @@ def native_t3(tmp_path, monkeypatch):
         "class Client:\n"
         " def shell_snapshot(self):\n"
         "  if os.environ.get('FIXTURE_MODE') == 'sleep': time.sleep(30)\n"
+        "  time.sleep(float(os.environ.get('FIXTURE_SHELL_DELAY', '0')))\n"
         "  return json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
         " def thread_snapshot(self, thread_id):\n"
         "  time.sleep(float(os.environ.get('FIXTURE_DETAIL_DELAY', '0')))\n"
@@ -496,5 +497,36 @@ def test_stalled_detail_read_does_not_block_publication(native_t3, capsys, monke
     assert main(["--t3-python", sys.executable, "--publish"]) == 0
     capsys.readouterr()
     assert time.monotonic() - started < 8
+    assert len(published) == 1
+    assert published[0].provider_link is None
+
+
+def test_slow_shell_read_skips_detail_waits_past_the_budget(native_t3, capsys, monkeypatch):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_SHELL_DELAY", "5")
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "30")
+    configure(
+        [
+            {
+                "id": "app-thread-slow-shell",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-slow",
+                "providerThreads": [
+                    {
+                        "id": "provider-slow",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": "native-slow", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
     assert len(published) == 1
     assert published[0].provider_link is None
