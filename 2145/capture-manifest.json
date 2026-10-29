@@ -1,0 +1,13 @@
+{
+  "base": "994468e0fb06c87f7549b6d669c0e2755ac7a9e2",
+  "head": "552dd1ec642cd5a47fc40ee4d0c3f770ea44cd66",
+  "terminal_geometry": "128x48",
+  "window_pixels": "1026x818",
+  "mcp_output_sha256": "94765f8fe85c4789a15d2667677ad28fcdcb5fecd167eb62406e257dcd5c8d59",
+  "mcp_identical": true,
+  "images": {
+    "unchanged-mcp.png": "fc8084978b18269dd0cc4f5507a3f6ec9eaac54239158b39a1155cf6fa4de430",
+    "before-instructions.png": "b13e8083ba769067e3c83df659764ae611a386c1c9dc78ea2670729072131476",
+    "after-instructions.png": "8c707a7895c79af5c83aa9677577cdcc8dd6af197e911428d6abf365f982fa7a"
+  }
+}
