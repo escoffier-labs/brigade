@@ -17,7 +17,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Mapping, Sequence
 
-from . import fleet_hub, fleet_hub_policy, fleet_policy, fleet_quota
+from . import fleet_hub, fleet_hub_policy, fleet_policy, fleet_quota, task_roles
 from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
 from .fleet_model_roster import canonical_json
 
@@ -771,6 +771,7 @@ def _store_decision(
     expires_at: str | None,
     decision_id: str,
     generation: int = 0,
+    task_role: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     payload = {
         "schema": ROUTE_SCHEMA,
@@ -787,6 +788,8 @@ def _store_decision(
         "work_id": request.get("work_id"),
         "admission_generation": generation,
     }
+    if task_role is not None:
+        payload["task_role"] = dict(task_role)
     conn.execute(
         "INSERT INTO fleet_route_decisions (decision_id, request_key, request_digest, admission_generation, "
         "policy_version, policy_digest, origin, origin_node, session_id, consumer, repo_identity, workload, "
@@ -1034,8 +1037,12 @@ def _collect_candidates(
     seat: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any] | None, str | None]:
     """Evaluate every seat/machine pair. Never writes; shared by ``route`` and dry-run previews."""
-    start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get("impl")
-    seats = _chain(start_seat, document["seats"], "fallback")
+    role = task_roles.role_for_workload(workload)
+    start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get(role)
+    if seat is None and role != "impl":
+        seats = [start_seat] if isinstance(start_seat, str) and start_seat in document["seats"] else []
+    else:
+        seats = _chain(start_seat, document["seats"], "fallback")
     if not seats:
         return [], [], None, "unknown-role"
     candidates: list[dict[str, Any]] = []
@@ -1246,6 +1253,17 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
             parsed["repo_identity"],
             override_reason=parsed["override_reason"],
         )
+        task_role = None
+        role = task_roles.role_for_workload(parsed["workload"])
+        if role != "impl":
+            task_role = {
+                "workload": parsed["workload"],
+                "role": role,
+                "seat": parsed["seat"] or resolution["effective"].get("roles", {}).get(role),
+                "source_layer": resolution["sources"].get(f"roles.{role}", {}).get("layer"),
+                "fallback": "disabled" if parsed["seat"] is None else "explicit-seat",
+                "explicit_seat": parsed["seat"] is not None,
+            }
         candidates, _eligible, selected_row, denial = _collect_candidates(
             conn,
             document=document,
@@ -1271,6 +1289,7 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
                 expires_at=None,
                 decision_id=_mint("dec-"),
                 generation=generation,
+                task_role=task_role,
             )
             if opened:
                 conn.commit()
@@ -1324,6 +1343,7 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
             expires_at=expires_at,
             decision_id=decision_id,
             generation=generation,
+            task_role=task_role,
         )
         if opened:
             conn.commit()

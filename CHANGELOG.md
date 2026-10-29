@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
+- Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 
 - Antigravity seat health runs `agy models` once per probe for both the authentication and model checks, allows it up to 10 seconds inside the per-seat deadline, and reports an expired listing as a timeout. Authentication errors, nonzero exits, empty or incomplete listings, and a missing requested model still fail the seat.
 
