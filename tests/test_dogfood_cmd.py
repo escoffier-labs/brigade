@@ -627,3 +627,10 @@ def test_dogfood_cli_latest_and_next(tmp_path, monkeypatch):
     assert cli.main(["dogfood", "latest", "--target", str(tmp_path)]) == 0
     assert cli.main(["dogfood", "next", "--target", str(tmp_path)]) == 0
     assert seen == [("latest", {"target": tmp_path}), ("next", {"target": tmp_path})]
+
+
+def test_dogfood_config_reads_written_windows_paths_verbatim():
+    windows_path = "D:\\a\\_temp\\brigade-temp\\target"
+    written = dogfood_cmd.toml_compat.format_toml_value(windows_path)
+    assert dogfood_cmd._parse_toml_value(written) == windows_path
+    assert dogfood_cmd._parse_toml_value('"D:\\\\a"') == "D:\\a"
