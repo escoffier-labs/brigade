@@ -86,24 +86,28 @@ jobs:
           toolchain: stable
       - name: Build exact native GraphTrail binaries
         if: runner.os != 'Windows'
-        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
+        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp --bin brigade-code-graph --bin brigade-code-graph-mcp
       - name: Stage native GraphTrail binaries
         if: runner.os != 'Windows'
         run: |
           mkdir -p "$GITHUB_WORKSPACE/release-assets"
           cp target/release/graphtrail "$GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}"
+          cp target/release/brigade-code-graph "$GITHUB_WORKSPACE/release-assets/brigade-code-graph-${{ matrix.platform }}"
           cp target/release/graphtrail-mcp "$GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}"
+          cp target/release/brigade-code-graph-mcp "$GITHUB_WORKSPACE/release-assets/brigade-code-graph-mcp-${{ matrix.platform }}"
       - name: Build exact native GraphTrail binaries
         if: runner.os == 'Windows'
         shell: pwsh
-        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
+        run: cargo build --release --locked --bin graphtrail --bin graphtrail-mcp --bin brigade-code-graph --bin brigade-code-graph-mcp
       - name: Stage native GraphTrail binaries
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path "$env:GITHUB_WORKSPACE/release-assets" | Out-Null
           Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-${{ matrix.platform }}.exe"
+          Copy-Item target/release/brigade-code-graph.exe "$env:GITHUB_WORKSPACE/release-assets/brigade-code-graph-${{ matrix.platform }}.exe"
           Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/graphtrail-mcp-${{ matrix.platform }}.exe"
+          Copy-Item target/release/brigade-code-graph-mcp.exe "$env:GITHUB_WORKSPACE/release-assets/brigade-code-graph-mcp-${{ matrix.platform }}.exe"
       - uses: actions/upload-artifact@v7
         with:
           name: rust-${{ matrix.platform }}
@@ -153,6 +157,7 @@ jobs:
           suffix=""
           if [ "$GOOS" = windows ]; then suffix=.exe; fi
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/miseledger-${{ matrix.platform }}$suffix" ./cmd/miseledger
+          go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/brigade-evidence-${{ matrix.platform }}$suffix" ./cmd/brigade-evidence
           go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/sessionfind-${{ matrix.platform }}$suffix" ./cmd/sessionfind
       - uses: actions/upload-artifact@v7
         with:
@@ -246,13 +251,13 @@ jobs:
           COMMIT: ${{ github.sha }}
         run: |
           mkdir release-assets
-          test "$(find downloaded -type f | wc -l)" -eq 25
+          test "$(find downloaded -type f | wc -l)" -eq 40
           test -z "$(find downloaded -type f -printf '%f\n' | sort | uniq -d)"
           find downloaded -type f -exec cp {} release-assets/ \;
           python scripts/generate_component_manifest.py --tag "$TAG" --commit "$COMMIT" \
             --assets-dir release-assets --output release-assets/component-manifest-v1.json \
             --checksums-output release-assets/checksums.txt
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42
       - uses: actions/attest@v4
         with:
           subject-path: |
@@ -281,6 +286,21 @@ jobs:
             release-assets/agent-notify-darwin-amd64
             release-assets/agent-notify-darwin-arm64
             release-assets/agent-notify-windows-amd64.exe
+            release-assets/brigade-code-graph-linux-amd64
+            release-assets/brigade-code-graph-linux-arm64
+            release-assets/brigade-code-graph-darwin-amd64
+            release-assets/brigade-code-graph-darwin-arm64
+            release-assets/brigade-code-graph-windows-amd64.exe
+            release-assets/brigade-code-graph-mcp-linux-amd64
+            release-assets/brigade-code-graph-mcp-linux-arm64
+            release-assets/brigade-code-graph-mcp-darwin-amd64
+            release-assets/brigade-code-graph-mcp-darwin-arm64
+            release-assets/brigade-code-graph-mcp-windows-amd64.exe
+            release-assets/brigade-evidence-linux-amd64
+            release-assets/brigade-evidence-linux-arm64
+            release-assets/brigade-evidence-darwin-amd64
+            release-assets/brigade-evidence-darwin-arm64
+            release-assets/brigade-evidence-windows-amd64.exe
             release-assets/component-manifest-v1.json
       - uses: actions/upload-artifact@v7
         with:
@@ -372,7 +392,7 @@ jobs:
         run: |
           mkdir release-assets
           gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir release-assets
-          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 27
+          test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 42
           (cd release-assets && sha256sum --check checksums.txt)
           python scripts/verify_component_manifest_provenance.py --manifest release-assets/component-manifest-v1.json
           while read -r _digest asset; do
