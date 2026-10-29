@@ -105,6 +105,18 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport, *, refusal="
     lost = threading.Event()
     finished = threading.Event()
     loss_time = []
+    worker_ended = []
+    real_run = proc.run
+
+    def observed_worker_run(command, *args, **kwargs):
+        result = real_run(command, *args, **kwargs)
+        if kwargs.get("process_registry") is not None and (
+            command == [sys.executable, str(child)] or command[:2] == [str(child), "wait"]
+        ):
+            worker_ended.append(time.monotonic())
+        return result
+
+    monkeypatch.setattr(proc, "run", observed_worker_run)
 
     def kill_worker():
         if pid_file.exists():
@@ -179,13 +191,12 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport, *, refusal="
                 "--no-route",
             ]
         )
-        ended_at = time.monotonic()
     finally:
         finished.set()
         kill_worker()
         watchdog.join(timeout=1)
     assert lost.is_set(), "the worker must start before ownership is revoked"
-    assert ended_at - loss_time[0] < CLAIM_LOSS_TERMINATE_GRACE_SECONDS + 2, (
+    assert worker_ended and worker_ended[0] - loss_time[0] < CLAIM_LOSS_TERMINATE_GRACE_SECONDS + 2, (
         "claim loss left the silent worker alive until the failsafe killed it"
     )
     assert rc == 2
