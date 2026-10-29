@@ -1413,3 +1413,39 @@ def test_final_block_outside_note_after_even_backslashes_remains_valid(tmp_path,
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert not other.exists()
     assert referrer.read_bytes() == before
+
+
+@pytest.mark.parametrize("in_index", [False, True])
+@pytest.mark.parametrize(
+    "destination",
+    ["%5Cother.md", "other.md%20", "other.md.", "file:Other.md", "file:other", "obsidian://open?file=other"],
+)
+def test_final_block_platform_aliases_and_local_schemes_stay_fail_closed(tmp_path, in_index, destination):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = tmp_path / "MEMORY.md" if in_index else card(tmp_path, "linker")
+    referrer.write_text(f"[claim]({destination}#^c-456def)\n")
+    before = {p: p.read_bytes() for p in (path, other, referrer)}
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("destination", ["https://example.com/Other.md", "//example.com/Other.md"])
+def test_final_block_remote_host_links_remain_outside_merge_authority(tmp_path, destination):
+    setup(tmp_path)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    referrer = card(tmp_path, "linker", body=f"[claim]({destination}#^c-456def)")
+    before = referrer.read_bytes()
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert referrer.read_bytes() == before

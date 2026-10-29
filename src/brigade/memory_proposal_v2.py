@@ -246,7 +246,7 @@ def _refuse_dangling_block_links(
     if not removed:
         return
     originals = {source["path"]: source["text"] for source in sources}
-    removed_stems = {posixpath.basename(path).lower().removesuffix(".md") for path in removed}
+    removed_stems = {posixpath.basename(path).lower().rstrip(". ").removesuffix(".md") for path in removed}
     gone: set[str] = set()
     for loser, survivor in removed.items():
         kept = set(re.findall(r"\^(c-[0-9a-f]{6})\b", texts[survivor] or ""))
@@ -310,7 +310,10 @@ def _refuse_dangling_block_links(
                 continue
             parsed = urlsplit(link[1])
             if parsed.scheme or parsed.netloc:
-                validated.append(link.span())
+                # Only hosted web links prove that the target is outside the
+                # local corpus; file and application schemes stay fail-closed.
+                if parsed.netloc and parsed.scheme.lower() in {"", "http", "https"}:
+                    validated.append(link.span())
                 continue
             destination = (
                 posixpath.normpath(posixpath.join(posixpath.dirname(rel), unquote(parsed.path))) if parsed.path else rel
@@ -319,8 +322,8 @@ def _refuse_dangling_block_links(
             if destination not in cards and destination not in care.index_paths:
                 # An unrelated note does not gain read or validation authority.
                 # Angle wrappers and other unparsed spellings stay fail-closed.
-                stem = posixpath.basename(destination).lower().removesuffix(".md")
-                if not re.search(r"[\s<>\\]", link[1]) and stem not in removed_stems:
+                stem = posixpath.basename(destination.replace("\\", "/")).lower().rstrip(". ").removesuffix(".md")
+                if not re.search(r"[\s<>\\]", unquote(link[1])) and stem not in removed_stems:
                     validated.append(link.span())
             elif check(destination, unquote(parsed.fragment)):
                 validated.append(link.span())
