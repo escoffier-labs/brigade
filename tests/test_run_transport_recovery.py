@@ -502,3 +502,26 @@ def test_orchestrated_grok_dispatch_does_not_enter_recovery(monkeypatch, tmp_pat
     assert len(direct_calls) == 1
     assert fallback_calls == []
     assert result.attempts == ()
+
+
+def test_task_role_strict_roster_blocks_invalid_final_seat_fallback(monkeypatch, tmp_path):
+    from brigade import task_roles
+
+    roster = _recovery_roster()
+    monkeypatch.setitem(
+        _dispatch_recovery.__globals__,
+        "_recovery_roster",
+        lambda **kwargs: task_roles.strict_roster(roster, "grok-review"),
+    )
+    result, direct_calls, fallback_calls = _dispatch_recovery(
+        monkeypatch,
+        tmp_path,
+        [_invalid_final(), _invalid_final()],
+        fallback_result=replace(_successful_final(), transport="acpx", stop_reason="end_turn"),
+    )
+
+    assert result.ok is False
+    assert len(direct_calls) == 2
+    assert fallback_calls == []
+    assert all(attempt.kind != "fallback" for attempt in result.attempts)
+    assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"

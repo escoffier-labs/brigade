@@ -65,7 +65,7 @@ _CODE_OBJECTS = (
         "code",
         re.compile(
             r"\b(?:functions?|class(?:es)?|logic|parser|hooks?|tests?|cache|scheduler|backend|server|"
-            r"allocator|memory|pool|worker|importer|bug|cron|queue|cli flag|file write|database write|"
+            r"allocator|memory|pool|worker|importer|validation|bug|cron|queue|cli flag|file write|database write|"
             r"build (?:tool|tooling|pipeline|script|config)|vite|webpack|esbuild|rollup|bundler|tsconfig|eslint)\b"
         ),
     ),
@@ -157,7 +157,7 @@ def classify(text: str) -> TaskRoleDecision:
 
 
 def strict_roster(roster: Roster, seat: str) -> Roster:
-    """Copy only the selected seat's fallback, preserving unrelated routing."""
+    """Clear both seat fallback mechanisms on a copy of the selected seat."""
     agents = dict(roster.agents)
-    agents[seat] = replace(agents[seat], fallback=())
+    agents[seat] = replace(agents[seat], fallback=(), invalid_final_fallback=None)
     return replace(roster, agents=agents)

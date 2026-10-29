@@ -48,13 +48,15 @@ def test_bounded_deterministic_evidence():
 
 
 def test_strict_roster_copies_only_selected_fallback():
-    agent = Agent(name="author", cli="claude", role="code", fallback=("coder",))
+    agent = Agent(name="author", cli="claude", role="code", fallback=("coder",), invalid_final_fallback="coder")
     coder = Agent(name="coder", cli="codex", role="code", fallback=("author",))
     roster = Roster(orchestrator="chef", agents={"author": agent, "coder": coder})
     strict = task_roles.strict_roster(roster, "author")
     assert strict.agents["author"].fallback == ()
+    assert strict.agents["author"].invalid_final_fallback is None
     assert strict.agents["coder"] is coder
     assert roster.agents["author"].fallback == ("coder",)
+    assert roster.agents["author"].invalid_final_fallback == "coder"
 
 
 @pytest.mark.parametrize(
@@ -94,6 +96,8 @@ def test_http_post_is_not_audience_prose(text):
         "Write an abstract base class for the storage backend",
         "Write resume logic for detached runs",
         "Write the email sender function",
+        "Update email validation to reject malformed addresses",
+        "Update the POST /api/login endpoint to validate the request body",
         "Write a post-processing step for the importer",
         "Write the POST /api/users handler",
         "Write a handler for POST /users",
@@ -137,6 +141,7 @@ def test_separate_implementation_action_exposes_ambiguity(text):
         ("Improve the hero section's spacing and typography", "frontend"),
         ("Make the settings page look better on mobile", "frontend"),
         ("Write an email about the sender function", "writing"),
+        ("Draft an email about validation", "writing"),
         ("Write a guide about parsing YAML", "writing"),
         ("Write a thread about thread-safe caches", "writing"),
         ("Write an abstract about base classes", "writing"),
