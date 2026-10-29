@@ -159,6 +159,8 @@ def validate_prepared_handoff(raw: object, work_id: str) -> dict[str, Any]:
 
 
 def _current_ownership(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]:
+    if conn.execute(ownership._EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None:
+        raise store.WorkloreConflict(ownership._EXTERNAL_UNSUPPORTED, code="ownership-conflict")
     # The existing multi-type ORDER BY can choose a work-id history scan. Seek
     # only the newest row of each ownership type, then choose among at most nine.
     latest = None

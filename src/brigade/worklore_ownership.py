@@ -13,7 +13,8 @@ import hmac
 import json
 import re
 import sqlite3
-from datetime import datetime
+from dataclasses import asdict
+from datetime import datetime, timedelta
 from typing import Any, Mapping
 
 from . import worklore_scope as scope
@@ -54,6 +55,28 @@ EVENT_TYPES = {
     "release": "ownership-released",
     "recover": "ownership-recovered",
 }
+EXTERNAL_EVENT_TYPES = {
+    "admit": "external-ownership-admitted",
+    "register": "external-ownership-registered",
+    "renew": "external-ownership-renewed",
+    "report": "external-ownership-reported",
+    "release": "external-ownership-released",
+    "expire": "external-ownership-expired",
+    "withdraw": "external-ownership-withdrawn",
+}
+ALL_OWNERSHIP_EVENT_TYPES = (*EVENT_TYPES.values(), *EXTERNAL_EVENT_TYPES.values())
+_OWNERSHIP_BINDS = tuple(EVENT_TYPES.values())
+_OWNERSHIP_PREDICATE = (
+    "(event_type IN ("
+    + ",".join("?" for _ in _OWNERSHIP_BINDS)
+    + ") OR substr(event_type,1,19) COLLATE BINARY = 'external-ownership-')"
+)
+_EXTERNAL_HISTORY_SQL = (
+    "SELECT 1 FROM work_events WHERE work_id=? "
+    "AND event_type COLLATE BINARY >= 'external-ownership-' "
+    "AND event_type COLLATE BINARY < 'external-ownership.' LIMIT 1"
+)
+_EXTERNAL_UNSUPPORTED = "unsupported external ownership version; ownership unchanged"
 _FIELDS = {
     "offer": {"action", "target_node", "exclusions", "authorization_ref", "attempt_budget"},
     "withdraw": {"action"},
@@ -274,6 +297,8 @@ def _initial() -> dict[str, Any]:
 
 
 def _current(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]:
+    if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None:
+        raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict")
     row = conn.execute(
         f"SELECT detail_json FROM work_events WHERE work_id=? AND {_EVENT_PREDICATE} ORDER BY seq DESC LIMIT 1",
         (work_id, *EVENT_TYPES.values()),
@@ -531,6 +556,10 @@ def ownership_action(
             raise store.WorkloreForbidden(
                 "campaign members require policy-bounded take", code="campaign-not-authorized"
             )
+        # Permanent domain fence also precedes historical legacy replay. Pure
+        # legacy items retain their original replay ordering and validation.
+        if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None:
+            raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict")
         replay = conn.execute(
             "SELECT actor_type, actor_id, detail_json FROM work_events WHERE work_id=? AND event_id=?",
             (work_id, event_id),
@@ -678,3 +707,526 @@ def ownership_action(
         return _public(result)
 
     return store._in_transaction(conn, write)
+
+
+def _external_event(row: Any) -> dict[str, Any]:
+    """Fully decode one bounded typed external row; unknown history never resets."""
+    from . import worklore_external as external
+
+    try:
+        work_id, event_type, node_id, raw, actor_type, actor_id, seq = row
+        if event_type not in EXTERNAL_EVENT_TYPES.values() or node_id is not None:
+            raise ValueError()
+        if len(raw if isinstance(raw, bytes) else raw.encode()) > OWNERSHIP_EVENT_MAX_BYTES:
+            raise ValueError()
+        detail = _object(json.loads(raw), {"external_ownership_version", "action", "fingerprint", "ownership"})
+        _integer(detail["external_ownership_version"], minimum=1, maximum=1)
+        action = detail["action"]
+        if not isinstance(action, str) or EXTERNAL_EVENT_TYPES.get(action) != event_type:
+            raise ValueError()
+        if not isinstance(detail["fingerprint"], str) or not scope._DIGEST_RE.fullmatch(detail["fingerprint"]):
+            raise ValueError()
+        snapshot = _object(
+            detail["ownership"],
+            {
+                "state",
+                "generation",
+                "revision",
+                "owner_node",
+                "owner_principal",
+                "admission",
+                "binding",
+                "holder_hash",
+                "heartbeat",
+                "expires_at",
+                "last_report",
+                "last_seq",
+                "updated_at",
+            },
+        )
+        admission = external.parse_admission(snapshot["admission"])
+        if admission.work_id != _reference(work_id) or snapshot["generation"] != admission.generation:
+            raise ValueError()
+        _integer(snapshot["generation"], minimum=1)
+        _integer(snapshot["revision"], minimum=1)
+        if snapshot["owner_node"] is not None or snapshot["owner_principal"] != asdict(admission.principal):
+            raise ValueError()
+        state = {"admit": "admitted", "withdraw": "withdrawn", "release": "released", "expire": "expired"}.get(
+            action, "active"
+        )
+        if snapshot["state"] != state:
+            raise ValueError()
+        expected_actor = "admin" if action in {"admit", "withdraw"} else "hub" if action == "expire" else "agent"
+        if actor_type != expected_actor or actor_id != (
+            admission.principal.id if expected_actor == "agent" else expected_actor
+        ):
+            raise ValueError()
+        _integer(snapshot["last_seq"], minimum=1)
+        if snapshot["last_seq"] != seq:
+            raise ValueError()
+        updated = datetime.fromisoformat(snapshot["updated_at"])
+        if updated.tzinfo is None or updated.utcoffset() is None:
+            raise ValueError()
+        if state in {"admitted", "withdrawn"}:
+            if any(
+                snapshot[key] is not None
+                for key in ("binding", "holder_hash", "heartbeat", "expires_at", "last_report")
+            ):
+                raise ValueError()
+        else:
+            binding = external.parse_registration(snapshot["binding"])
+            external.validate_binding(admission, binding)
+            if not isinstance(snapshot["holder_hash"], str) or not scope._DIGEST_RE.fullmatch(snapshot["holder_hash"]):
+                raise ValueError()
+            heartbeat = datetime.fromisoformat(snapshot["heartbeat"])
+            deadline = datetime.fromisoformat(snapshot["expires_at"])
+            external.LeaseSnapshot(
+                admission,
+                binding,
+                snapshot["revision"],
+                "released" if state != "active" else "active",
+                heartbeat,
+                deadline,
+            )
+            if updated < heartbeat or (state == "expired" and updated < deadline):
+                raise ValueError()
+            if snapshot["last_report"] is not None:
+                external.parse_report(snapshot["last_report"], repo_identity=admission.repo_identity)
+        return detail
+    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError, OverflowError, WorkloreValidationError):
+        raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict") from None
+
+
+def _external_current(conn: sqlite3.Connection, work_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT work_id,event_type,node_id,substr(CAST(detail_json AS BLOB),1,?),actor_type,actor_id,seq "
+        "FROM work_events WHERE work_id=? AND " + _OWNERSHIP_PREDICATE + " ORDER BY seq DESC LIMIT 1",
+        (OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, *_OWNERSHIP_BINDS),
+    ).fetchone()
+    external_history = conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None
+    if not external_history:
+        return None
+    if row is None:
+        raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict")
+    return _external_event(row)["ownership"]
+
+
+def _external_authority(conn: sqlite3.Connection, admission: Any, observed: Any) -> None:
+    """Read the supported current principal and compare private auth under the fence."""
+    from . import worklore_external as external
+
+    if observed is not None and (
+        not isinstance(observed, external.AuthorityObservation) or observed.principal != admission.principal
+    ):
+        raise store.WorkloreForbidden("external ownership authority refused", code="principal-forbidden")
+    row = conn.execute(
+        "SELECT role,revoked_at,enrollment_id,authorization_enrollment_epoch,token_hash "
+        "FROM fleet_message_principals WHERE principal_id=?",
+        (admission.principal.id,),
+    ).fetchone()
+    code = None
+    if row is None or row[0] != "agent":
+        code = "principal-forbidden"
+    elif row[1] is not None:
+        code = "principal-revoked"
+    elif row[2] is None or row[2] != admission.enrollment_id or row[3] != admission.authorization_enrollment_epoch:
+        code = "enrollment-mismatch"
+    elif observed is not None:
+        if not isinstance(observed, external.AuthorityObservation):
+            code = "principal-forbidden"
+        else:
+            try:
+                current = external.AuthorityObservation(
+                    observed.principal,
+                    row[2],
+                    row[3],
+                    external.CredentialBinding(row[4]),
+                    observed.authenticated_credential_generation,
+                    None,
+                    None,
+                    "active",
+                )
+                code = external._authority_refusal(admission, current)
+                # The server-authenticated enrollment observation must still
+                # match; current DB values cannot repair stale authentication.
+                code = code or external._authority_refusal(admission, observed)
+            except external.ModelError:
+                code = "stale-credential"
+    if code:
+        raise store.WorkloreForbidden("external ownership authority refused", code=code)
+
+
+def _external_capacity(conn: sqlite3.Connection, work_id: str, state: str, planned: int = 1) -> None:
+    count = conn.execute(
+        "SELECT COUNT(*) FROM work_events WHERE work_id=? AND " + _OWNERSHIP_PREDICATE,
+        (work_id, *_OWNERSHIP_BINDS),
+    ).fetchone()[0]
+    maximum = 198 if state == "admitted" else 199 if state == "active" else ITEM_MAX_OWNERSHIP_TOTAL
+    if count + planned > maximum:
+        raise store.WorkloreConflict("external ownership event capacity exhausted", code="ownership-capacity-exhausted")
+
+
+def _external_public(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+    public_fields = (
+        "state",
+        "generation",
+        "revision",
+        "owner_node",
+        "owner_principal",
+        "binding",
+        "heartbeat",
+        "expires_at",
+        "last_report",
+        "last_seq",
+        "updated_at",
+    )
+    return {key: snapshot[key] for key in public_fields} | {
+        "claim_ref": {"work_id": snapshot["admission"]["work_id"], "generation": snapshot["generation"]},
+        "physical_writer_stopped": False,
+        "evidence_class": "reported-unverified",
+        "reservation_retained": snapshot["state"] == "active",
+    }
+
+
+def _external_insert(
+    conn: sqlite3.Connection,
+    work_id: str,
+    snapshot: dict[str, Any],
+    action: str,
+    event_id: str,
+    fingerprint: str,
+    *,
+    now: str,
+) -> dict[str, Any]:
+    snapshot = dict(snapshot) | {
+        "last_seq": conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0],
+        "updated_at": now,
+    }
+    actor_type = "admin" if action in {"admit", "withdraw"} else "hub" if action == "expire" else "agent"
+    actor_id = snapshot["owner_principal"]["id"] if actor_type == "agent" else actor_type
+    detail = {"external_ownership_version": 1, "action": action, "fingerprint": fingerprint, "ownership": snapshot}
+    serialized = json.dumps(detail)
+    # Validate the same complete typed envelope that future retaining scans read.
+    validated = _external_event(
+        (work_id, EXTERNAL_EVENT_TYPES[action], None, serialized, actor_type, actor_id, snapshot["last_seq"])
+    )
+    placeholders = ",".join(["?"] * len(store._EVENT_COLUMNS) + [store._EVENT_SEQ_SQL])
+    conn.execute(
+        f"INSERT INTO work_events ({','.join(store._EVENT_INSERT_COLUMNS)}) VALUES ({placeholders})",
+        (
+            work_id,
+            event_id,
+            EXTERNAL_EVENT_TYPES[action],
+            None,
+            None,
+            actor_type,
+            actor_id,
+            None,
+            None,
+            serialized,
+            now,
+            now,
+        ),
+    )
+    return validated["ownership"]
+
+
+def _external_admission(conn: sqlite3.Connection, work_id: str, admission: Any) -> dict[str, Any]:
+    current = _current(conn, work_id)
+    if (
+        current["state"] != "unowned"
+        or conn.execute(
+            "SELECT 1 FROM work_campaign_members WHERE work_id=? UNION ALL "
+            "SELECT 1 FROM work_campaigns WHERE work_id=? LIMIT 1",
+            (work_id, work_id),
+        ).fetchone()
+        is not None
+    ):
+        raise store.WorkloreConflict("external admission requires unowned noncampaign work", code="ownership-conflict")
+    if admission.work_id != work_id or admission.generation != _integer(current["generation"]) + 1:
+        raise store.WorkloreConflict("external admission generation does not match", code="stale-generation")
+    _external_authority(conn, admission, None)
+    return {
+        "state": "admitted",
+        "generation": admission.generation,
+        "revision": _integer(current["revision"]) + 1,
+        "owner_node": None,
+        "owner_principal": asdict(admission.principal),
+        "admission": asdict(admission),
+        "binding": None,
+        "holder_hash": None,
+        "heartbeat": None,
+        "expires_at": None,
+        "last_report": None,
+        "last_seq": None,
+        "updated_at": None,
+    }
+
+
+def _external_replay(
+    conn: sqlite3.Connection,
+    work_id: str,
+    event_id: str,
+    fingerprint: str,
+    action: str,
+) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT work_id,event_type,node_id,substr(CAST(detail_json AS BLOB),1,?),actor_type,actor_id,seq "
+        "FROM work_events WHERE work_id=? AND event_id=?",
+        (OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, event_id),
+    ).fetchone()
+    if row is None:
+        return None
+    detail = _external_event(row)
+    if detail["action"] != action or not hmac.compare_digest(detail["fingerprint"], fingerprint):
+        raise store.WorkloreConflict("external idempotency request conflicts", code="idempotency-conflict")
+    return detail["ownership"]
+
+
+def _expire_external_overlaps(conn: sqlite3.Connection, work_id: str, binding: Any, now: str) -> None:
+    eligible = []
+    for index, row in enumerate(scope._reservation_rows(conn, work_id)):
+        if index == scope.MAX_SCOPE_SNAPSHOTS:
+            raise scope.ScopeAdmissionError("path-scope-capacity-exhausted")
+        reservation = scope._reservation(row, repo_identity=binding.repo_identity)
+        snapshot = reservation.get("external")
+        if snapshot is None or snapshot["state"] != "active" or reservation["repo"].casefold() != binding.repo_identity:
+            continue
+        if not any(
+            a == b or a.startswith(b + "/") or b.startswith(a + "/")
+            for a in binding.write_scope
+            for b in reservation["paths"]
+        ):
+            continue
+        if datetime.fromisoformat(snapshot["expires_at"]) > datetime.fromisoformat(now):
+            continue
+        eligible.append((row[0], snapshot))
+        if len(eligible) > 32:
+            raise scope.ScopeAdmissionError("path-scope-capacity-exhausted")
+    # Check every affected item's own exit slot before inserting any ending.
+    for identifier, snapshot in eligible:
+        _external_capacity(conn, identifier, "expired")
+        if snapshot["revision"] == COUNTER_MAX or datetime.fromisoformat(now) < datetime.fromisoformat(
+            snapshot["heartbeat"]
+        ):
+            raise store.WorkloreConflict("external expiry revision or clock refused", code="ownership-conflict")
+    for identifier, snapshot in eligible:
+        ended = dict(snapshot) | {"state": "expired", "revision": snapshot["revision"] + 1}
+        _external_insert(
+            conn,
+            identifier,
+            ended,
+            "expire",
+            store._mint_id("ext-own-"),
+            hashlib.sha256(
+                f"expire\0{identifier}\0{snapshot['generation']}\0{snapshot['revision']}".encode()
+            ).hexdigest(),
+            now=now,
+        )
+
+
+def external_ownership_action(
+    conn: sqlite3.Connection,
+    work_id: str,
+    raw: object,
+    *,
+    expected_revision: int,
+    idempotency_key: object,
+    authority: Any = None,
+    operator_authorized: bool = False,
+    holder_nonce: object = None,
+) -> dict[str, Any]:
+    """Dormant transaction entry. Only tests call it; no route authenticates it.
+
+    Authority observations and the explicit operator flag belong to a future
+    trusted server caller, never request-body fields. No live records are allowed
+    before the separately held safe-read and authenticated-route prerequisites.
+    """
+    from . import worklore_external as external
+
+    expected_revision = _integer(expected_revision)
+    key = _text(idempotency_key, "idempotency_key", IDEMPOTENCY_KEY_MAX)
+    if isinstance(holder_nonce, str):
+        _reject_nonce_echo(raw, key, holder_nonce)
+    try:
+        if not isinstance(raw, Mapping):
+            raise _invalid()
+        action = raw.get("action")
+        fields = {
+            "admit": {"action", "admission"},
+            "withdraw": {"action", "generation"},
+            "register": {"action", "generation", "registration", "lease_seconds"},
+            "renew": {"action", "generation", "lease_seconds"},
+            "release": {"action", "generation"},
+            "report": {"action", "generation", "report"},
+        }
+        if not isinstance(action, str) or action not in fields:
+            raise _invalid()
+        body = _object(raw, fields[action])
+        parsed_admission = external.parse_admission(body["admission"]) if action == "admit" else None
+        parsed_binding = external.parse_registration(body["registration"]) if action == "register" else None
+        if "generation" in body:
+            _integer(body["generation"], minimum=1)
+        if "lease_seconds" in body:
+            _integer(body["lease_seconds"], minimum=60, maximum=3600)
+    except external.ModelError as error:
+        raise _invalid("external ownership input refused", code=error.code) from None
+    operator = action in {"admit", "withdraw"}
+    if operator:
+        if operator_authorized is not True or authority is not None:
+            raise store.WorkloreForbidden("explicit external operator authority required", code="forbidden")
+        digest = None
+    else:
+        if not isinstance(authority, external.AuthorityObservation) or operator_authorized is not False:
+            raise store.WorkloreForbidden("authenticated agent context required", code="principal-forbidden")
+        digest = nonce_hash(holder_nonce)
+
+    def write() -> dict[str, Any]:
+        item = store.get_item(conn, work_id)
+        current = _external_current(conn, work_id)
+        admission = (
+            parsed_admission
+            if action == "admit"
+            else external.parse_admission(current["admission"])
+            if current
+            else None
+        )
+        if admission is None:
+            raise store.WorkloreConflict("external admission is required", code="ownership-conflict")
+        if action == "admit":
+            _external_authority(conn, admission, None)
+        elif action != "withdraw":
+            _external_authority(conn, admission, authority)
+            if action not in admission.actions:
+                raise store.WorkloreForbidden("external action is not admitted", code="action-forbidden")
+        if action != "admit":
+            assert current is not None  # Established by the admission check above.
+            if body["generation"] != current["generation"]:
+                raise store.WorkloreConflict("external generation does not match", code="stale-generation")
+            if (
+                action != "register"
+                and not operator
+                and not hmac.compare_digest(current["holder_hash"] or "", digest or "")
+            ):
+                raise store.WorkloreForbidden("external holder does not match", code="holder-mismatch")
+        principal = {"kind": "admin", "id": "admin"} if operator else asdict(authority.principal)
+        event_id = (
+            "ext-own-"
+            + hashlib.sha256(
+                json.dumps(
+                    [principal, admission.enrollment_id, work_id, key], sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()[:32]
+        )
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "principal": principal,
+                    "enrollment_id": admission.enrollment_id,
+                    "work_id": work_id,
+                    "request_key": key,
+                    "admission": asdict(admission),
+                    "binding": asdict(parsed_binding)
+                    if parsed_binding is not None
+                    else current["binding"]
+                    if current is not None and not operator
+                    else None,
+                    "body": body,
+                    "expected_revision": expected_revision,
+                    "holder_hash": digest,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        historical = _external_replay(conn, work_id, event_id, fingerprint, action)
+        if historical is not None:
+            if historical["generation"] != admission.generation or (
+                current is not None and historical["generation"] != current["generation"]
+            ):
+                raise store.WorkloreConflict("external replay generation differs", code="stale-generation")
+            if action == "register" and not hmac.compare_digest(historical["holder_hash"] or "", digest or ""):
+                raise store.WorkloreForbidden("external holder does not match", code="holder-mismatch")
+            return _external_public(historical)
+        now = store._utc_now()
+        if item["status"] in TERMINAL_STATUSES and action not in {"release", "withdraw"}:
+            raise store.WorkloreConflict("terminal work item refuses external progress", code="ownership-conflict")
+        if action == "admit":
+            if current is not None:
+                raise store.WorkloreConflict("external work item cannot be reused", code="ownership-conflict")
+            legacy = _current(conn, work_id)
+            if legacy["revision"] != expected_revision:
+                raise store.WorkloreConflict("ownership revision does not match", code="version-conflict")
+            result = _external_admission(conn, work_id, admission)
+        else:
+            assert current is not None
+            if current["revision"] != expected_revision:
+                raise store.WorkloreConflict("ownership revision does not match", code="version-conflict")
+            if current["revision"] == COUNTER_MAX:
+                raise store.WorkloreConflict("external revision exhausted", code="ownership-conflict")
+            expected_state = "admitted" if action in {"register", "withdraw"} else "active"
+            if current["state"] != expected_state:
+                raise store.WorkloreConflict("external state does not permit action", code="ownership-conflict")
+            result = dict(current) | {"revision": current["revision"] + 1}
+            if action in {"register", "renew"}:
+                if body["lease_seconds"] > admission.max_lease_seconds:
+                    raise store.WorkloreConflict("external duration exceeds admission", code="ownership-conflict")
+                try:
+                    result["expires_at"] = (
+                        datetime.fromisoformat(now) + timedelta(seconds=body["lease_seconds"])
+                    ).isoformat()
+                except OverflowError:
+                    raise _invalid("external deadline out of bounds") from None
+            if action == "register":
+                assert parsed_binding is not None
+                external.validate_binding(admission, parsed_binding)
+                prior = conn.execute(
+                    "SELECT substr(CAST(detail_json AS BLOB),1,?) FROM work_events WHERE work_id=? "
+                    "AND event_type IN ('ownership-accepted','ownership-taken','external-ownership-registered') LIMIT ?",
+                    (OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, ITEM_MAX_OWNERSHIP_TOTAL),
+                )
+                for row in prior:
+                    try:
+                        old = json.loads(row[0])["ownership"]["holder_hash"]
+                        if not isinstance(old, str) or not scope._DIGEST_RE.fullmatch(old):
+                            raise ValueError()
+                    except (ValueError, TypeError, KeyError, UnicodeError, RecursionError):
+                        raise store.WorkloreConflict(
+                            "prior holder history unavailable", code="ownership-conflict"
+                        ) from None
+                    if hmac.compare_digest(old, digest or ""):
+                        raise store.WorkloreConflict(
+                            "external registration needs fresh holder nonce", code="ownership-conflict"
+                        )
+                result.update(state="active", binding=asdict(parsed_binding), holder_hash=digest, heartbeat=now)
+            elif action == "withdraw":
+                result["state"] = "withdrawn"
+            else:
+                clock = datetime.fromisoformat(now)
+                if clock < datetime.fromisoformat(current["heartbeat"]) or clock >= datetime.fromisoformat(
+                    current["expires_at"]
+                ):
+                    raise store.WorkloreConflict("external lease clock refused", code="ownership-conflict")
+                if action == "renew":
+                    result["heartbeat"] = now
+                elif action == "release":
+                    result["state"] = "released"
+                else:
+                    result["last_report"] = external.parse_report(body["report"], repo_identity=admission.repo_identity)
+        _external_capacity(conn, work_id, result["state"])
+        if action == "register":
+            assert parsed_binding is not None and digest is not None
+            _expire_external_overlaps(conn, work_id, parsed_binding, now)
+            scope.admit_checkpoint(
+                conn,
+                work_id,
+                {"repo_identity": parsed_binding.repo_identity, "write_scope": list(parsed_binding.write_scope)},
+                current_holder_digest=digest,
+            )
+        result = _external_insert(conn, work_id, result, action, event_id, fingerprint, now=now)
+        return _external_public(result)
+
+    try:
+        return store._in_transaction(conn, write)
+    except external.ModelError as error:
+        raise _invalid("external ownership input refused", code=error.code) from None

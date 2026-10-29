@@ -212,6 +212,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
+- Add an inactive transactional model for external Worklore leases, with owner fencing and conflict checks. No external registration route is enabled.
+
+
 ## [0.30.0] - 2026-10-20
 
 ### Added
