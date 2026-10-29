@@ -105,12 +105,23 @@ def test_manifest_authentication_precedes_classification_without_writes(home, ba
             value["sig"] = crypto.encode_binary(bytes(64))
         else:
             value["keys"] = [dict(entry(), fingerprint="invalid")]
+            unsigned = {key: item for key, item in value.items() if key != "sig"}
+            value["sig"] = crypto.sign(unsigned, fixtures.SEED, label="manifest")
+            crypto.verify(unsigned, value["sig"], fixtures.key(), label="manifest")
         raw = crypto.canonical(value)
     if bad == "kind":
         raw = fixtures.signed(seq=2)
     if bad == "bytes":
         raw = b" " * 2098177
-    with pytest.raises(crypto.MeshError):
+    expected = {
+        "signer": "statement_signature_invalid",
+        "hub": "mesh_trust_scope_mismatch",
+        "signature": "statement_signature_invalid",
+        "entries": "statement_malformed",
+        "kind": "statement_malformed",
+        "bytes": "statement_malformed",
+    }[bad]
+    with pytest.raises(crypto.MeshError, match="^" + expected + "$"):
         admit(home, raw)
     assert fixtures.saved(home).read_bytes() == before
 
@@ -258,7 +269,11 @@ def test_manifest_listing_removal_and_relisting_never_change_peer_evidence_or_us
         )
     before = trust.load_trust(brigade_home=home).data
     peers = [fixtures.peer_load(trust, home, require_verified=required) for required in (False, True)]
-    listed = entry(hub=fixtures.PEER_HUB, kid=value["kid"], principal=fixtures.PEER_PRINCIPAL)
+    listed = dict(
+        entry(hub=fixtures.PEER_HUB, kid=value["kid"], principal=fixtures.PEER_PRINCIPAL),
+        fingerprint=crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32)),
+    )
+    assert listed["fingerprint"] == crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32))
     for seq, keys in enumerate(([listed], [], [listed]), 1):
         admit(home, manifest(hub=fixtures.PEER_HUB, seq=seq, keys=keys), hub=fixtures.PEER_HUB)
         after = trust.load_trust(brigade_home=home).data
@@ -279,6 +294,48 @@ def test_manifest_listing_removal_and_relisting_never_change_peer_evidence_or_us
                 )
                 == previous
             )
+
+
+@pytest.mark.parametrize("verified", [False, True])
+def test_manifest_floor_and_conflict_are_diagnostics_without_peer_authority(home, verified):
+    fixtures.peer_setup(trust, home, members=[fixtures.PEER_PRINCIPAL])
+    raw = fixtures.peer_record()
+    if verified:
+        fixtures.peer_accept(trust, home, raw, require_verified=True)
+    else:
+        fixtures.peer_observe(trust, home, raw)
+    before = fixtures.peer_load(trust, home, require_verified=verified).use
+    assert before is not None and before.eligible
+    value = json.loads(raw)
+    listed = dict(
+        entry(hub=fixtures.PEER_HUB, kid=value["kid"], principal=fixtures.PEER_PRINCIPAL),
+        fingerprint=crypto.fingerprint(crypto.decode_binary(value["sig_pub"], 32)),
+    )
+    accepted = manifest(hub=fixtures.PEER_HUB, keys=[listed])
+    assert admit(home, accepted, hub=fixtures.PEER_HUB).status == "accepted"
+    pending = manifest(hub=fixtures.PEER_HUB, seq=3)
+    snapshot = floor(home, pending, hub=fixtures.PEER_HUB)
+    assert any(item["kind"] == "manifest" for item in snapshot.unsatisfied_floors)
+    assert admit(home, manifest(hub=fixtures.PEER_HUB), hub=fixtures.PEER_HUB).evidence_recorded
+    after = fixtures.peer_load(trust, home, require_verified=verified).use
+    assert after is not None
+    assert after.floors == (
+        {
+            "kind": "manifest",
+            "signer": fixtures.signer(),
+            "hub": fixtures.PEER_HUB,
+            "seq": 3,
+            "digest": fixtures.digest(pending),
+            "source": "trust",
+        },
+    )
+    assert len(after.conflicts) == 1
+    assert after.conflicts[0]["rejected"]["kind"] == "manifest"
+    assert after.conflicts[0]["accepted_digest"] == fixtures.digest(accepted)
+    assert (
+        replace(after, floors=before.floors, conflicts=before.conflicts, trust_generation=before.trust_generation)
+        == before
+    )
 
 
 def test_manifest_non_posix_refusal_precedes_path_access(monkeypatch):
