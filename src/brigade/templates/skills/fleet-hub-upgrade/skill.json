@@ -1,0 +1,15 @@
+{
+  "id": "fleet-hub-upgrade",
+  "title": "fleet-hub-upgrade",
+  "version": "0.1.0",
+  "description": "Hub-first upgrade checklist for a Brigade Fleet Hub and its node clients: pre-flight payload and SCHEMA_VERSION diff, snapshot-and-switch deploy with rollback, and node verification.",
+  "required_tools": [
+    "Read",
+    "Grep",
+    "Bash(git diff:*)",
+    "Bash(git log:*)",
+    "Bash(git show:*)",
+    "Bash(brigade fleet status:*)"
+  ],
+  "tests": ["brigade skills lint fleet-hub-upgrade"]
+}
