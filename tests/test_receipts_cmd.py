@@ -2129,6 +2129,9 @@ def test_receipts_verify_reports_notify_failure_not_verified(tmp_path, monkeypat
         '{"inserted_items":1,"already_known":false,"status":"partial"}',
         '{"inserted_items":0,"already_known":false,"errors":["write failed"]}',
         '{"inserted_items":0,"already_known":false,"failed_items":1}',
+        '{"inserted_items":0,"already_known":false,"warnings":{}}',
+        '{"inserted_items":0,"already_known":false,"warnings":0}',
+        '{"inserted_items":0,"already_known":false,"errors":false}',
     ],
 )
 def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path, monkeypatch, summary):

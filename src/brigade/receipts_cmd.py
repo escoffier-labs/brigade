@@ -1498,6 +1498,10 @@ def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
         raise ValueError("import summary does not report completion")
     if payload.get("status") == "already_known" and (not known or inserted != 0):
         raise ValueError("inconsistent already_known import summary")
+    for field in ("warnings", "errors"):
+        value = payload.get(field)
+        if value is not None and not isinstance(value, list):
+            raise ValueError(f"import summary requires {field} to be an array or null")
     for field in ("warnings", "errors", "error", "failed_items", "failed", "error_count", "warning_count"):
         if payload.get(field):
             raise ValueError(f"import summary reports {field}")
