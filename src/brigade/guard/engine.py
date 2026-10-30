@@ -1030,10 +1030,13 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     # Complete earlier shell assignment words are opaque to code keywords.
     if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
-    # A unary operand forming a whole statement (`delete process.env.HOME;`)
-    # is code. The keyword must start the line, so prose such as
-    # `Please delete <host>;` keeps detection.
-    if re.fullmatch(r"[ \t]*(?:delete|typeof|void|await)[ \t]+", before) and re.fullmatch(r"\s*;\s*", after):
+    # A unary operand forming a whole statement (`delete process.env.HOME;`,
+    # `else delete ...;`, `yield await ...;`) is code. Only JavaScript keywords
+    # may precede it on the line, so prose such as `Please delete <host>;`
+    # keeps detection.
+    if re.fullmatch(
+        r"[ \t]*(?:(?:else|do|yield|await|void|typeof|delete)[ \t]+)*(?:delete|typeof|void|await)[ \t]+", before
+    ) and re.fullmatch(r"\s*;\s*", after):
         return False
     # An indented `key: value,` member with an unquoted value ending the line
     # is an object-literal expression (`local: args.local,`). Host-related keys

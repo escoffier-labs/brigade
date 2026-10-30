@@ -21,6 +21,8 @@ def rule_ids(text: str) -> list[str]:
         "    delete " + ENV_HOST + ";",
         "  await " + HOST + ";",
         "typeof " + HOST + ";",
+        "    yield await " + HOST + ";",
+        "  else delete " + ENV_HOST + ";",
     ],
 )
 def test_code_shaped_members_are_not_hostnames(text: str) -> None:
