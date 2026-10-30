@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._posix import requires_process_groups
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -97,7 +99,7 @@ def test_shard_runner_keeps_subtest_counts_separate(tmp_path):
     assert "2 subtests passed" in result.stdout
 
 
-@pytest.mark.skipif(os.name != "posix", reason="process group cancellation is POSIX")
+@requires_process_groups
 @pytest.mark.parametrize("mode", ["graceful", "repeat", "forced"])
 def test_shard_cancellation_stops_test_grandchildren(tmp_path, mode):
     import fcntl
