@@ -261,13 +261,13 @@ def test_redact_text_removes_json_escaped_windows_private_paths_without_over_red
 
 
 def test_redact_text_removes_forward_slash_and_mixed_windows_private_paths(probe) -> None:
-    forward_path = "C:/Users/name/.ssh/id_rsa"
-    mixed_path = r"C:\Users/name\.config\tool"
+    forward_path = "C:/Users/name/.ssh/id_rsa"  # content-guard: allow windows-home-path
+    mixed_path = r"C:\Users/name\.config\tool"  # content-guard: allow windows-home-path
 
     result = probe.redact_text(f"forward={forward_path}\nmixed={mixed_path}")
 
-    assert "C:/Users/name" not in result
-    assert r"C:\Users/name" not in result
+    assert "C:/Users/name" not in result  # content-guard: allow windows-home-path
+    assert r"C:\Users/name" not in result  # content-guard: allow windows-home-path
     assert "forward=[HOME]/.ssh/id_rsa" in result
     assert r"mixed=[HOME]\.config\tool" in result
 
@@ -278,7 +278,7 @@ def test_redact_text_removes_forward_slash_and_mixed_windows_private_paths(probe
         r"C:\Users\Jane Doe\.ssh\id_rsa",  # content-guard: allow windows-home-path
         r"C:\\Users\\Jane Doe\\.ssh\\id_rsa",  # content-guard: allow windows-home-path
         "C:/Users/Jane Doe/.ssh/id_rsa",
-        r"C:\Users/Jane Doe/.ssh/id_rsa",
+        r"C:\Users/Jane Doe/.ssh/id_rsa",  # content-guard: allow windows-home-path
     ],
 )
 def test_redact_text_removes_spaced_windows_home_prefix_for_all_separators(probe, private_path: str) -> None:
