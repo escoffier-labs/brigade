@@ -8,7 +8,7 @@ from pathlib import Path
 
 def register(sub: argparse._SubParsersAction) -> None:
     # status
-    p_status = sub.add_parser("status", help="Show which stations are present and healthy.")
+    p_status = sub.add_parser("status", help="Show which components are present and healthy.")
     p_status.add_argument("--target", "-t", type=Path, default=Path("."))
     p_status.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_status.set_defaults(func=dispatch)

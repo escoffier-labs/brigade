@@ -1,5 +1,7 @@
 import json
+import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 import time
 from dataclasses import replace
 
@@ -66,6 +68,16 @@ def test_probe_normalizes_auth_version_model_transport_hang_and_timeout_failures
         assert "secret-value" not in result.failure.payload()["detail"]
 
 
+def _mock_antigravity_processes(monkeypatch, run):
+    monkeypatch.setattr(seat_health.proc, "run", run)
+
+    def listing(argv, **kwargs):
+        result = run(argv, **kwargs)
+        return proc.DelimitedResult(result.code, result.stdout.splitlines(), result.stderr)
+
+    monkeypatch.setattr(seat_health.proc, "run_delimited", listing)
+
+
 def test_antigravity_prompt_free_probes_pass_for_listed_model(monkeypatch):
     seat = roster.Agent("agy", "antigravity", "work", model="gemini-3.8-flash")
     roster_value = roster.Roster("agy", {"agy": seat}, sandbox="read-only")
@@ -85,7 +97,7 @@ def test_antigravity_prompt_free_probes_pass_for_listed_model(monkeypatch):
             return proc.Result(0, "agy 1.1.25", "")
         raise AssertionError(f"unexpected command: {argv}")
 
-    monkeypatch.setattr(seat_health.proc, "run", fake_run)
+    _mock_antigravity_processes(monkeypatch, fake_run)
 
     result = SeatHealthProbe().probe(seat, roster_value, allow_model_smoke=False)
 
@@ -99,7 +111,8 @@ def test_antigravity_prompt_free_probes_pass_for_listed_model(monkeypatch):
         "model-reachability": "passed",
         "isolation-compatibility": "passed",
     }
-    assert all(timeout <= 2.0 for _, kwargs in calls for timeout in [kwargs.get("timeout", 0.0)])
+    assert len([argv for argv, _ in calls if argv[-1] == "models"]) == 1
+    assert all(kwargs["timeout"] <= 2.0 for argv, kwargs in calls if argv[-1] == "--version")
 
 
 @pytest.mark.parametrize("requested_model", ("Gemini 3.8 Flash (Low)", "Gemini 3.8 Flash"))
@@ -112,9 +125,8 @@ def test_antigravity_model_probe_matches_display_name_and_model_override(monkeyp
         "resolve_agent_executable",
         lambda cli: proc.ExecutableIdentity("agy", None, "fixture", True, "fixture"),
     )
-    monkeypatch.setattr(
-        seat_health.proc,
-        "run",
+    _mock_antigravity_processes(
+        monkeypatch,
         lambda argv, **kwargs: proc.Result(
             0,
             "gemini-3.8-flash-low (Gemini Flash)" if argv[-1] == "models" else "agy 1.1.25",
@@ -153,7 +165,7 @@ def test_antigravity_prompt_free_probes_use_agent_command_prefix_and_environment
             "",
         )
 
-    monkeypatch.setattr(seat_health.proc, "run", fake_run)
+    _mock_antigravity_processes(monkeypatch, fake_run)
 
     result = SeatHealthProbe(collect_executable_version=False).probe(seat, roster_value, allow_model_smoke=False)
 
@@ -161,7 +173,6 @@ def test_antigravity_prompt_free_probes_use_agent_command_prefix_and_environment
     assert [argv for argv, _ in calls] == [
         ["agy-wrapper", "--profile", "seat-profile", "models"],
         ["agy-wrapper", "--profile", "seat-profile", "--version"],
-        ["agy-wrapper", "--profile", "seat-profile", "models"],
     ]
     assert all(kwargs["env"]["AGY_PROFILE"] == "seat-profile" for _, kwargs in calls)
 
@@ -170,6 +181,14 @@ def test_antigravity_prompt_free_probes_use_agent_command_prefix_and_environment
     ("models", "models_code", "version", "check_name", "cause_code"),
     [
         ("Error: authentication required", 1, "1.1.25", "authentication-entitlement", "auth-required"),
+        (
+            "gemini-3.8-flash-low\nError: authentication required",
+            0,
+            "1.1.25",
+            "authentication-entitlement",
+            "auth-required",
+        ),
+        ("", 0, "1.1.25", "authentication-entitlement", "model-list-empty"),
         ("gemini-3.8-pro-low (Gemini Pro)", 0, "1.1.25", "model-reachability", "model-not-listed"),
         ("gemini-3.8-flash-low (Gemini Flash)", 0, "1.1.24", "version-gates", "version-mismatch"),
     ],
@@ -184,21 +203,22 @@ def test_antigravity_prompt_free_probes_report_auth_model_and_version_failures(
         "resolve_agent_executable",
         lambda cli: proc.ExecutableIdentity("agy", None, "fixture", True, "fixture"),
     )
-    monkeypatch.setattr(
-        seat_health.proc,
-        "run",
-        lambda argv, **kwargs: proc.Result(
-            models_code if argv[-1] == "models" else 0,
-            models if argv[-1] == "models" else f"agy {version}",
-            "",
-        ),
-    )
+    calls = []
+
+    def run(argv, **kwargs):
+        calls.append(argv[-1])
+        return proc.Result(
+            models_code if argv[-1] == "models" else 0, models if argv[-1] == "models" else f"agy {version}", ""
+        )
+
+    _mock_antigravity_processes(monkeypatch, run)
 
     result = SeatHealthProbe().probe(seat, roster_value, allow_model_smoke=False)
     check = next(item for item in result.checks if item.name == check_name)
 
     assert check.status == "failed"
     assert check.cause_code == cause_code
+    assert calls.count("models") == 1
 
 
 def test_probe_roster_includes_fallbacks_and_cache_ttls(monkeypatch):
@@ -445,3 +465,100 @@ def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatc
     # Keep cleanup assertions outside finally so they cannot mask the primary failure.
     assert not coordinator.is_alive()
     assert all(not worker.is_alive() for worker in workers.values())
+
+
+@pytest.mark.parametrize(
+    "delay,deadline,exit_code,expected",
+    [
+        (2.1, 8.0, 0, "healthy"),
+        (2.1, 0.2, 0, "timeout"),
+        (0.0, 8.0, 124, "models-command-failed"),
+    ],
+)
+def test_antigravity_metadata_real_process_deadline(monkeypatch, tmp_path, delay, deadline, exit_code, expected):
+    script = tmp_path / "metadata.py"
+    script.write_text(
+        "import sys,time\n"
+        "if sys.argv[-1] == '--version': print('agy 1.4.10')\n"
+        "else:\n"
+        " print('gemini-3.8-flash-low (Gemini Flash)', flush=True)\n"
+        f" time.sleep({delay})\n"
+        f" sys.exit({exit_code})\n"
+    )
+    seat = roster.Agent("agy", "antigravity", "work", command=(sys.executable, str(script)), model="gemini-3.8-flash")
+    value = roster.Roster("agy", {"agy": seat}, sandbox="read-only")
+    monkeypatch.setattr(seat_health, "PER_SEAT_TIMEOUT_SECONDS", deadline)
+    monkeypatch.setattr(
+        seat_health.agents,
+        "resolve_agent_executable",
+        lambda cli, command=None: proc.ExecutableIdentity(sys.executable, None, "fixture", True, "fixture"),
+    )
+    started = time.monotonic()
+    result = SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+    elapsed = time.monotonic() - started
+    if expected == "healthy":
+        assert result.status == "healthy"
+        assert elapsed >= delay
+    else:
+        assert result.status == "unhealthy"
+        auth = next(check for check in result.checks if check.name == "authentication-entitlement")
+        assert auth.cause_code == expected
+        if expected == "timeout":
+            assert result.failure.failure_class.value == "timeout"
+            assert elapsed < 1.5
+
+
+def test_antigravity_metadata_is_scoped_to_each_concurrent_probe(monkeypatch):
+    from threading import Barrier
+
+    barrier = Barrier(2)
+    calls = []
+    monkeypatch.setattr(
+        seat_health.agents,
+        "resolve_agent_executable",
+        lambda cli: proc.ExecutableIdentity("agy", None, "fixture", True, "fixture"),
+    )
+    monkeypatch.setattr(seat_health.proc, "run", lambda *args, **kwargs: proc.Result(0, "agy 1.4.10", ""))
+
+    def listing(argv, **kwargs):
+        profile = kwargs["env"]["AGY_PROFILE"]
+        calls.append(profile)
+        barrier.wait(timeout=5)
+        return proc.DelimitedResult(0, [f"gemini-3.8-{profile}-low"], "")
+
+    monkeypatch.setattr(seat_health.proc, "run_delimited", listing)
+    probe = SeatHealthProbe(collect_executable_version=False)
+    seats = [
+        roster.Agent(profile, "antigravity", "work", model=f"gemini-3.8-{profile}", env={"AGY_PROFILE": profile})
+        for profile in ("flash", "pro")
+    ]
+    value = roster.Roster("flash", {seat.name: seat for seat in seats}, sandbox="read-only")
+    for _ in range(2):
+        probe.invalidate()
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            results = list(executor.map(lambda seat: probe.probe(seat, value, allow_model_smoke=False), seats))
+        assert all(result.status == "healthy" for result in results)
+    assert sorted(calls) == ["flash", "flash", "pro", "pro"]
+
+
+@pytest.mark.parametrize("flag", ["truncated", "stderr_truncated"])
+def test_antigravity_incomplete_metadata_fails_closed(monkeypatch, flag):
+    seat = roster.Agent("agy", "antigravity", "work", model="gemini-3.8-flash")
+    value = roster.Roster("agy", {"agy": seat}, sandbox="read-only")
+    monkeypatch.setattr(
+        seat_health.agents,
+        "resolve_agent_executable",
+        lambda cli: proc.ExecutableIdentity("agy", None, "fixture", True, "fixture"),
+    )
+    monkeypatch.setattr(seat_health.proc, "run", lambda *args, **kwargs: proc.Result(0, "agy 1.4.10", ""))
+    monkeypatch.setattr(
+        seat_health.proc,
+        "run_delimited",
+        lambda *args, **kwargs: proc.DelimitedResult(0, ["gemini-3.8-flash-low"], "", **{flag: True}),
+    )
+    result = SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+    assert result.status == "unhealthy"
+    assert (
+        next(check for check in result.checks if check.name == "authentication-entitlement").cause_code
+        == "models-command-failed"
+    )

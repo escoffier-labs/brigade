@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 
-from brigade import stations_cmd
+import pytest
+
+from brigade import cli, stations_cmd
 
 
 def test_discover_finds_station_json(tmp_path):
@@ -132,3 +134,16 @@ def test_discover_counts_each_lifecycle_separately(tmp_path):
         "deprecated": 1,
         "historical": 1,
     }
+
+
+@pytest.mark.parametrize("command", ["components", "stations"])
+def test_catalog_discover_cli_preserves_legacy_contract(command, tmp_path, capsys):
+    _write_lifecycle_manifest(tmp_path, "embedded-example", "embedded")
+    assert cli.main([command, "discover", "--root", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["count"] == 1
+    assert payload["manifests"][0]["station"] == "guard"
+    assert payload["manifests"][0]["lifecycle"] == "embedded"
+    assert payload["docs"]["list"] == "brigade stations list"
+    assert cli.main([command, "discover", "--root", str(tmp_path)]) == 0
+    assert "brigade components discover:" in capsys.readouterr().out

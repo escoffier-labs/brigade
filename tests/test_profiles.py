@@ -1,6 +1,8 @@
 import json
 
-from brigade import profiles, profiles_cmd, stations_cmd
+import pytest
+
+from brigade import cli, profiles, profiles_cmd, stations_cmd
 
 
 def test_repo_profile_selects_priority_stations():
@@ -59,3 +61,26 @@ def test_stations_list_unknown_profile_returns_cli_error(capsys):
     rc = stations_cmd.list_stations(profile_name="nope")
     assert rc == 2
     assert "unknown profile: nope" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["components", "stations"])
+def test_catalog_cli_preserves_list_contract(command, capsys):
+    assert cli.main([command, "list", "--profile", "default", "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert set(payload) == {"profile", "stations"}
+    assert payload["profile"] == "repo"
+    rows = {row["station"]: row for row in payload["stations"]}
+    assert rows["skills"]["selection"] == "selected"
+    assert rows["mcp"]["selection"] == "optional"
+    assert cli.main([command, "list"]) == 0
+    assert "brigade components: profile=repo" in capsys.readouterr().out
+    assert cli.main([command, "list", "--profile", "nope"]) == 2
+    assert "unknown profile: nope" in capsys.readouterr().out
+
+
+def test_profile_human_labels_use_components(capsys):
+    assert profiles_cmd.show_profile("repo") == 0
+    out = capsys.readouterr().out
+    assert "selected components:" in out
+    assert "optional components:" in out
+    assert "stations" not in out

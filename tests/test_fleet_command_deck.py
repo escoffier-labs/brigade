@@ -251,7 +251,7 @@ def test_reported_cloud_agent_survives_hub_projection_without_becoming_a_job(tmp
         work = overview_page.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
         assert "Miller" not in work and "local-session" not in work
         capacity = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
-        assert "Use: 0 / 4 slots" in capacity
+        assert "Managed runs: 0 / 4 slots" in capacity
 
 
 @pytest.mark.parametrize("providers", [(), (deck.CloudWorker("codex", 0, 2, "closed", ()),)])
@@ -1218,7 +1218,7 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert status == 200
         machine_list = body.split('aria-label="machines"', 1)[1].split("</nav>", 1)[0]
         assert machine_list.index("BravoBox") < machine_list.index("Alpha")
-        assert "Use: 1 / 1 slots" in body and "Use: 1 / 2 slots" in body
+        assert "Managed runs: 1 / 1 slots" in body and "Managed runs: 1 / 2 slots" in body
         activity = _request(hub, "GET", "/deck/activity", headers=_bearer())[2]
         assert activity.count("Recorded outcome ·") == 2
 
@@ -1327,7 +1327,7 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
         assert HOLDER_TOKEN not in body and "a" * 64 not in body
         machine = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
-        assert "Use: 1 / 4 slots" in machine
+        assert "Managed runs: 1 / 4 slots" in machine
 
 
 def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tmp_path):
@@ -2217,7 +2217,7 @@ def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidenc
     )
     view = replace(_mixed_view(), cloud_workers=(worker,), octopool_observation=_octopool_capture())
     html = overview.render_capacity_page(view, resource_now, nonce="n", worklore_enabled=False)
-    assert "Capacity: 10 configured slots" in html and "Use: 2 / 10 slots" in html
+    assert "Capacity: 10 configured slots" in html and "Managed runs: 2 / 10 slots" in html
     assert "stale-telemetry" in html and "1m" in html
     assert "41 requests" not in html and "Lease &lt;fixture&gt;" not in html
     investigation_markup(html, only_investigation_details=True)

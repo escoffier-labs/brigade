@@ -46,22 +46,24 @@ def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans
     repo_root = Path(__file__).parents[1]
     quickstart = (repo_root / "QUICKSTART.md").read_text()
     station_contract = (repo_root / "docs" / "station-contract.md").read_text()
+    technical_guide = (repo_root / "docs" / "technical-guide.md").read_text()
     search_docstring = search_cmd.__doc__ or ""
     evidence_docstring = evidence_cmd.__doc__ or ""
 
-    assert "brigade evidence crawl sessions" in quickstart
-    assert "brigade evidence search" in quickstart
-    assert "brigade evidence crawl plan     # review-only" in quickstart
-    assert "brigade evidence export plan    # review-only" in quickstart
-    assert "brigade code sync .             # preferred GraphTrail facade" in quickstart
-    assert "brigade search sync|context|impact` remain compatibility aliases" in quickstart
+    assert "(docs/technical-guide.md#managed-stations)" in quickstart
+    assert "brigade evidence crawl <args...>" in technical_guide
+    assert "brigade evidence search <args...>" in technical_guide
+    assert "brigade evidence crawl plan` still previews" in technical_guide
+    assert "brigade evidence export plan` still previews" in technical_guide
+    assert "brigade code <verb> <args...>" in technical_guide
+    assert "compatibility aliases for `code`" in technical_guide
     assert "runs the local evidence engine for `brigade evidence crawl|search`" in station_contract
     assert "crawl/export plans are review-only" in station_contract
     assert "Explicit user-invoked" in evidence_docstring
     assert "brigade code sync|context|impact" in search_docstring
     assert "compatibility aliases" in search_docstring
     assert "sync plan`` stays\nreview-only" in search_docstring
-    for text in (quickstart, station_contract, search_docstring, evidence_docstring):
+    for text in (quickstart, station_contract, technical_guide, search_docstring, evidence_docstring):
         assert "does not crawl for you" not in text
 
 

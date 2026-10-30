@@ -1,0 +1,208 @@
+{
+  "schema": "brigade.context_handoff.export_fixture.v1",
+  "artifact_kind": "portable-test-template-not-a-consumable-handoff",
+  "identity_expectations": "Replace identity placeholders with nofollow metadata from the generated local fixture. Compute repository location and canonical integrity digest for that fixture. No saved local identity is portable.",
+  "setup": {
+    "files": {
+      "AGENTS.md": "726f6f74",
+      "sub/AGENTS.md": "616263646566"
+    },
+    "directories": [
+      ".git",
+      "sub"
+    ],
+    "cwd": "sub"
+  },
+  "expected_export": {
+    "schema": "brigade.context_handoff",
+    "schema_version": 1,
+    "producer": {
+      "name": "brigade",
+      "version": "${producer_version}"
+    },
+    "consumer": {
+      "name": "codex",
+      "version": "0.160.0",
+      "version_source": "caller-supplied",
+      "source_commit": "a956835d020762cb2b570053af06f643a11c0ecc"
+    },
+    "actual_session_observed": false,
+    "repository": {
+      "location_sha256": "${repository_location_sha256}",
+      "identity": {
+        "device": "${device}",
+        "inode": "${inode}",
+        "kind": "directory"
+      }
+    },
+    "cwd": "sub",
+    "settings": {
+      "project_doc_max_bytes": {
+        "value": 4,
+        "source": "caller-supplied"
+      },
+      "fallback_filenames": {
+        "value": [],
+        "source": "caller-supplied"
+      },
+      "root_markers": {
+        "value": [
+          ".git"
+        ],
+        "source": "caller-supplied"
+      },
+      "trust": {
+        "value": "trusted",
+        "source": "caller-supplied"
+      },
+      "read_access": {
+        "value": "full",
+        "source": "caller-supplied"
+      },
+      "environment_order": {
+        "value": [
+          "explicit-cwd"
+        ],
+        "source": "caller-supplied"
+      }
+    },
+    "directories": [
+      {
+        "path": ".",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "directory"
+        }
+      },
+      {
+        "path": "sub",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "directory"
+        }
+      }
+    ],
+    "root_marker_observations": [
+      {
+        "directory": "sub",
+        "name": ".git",
+        "state": "absent",
+        "identity": null
+      },
+      {
+        "directory": ".",
+        "name": ".git",
+        "state": "directory",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "directory"
+        }
+      }
+    ],
+    "selection_observations": [
+      {
+        "directory": ".",
+        "name": "AGENTS.override.md",
+        "state": "absent",
+        "identity": null
+      },
+      {
+        "directory": ".",
+        "name": "AGENTS.md",
+        "state": "regular",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "regular",
+          "size_bytes": "${size_bytes}",
+          "mtime_ns": "${mtime_ns}",
+          "ctime_ns": "${ctime_ns}"
+        }
+      },
+      {
+        "directory": "sub",
+        "name": "AGENTS.override.md",
+        "state": "absent",
+        "identity": null
+      },
+      {
+        "directory": "sub",
+        "name": "AGENTS.md",
+        "state": "regular",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "regular",
+          "size_bytes": "${size_bytes}",
+          "mtime_ns": "${mtime_ns}",
+          "ctime_ns": "${ctime_ns}"
+        }
+      }
+    ],
+    "sources": [
+      {
+        "path": "AGENTS.md",
+        "selection_order": 1,
+        "size_bytes": 4,
+        "cumulative_selected_bytes": 4,
+        "consumed_raw_bytes": 4,
+        "rendered_utf8_bytes": 4,
+        "contribution": "loaded",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "regular",
+          "size_bytes": "${size_bytes}",
+          "mtime_ns": "${mtime_ns}",
+          "ctime_ns": "${ctime_ns}"
+        },
+        "sha256": "4813494d137e1631bba301d5acab6e7bb7aa74ce1185d456565ef51d737677b2"
+      },
+      {
+        "path": "sub/AGENTS.md",
+        "selection_order": 2,
+        "size_bytes": 6,
+        "cumulative_selected_bytes": 10,
+        "consumed_raw_bytes": 0,
+        "rendered_utf8_bytes": 0,
+        "contribution": "cap_exhausted",
+        "identity": {
+          "device": "${device}",
+          "inode": "${inode}",
+          "kind": "regular",
+          "size_bytes": "${size_bytes}",
+          "mtime_ns": "${mtime_ns}",
+          "ctime_ns": "${ctime_ns}"
+        },
+        "sha256": "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721"
+      }
+    ],
+    "baseline": {
+      "selected_bytes": 10,
+      "consumed_raw_bytes": 4,
+      "rendered_utf8_bytes": 4
+    },
+    "completeness": {
+      "inspection": "complete",
+      "source_hashes": true,
+      "selection": true,
+      "directories": true,
+      "root_markers": true
+    },
+    "limitations": [
+      "fresh_disk_only",
+      "no_atomic_snapshot",
+      "timestamp_granularity_limits_change_detection",
+      "access_times_may_change",
+      "thread_and_session_state_unknown",
+      "global_not_requested",
+      "profile_project_system_managed_launch_overrides_unresolved",
+      "integrity_digest_not_authorization",
+      "under_cap_not_behavior_guarantee"
+    ],
+    "digest": "${canonical_integrity_digest}"
+  }
+}

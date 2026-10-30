@@ -55,7 +55,6 @@ def test_cloud_config_defaults_and_validates_hosted_pool(tmp_path):
     assert config.cloud.providers["cursor"].limit == 3
     assert config.cloud.providers["codex"].limit == 2
     assert config.cloud.providers["claude"].limit == 0
-    assert config.cloud.providers["jules"].limit == 15
     assert config.cloud.providers["grok-bot"].hosted is False
     path.write_text(
         '{"stations":[{"node_id":"node-a","name":"A","capacity":1}],'
@@ -146,7 +145,6 @@ def test_cloud_lease_is_idempotent_fenced_expiring_and_sanitized(conn, monkeypat
         ("codex-cloud", "codex"),
         ("claude-cloud", "claude"),
         ("grokbot-cloud", "grok-bot"),
-        ("jules", "jules"),
     ],
 )
 def test_cloud_provider_aliases_are_stored_and_compared_canonically(conn, raw_provider, canonical):
@@ -2318,3 +2316,52 @@ def test_cloud_v24_upgrade_refuses_unsupported_downgrade(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_hub, "SCHEMA_VERSION", 24)
     with pytest.raises(fleet_hub.FleetHubError, match=f"schema version {current_version}"):
         fleet_hub.init_db(db_path)
+
+
+def test_unsupported_stored_cloud_policy_is_ignored_without_migration(conn):
+    conn.execute(
+        "INSERT INTO cloud_provider_state (provider, enabled, limit_count, hosted, circuit_state, updated_at) "
+        "VALUES ('retired-provider', 1, 15, 1, 'closed', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+    config = deck.DeckConfig()
+    from brigade import fleet_hub_roster_page
+
+    roster = fleet_hub_roster_page.load_view(conn, config)
+    assert {row.provider for row in roster.cloud} == set(config.cloud.providers)
+    snapshot = fleet_hub.cloud_snapshot(conn, config)
+    assert {row["provider"] for row in snapshot["policy"]["providers"]} == set(config.cloud.providers)
+    assert conn.execute("SELECT enabled FROM cloud_provider_state WHERE provider='retired-provider'").fetchone() == (1,)
+    status, payload = fleet_hub.handle_cloud(conn, _admit(provider="retired-provider"), config=config)
+    assert status == 409
+    assert payload == {"admitted": False, "error": "unsupported cloud provider"}
+
+
+def test_retired_provider_lease_does_not_consume_hosted_capacity(conn):
+    config = deck.DeckConfig()
+    assert fleet_hub.handle_cloud(conn, {"action": "policy", "global_limit": 1}, config=config)[0] == 200
+    conn.execute(
+        "INSERT INTO cloud_leases (lease_id, provider, provider_task_id, repo, label, prompt_hash, "
+        "owner_node, owner_conductor, holder_token, state, admitted_at, renewed_at, ttl_seconds, "
+        "expires_at, artifact_ref, released_at) VALUES ('legacy', 'retired-provider', 'task', 'repo-a', "
+        "'legacy', ?, ?, NULL, 'holder-legacy', 'bound', '2026-01-01T00:00:00Z', "
+        "'2026-01-01T00:00:00Z', 21600, ?, NULL, NULL)",
+        ("a" * 64, NODE_A, fleet_hub._now_epoch() + 3600),
+    )
+    conn.commit()
+    assert fleet_hub.cloud_snapshot(conn, config, include_all=True)["leases"] == []
+    status, payload = fleet_hub.handle_cloud(conn, _admit(), caller_node=NODE_A, config=config)
+    assert status == 200 and payload["admitted"] is True
+
+
+def test_obsolete_configured_cloud_lane_is_ignored(tmp_path):
+    path = tmp_path / "deck.json"
+    path.write_text(
+        json.dumps(
+            {
+                "stations": [{"node_id": "node-a", "name": "A", "capacity": 1}],
+                "cloud": {"providers": {"retired-provider": {"limit": 15, "enabled": True}}},
+            }
+        )
+    )
+    assert set(deck.load_config(path).cloud.providers) == set(deck.default_cloud_config().providers)

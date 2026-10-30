@@ -87,11 +87,14 @@ def fleet_routing_for_brief() -> dict[str, Any] | None:
                 except Exception:  # noqa: BLE001
                     result["cached_at"] = None
     if isinstance(cloud, dict):
+        from ...fleet_command_deck import default_cloud_config
+
+        known_providers = default_cloud_config().providers
         providers = (cloud.get("policy") or {}).get("providers") or []
         result["cloud_lanes"] = {
             str(row["provider"]): bool(row.get("enabled"))
             for row in providers
-            if isinstance(row, dict) and row.get("provider")
+            if isinstance(row, dict) and row.get("provider") in known_providers
         }
     return result
 

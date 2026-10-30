@@ -53,7 +53,7 @@ def test_overview_keeps_machine_capacity_in_a_short_scan_without_diagnostic_fold
     assert all(f'href="{href}"' in page for href in ("/deck/alerts", "/deck/activity", "/deck/capacity"))
     assert f"/deck/capacity{explorer.selection_href('11111111-1111-4111-8111-111111111111')}" in page
     assert "linux-a" in page and "windows" in page
-    assert "10 slots" in page and "2/10 used" in page and "Reported load" in page and "44%" in page
+    assert "10 slots" in page and "2/10 slots" in page and "Reported load" in page and "44%" in page
     assert "stale" in page and "2h 0m" in page
     assert 'id="fleet-title"' not in page and "Capacity telemetry unavailable" not in page
     assert "Ready to run: 3" in page

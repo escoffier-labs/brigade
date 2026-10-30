@@ -119,6 +119,9 @@ _PASSTHROUGH_LEAVES = {
     *(("code", verb) for verb in _code_group.ENGINE_VERBS),
     ("evidence", "crawl"),
     ("evidence", "search"),
+    ("evidence", "show"),
+    ("evidence", "explain"),
+    ("evidence", "stats"),
     ("search", "sync"),
     ("search", "context"),
     ("search", "impact"),
@@ -227,6 +230,21 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
         return argv, None
     if leaf in _PLAN_LEAVES and len(argv) > 2 and argv[2] == "plan":
         return argv, None
+    if leaf[0] == "evidence" and leaf[1] in {"show", "explain", "stats"}:
+        # Help remains local even after engine flags; a terminator makes it literal.
+        for argument in argv[2:]:
+            if argument == "--":
+                break
+            if argument in {"-h", "--help"}:
+                return [*argv[:2], argument], None
+        split = 2
+        if leaf[1] == "show":
+            while split < len(argv) and argv[split] == "--forensic-content":
+                split += 1
+            if "--" in argv[split:]:
+                # Dispatch appends consumed forensic flags; keep them before `--`.
+                return argv[:2], argv[2:]
+        return argv[:split], argv[split:]
     return argv[:2], argv[2:]
 
 

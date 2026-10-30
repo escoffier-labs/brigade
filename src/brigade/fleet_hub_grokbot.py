@@ -974,7 +974,7 @@ def _admit_capacity(
     provider_policy = policy_row["providers"].get(provider, fleet_hub._provider_defaults(config, provider))
     if not provider_policy["enabled"] or provider_policy.get("circuit_state") == "open":
         return False, provider_policy.get("reason") or "provider disabled by policy"
-    hosted_count, provider_counts = fleet_hub._active_cloud_counts(conn, policy_row)
+    hosted_count, provider_counts = fleet_hub._active_cloud_counts(conn, policy_row, config)
     if provider_counts.get(provider, 0) >= provider_policy["limit"]:
         return False, "provider cloud capacity is exhausted"
     if provider_policy["hosted"] and hosted_count >= policy_row["global_limit"]:

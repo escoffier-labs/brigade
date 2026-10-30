@@ -8,8 +8,8 @@ from pathlib import Path
 
 def register(sub: argparse._SubParsersAction) -> None:
     # add
-    p_add = sub.add_parser("add", help="Install and wire a station's managed tools.")
-    p_add.add_argument("station", help="Station name or local path containing station.json.")
+    p_add = sub.add_parser("add", help="Install and wire a component's managed tools.")
+    p_add.add_argument("station", metavar="component", help="Component name or local path containing station.json.")
     p_add.add_argument("--target", "-t", type=Path, default=Path("."))
     p_add.add_argument("--install", action="store_true", help="Run install commands from a station.json manifest.")
     p_add.set_defaults(func=dispatch)

@@ -1068,3 +1068,120 @@ def test_snapshot_and_routing_agree_on_machine_wide_rejections(conn, telemetry, 
     )
     assert fleet_deck_overview.station_status(station, machine) == "limited"
     assert fleet_deck_overview.free_seats(station, machine) == 0
+
+
+def _task_policy(conn, *, missing=False, disabled=False, patch=False):
+    document = _document()
+    for workload in ("writing", "frontend"):
+        document["routing"]["workload_requirements"][workload] = {"os": "linux", "capabilities": ["general"]}
+        if not missing:
+            document["defaults"]["roles"][workload] = "seat-author"
+    document["seats"]["seat-author"] = {
+        "provider": "anthropic",
+        "model": "model-author",
+        "enabled": not disabled,
+        "eligible_machines": ["worker-cloud-1"],
+        "fallback": ["seat-grok"],
+        "concurrency": 1,
+    }
+    if patch:
+        document["repositories"]["repo/public"]["patches"] = {"roles": {"writing": "seat-grokbot"}}
+    fleet_hub_policy.save_policy(conn, document, expected_version=2, actor="operator", reason="task roles")
+    _fresh_quota(conn)
+    _observe(conn, NODE_LINUX, load=0.0)
+    _observe(conn, NODE_LINUX_2, load=0.0)
+    _observe(conn, NODE_CLOUD, load=0.0, usable_seats=["seat-author", "seat-grokbot", "seat-grok"])
+
+
+@pytest.mark.parametrize("workload", ["writing", "frontend"])
+def test_task_workload_selects_role_with_internal_evidence(conn, workload):
+    _task_policy(conn)
+    decision = _route(conn, workload=workload)
+    assert decision["selected"]["seat"] == "seat-author"
+    assert decision["task_role"] == {
+        "workload": workload,
+        "role": workload,
+        "seat": "seat-author",
+        "source_layer": "fleet-defaults",
+        "fallback": "disabled",
+        "explicit_seat": False,
+    }
+    assert set(fleet_hub_routing.public_route(decision)) == {
+        "schema",
+        "decision_id",
+        "policy_version",
+        "policy_digest",
+        "selected",
+        "reason",
+        "candidates",
+        "reservation_id",
+        "expires_at",
+    }
+
+
+@pytest.mark.parametrize(
+    ("missing", "disabled", "reason"),
+    [
+        (True, False, "unknown-role"),
+        (False, True, "no-eligible-candidate"),
+    ],
+)
+def test_task_role_never_falls_back(conn, missing, disabled, reason):
+    _task_policy(conn, missing=missing, disabled=disabled)
+    decision = _route(conn, workload="writing")
+    assert decision["selected"] is None
+    assert decision["reason"] == reason
+    assert all(row["seat"] == "seat-author" for row in decision["candidates"])
+    assert decision["task_role"]["fallback"] == "disabled"
+
+
+def test_task_explicit_override_keeps_precedence(conn):
+    _task_policy(conn)
+    decision = _route(conn, workload="writing", seat="seat-grok", override_reason="explicit choice")
+    assert decision["selected"]["seat"] == "seat-grok"
+    assert decision["task_role"]["explicit_seat"] is True
+
+
+def test_task_role_repository_precedence(conn):
+    _task_policy(conn, patch=True)
+    decision = _route(conn, workload="writing")
+    assert decision["selected"]["seat"] == "seat-grokbot"
+    assert decision["task_role"]["source_layer"] == "repo:repo/public"
+
+
+def test_task_preview_matches_route(conn):
+    _task_policy(conn)
+    preview = fleet_hub_routing.preview_route_for_work(conn, consumer="consumer-one", workload="writing")
+    decision = _route(conn, workload="writing")
+    assert preview["selected"] == decision["selected"]
+
+
+def test_task_capacity_does_not_use_seat_fallback(conn):
+    _task_policy(conn)
+    first = _route(conn, workload="writing")
+    assert first["selected"]["seat"] == "seat-author"
+    denied = _route(conn, workload="writing", session_id="second")
+    assert denied["selected"] is None
+    assert all(row["seat"] == "seat-author" for row in denied["candidates"])
+
+
+def test_task_quota_does_not_use_seat_fallback(conn):
+    _task_policy(conn)
+    current = fleet_hub_policy.current_policy(conn)
+    document = current["document"]
+    document["seats"]["seat-author"]["quota_pool"] = "pool-grok"
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="quota test"
+    )
+    conn.execute("DELETE FROM fleet_quota_observations WHERE pool_id='pool-grok'")
+    fleet_quota.ingest_observations(
+        conn,
+        {
+            "schema": fleet_quota.QUOTA_SCHEMA,
+            "collected_at": _iso(),
+            "observations": [_quota_obs("exhausted", "pool-grok", "acct-generic-grok", used=100.0)],
+        },
+    )
+    denied = _route(conn, workload="writing")
+    assert denied["selected"] is None
+    assert all(row["seat"] == "seat-author" for row in denied["candidates"])

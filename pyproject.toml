@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=84.2.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -27,8 +27,8 @@ dependencies = []
 [project.optional-dependencies]
 mesh = ["cryptography>=50.0.2,<52"]
 # Keep pytest below 9.2 until forwarded-module monkeypatch cleanup is compatible (#2091).
-dev = ["cryptography>=50.0.2,<52", "pytest>=7,<9.2", "pytest-cov>=7.1.0", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
-grokbot = ["mcp>=2,<3", "pyjwt[crypto]>=2"]
+dev = ["cryptography>=50.0.2,<52", "pytest>=9.1.1,<9.2", "pytest-cov>=7.1.0", "pytest-xdist>=3.8.0", "ruff>=0.17.1", "mypy>=2.4.0"]
+grokbot = ["mcp>=2.3.0,<3", "pyjwt[crypto]>=2.15.1"]
 research = ["playwright>=1.64.0"]
 
 [project.urls]
@@ -61,7 +61,7 @@ brigade-hook = "brigade.claude_hooks.entry:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json", "fixtures/*.json", "runs_view.html", "assets/fleet_hub/*"]
+brigade = ["py.typed", "templates/**/*", "guard/policies/*.json", "guard/examples/**/*.json", "fixtures/*.json", "fixtures/**/*", "runs_view.html", "assets/fleet_hub/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -14,6 +14,7 @@ BUNDLED_TEMPLATES = (
     "handoff-inbox-drain",
     "card-refresh",
     "forward-plan",
+    "fleet-hub-upgrade",
 )
 
 

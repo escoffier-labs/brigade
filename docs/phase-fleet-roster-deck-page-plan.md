@@ -611,7 +611,7 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
             assert heading in page
         assert 'name="role.security"' in page and 'name="role.scout"' in page
         assert 'name="seat.agy_flash" value="1" checked' in page
-        assert 'name="cloud.jules" value="1" checked' in page
+        assert 'name="cloud.cursor" value="1" checked' in page
         assert 'name="cloud.claude" value="1"' in page and 'name="cloud.claude" value="1" checked' not in page
         assert 'name="default.brigade-run"' in page and 'name="default.t3-fleet"' in page
         assert "gpt-5.4" in page and "permanent" in page
@@ -1558,19 +1558,19 @@ def test_work_brief_fleet_routing_from_hub(tmp_path, monkeypatch, capsys):
     )
     monkeypatch.setattr(
         "brigade.fleet_client_cloud.fetch_cloud",
-        lambda: {"policy": {"providers": [{"provider": "jules", "enabled": True}, {"provider": "codex", "enabled": False}]}},
+        lambda: {"policy": {"providers": [{"provider": "cursor", "enabled": True}, {"provider": "codex", "enabled": False}]}},
     )
     payload = fleet_routing.fleet_routing_for_brief()
     assert payload["roles"] == {"impl": "agy_flash", "security": "daybreak"}
     assert payload["disabled_seats"] == ["coder", "cursor_grok"]
-    assert payload["cloud_lanes"] == {"codex": False, "jules": True}
+    assert payload["cloud_lanes"] == {"codex": False, "cursor": True}
     assert payload["source"] == "hub" and payload["revision"] == 16
     assert work_cmd.brief(target=tmp_path, limit=2) == 0
     out = capsys.readouterr().out
     assert "fleet_routing: impl=agy_flash security=daybreak" in out
     assert "fleet_routing_notes: cursor via Other Models only" in out
     assert "fleet_disabled_seats: coder, cursor_grok" in out
-    assert "fleet_cloud_lanes: codex=off jules=on" in out
+    assert "fleet_cloud_lanes: codex=off cursor=on" in out
     assert "fleet_routing_source: hub revision 16" in out
     assert out.index("latest_run:") < out.index("fleet_routing:") < out.index("next_source:")
 

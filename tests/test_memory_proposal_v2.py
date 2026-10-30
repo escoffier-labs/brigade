@@ -1466,3 +1466,127 @@ def test_final_block_stream_and_control_aliases_stay_fail_closed(tmp_path, in_in
             paths=[PATH, "memory/cards/other.md"],
         )
     assert {p: p.read_bytes() for p in before} == before
+
+
+def test_supersession_target_removed_by_later_merge_refuses_creation(tmp_path):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    before = {p: p.read_bytes() for p in (path, other)}
+    with pytest.raises(api.ProposalError, match="superseded_by"):
+        create(
+            tmp_path,
+            [
+                op("supersede_card", other_card="memory/cards/other.md"),
+                op("merge_exact_duplicates", other_card="memory/cards/other.md"),
+            ],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list(tmp_path.rglob("revision-1.json"))
+    assert not list(tmp_path.rglob("proposal-*.md"))
+
+
+def test_merge_before_supersession_preserves_ordinary_op_drop_rules(tmp_path):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    proposal = create(
+        tmp_path,
+        [
+            op("merge_exact_duplicates", other_card="memory/cards/other.md"),
+            op("supersede_card", other_card="memory/cards/other.md"),
+        ],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    assert [item["type"] for item in proposal["ops"]] == ["merge_exact_duplicates"]
+    assert [item["index"] for item in proposal["dropped_ops"]] == [1]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert not other.exists()
+    assert "superseded_by" not in api._meta(path.read_text())
+
+
+def test_existing_survivor_supersession_cannot_target_removed_source(tmp_path):
+    path = card(tmp_path, "cache", body=CLAIM, extra="superseded_by: memory/cards/other.md\n")
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    before = {p: p.read_bytes() for p in (path, other)}
+    with pytest.raises(api.ProposalError, match="superseded_by"):
+        create(
+            tmp_path,
+            [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+            paths=[PATH, "memory/cards/other.md"],
+        )
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list(tmp_path.rglob("revision-1.json"))
+
+
+@pytest.mark.parametrize("phase", ["review", "apply"])
+def test_live_untouched_supersession_blocks_merge_without_card_writes(tmp_path, phase):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    proposal = create(
+        tmp_path,
+        [op("merge_exact_duplicates", other_card="memory/cards/other.md")],
+        paths=[PATH, "memory/cards/other.md"],
+    )
+    values = dict(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+    if phase == "apply":
+        api.review_payload(**values, reason="Inspected the exact merge.")
+    watcher = card(tmp_path, "watcher", extra="superseded_by: memory/cards/other.md\n")
+    before = {p: p.read_bytes() for p in (path, other, watcher)}
+    with pytest.raises(api.ProposalError, match="no valid delta ops remain"):
+        if phase == "review":
+            api.review_payload(**values, reason="Inspect live references.")
+        else:
+            api.apply_payload(**values)
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list(tmp_path.rglob("apply-receipt.json"))
+
+
+@pytest.mark.parametrize("included", [False, True])
+def test_untouched_supersession_keeps_existing_merge_drop_behavior(tmp_path, included):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    watcher = card(tmp_path, "watcher", extra="superseded_by: memory/cards/other.md\n")
+    paths = [PATH, "memory/cards/other.md"]
+    if included:
+        paths.append("memory/cards/watcher.md")
+    proposal = create(
+        tmp_path,
+        [
+            op("merge_exact_duplicates", other_card="memory/cards/other.md"),
+            op("append_evidence", evidence_ids=[".brigade/receipts/support.json"]),
+        ],
+        paths=paths,
+    )
+    assert [item["type"] for item in proposal["ops"]] == ["append_evidence"]
+    assert [item["index"] for item in proposal["dropped_ops"]] == [0]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert other.exists()
+    assert api._meta(watcher.read_text())["superseded_by"] == "memory/cards/other.md"
+    assert "superseded_by" not in api._meta(path.read_text())
+
+
+@pytest.mark.parametrize("merge_first", [False, True])
+def test_strict_supersession_packet_never_becomes_partial(tmp_path, merge_first):
+    from brigade import memory_proposal_v2
+
+    setup(tmp_path)
+    card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    ops = [
+        op("supersede_card", other_card="memory/cards/other.md"),
+        op("merge_exact_duplicates", other_card="memory/cards/other.md"),
+    ]
+    if merge_first:
+        ops.reverse()
+    with pytest.raises(api.ProposalError, match="partial proposal" if merge_first else "superseded_by"):
+        memory_proposal_v2.create_payload(
+            target=tmp_path,
+            source_paths=[PATH, "memory/cards/other.md"],
+            ops=ops,
+            anchor_blocks=False,
+            reason="Inspect every generated operation.",
+            strict_ops=True,
+        )
+    assert (tmp_path / PATH).exists()
+    assert (tmp_path / "memory/cards/other.md").exists()
+    assert "superseded_by" not in api._meta((tmp_path / PATH).read_text())
+    assert not list(tmp_path.rglob("revision-1.json"))

@@ -17,7 +17,10 @@ def test_command_groups_cover_every_command_exactly_once():
     sub = _subparsers_action(parser)
     grouped = [name for _, names in cli.COMMAND_GROUPS for name in names]
     assert len(grouped) == len(set(grouped)), "duplicate command in COMMAND_GROUPS"
-    assert set(grouped) == set(sub.choices)
+    assert set(grouped) | {"stations"} == set(sub.choices)
+    assert "components" in grouped
+    assert "stations" not in grouped
+    assert sub.choices["stations"] is sub.choices["components"]
 
 
 def test_top_level_help_lists_all_commands_and_group_titles():
@@ -26,8 +29,10 @@ def test_top_level_help_lists_all_commands_and_group_titles():
     help_text = parser.format_help()
     for title, _ in cli.COMMAND_GROUPS:
         assert title in help_text
-    for name in sub.choices:
+    for name in set(sub.choices) - {"stations"}:
         assert name in help_text
+    assert "stations" not in help_text
+    assert "Components and tools" in help_text
 
 
 def test_bare_invocation_prints_start_here_then_usage_error(capsys):
@@ -134,3 +139,22 @@ def test_roster_help_uses_agent_terminology():
     parser = cli._build_parser()
     roster_help = next(action.help for action in _subparsers_action(parser)._choices_actions if action.dest == "roster")
     assert roster_help == "Create and check agent rosters."
+
+
+@pytest.mark.parametrize("command", ["components", "stations"])
+@pytest.mark.parametrize("suffix", [[], ["list"], ["discover"], ["verify"]])
+def test_catalog_help_keeps_both_spellings_callable(command, suffix, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([command, *suffix, "--help"])
+    assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert "components" in out
+    assert "stations" not in out
+
+
+@pytest.mark.parametrize("command", ["components", "stations"])
+def test_catalog_invalid_subcommand_remains_usage_error(command, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main([command, "unknown-subcommand"])
+    assert exc.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err

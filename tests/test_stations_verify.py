@@ -70,30 +70,32 @@ def helper_path(tmp_path, monkeypatch):
     return binary
 
 
-def test_cli_verify_directory_and_manifest_json_payload(tmp_path, helper_path, capsys):
+@pytest.mark.parametrize("command", ["components", "stations"])
+def test_cli_verify_directory_and_manifest_json_payload(command, tmp_path, helper_path, capsys):
     manifest = _write_manifest(tmp_path / "sidecar")
 
-    assert cli.main(["stations", "verify", str(manifest.parent), "--json"]) == 0
+    assert cli.main([command, "verify", str(manifest.parent), "--json"]) == 0
     directory_payload = json.loads(capsys.readouterr().out)
     assert directory_payload["schema"] == "brigade.stations.verify.v1"
     assert directory_payload["status"] == "passed"
     assert directory_payload["ok"] is True
     assert directory_payload["manifest"]["path"] == str(manifest)
 
-    assert cli.main(["stations", "verify", str(manifest), "--json", "--check-managed"]) == 0
+    assert cli.main([command, "verify", str(manifest), "--json", "--check-managed"]) == 0
     file_payload = json.loads(capsys.readouterr().out)
     assert file_payload["check_managed"] is True
 
 
-def test_cli_verify_missing_or_malformed_manifest_is_usage_error(tmp_path, capsys):
-    assert cli.main(["stations", "verify", str(tmp_path / "missing"), "--json"]) == 2
+@pytest.mark.parametrize("command", ["components", "stations"])
+def test_cli_verify_missing_or_malformed_manifest_is_usage_error(command, tmp_path, capsys):
+    assert cli.main([command, "verify", str(tmp_path / "missing"), "--json"]) == 2
     missing = json.loads(capsys.readouterr().out)
     assert missing["status"] == "error"
     assert missing["exit_code"] == 2
 
     bad = tmp_path / "station.json"
     bad.write_text("{")
-    assert cli.main(["stations", "verify", str(bad), "--json"]) == 2
+    assert cli.main([command, "verify", str(bad), "--json"]) == 2
     malformed = json.loads(capsys.readouterr().out)
     assert malformed["status"] == "error"
     assert "not valid JSON" in malformed["detail"]

@@ -7,6 +7,8 @@ agent data behind the shared Admin/Agent switch.
 
 from __future__ import annotations
 
+import json
+
 import hashlib
 import hmac
 import html
@@ -262,6 +264,12 @@ def _decision_form(
             f"<tbody>{''.join(rows)}</tbody></table></div></details>"
         )
     hint_html = "".join(f'<p class="decision-hint">{_esc(h)}</p>' for h in hints)
+    bindings = "".join(
+        f"<p>{_esc(c.machine)} ({_esc(c.harness)})</p><pre>{_esc(json.dumps(c.binding, sort_keys=True, indent=2) if c.binding else 'Incomplete package provenance; mutation approval unavailable')}</pre>"
+        for c in skill.copies
+    )
+    hint_html += f"<details><summary>Exact package bindings</summary>{bindings}<p>Null evaluation means evidence pending or absent.</p></details>"
+
     save = (
         '<div class="decision-actions"><button type="submit" class="primary">Save decision</button></div>'
         if editable
@@ -271,6 +279,7 @@ def _decision_form(
         '<form class="decision" method="post" action="/deck/skills">'
         "<h3>Decision</h3>"
         f"{_csrf_field(csrf, editable)}"
+        f'<input type="hidden" name="display_token" value="{review.review_token(skill)}">'
         '<input type="hidden" name="action" value="save">'
         f'<input type="hidden" name="skill" value="{_esc(skill.skill_id, quote=True)}">'
         f'<input type="hidden" name="filter" value="{_esc(filter_key, quote=True)}">'
@@ -352,6 +361,7 @@ def render(
         filter_key = "needs"
     plan = review.build_plan(view, draft)
     top = _banner(banner, error)
+    top += "".join(f'<p class="access-note">{_esc(b)}</p>' for b in plan.blockers)
     if not editable:
         top += f'<p class="access-note">{_esc(READ_ONLY_NOTICE)}</p>'
     if view.reports == 0:
@@ -415,6 +425,7 @@ def render_plan(
 ) -> str:
     plan: Plan = review.build_plan(view, draft)
     top = _banner(banner, error)
+    top += "".join(f'<p class="access-note">{_esc(b)}</p>' for b in plan.blockers)
     if not editable:
         top += f'<p class="access-note">{_esc(READ_ONLY_NOTICE)}</p>'
     back = '<p><a href="/deck/skills">Back to skills</a></p>'
