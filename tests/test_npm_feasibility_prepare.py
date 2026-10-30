@@ -5,6 +5,8 @@ import csv
 import hashlib
 import importlib.util
 import io
+import json
+import tarfile
 import subprocess
 import sys
 import zipfile
@@ -129,7 +131,8 @@ def test_pure_wheel_extra_dependency_is_allowed(tmp_path):
 
 
 @pytest.mark.parametrize("untracked", [False, True])
-def test_dirty_preparation_refuses_before_download(tmp_path, monkeypatch, untracked):
+@pytest.mark.parametrize("candidate", [False, True])
+def test_dirty_preparation_refuses_before_download(tmp_path, monkeypatch, untracked, candidate):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", repo], check=True)
@@ -153,7 +156,9 @@ def test_dirty_preparation_refuses_before_download(tmp_path, monkeypatch, untrac
     )
     (repo / "untracked.txt" if untracked else tracked).write_text("dirty\n")
     monkeypatch.setattr(prepare, "REPO", repo)
-    monkeypatch.setattr(sys, "argv", ["prepare", "--out", str(tmp_path / "output")])
+    monkeypatch.setattr(
+        sys, "argv", ["prepare", "--out", str(tmp_path / "output"), *(["--candidate"] if candidate else [])]
+    )
 
     def forbidden(*args, **kwargs):
         pytest.fail("dirty preparation attempted a download")
@@ -948,14 +953,388 @@ def test_readback_schedule_spans_about_ten_minutes_with_capped_backoff():
 
 def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
     root = SOURCE.parents[2]
-    for filename, job in (("npm-feasibility.yml", "package"), ("npm-publish.yml", "build")):
+    for filename, job, step in (
+        ("npm-feasibility.yml", "package", "Build six current-source candidate archives once from clean source"),
+        ("npm-publish.yml", "build", "Build six stable payload archives once from clean source"),
+    ):
         text = (root / ".github/workflows" / filename).read_text()
         build = text.split("  " + job + ":", 1)[1].split("\n  acceptance:", 1)[0]
         gate = build.index("npm/feasibility/provenance.test.cjs")
-        assert build.index("python-version:") < gate < build.index("Build six stable payload archives")
+        assert build.index("python-version:") < gate < build.index("- name: " + step + "\n")
         assert "NODE_OPTIONS" not in text
     import re
 
     for filename, allowed in (("publish.cjs", {"GITHUB_SHA"}), ("provenance.cjs", {"npm_execpath", "PATH"})):
         text = (SOURCE.parent / filename).read_text()
         assert set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z_0-9]*)", text)) <= allowed
+
+
+@pytest.fixture
+def candidate_source(tmp_path, monkeypatch):
+    root = tmp_path / "source"
+    (root / "src/brigade").mkdir(parents=True)
+    (root / "src/brigade/__init__.py").write_text('__version__ = "0.30.0"\n')
+    (root / "src/brigade/current.py").write_bytes(b"CURRENT = True\n")
+    (root / "pyproject.toml").write_text('version = "0.30.0"\n')
+    (root / "scripts").mkdir()
+    (root / "scripts/prepare_dev_wheel.py").write_bytes(
+        (SOURCE.parents[2] / "scripts/prepare_dev_wheel.py").read_bytes()
+    )
+    (root / "LICENSE").write_bytes(b"fixture license")
+    (root / ".gitignore").write_text("__pycache__/\n")
+    source = root / "npm/feasibility"
+    source.mkdir(parents=True)
+    for name in ("package.json", "README.md", "launcher.cjs", "build-requirements.txt"):
+        (source / name).write_bytes((SOURCE.parent / name).read_bytes())
+    reviewed = json.loads((SOURCE.parent / "runtime.json").read_text())
+    for platform, pin in reviewed["platforms"].items():
+        pin["binarySha256"] = prepare.digest(platform.encode())
+    reviewed["licenses"] = {"LICENSE-MIT": prepare.digest(b"fixture uv license")}
+    prepare.write_json(source / "runtime.json", reviewed)
+    subprocess.run(["git", "init", "-q", root], check=True)
+    subprocess.run(["git", "-C", root, "add", "."], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            root,
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        check=True,
+    )
+    monkeypatch.setattr(prepare, "REPO", root)
+    monkeypatch.setattr(prepare, "SOURCE", source)
+    identity, paths = prepare.source_snapshot(False)
+    return root, reviewed, identity, paths
+
+
+def candidate_wheel(directory, runtime, root, *, mutation=None):
+    extra = {
+        "brigade/__init__.py": f'__version__ = "{runtime["payloadVersion"]}"\n'.encode(),
+        "brigade/current.py": (root / "src/brigade/current.py").read_bytes(),
+    }
+    if mutation == "source-init-bytes":
+        extra["brigade/__init__.py"] += b"UNREVIEWED = True\n"
+    elif mutation == "source-bytes":
+        extra["brigade/current.py"] = b"CURRENT = False\n"
+    elif mutation == "source-inventory":
+        extra.pop("brigade/current.py")
+    return wheel(directory, version=runtime["payloadVersion"], extra=extra)
+
+
+def write_candidate_archive(output, item, files):
+    archive_path = output / item["filename"]
+    with tarfile.open(archive_path, "w:gz") as archive:
+        for name, data in files.items():
+            entry = tarfile.TarInfo(name)
+            entry.size = len(data)
+            archive.addfile(entry, io.BytesIO(data))
+    data = archive_path.read_bytes()
+    item.update(
+        bytes=len(data),
+        sha256=prepare.digest(data),
+        shasum=hashlib.sha1(data).hexdigest(),
+        integrity="sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode(),
+    )
+
+
+@pytest.fixture
+def candidate_artifacts(tmp_path, candidate_source):
+    root, reviewed, identity, paths = candidate_source
+    output = tmp_path / "artifacts"
+    output.mkdir()
+    runtime = prepare.candidate_runtime(reviewed, identity)
+    payload = candidate_wheel(output, runtime, root)
+    runtime["payload"] = {
+        **prepare.validate_wheel(payload, runtime["payloadVersion"]),
+        **{k: identity[k] for k in ("sourceCommit", "sourceTree", "sourceIdentity")},
+    }
+    packages = []
+    for index, (platform, pin) in enumerate(runtime["platforms"].items()):
+        system, cpu = platform.split("-")
+        manifest = {
+            "name": pin["package"],
+            "version": runtime["version"],
+            "publishConfig": {"access": "public"},
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "directory": "npm/feasibility",
+            },
+            "license": "MIT OR Apache-2.0",
+            "os": [system],
+            "cpu": [cpu],
+            "main": "manifest.json",
+            "files": [pin["executable"], "manifest.json", *runtime["licenses"]],
+        }
+        if system == "linux":
+            manifest["libc"] = ["glibc"]
+        files = {
+            "package/package.json": json.dumps(manifest).encode(),
+            "package/" + pin["executable"]: platform.encode(),
+            "package/LICENSE-MIT": b"fixture uv license",
+            "package/manifest.json": json.dumps(
+                {
+                    "version": runtime["version"],
+                    "uvVersion": runtime["uvVersion"],
+                    "sha256": pin["binarySha256"],
+                    "executable": pin["executable"],
+                }
+            ).encode(),
+        }
+        packages.append(({"name": pin["package"], "platform": platform, "filename": f"companion-{index}.tgz"}, files))
+    manifest = json.loads((prepare.SOURCE / "package.json").read_text())
+    manifest.update(
+        version=runtime["version"],
+        optionalDependencies={p["package"]: runtime["version"] for p in runtime["platforms"].values()},
+    )
+    files = {
+        "package/package.json": json.dumps(manifest).encode(),
+        "package/runtime.json": json.dumps(runtime).encode(),
+        "package/wheel/" + payload.name: payload.read_bytes(),
+        "package/LICENSE": (root / "LICENSE").read_bytes(),
+    }
+    for name in ("launcher.cjs", "README.md"):
+        files["package/" + name] = (prepare.SOURCE / name).read_bytes()
+    packages.append(({"name": manifest["name"], "filename": "launcher.tgz"}, files))
+    metadata = {**identity, "runtime": runtime, "artifacts": [item for item, _ in packages]}
+    return output, metadata, packages, root
+
+
+def save_candidate(output, metadata, packages):
+    for item, files in packages:
+        write_candidate_archive(output, item, files)
+    prepare.write_json(output / "artifacts.json", metadata)
+    prepare.write_json(output / "runtime.json", metadata["runtime"])
+
+
+@pytest.mark.parametrize(
+    "mutation,reason",
+    [
+        (None, None),
+        ("source-identity", "packaging source mismatch"),
+        ("outer-integrity", "original archive integrity"),
+        ("outer-inventory", "six-archive inventory"),
+        ("payload-source", "candidate payload source identity"),
+        ("packed-runtime", "packed runtime"),
+        ("source-bytes", "wheel differs from source"),
+        ("source-init-bytes", "wheel differs from source"),
+        ("source-inventory", "source package inventory"),
+        ("companion-manifest", "companion manifest"),
+        ("companion-binary", "companion identity"),
+        ("companion-license", "license mismatch"),
+        ("companion-inventory", "companion identity"),
+        ("companion-association", "companion platform"),
+        ("companion-os", "companion platform"),
+        ("companion-cpu", "companion platform"),
+        ("companion-libc", "companion platform"),
+        ("companion-install-script", "companion package manifest"),
+        ("companion-dependency", "companion package manifest"),
+        ("companion-entrypoint", "companion package manifest"),
+        ("launcher-identity", "package identity"),
+        ("launcher-source", "launcher source"),
+        ("launcher-inventory", "launcher inventory"),
+        ("wheel-record", "RECORD"),
+    ],
+)
+def test_candidate_verifier_binds_physical_archives(candidate_artifacts, mutation, reason):
+    output, metadata, packages, root = candidate_artifacts
+    save_candidate(output, metadata, packages)
+    assert prepare.verify_artifacts(output, candidate=True) == metadata
+    if mutation is None:
+        with pytest.raises(ValueError, match="runtime differs from reviewed source"):
+            prepare.verify_artifacts(output)
+        return
+    runtime = metadata["runtime"]
+    companion = packages[0][1]
+    launcher = packages[-1][1]
+    if mutation == "source-identity":
+        metadata["sourceIdentity"] = "0" * 64
+    elif mutation == "payload-source":
+        runtime["payload"]["sourceIdentity"] = "0" * 64
+        launcher["package/runtime.json"] = json.dumps(runtime).encode()
+    elif mutation == "packed-runtime":
+        launcher["package/runtime.json"] = b"{}"
+    elif mutation in {"source-bytes", "source-init-bytes", "source-inventory", "wheel-record"}:
+        payload = candidate_wheel(output, runtime, root, mutation=mutation)
+        if mutation == "wheel-record":
+            with zipfile.ZipFile(payload) as archive:
+                members = {n: archive.read(n) for n in archive.namelist()}
+            members["brigade/current.py"] = b"corrupt RECORD"
+            with zipfile.ZipFile(payload, "w") as archive:
+                for name, data in members.items():
+                    archive.writestr(name, data)
+        data = payload.read_bytes()
+        runtime["payload"].update(sha256=prepare.digest(data), bytes=len(data))
+        launcher["package/wheel/" + payload.name] = data
+        launcher["package/runtime.json"] = json.dumps(runtime).encode()
+    elif mutation == "companion-association":
+        # Preserve both package-name and platform sets, binaries and manifests.
+        a, b = packages[:2]
+        a[0]["name"], b[0]["name"] = b[0]["name"], a[0]["name"]
+        for item, files in (a, b):
+            manifest = json.loads(files["package/package.json"])
+            manifest["name"] = item["name"]
+            files["package/package.json"] = json.dumps(manifest).encode()
+    elif mutation in {"companion-os", "companion-cpu", "companion-libc"}:
+        manifest = json.loads(companion["package/package.json"])
+        manifest.pop(mutation.removeprefix("companion-"))
+        companion["package/package.json"] = json.dumps(manifest).encode()
+    elif mutation in {"companion-install-script", "companion-dependency", "companion-entrypoint"}:
+        manifest = json.loads(companion["package/package.json"])
+        key, value = {
+            "companion-install-script": ("scripts", {"postinstall": "node -e process.exit(1)"}),
+            "companion-dependency": ("dependencies", {"unexpected-package": "1.0.0"}),
+            "companion-entrypoint": ("main", "unexpected.js"),
+        }[mutation]
+        manifest[key] = value
+        companion["package/package.json"] = json.dumps(manifest).encode()
+    elif mutation == "companion-manifest":
+        companion["package/manifest.json"] = b"{}"
+    elif mutation == "companion-binary":
+        companion["package/" + runtime["platforms"][packages[0][0]["platform"]]["executable"]] = b"forged"
+    elif mutation == "companion-license":
+        companion["package/LICENSE-MIT"] = b"forged"
+    elif mutation == "companion-inventory":
+        companion["package/extra"] = b"extra"
+    elif mutation == "launcher-identity":
+        manifest = json.loads(launcher["package/package.json"])
+        manifest["version"] = "0.0.0"
+        launcher["package/package.json"] = json.dumps(manifest).encode()
+    elif mutation == "launcher-source":
+        launcher["package/launcher.cjs"] = b"forged"
+    elif mutation == "launcher-inventory":
+        launcher["package/extra"] = b"extra"
+    save_candidate(output, metadata, packages)
+    if mutation == "outer-integrity":
+        (output / packages[0][0]["filename"]).write_bytes(b"corrupt")
+    elif mutation == "outer-inventory":
+        (output / "extra.tgz").write_bytes(b"extra")
+    with pytest.raises(ValueError, match=reason):
+        prepare.verify_artifacts(output, candidate=True)
+
+
+def test_candidate_numeric_commit_prefix_is_valid_npm_semver(candidate_source):
+    _, reviewed, identity, _ = candidate_source
+    runtime = prepare.candidate_runtime(reviewed, {**identity, "sourceCommit": "012345678901" + "a" * 28})
+    assert runtime["version"].endswith(".g012345678901")
+    assert runtime["payloadVersion"].startswith("0.30.0.dev")
+    package = prepare.REPO.parent / "numeric-package"
+    package.mkdir()
+    prepare.write_json(package / "package.json", {"name": "candidate-semver-fixture", "version": runtime["version"]})
+    artifact = prepare.pack(package, package)
+    with tarfile.open(package / artifact["filename"], "r:gz") as archive:
+        packed = json.load(archive.extractfile("package/package.json"))
+    assert packed["version"] == runtime["version"]
+
+
+@pytest.mark.parametrize("state", ["clean", "dirty", "race"])
+def test_candidate_builder_stages_current_source_and_refuses_changes(tmp_path, monkeypatch, candidate_source, state):
+    root, _, identity, paths = candidate_source
+    if state == "dirty":
+        identity = {**identity, "sourceTree": "dirty"}
+    original_run = subprocess.run
+    calls = []
+
+    def run(argv, **kwargs):
+        if "pip" not in argv:
+            return original_run(argv, **kwargs)
+        calls.append(argv)
+        if "wheel" in argv:
+            staged = Path(argv[-1])
+            assert staged != root
+            assert (staged / "src/brigade/current.py").read_bytes() == b"CURRENT = True\n"
+            assert (root / "src/brigade/__init__.py").read_text() == '__version__ = "0.30.0"\n'
+            version = prepare.candidate_version(identity)
+            assert (staged / "src/brigade/__init__.py").read_text() == f'__version__ = "{version}"\n'
+            assert (staged / "pyproject.toml").read_text() == f'version = "{version}"\n'
+            candidate_wheel(staged.parent, {"payloadVersion": version}, staged)
+            if state == "race":
+                (root / "LICENSE").write_bytes(b"changed during build")
+                original_run(["git", "-C", root, "add", "LICENSE"], check=True)
+                original_run(
+                    [
+                        "git",
+                        "-C",
+                        root,
+                        "-c",
+                        "user.name=Example",
+                        "-c",
+                        "user.email=example@example.invalid",
+                        "commit",
+                        "-qm",
+                        "race",
+                    ],
+                    check=True,
+                )
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(prepare.subprocess, "run", run)
+    monkeypatch.setattr(prepare.venv.EnvBuilder, "create", lambda self, path: None)
+    original_output = subprocess.check_output
+    monkeypatch.setattr(
+        prepare.subprocess, "check_output", lambda argv, **kw: b"{}" if "-I" in argv else original_output(argv, **kw)
+    )
+    runtime = {}
+    if state != "clean":
+        with pytest.raises(ValueError, match="clean source" if state == "dirty" else "source changed during build"):
+            prepare.build_candidate_payload(tmp_path / "output", runtime, identity, paths)
+        if state == "dirty":
+            assert not calls
+    else:
+        built, tools = prepare.build_candidate_payload(tmp_path / "output", runtime, identity, paths)
+        assert built.is_file() and runtime["payload"]["sourceIdentity"] == identity["sourceIdentity"]
+        assert tools["requirementsSha256"] == prepare.digest((prepare.SOURCE / "build-requirements.txt").read_bytes())
+        assert "--require-hashes" in calls[0]
+        assert all(flag in calls[1] for flag in ("--no-index", "--no-deps", "--no-build-isolation"))
+
+
+def test_candidate_mode_is_confined_to_unreleased_workflow():
+    import re
+
+    for filename, expected in (
+        ("npm-feasibility.yml", ["--out", "--verify-artifacts", "--verify-artifacts"]),
+        ("npm-publish.yml", []),
+    ):
+        text = (SOURCE.parents[2] / ".github/workflows" / filename).read_text()
+        commands = [
+            json.loads(command)
+            for command in re.findall(
+                r'JSON.stringify\((\["python","npm/feasibility/prepare.py".*?\])\)',
+                text.replace('process.env.RUNNER_TEMP+"/npm-artifacts"', '"artifacts"'),
+            )
+        ]
+        assert commands
+        assert [
+            next(flag for flag in ("--out", "--verify-artifacts") if flag in command)
+            for command in commands
+            if "--candidate" in command
+        ] == expected
+        assert all(("--candidate" in command) == bool(expected) for command in commands)
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_candidate_audit_matches_helper_first_version_stamp(tmp_path, candidate_source, newline):
+    import os
+
+    root, _, identity, paths = candidate_source
+    original = b'__version__ = "0.30.0 label"\n__version__ = "retained"\n'.replace(b"\n", newline)
+    (root / "src/brigade/__init__.py").write_bytes(original)
+    version = prepare.candidate_version(identity)
+    prepare.dev_helper().prepare_dev_wheel(root, version)
+    stamped = (root / "src/brigade/__init__.py").read_bytes()
+    (root / "src/brigade/__init__.py").write_bytes(original)
+    payload = wheel(
+        tmp_path, version=version, extra={"brigade/__init__.py": stamped, "brigade/current.py": b"CURRENT = True\n"}
+    )
+    prepare.audit_candidate_wheel(payload, version, paths)
+    with zipfile.ZipFile(payload) as archive:
+        assert archive.read("brigade/__init__.py") == (
+            f'__version__ = "{version}"\n__version__ = "retained"\n'.replace("\n", os.linesep).encode()
+        )
