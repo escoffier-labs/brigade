@@ -41,6 +41,7 @@ from .. import run_projector
 from .. import run_shadow
 from .. import seat_health
 from .. import seat_health_policy
+from .. import task_roles
 from .. import verification_contract
 from ..result_integrity import validate_final_output
 from ..run_receipts import (
@@ -896,24 +897,7 @@ def run(
                         ),
                         file=sys.stderr,
                     )
-                    roster = replace(
-                        roster,
-                        seat_routing=tuple(
-                            {
-                                **entry,
-                                "task_role": {
-                                    **role_evidence,
-                                    "seat": effective,
-                                    "requested_seat": worker,
-                                    "effective_seat": effective,
-                                },
-                            }
-                            if isinstance(role_evidence := entry.get("task_role"), dict)
-                            and role_evidence.get("seat") == worker
-                            else entry
-                            for entry in roster.seat_routing
-                        ),
-                    )
+                    roster = task_roles.retarget_worker_evidence(roster, requested=worker, effective=effective)
                     worker = effective
                 break
         if routing.receipt is not None:

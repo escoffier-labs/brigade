@@ -219,3 +219,17 @@ def load_instructions(roster: Roster, role: str) -> tuple[str, dict[str, str] | 
     except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError(f"task role {role} instructions file {path.name!r} is unreadable or exceeds 64 KiB") from exc
     return text, {"file": path.name, "sha256": hashlib.sha256(raw).hexdigest()[:12]}
+
+
+def retarget_worker_evidence(roster: Roster, *, requested: str, effective: str) -> Roster:
+    """Point task-role evidence at the fallback seat that actually ran."""
+    routing = tuple(
+        {
+            **entry,
+            "task_role": {**evidence, "seat": effective, "requested_seat": requested, "effective_seat": effective},
+        }
+        if isinstance(evidence := entry.get("task_role"), dict) and evidence.get("seat") == requested
+        else entry
+        for entry in roster.seat_routing
+    )
+    return replace(roster, seat_routing=routing)
