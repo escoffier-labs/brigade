@@ -26,10 +26,13 @@ def native_t3(tmp_path, monkeypatch):
     package.mkdir()
     (package / "__init__.py").write_text("")
     (package / "agent.py").write_text(
-        "import json, os, time\nfrom pathlib import Path\n"
+        "import json, os, threading, time\nfrom pathlib import Path\n"
         "if os.environ.get('FIXTURE_NATIVE_TIME'): time.time = lambda: float(os.environ['FIXTURE_NATIVE_TIME'])\n"
+        "_RECORD_LOCK = threading.Lock()\n"
         "def record(event):\n"
-        " with Path(os.environ['FIXTURE_CALLS_PATH']).open('a') as stream: stream.write(json.dumps(event) + '\\n')\n"
+        " # Detail workers append concurrently; Windows append handles can overwrite each other.\n"
+        " with _RECORD_LOCK, Path(os.environ['FIXTURE_CALLS_PATH']).open('a') as stream:\n"
+        "  stream.write(json.dumps(event) + '\\n')\n"
         "class Client:\n"
         " def shell_snapshot(self):\n"
         "  record('shell')\n"
