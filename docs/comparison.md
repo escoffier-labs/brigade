@@ -67,7 +67,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 | Project | Receipts | Code impact | Agent activity | Cloud state | Learning / replay | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Command, exit code, Git state, optional graph delta, causal lineage receipts | `brigade code` impact, Center code-graph views and blast radius | Center activity, hub-served fleet board, external harness sessions, Command Deck fleet overview | Registered Codex Cloud, Cursor cloud agent, and Jules task status (best-effort). Claude cloud sessions register only | Score, promote, rollback. Run child, diff, resume | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Command, exit code, Git state, optional graph delta, causal lineage receipts | `brigade code` impact, Center code-graph views and blast radius | Center activity, hub-served fleet board, external harness sessions, Command Deck fleet overview | Registered Codex Cloud and Cursor cloud agent task status (best-effort). Claude cloud sessions register only | Score, promote, rollback. Run child, diff, resume | [README](https://github.com/escoffier-labs/brigade) |
 | ActiveGraph | Event trace | Not documented | Reactive behaviors | Not documented | Replay, fork, and diff | [README](https://github.com/yoheinakajima/activegraph) |
 | Graphiti | Episode provenance and validity windows | Not documented | Not documented | Not documented | Temporal fact updates | [README](https://github.com/getzep/graphiti) |
 | Codex Cloud | Changed files and test results for review | Not documented | Task review and follow-ups | Hosted task workspaces that keep running while you are away | Not documented | [Docs](https://developers.openai.com/codex/cloud) |

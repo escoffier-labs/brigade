@@ -1,6 +1,6 @@
 # Brigade Stack Overview
 
-The full tour: every station, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Agents work within operator-defined scopes and pass receipts and handoffs with evidence. One-shot commands and long-running services share the [execution model](execution-model.md).
+The full tour: every component, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Agents work within operator-defined scopes and pass receipts and handoffs with evidence. One-shot commands and long-running services share the [execution model](execution-model.md).
 
 ## Project identity
 
@@ -336,7 +336,7 @@ For safety:
 - import Content Guard findings into the work inbox for review
 - keep generated state ignored by default
 - avoid publishing, pushing, or mutating remotes automatically
-- keep notification sending opt-in; `brigade work brief` may report readiness or suggest the station, but Brigade Stack never sends unless the operator uses an explicit send action
+- keep notification sending opt-in; `brigade work brief` may report readiness or suggest the component, but Brigade Stack never sends unless the operator uses an explicit send action
 - make risky actions visible as operator decisions
 
 ## Ecosystem
@@ -543,7 +543,7 @@ Exports are explicit and receipt-backed. Brigade Stack records the source finger
 
 ## Agent Pantry
 
-The `pantry` station (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. Agent Pantry stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not mint PSKs, start source/sink, or mutate browser auth files.
+The `pantry` component (alias `larder`) wires [Agent Pantry](https://github.com/escoffier-labs/agentpantry) into the same operator workflow: encrypted browser session, cookie, and secret sync between agent machines. Agent Pantry stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not mint PSKs, start source/sink, or mutate browser auth files.
 
 Multi-machine path (sink on the agent host, source on the daily driver):
 
@@ -563,7 +563,7 @@ brigade pantry expiry-alert --send   # optional agent-notify (install notificati
 
 ## Notifications
 
-The `notifications` station wires optional `agent-notify` into the same operator workflow: private Discord, Telegram, or Signal delivery for long-running agent work. Source lives in [`stations/notify/`](../stations/notify/) in this repository. `agent-notify` stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not send messages from doctor, status, or brief flows.
+The `notifications` component wires optional `agent-notify` into the same operator workflow: private Discord, Telegram, or Signal delivery for long-running agent work. Source lives in [`stations/notify/`](../stations/notify/) in this repository. `agent-notify` stays a **separate Go binary** (process boundary). Brigade Stack installs it, plans setup, and health-checks it; it does not send messages from doctor, status, or brief flows.
 
 Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. Source lives in [`stations/notify/`](../stations/notify/); the standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing here.
 
@@ -576,7 +576,7 @@ brigade pantry expiry-alert --send
 ```
 
 - `brigade notifications status` / `brigade notifications setup plan` inspect wiring without sending.
-- `brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station.
+- `brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the component.
 - Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
 ## For OpenClaw Users

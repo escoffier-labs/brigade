@@ -314,7 +314,7 @@ def render_activity(view: deck.DeckView, now: datetime, *, nonce: str, worklore_
 
 
 def render_capacity(
-    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity"
+    view: deck.DeckView, now: datetime, *, nonce: str, worklore_enabled: bool, tab: str = "capacity", query: str = ""
 ) -> str:
     if tab == "github-reads":
         # This dedicated tab intentionally shows the whole bounded observation.
@@ -402,8 +402,8 @@ def render_capacity(
                 '<div class="resource-bars">'
                 f"<span>Capacity: {capacity} configured slots</span>"
                 f'<progress class="capacity-bar" value="{capacity}" max="{max(1, capacity)}" aria-label="Configured slots"></progress>'
-                f"<span>Use: {station.busy} / {capacity} slots</span>"
-                f'<progress value="{station.busy}" max="{max(1, capacity)}" aria-label="Reported used slots"></progress></div>'
+                f"<span>Managed runs: {station.busy} / {capacity} slots</span>"
+                f'<progress value="{station.busy}" max="{max(1, capacity)}" aria-label="Managed runs"></progress></div>'
             )
             entries.append(
                 explorer.Entry(
@@ -421,7 +421,7 @@ def render_capacity(
                     + facts(
                         {
                             "Capacity": f"{capacity} slots",
-                            "In use": f"{station.busy} of {capacity} slots",
+                            "Managed runs": f"{station.busy} of {capacity} slots",
                             **({"Agent sessions": station.sessions} if station.sessions else {}),
                             "Load": overview._load_cell(machine).split("<", 1)[0],
                             "Last seen": overview.format_age(overview.seconds_since(machine.last_observed_at, now))
@@ -456,7 +456,7 @@ def render_capacity(
                                 "Status": status,
                                 "Enrolled": station.enrolled,
                                 "Configured slots": capacity,
-                                "Reported used slots": station.busy,
+                                "Managed runs": station.busy,
                                 "Agent sessions": station.sessions,
                                 "Telemetry age": overview.format_age(
                                     overview.seconds_since(machine.last_observed_at, now)
@@ -478,7 +478,7 @@ def render_capacity(
         content = (
             '<div id="machines-table">'
             + explorer.render(
-                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1]
+                entries, label="machines", empty=COPY["no_stations"][0], empty_hint=COPY["no_stations"][1], query=query
             )
             + "</div>"
         )
@@ -493,6 +493,14 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         status = overview.station_status(station, machine)
         capacity = station.station.capacity
         age = overview.format_age(overview.seconds_since(machine.last_observed_at, now)) if machine else "unknown"
+        last_report = ""
+        if status == "idle":
+            report_age = (
+                "never"
+                if station.last_heard is None
+                else overview.format_age(overview.seconds_since(station.last_heard, now))
+            )
+            last_report = f"<span>Last run report: <b>{_esc(report_age)}</b></span>"
         if not station.enrolled:
             state = "not enrolled · offline"
         elif status == "unknown":
@@ -504,8 +512,8 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
         load_bar = load_cell[len(load) :] if load != overview.UNKNOWN else ""
         rows.append(
             '<div class="overview-machine-row">'
-            '<div class="overview-machine-name"><a href="/deck/capacity#'
-            + explorer.anchor(station.station.node_id)
+            '<div class="overview-machine-name"><a href="/deck/capacity'
+            + explorer.selection_href(station.station.node_id)
             + '">'
             + _esc(station.label)
             + "</a><span>"
@@ -519,13 +527,18 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + str(capacity)
             + '" max="'
             + str(max(1, capacity))
-            + '" aria-label="Configured capacity"></progress><div><span>Reported use</span><b>'
-            + _esc(f"{station.busy}/{capacity} used")
+            + '" aria-label="Configured capacity"></progress><div><span>Managed runs</span><b>'
+            + _esc(f"{station.busy}/{capacity} slots")
             + '</b></div><progress class="overview-use-bar" value="'
             + str(station.busy)
             + '" max="'
             + str(max(1, capacity))
-            + '" aria-label="Reported used slots"></progress>'
+            + '" aria-label="Managed runs"></progress>'
+            + (
+                '<small class="overview-managed-hint">No managed runs. Agent sessions do not use slots.</small>'
+                if not station.busy and station.sessions
+                else ""
+            )
             + (f"<div><span>Agent sessions</span><b>{station.sessions}</b></div>" if station.sessions else "")
             + "</div>"
             '<div class="overview-machine-load"><span>Reported load</span><b>'
@@ -534,7 +547,9 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + load_bar
             + '</div><div class="overview-machine-age"><span>Telemetry</span><b>'
             + _esc(age)
-            + "</b></div></div>"
+            + "</b>"
+            + last_report
+            + "</div></div>"
         )
     body = "".join(rows) or '<p class="overview-machines-empty">No machines configured.</p>'
     return (

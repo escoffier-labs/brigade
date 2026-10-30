@@ -58,7 +58,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **closeout** | Marking something reviewed or done so it stops nagging you. |
 | **gate** | A checkpoint the operator places where they want approval before work continues. |
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
-| **station** | A subsystem of Brigade Stack (memory, security, tokens, pantry) with its own commands. |
+| **component** | A subsystem of Brigade Stack (memory, security, tokens, pantry) with its own commands. |
 
 Execution model: the operator sets policy, budgets, scopes, and gates, then agents work within that authority. Receipts with real exit codes and run journals record what happened. Agents pass evidence packages and handoffs so the next agent can check their work. Commands and operator-started services share this model. Details: [`docs/execution-model.md`](execution-model.md).
 
@@ -86,7 +86,7 @@ The Token Glace starter card documents Claude Code's PreToolUse wrapper path, Co
 
 ## What you get
 
-> **In plain terms:** the list below is everything Brigade Stack can do today. Skim the bold labels; each one is a "station" documented in detail later. You do not need most of them on day one.
+> **In plain terms:** the list below is everything Brigade Stack can do today. Skim the bold labels; each one is a "component" documented in detail later. You do not need most of them on day one.
 
 Brigade Stack has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
@@ -102,7 +102,7 @@ Brigade Stack has grown from a bootstrap kit into a local control plane for agen
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
 - Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, trust score, changelog, install history, diffs, portable packs, publish proposals, and one-command installation across Codex, Claude, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
-- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
+- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the component; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
 The operator can inspect or stop work and place gates where approval is needed. Within an authorized scope, agents can keep working and pass verification evidence to each other. Local receipts and run journals retain the record even when coordination uses the fleet hub or cloud seats. Service lifecycles and record locations are in the [`execution model`](execution-model.md).
@@ -113,9 +113,7 @@ The operator can inspect or stop work and place gates where approval is needed. 
 
 The Agent Activity dashboard is visual-first: machine cards (one per configured host, plus cloud) group agent tiles, with the spreadsheet table retained as a secondary section. Completed items older than `completed_window_seconds` (configurable in the sources file, default 3600) collapse behind a per-card expander. The Cloud card is fed by the local cloud dispatch registry (`brigade run cloud status`); when empty it shows the #890 placeholder, and when the registry has entries it renders real cloud rows.
 
-Use `brigade run cloud launch` to start Cursor Cloud or Jules work from a bounded private `--prompt-file`. Credentials come from the existing environment (`CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY`, or `JULES_API_KEY`) and are never CLI arguments. A missing key or unreadable prompt file makes no provider call. On a successful hub bind the command registers provider IDs, the prompt hash, the expected artifact, and the private lease holder used later by `sync`; launch JSON and `LaunchResult` never include that holder or the prompt text. `autoCreatePR` stays off unless `--auto-create-pr` is passed. Jules launch accepts `--no-plan-approval` so headless conductor launches can skip `requirePlanApproval`; the flag is rejected for Cursor Cloud. `brigade run cloud approve --provider jules --task <id>` wraps the existing `approve_plan` helper. Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches that were started outside this command. Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats. Cursor Cloud uses the Agents API v1: `POST /v1/agents` accepts a client-supplied `agentId` in `bc-<uuid>` form for idempotent create; the adapter generates one per launch and sends it with `{"agentId": ..., "prompt": {"text": ...}, "repos": [{"url": ...}], "autoCreatePR": ...}`. `repos[].url` must be an absolute `https://github.com/owner/repo` URL; `owner/repo` is normalized and unsafe/non-GitHub strings are rejected before hub admission or provider mutation. The response is `{"agent": {"id", "latestRunId", ...}, "run": {"id", "status", ...}}`; both identifiers are bound to the local lease. A provider HTTP 4xx/5xx releases the unbound lease as `submit-failed`; a transport timeout, `OSError`, `TimeoutError`, or malformed/oversized response after POST is ambiguous, so the lease is held and the result reports `uncertain` with the client `agentId` preserved for later adoption. `GET /v1/agents` returns `items`. Run active states are `CREATING`/`RUNNING`; terminal states are `FINISHED`/`ERROR`/`CANCELLED`/`EXPIRED`. Cursor cloud remains an unwired source until a `CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY` exists, and when wired the status payload includes sanitized Cursor inventory keyed by agent id. Claude Cloud launch is disabled-by-policy; `claude_cloud` only parses local `claude agents --json --all` inventory, which is a local/background session list, not a documented cloud-task registry. It supports `sessionId` as the canonical id and `cwd` as the workspace while remaining backward-compatible with `id`/`workspace`/`status`. Local Claude inventory is not merged into cloud provider_tasks or Cloud Workers, and absolute `cwd` paths stay out of hub/dashboard payloads. Claude Cloud remains untracked/disabled until a structured bindable provider surface exists. `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sync` reads hub leases from the fleet client when a hub is configured and releases matching terminal leases; when no hub is reachable it stays purely observational and does not invent Needs You rows. `brigade run cloud sweep` writes a receipted report only. Nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
-
-Jules Cloud uses the alpha `https://jules.googleapis.com/v1alpha` API with `X-Goog-Api-Key` authentication and a zero-runtime-dependency stdlib `urllib` adapter. Launch resolves the target repository first: `GET /sources` is a read-only probe whose rows are matched exactly (case-insensitively) on `githubRepo.owner` and `githubRepo.repo`, and the starting branch must be one the source lists, or else the source default, `main`, or a sole listed branch. If the repository is not connected, or the branch cannot be validated, there is no hub admission and no provider mutation. Only then does `POST /sessions` send `{"prompt": ..., "title": ..., "sourceContext": {"source": "sources/<connected-id>", "githubRepoContext": {"startingBranch": ...}}, "requirePlanApproval": ...}` using the exact connected `source.name` such as `sources/github-owner-repo`; the literal `USER` is not a valid source. `requirePlanApproval` stays true unless `--no-plan-approval` is passed. `automationMode` is omitted unless `autoCreatePR` is explicitly requested, in which case it is validated to `AUTO_CREATE_PR` and nothing else. The low-level `create_session` takes an already-validated `source_name` and `starting_branch` and does no discovery of its own; it requires a top-level `id` in the create response, which is bound immediately to the local hub lease via `fleet_client.bind_cloud`. The adapter never auto-approves plans, deletes sessions, pulls or applies patches, or creates PRs by default. Operators approve a waiting plan with `brigade run cloud approve --provider jules --task <id>`. `status` classifies a terminal session as `needs-plan-approval` only on positive evidence: a bounded `GET /sessions/{id}/activities` read must actually show a `planGenerated` activity with no `artifacts` activity, no outputs, no branch, and no pull request. That activity read is a second bounded phase of the observation, taken only for sessions whose label could still turn on plan evidence (terminal, no outputs, no PR url), capped at 10 sessions per observation, one page of 30 activities each, a 5s per-call deadline and a 15s wall-clock budget for the phase; newest-updated candidates win the cap. A session row itself never carries activity kinds, so without that read the evidence is unobservable. A failed or skipped activity read leaves activity evidence absent, and absent evidence never yields `needs-plan-approval`. When the provider explicitly reports no outputs and neither the provider nor GitHub reports a pull request or matching branch, `status` reports `needs-investigation`. Positive `planGenerated` evidence with no work artifact remains `needs-plan-approval`. Other completed sessions follow the ordinary `ready-to-land`/`stale` classification. This keeps an unreadable activity feed from being treated as proof that plan approval caused the stop. `status` surfaces the Jules session URL either way. A provider HTTP 4xx/5xx after `POST` releases the unbound lease as `submit-failed`; a transport timeout, `URLError`, `OSError`, `TimeoutError`, or malformed/oversized/id-less response is ambiguous, so the lease is held, exactly one `POST` is ever issued, and the result reports `uncertain` for later adoption. `GET /sessions` and `GET /sessions/{id}/activities` are bounded paginated reads (`pageSize` 1-100, at most 20 pages and 1000 items); `GET /sessions/{id}` reads a single session; `POST /sessions/{id}:approvePlan` sends an empty JSON body and accepts an empty success body. Session ids are rejected when empty or when they contain a path separator, and every path segment is percent-encoded with `safe=""`. A `base_url` override is accepted for tests and must be `https`, or `http` on loopback. Jules states are mapped to the common cloud state space: `QUEUED`/`PLANNING`/`AWAITING_PLAN_APPROVAL`/`AWAITING_USER_FEEDBACK`/`IN_PROGRESS`/`PAUSED`/`STATE_UNSPECIFIED` hold capacity, while `FAILED`/`COMPLETED` are terminal. Inventory is a positive signal only: a failed fetch or a truncated page walk simply omits ids, and an absent id is never read as terminal, so unknown or truncated inventory cannot release capacity. The tracker authority is `alpha REST` when `JULES_API_KEY` is set and `unwired` otherwise. Every provider payload is sanitized to ids, normalized state, bounded RFC 3339 timestamps, the source owner/repo/branches needed for matching, a validated `https://jules.google.com/...` session URL, and a validated `https://github.com/owner/repo/pull/N` URL, and an activity's id, timestamp and allowlisted oneof `kind`; prompts, titles, descriptions, activity payloads, artifacts, patches, shell output, raw response bodies, and credentials are dropped. Hosted lease labels are generated as `<provider>:<owner>/<repo>@<12-hex prompt digest>` (`cloud_tracker.lease_label`, capped at 120 characters), so neither Jules nor Cursor ever persists prompt text as a label.
+Use `brigade run cloud launch` to start Cursor Cloud work from a bounded private `--prompt-file`. Credentials come from the existing environment (`CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY`) and are never CLI arguments. A missing key or unreadable prompt file makes no provider call. On a successful hub bind the command registers provider IDs, the prompt hash, the expected artifact, and the private lease holder used later by `sync`; launch JSON and `LaunchResult` never include that holder or the prompt text. `autoCreatePR` stays off unless `--auto-create-pr` is passed. Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches that were started outside this command. Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats. Cursor Cloud uses the Agents API v1: `POST /v1/agents` accepts a client-supplied `agentId` in `bc-<uuid>` form for idempotent create; the adapter generates one per launch and sends it with `{"agentId": ..., "prompt": {"text": ...}, "repos": [{"url": ...}], "autoCreatePR": ...}`. `repos[].url` must be an absolute `https://github.com/owner/repo` URL; `owner/repo` is normalized and unsafe/non-GitHub strings are rejected before hub admission or provider mutation. The response is `{"agent": {"id", "latestRunId", ...}, "run": {"id", "status", ...}}`; both identifiers are bound to the local lease. A provider HTTP 4xx/5xx releases the unbound lease as `submit-failed`; a transport timeout, `OSError`, `TimeoutError`, or malformed/oversized response after POST is ambiguous, so the lease is held and the result reports `uncertain` with the client `agentId` preserved for later adoption. `GET /v1/agents` returns `items`. Run active states are `CREATING`/`RUNNING`; terminal states are `FINISHED`/`ERROR`/`CANCELLED`/`EXPIRED`. Cursor cloud remains an unwired source until a `CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY` exists, and when wired the status payload includes sanitized Cursor inventory keyed by agent id. Claude Cloud launch is disabled-by-policy; `claude_cloud` only parses local `claude agents --json --all` inventory, which is a local/background session list, not a documented cloud-task registry. It supports `sessionId` as the canonical id and `cwd` as the workspace while remaining backward-compatible with `id`/`workspace`/`status`. Local Claude inventory is not merged into cloud provider_tasks or Cloud Workers, and absolute `cwd` paths stay out of hub/dashboard payloads. Claude Cloud remains untracked/disabled until a structured bindable provider surface exists. `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sync` reads hub leases from the fleet client when a hub is configured and releases matching terminal leases; when no hub is reachable it stays purely observational and does not invent Needs You rows. `brigade run cloud sweep` writes a receipted report only. Nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
 
 ### Node-local GitHub reads
 
@@ -316,7 +314,7 @@ brigade init --target ./repo --depth repo --harnesses codex
 brigade init --target ./repo --harnesses none           # generic install
 ```
 
-Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
+Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the component registry.
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
 `brigade handoff doctor` reports pending `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, and `.crush/memory-handoffs/` files that are not covered by that local source list.
 Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
@@ -1112,7 +1110,7 @@ Local-only runs need no extra dependency. Without the extra, `--web` records a b
 
 ### Daily Work Loop
 
-> **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional station you reach for only when you need it. Read for the command you want and ignore the rest.
+> **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional component you reach for only when you need it. Read for the command you want and ignore the rest.
 
 Use `brigade work bootstrap` once per repo.
 It writes or verifies `.brigade/dogfood.toml`, creates local artifact directories, creates the handoff inbox, updates `.gitignore`, and reports readiness.
@@ -1440,8 +1438,8 @@ Operator notification commands:
 - `brigade add notifications` installs `agent-notify` when missing and reports manual wiring steps.
 - `brigade notifications status --json` inspects the local `agent-notify` binary, config file, selected profile, and referenced environment variables without sending.
 - `brigade notifications setup plan --profile operator` prints reviewed Codex and Claude Code hook snippets.
-- `brigade doctor` includes advisory `agent-notify` health under the notifications station.
-- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications station; they never send.
+- `brigade doctor` includes advisory `agent-notify` health under the notifications component.
+- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications component; they never send.
 
 Brigade Stack does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
 
@@ -1881,7 +1879,7 @@ Operator surfaces reuse the same audit:
 
 The 1,601 legacy outcome ledger rows reported in the scorecard proposal are audit-only. They cannot be converted into receipt scorecards because scorecards require verifier-attributed verify receipts, not caller-supplied ledger `artifact_id` values.
 
-`brigade operator checkup` runs the six first-run doctors by default and reports optional loop station health alongside them. Missing optional stations warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, GraphTrail health and the latest work receipt delta, and MiseLedger work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
+`brigade operator checkup` runs the six first-run doctors by default and reports optional loop component health alongside them. Missing optional components warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, code map health and the latest work receipt delta, and evidence log work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
 
 Use `--handoff` to bridge a completed run back into the memory system.
 
@@ -2010,14 +2008,18 @@ The managed `.gitignore` block is replaced between its markers without touching 
 
 See [QUICKSTART.md](../QUICKSTART.md) for setup, verification, and the ingest flow.
 
-## Managed stations
+<a id="managed-stations"></a>
 
-> **In plain terms:** "stations" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
+## Managed components
 
-Some stations can install and wire external tools for you.
-Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
+The `brigade components` catalog command is unreleased, targeted for the next 0.31.x release. Stable 0.30 uses `brigade stations` with the same subcommands. See the [component reference](station-contract.md) for alias and manifest compatibility.
+
+> **In plain terms:** "components" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
+
+Some components can install and wire external tools for you.
+Run `brigade setup` first to install the code map and evidence log engines, their companion binaries, and `agent-notify` when published on the running CLI's exact release manifest. The `brigade add evidence` and `brigade add search` commands remain one-release compatibility paths and are not required after setup. Use `brigade add <component>` for component-specific tools that setup does not manage, then wire their default config.
 Tools are never imported in process; Brigade Stack shells out to each CLI, so the boundary stays model-neutral and mixed-language.
-`brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
+`brigade add <path>` also discovers a local `station.json` manifest from an external component repo. The manifest path reports the component name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
 ```bash
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
@@ -2026,16 +2028,16 @@ brigade add tokens   # token-glace (+ optional usage-tracker)
 brigade add skills   # built-in skills; optional Skillet installer remains available
 brigade add pantry   # agentpantry (extras surface)
 brigade add notifications   # agent-notify (extras surface)
-brigade stations discover --root ~/repos
+brigade components discover --root ~/repos
 brigade add ../agentpantry   # inspect an external station.json
 ```
 
 For general workflow guidance, install upstream [Superpowers](https://github.com/obra/superpowers) separately alongside the Brigade Stack and T3 specialists you use. `brigade init` does not bundle Superpowers. The optional Skillet installer is retained unchanged.
 
 
-`security` is a built-in station with no external managed tool yet.
+`security` is a built-in component with no external managed tool yet.
 
-First-class station CLIs (always registered; not extras-gated):
+First-class component CLIs (always registered; not extras-gated):
 
 | Command group | Plans / health |
 |---|---|
@@ -2043,11 +2045,11 @@ First-class station CLIs (always registered; not extras-gated):
 | `brigade code` | `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, `diff` |
 | `brigade search` | `status`, `doctor`, `sync`, `context`, `impact`, `sync plan` |
 | `brigade tokens` | `status`, `doctor`, `wire plan` |
-| `brigade stations` | `list`, `discover`, `verify` |
+| `brigade components` | `list`, `discover`, `verify` |
 
 `pantry` and `notifications` remain extras-gated (`brigade extras on` or `BRIGADE_EXTRAS=1`).
 
-`pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade Stack never imports it.
+`pantry` (alias `larder`) is the agent session auth sync component. Agent Pantry remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
 Before invoking any installed agentpantry surface, Brigade Stack probes `agentpantry version --json` and accepts only released ASCII semver triples (optional leading `v`, no prerelease or build suffix). Dev builds, prerelease tags, and other non-triple strings are rejected by version policy, not because parsing failed. Brigade Stack never echoes the raw rejected version string in `work brief`, doctor output, logs, or receipts; it surfaces a fixed policy message instead.
 `brigade doctor` health-checks it with `agentpantry doctor --json --no-net` and keeps a compatibility fallback to `agentpantry status --json` for older binaries.
@@ -2056,12 +2058,12 @@ Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific heal
 Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade Stack would send. Add `--send` only after `brigade add notifications` if you want delivery.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
 
-`notifications` is the operator notification station. `agent-notify` remains a process-boundary Go binary; Brigade Stack never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
+`notifications` is the operator notification component. `agent-notify` remains a process-boundary Go binary; Brigade Stack never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
 `brigade add notifications` installs `agent-notify` when missing and prints manual wiring steps.
 Use `brigade notifications status` and `brigade notifications setup plan` for advisory health and reviewed hook snippets without sending.
-`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station; Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
+`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the component; Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger component. Its engine remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `--code-reference <brigade.code-reference.v1 JSON>` is passed to MiseLedger unchanged, so its exact code-reference lookup runs before lexical fallback.
 
@@ -2074,9 +2076,9 @@ Crawl defaults to 900 seconds and can be changed with the positive finite numeri
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
 
-`plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
+`plating` is an optional guard-component publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger component. Its engine remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. Brigade Stack selects and health-checks the crawler runtime for supported sources before delegating; MiseLedger still performs the crawl and import. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
@@ -2136,7 +2138,7 @@ Security config supports policy presets (`personal`, `public-repo`, `strict`), `
 
 The current managed tools:
 
-| Station | Tool | What it does |
+| Component | Tool | What it does |
 |---|---|---|
 | `memory` | embedded `brigade memory status|lint|compact` | index health, dead-link lint, MEMORY.md compact |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
@@ -2153,10 +2155,10 @@ The current managed tools:
 | `notifications` | `agent-notify` | private operator notifications for agent events |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.
-`brigade stations list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
-`brigade stations discover` finds local `station.json` catalogs (`brigade.station.v1`) under cwd and common repo roots.
+`brigade components list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
+`brigade components discover` finds local `station.json` catalogs (`brigade.station.v1`) under cwd and common repo roots.
 A missing optional tool is not a failure.
-It shows up as a non-failing `[todo]` hint telling you to run `brigade add <station>`.
+It shows up as a non-failing `[todo]` hint telling you to run `brigade add <component>`.
 
 ### What a green doctor looks like
 

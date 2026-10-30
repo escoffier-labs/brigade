@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
 REPOSITORY = "escoffier-labs/brigade"
 COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+CANONICAL_ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 USER_AGENT = "brigade-component-manifest-provenance/1.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -221,7 +222,22 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
         if name in release_assets:
             errors.append(f"GitHub release lists duplicate asset {name!r}")
         release_assets[name] = asset
-    expected_release_names = set(expected_native) | {"component-manifest-v1.json", "checksums.txt"}
+    alias_names = {
+        _expected_asset_name(component, platform) for component in CANONICAL_ALIASES for platform in SUPPORTED_PLATFORMS
+    }
+    expected_aliases = alias_names if set(release_assets) & alias_names else set()
+    for name in sorted(expected_aliases):
+        asset = release_assets.get(name)
+        if asset is None:
+            continue
+        size = asset.get("size")
+        if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+            errors.append(f"release asset {name!r} size must be a positive integer")
+        if asset.get("browser_download_url") != _release_url(tag, name):
+            errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
+        if _github_asset_digest(asset) is None:
+            errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
+    expected_release_names = expected_aliases | set(expected_native) | {"component-manifest-v1.json", "checksums.txt"}
     if set(release_assets) != expected_release_names:
         missing = sorted(expected_release_names - set(release_assets))
         extra = sorted(set(release_assets) - expected_release_names)
@@ -275,11 +291,16 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
         checksum_map = parse_checksums(checksums_text)
     except ValueError as exc:
         return [*errors, str(exc)]
-    if set(checksum_map) != set(expected_native) | {"component-manifest-v1.json"}:
+    if set(checksum_map) != expected_aliases | set(expected_native) | {"component-manifest-v1.json"}:
         errors.append("checksums.txt must contain exactly every native asset and component-manifest-v1.json")
     for name, expected in expected_native.items():
         if checksum_map.get(name) != expected["sha256"]:
             errors.append(f"checksums.txt digest for {name!r} does not match manifest")
+    for name in sorted(expected_aliases):
+        alias = release_assets.get(name)
+        digest = _github_asset_digest(alias) if alias is not None else None
+        if digest is not None and checksum_map.get(name) != digest.group(1):
+            errors.append(f"checksums.txt digest for {name!r} does not match release")
     manifest_digest = _github_asset_digest(manifest_asset)
     if manifest_digest and checksum_map.get("component-manifest-v1.json") != manifest_digest.group(1):
         errors.append("checksums.txt digest for component-manifest-v1.json does not match release")

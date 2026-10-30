@@ -15,7 +15,7 @@ from typing import Any
 
 from . import __version__
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 MAX_ROWS = 500
 MAX_TEXT = 120
 SHA256 = re.compile(r"[0-9a-f]{64}")
@@ -60,8 +60,16 @@ def build_copies(target: Path) -> list[dict[str, Any]]:
         installed = _mapping(receipt.get("installed"))
         source = _mapping(copy.get("source"))
         receipt_source = _mapping(receipt.get("source"))
+        from .skills_cmd.install import _review_binding
+
+        selector = _update_selector(skill_id, source or receipt_source)
+        try:
+            binding = _review_binding(target, skill_id, harness, selector)
+        except (OSError, ValueError, skills_cmd.SkillsStatePathError):
+            binding = None
         rows.append(
             {
+                "binding": binding,
                 "skill_id": _text(skill_id),
                 "harness": _text(harness),
                 "status": _text(copy["status"]),

@@ -980,13 +980,13 @@ def test_sidebar_shows_compact_machine_and_cloud_destinations_and_capacity_keeps
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
     assert "data-tree-filter" not in sidebar
     assert "telemetry 1m" in sidebar
-    assert f"/deck/capacity#{fleet_admin_explorer.anchor(NODE_A)}" in sidebar
+    assert f"/deck/capacity{fleet_admin_explorer.selection_href(NODE_A)}" in sidebar
     assert f"/deck/capacity/cloud#{fleet_admin_explorer.anchor('claude')}" in sidebar
     assert "0/4" in sidebar and "1/3" in sidebar
     assert sidebar.index("linux-a") < sidebar.index("claude") < sidebar.index("Resources")
     assert 'data-status="stale"' in sidebar and 'data-status="offline"' in sidebar
     html = overview.render_capacity_page(view, NOW, nonce="n", worklore_enabled=True)
-    assert "Capacity: 10 configured slots" in html and "Use: 2 / 10 slots" in html
+    assert "Capacity: 10 configured slots" in html and "Managed runs: 2 / 10 slots" in html
     assert "stale-telemetry" in html and "win-a" in html
     assert "Usable for selected work: unknown" in html
     cloud_page = fleet_admin_pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True, tab="cloud-details")
@@ -1633,9 +1633,26 @@ def test_station_counts_live_sessions_per_node_without_touching_slots():
     assert overview.station_status(alpha, machines[NODE_A]) == "working"
     html = pages.render_overview_machines(view, NOW)
     assert "<span>Agent sessions</span><b>2</b>" in html
-    assert "0/2 used" in html
+    assert "0/2 slots" in html
     page = pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True)
     assert "Agent sessions" in page
+
+
+def test_managed_runs_hint_shows_only_without_runs_and_with_sessions():
+    from brigade import fleet_admin_pages as pages
+
+    hint = "No managed runs. Agent sessions do not use slots."
+    sessions_only = pages.render_overview_machines(_sessions_view([_live_session(NODE_A, "s1")]), NOW)
+    assert "<span>Managed runs</span><b>0/2 slots</b>" in sessions_only
+    assert 'aria-label="Managed runs"' in sessions_only
+    assert "Reported use" not in sessions_only
+    assert sessions_only.count(hint) == 1
+    assert pages.render_overview_machines(_sessions_view([]), NOW).count(hint) == 0
+    running = pages.render_overview_machines(
+        _sessions_view([_live_session(NODE_A, "s1")], runs=[_run(NODE_A, "run-a", "example/tool")]), NOW
+    )
+    assert "<span>Managed runs</span><b>1/2 slots</b>" in running
+    assert running.count(hint) == 0
 
 
 def test_station_without_jobs_or_sessions_stays_idle():

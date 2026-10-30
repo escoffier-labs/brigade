@@ -317,7 +317,7 @@ def resolve_orchestrator_health_routing(
         roster,
         agents=effective_agents,
         orchestrator=effective_orchestrator,
-        seat_routing=tuple(decisions),
+        seat_routing=(*roster.seat_routing, *decisions),
     )
     receipt: dict[str, object] = {"schema": "brigade.seat_routing.v1", "decisions": decisions}
     if direct_worker:

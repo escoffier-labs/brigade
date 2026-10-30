@@ -9,6 +9,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 from dataclasses import dataclass, replace
 from datetime import date, datetime
 from pathlib import Path
@@ -18,6 +19,7 @@ from . import memory_cmd
 from . import memory_proposal_io as io
 from .card_fingerprint import _upsert_frontmatter_fields, content_fingerprint, normalize_card_content
 from .card_identity import CardIdentity, card_identity, identity_collision_aliases
+from .memory_claim_blocks import claim_spans
 from .memory_evidence_log import EvidenceLog, _timestamp
 from .selection import WRITER_INBOXES
 
@@ -194,21 +196,30 @@ def _invalid_outcome_ids(target: Path, card: Card, refs: set[str]) -> set[str]:
     Callers bound refs to the newest distinct window and/or current citations.
     Conflicting timestamps cannot all describe the retained original receipt.
     """
-    from .memory_evidence_log import validate_outcome_support, verify_outcome_ref
+    from .memory_evidence_log import outcome_ref_requires_support, validate_outcome_support, verify_outcome_ref
 
     stamps: dict[str, set[str]] = {}
     for row in card.rows:
         ref = _evidence_id(row["evidence_id"])
-        if ref in refs and row["kind"] == "outcome" and verify_outcome_ref(ref):
+        if ref in refs and row["kind"] in {"outcome", "negative-outcome"} and verify_outcome_ref(ref):
             stamps.setdefault(ref, set()).add(row["ts"])
-    return {
-        ref
-        for ref, values in stamps.items()
-        if len(values) != 1
-        or not validate_outcome_support(
-            target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(values))
-        )
-    }
+    negative = {_evidence_id(row["evidence_id"]) for row in card.rows if row["kind"] == "negative-outcome"}
+    invalid = negative & refs
+    for ref in refs:
+        if not verify_outcome_ref(ref):
+            continue
+        values = stamps.get(ref)
+        if values is None and not outcome_ref_requires_support(target, ref):
+            continue
+        if (values is not None and len(values) != 1) or not validate_outcome_support(
+            target,
+            card_path=card.path,
+            card_text=card.text,
+            ref=ref,
+            timestamp=next(iter(values)) if values else None,
+        ):
+            invalid.add(ref)
+    return invalid
 
 
 def _structured_preview(card: Card) -> bool:
@@ -286,11 +297,14 @@ def _candidate(
     diff: str = "",
     review: list[str] | None = None,
     summary: str,
+    outcome_bindings: dict[str, Any] | None = None,
+    unresolved_review: set[str] | None = None,
 ) -> dict[str, Any]:
     cards = sorted(cards, key=lambda c: c.identity.card_id)
     scopes = sorted({str(card.meta.get("scope", "repo")) for card in cards})
     trusts = {label for card in cards for label in _trust_labels(card.meta)}
-    review = sorted(set(review or []))
+    unresolved_review = unresolved_review or set()
+    review = sorted(set(review or []) | unresolved_review)
     proof = set(evidence) - set(contrary) - set(review)
     review_only = bool(
         contrary or review or len(scopes) > 1 or len(trusts) > 1 or any(_structured_preview(c) for c in cards)
@@ -307,12 +321,15 @@ def _candidate(
         "proof_sources": len({sources[ref] for ref in proof}),
         "review_evidence_ids": review,
         "contrary_ids": sorted(set(contrary)),
-        "unresolved_evidence_ids": sorted((set(contrary) | set(review)) - sources.keys()),
+        "unresolved_evidence_ids": sorted(((set(contrary) | set(review)) - sources.keys()) | unresolved_review),
         "tier": 2 if review_only else 0,
         "scope": scopes,
         "diff": "" if review_only else diff,
         "summary": summary,
     }
+    if outcome_bindings is not None:
+        payload["outcome_bindings"] = outcome_bindings
+        payload["semantic_contradiction"] = "unadjudicated"
     payload["candidate_id"] = "candidate-" + io.sha256(io.json_bytes(payload))[:24]
     return payload
 
@@ -353,6 +370,65 @@ def _pending_rows(card: Card) -> list[dict[str, Any]]:
     ]
 
 
+def _grouping_text(text: str) -> str:
+    """Ignore addressable claim suffixes only for reflection equality.
+
+    Keep the original card on every candidate and evidence binding. Match the
+    reviewed proposal suffix syntax without importing ops, which imports us.
+    """
+    header = re.match(r"\A---[ \t]*\r?\n.*?^---[ \t]*(?:\r?\n|\Z)", text, re.MULTILINE | re.DOTALL)
+    offset = header.end() if header else 0
+    for span in reversed(claim_spans(text, offset)):
+        suffix = re.search(r" \^(c-[0-9a-f]{6})$", text[span.start : span.end])
+        if suffix:
+            text = text[: span.start + suffix.start()] + text[span.end :]
+    return text
+
+
+def _negative_outcome_bindings(
+    target: Path, card: Card, selected: set[str] | None = None
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Separate eligible signals from unresolved pending review blockers."""
+    if not any(row["kind"] == "negative-outcome" for row in card.rows):
+        return {}, set()
+    if selected is None:
+        newest = dict.fromkeys(
+            row["evidence_id"]
+            for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+        )
+        selected = set(list(newest)[: io.MAX_LIST])
+    from .memory_evidence_log import negative_outcome_binding
+
+    negative_stamps: dict[str, set[str]] = {}
+    pending = _pending_rows(card)
+    reference = _timestamp(card.meta.get("last_consolidated")) or _timestamp(
+        memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+    )
+    if reference is None:
+        pending = card.rows
+    for row in card.rows:
+        if row["kind"] == "negative-outcome" and row["evidence_id"] in selected:
+            negative_stamps.setdefault(row["evidence_id"], set()).add(row["ts"])
+    bindings: dict[str, dict[str, Any]] = {}
+    pending_ids = {row["evidence_id"] for row in pending if row["kind"] == "negative-outcome"}
+    # The receipt window bounds validation IO, not the lifetime of review state.
+    unresolved = pending_ids - selected
+    for ref, stamps in negative_stamps.items():
+        if ref not in pending_ids:
+            continue
+        if len(stamps) != 1:
+            unresolved.add(ref)
+            continue
+        binding = negative_outcome_binding(
+            target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(stamps))
+        )
+        if binding is not None:
+            bindings[ref] = binding
+        else:
+            unresolved.add(ref)
+    return bindings, unresolved
+
+
 def generate(
     target: Path, care: memory_cmd.MemoryCareConfig, ledger: EvidenceLog, cards: list[Card]
 ) -> list[dict[str, Any]]:
@@ -361,6 +437,7 @@ def generate(
     citations: dict[str, list[str]] = {}
     contrary_by_card: dict[str, list[str]] = {}
     review_by_card: dict[str, list[str]] = {}
+    unresolved_by_card: dict[str, set[str]] = {}
     groups: dict[str, list[Card]] = {}
     finding_config = replace(care, enabled_checks=("unconsolidated-evidence",))
     roots = _evidence_roots(target)
@@ -375,7 +452,28 @@ def generate(
             for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         )
         selected = list(newest)[: io.MAX_LIST]
+        bindings, unresolved = _negative_outcome_bindings(target, card, set(selected))
+        negative_sources = _resolved(target, sorted(bindings), roots)
+        # A receipt can disappear after binding validation. Keep the blocker,
+        # but do not construct eligible evidence without a resolved source.
+        unresolved.update(bindings.keys() - negative_sources.keys())
+        bindings = {ref: binding for ref, binding in bindings.items() if ref in negative_sources}
+        negative_ids = sorted(bindings)
+        if negative_ids:
+            candidates.append(
+                _candidate(
+                    "negative-outcome-review",
+                    [card],
+                    negative_ids,
+                    [],
+                    sources=negative_sources,
+                    review=negative_ids,
+                    outcome_bindings=bindings,
+                    summary="Failed effectiveness verification requires human review. Claim truth is unadjudicated.",
+                )
+            )
         invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
+        invalid |= {row["evidence_id"] for row in card.rows if row["kind"] == "negative-outcome"}
         retained_refs = refs
         refs = [ref for ref in refs if ref not in invalid]
         card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
@@ -393,15 +491,21 @@ def generate(
         contrary = sorted(
             {row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} - set(refs)
         )
-        review = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
-        blockers = sorted(set(contrary) | set(review))
+        review = sorted(
+            ({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
+            | set(negative_ids)
+            | unresolved
+        )
+        blockers = sorted((set(contrary) | set(review)) - unresolved)
         for start in range(0, len(blockers), io.MAX_LIST):
             sources.update(_resolved(target, blockers[start : start + io.MAX_LIST], roots))
         citations[card.path] = evidence
         contrary_by_card[card.path] = contrary
         review_by_card[card.path] = review
-        if normalize_card_content(card.text):
-            groups.setdefault(content_fingerprint(card.text), []).append(card)
+        unresolved_by_card[card.path] = unresolved
+        grouping_text = _grouping_text(card.text)
+        if normalize_card_content(grouping_text):
+            groups.setdefault(content_fingerprint(grouping_text), []).append(card)
         if stale_ids:
             fields: dict[str, Any] = {
                 "evidence": sorted(set(retained_refs) | set(stale_ids)),
@@ -418,6 +522,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
+                    unresolved_review=unresolved,
                     diff="" if contrary else _diff(card, fields),
                     summary="Review matched evidence newer than the last consolidation or review.",
                 )
@@ -437,6 +542,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
+                    unresolved_review=unresolved,
                     diff=_diff(card, {"evidence": sorted(set(retained_refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
@@ -450,6 +556,7 @@ def generate(
                     resolved_contrary,
                     contrary,
                     sources=sources,
+                    unresolved_review=unresolved,
                     summary="Opposite-polarity flag only. Human review must decide the relationship.",
                 )
             )
@@ -468,10 +575,17 @@ def generate(
                 contrary,
                 sources=sources,
                 review=sorted({ref for card in group for ref in review_by_card[card.path]}),
+                unresolved_review={ref for card in group for ref in unresolved_by_card[card.path]},
                 summary="would merge exact normalized duplicates: " + ", ".join(sorted(c.path for c in group)),
             )
         )
-    priority = {"opposite-polarity": 0, "stale-newer-evidence": 1, "reinforce": 2, "duplicate": 3}
+    priority = {
+        "negative-outcome-review": 0,
+        "opposite-polarity": 0,
+        "stale-newer-evidence": 1,
+        "reinforce": 2,
+        "duplicate": 3,
+    }
     return sorted(candidates, key=lambda c: (priority[c["kind"]], c["card_ids"], c["candidate_id"]))
 
 

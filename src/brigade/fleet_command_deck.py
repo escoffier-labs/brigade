@@ -97,7 +97,6 @@ def default_cloud_config() -> CloudConfig:
             "cursor": CloudProviderConfig(limit=3),
             "codex": CloudProviderConfig(limit=2),
             "claude": CloudProviderConfig(limit=0, enabled=False),
-            "jules": CloudProviderConfig(limit=15),
             # Grok Bot is tracked but has no hosted-subscription admission cost.
             "grok-bot": CloudProviderConfig(limit=64, hosted=False),
         },
@@ -618,6 +617,8 @@ def _cloud_config(raw: object) -> CloudConfig:
     for name, item in configured.items():
         if not isinstance(name, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", name):
             raise DeckConfigError("cloud provider name is invalid")
+        if name not in defaults.providers:
+            continue
         if not isinstance(item, Mapping):
             raise DeckConfigError("cloud provider must be a JSON object")
         previous = providers.get(name, CloudProviderConfig(limit=0, enabled=False))
@@ -812,7 +813,13 @@ def _enrich_runs(conn: sqlite3.Connection, runs: list[LiveRun]) -> list[LiveRun]
     return enriched
 
 
-def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int) -> list[LiveRun]:
+def _exclude_nodes_sql(node_ids: Sequence[str]) -> str:
+    return " AND node_id NOT IN (" + ",".join("?" for _ in node_ids) + ")" if node_ids else ""
+
+
+def fetch_live_runs(
+    conn: sqlite3.Connection, *, now: datetime, stale_after_seconds: int, revoked_node_ids: Sequence[str] = ()
+) -> list[LiveRun]:
     rank_sql = (
         "CASE WHEN state LIKE '%failed' THEN 0"
         + "".join(f" WHEN state LIKE '%{suffix}' THEN 0" for suffix in FAILURE_STATE_SUFFIXES[1:])
@@ -821,9 +828,10 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
     cutoff = datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=now.tzinfo or _UTC).isoformat()
     query = (
         f"{_LATEST_ROWS} AND {_NOT_TERMINAL_SQL} AND received_at >= ?"
-        f" ORDER BY {rank_sql}, ts DESC, node_id, run_id LIMIT {ACTIVE_LIMIT}"
+        + _exclude_nodes_sql(revoked_node_ids)
+        + f" ORDER BY {rank_sql}, ts DESC, node_id, run_id LIMIT {ACTIVE_LIMIT}"
     )
-    rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *AWAITING_STATES)).fetchall()
+    rows = conn.execute(query, (*TERMINAL_STATES, cutoff, *revoked_node_ids, *AWAITING_STATES)).fetchall()
     started = fetch_started_at(conn, [(row[0], row[1], row[4]) for row in rows])
     runs: list[LiveRun] = []
     for node_id, run_id, repo, seat, harness, state, _ts, received_at, repo_identity in rows:
@@ -903,6 +911,7 @@ def fetch_failed_outcomes(
     now: datetime,
     lookback_seconds: int,
     stale_after_seconds: int = 1800,
+    revoked_node_ids: Sequence[str] = (),
 ) -> list[LiveRun]:
     cutoff = datetime.fromtimestamp(now.timestamp() - lookback_seconds, tz=now.tzinfo or _UTC).isoformat()
     stale_cutoff = datetime.fromtimestamp(now.timestamp() - stale_after_seconds, tz=now.tzinfo or _UTC).isoformat()
@@ -910,21 +919,23 @@ def fetch_failed_outcomes(
         "WITH latest AS (" + _LATEST_ROWS + "), failures AS ("
         "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity, "
         f"{_REPO_IDENTITY_SQL} AS identity, ROW_NUMBER() OVER ("
-        f"PARTITION BY node_id, {_REPO_IDENTITY_SQL} ORDER BY received_at DESC, run_id DESC"
+        f"PARTITION BY node_id, {_REPO_IDENTITY_SQL} ORDER BY julianday(received_at) DESC, run_id DESC"
         ") AS attention_rank FROM latest "
-        f"WHERE ({_FAILURE_MATCH_SQL}) AND received_at >= ?"
-        "), successors AS ("
+        f"WHERE ({_FAILURE_MATCH_SQL}) AND julianday(received_at) >= julianday(?)"
+        + _exclude_nodes_sql(revoked_node_ids)
+        + "), successors AS ("
         f"SELECT node_id, {_REPO_IDENTITY_SQL} AS identity, received_at FROM latest "
-        f"WHERE ({_NOT_TERMINAL_SQL} AND received_at >= ?)"
+        f"WHERE ({_NOT_TERMINAL_SQL} AND julianday(received_at) >= julianday(?))"
         f" OR (state LIKE '%.completed' AND state NOT IN ({_INTERNAL_OUTCOME_PLACEHOLDERS}))"
         ") SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity "
         "FROM failures AS failure "
         "WHERE attention_rank = 1 AND NOT EXISTS ("
         "SELECT 1 FROM successors WHERE successors.node_id = failure.node_id "
         "AND failure.identity IS NOT NULL AND successors.identity IS NOT NULL "
-        "AND successors.identity = failure.identity AND successors.received_at > failure.received_at"
-        f") ORDER BY received_at DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
-        (cutoff, *TERMINAL_STATES, stale_cutoff, *_INTERNAL_OUTCOME_PARAMS),
+        "AND successors.identity = failure.identity "
+        "AND julianday(successors.received_at) > julianday(failure.received_at)"
+        f") ORDER BY julianday(received_at) DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
+        (cutoff, *revoked_node_ids, *TERMINAL_STATES, stale_cutoff, *_INTERNAL_OUTCOME_PARAMS),
     ).fetchall()
     return _enrich_runs(conn, [_live_run_from_row(row, bucket="failed", now=now) for row in rows])
 
@@ -1251,6 +1262,7 @@ def build_view(
     interactive_sessions: Sequence[Mapping[str, object]] = (),
     control_plane: ControlPlane | None = None,
     session_counts: Mapping[str, int] | None = None,
+    revoked_node_ids: Sequence[str] = (),
 ) -> DeckView:
     from .fleet_dot import TERMINAL_STATES
     from .fleet_deck_activity import interactive_session
@@ -1306,29 +1318,23 @@ def build_view(
                 ),
             )
         )
-    rail: list[RailEntry] = [
-        RailEntry(
-            kind="failed",
-            node_id=run.node_id,
-            repo=run.repo,
-            run_id=run.run_id,
-            detail=run.state,
-            age_seconds=run.age_seconds,
-        )
-        for run in failed_outcomes
-    ]
-    rail.extend(
-        RailEntry(
-            kind=run.bucket,
-            node_id=run.node_id,
-            repo=run.repo,
-            run_id=run.run_id,
-            detail=run.state,
-            age_seconds=run.age_seconds,
-        )
-        for run in live_runs
-        if run.bucket in ("awaiting approval", "stale", "unknown")
-    )
+    # Bound abandoned attention with the existing history horizon, never less
+    # than the live freshness window. Unknown age is not proof of abandonment.
+    abandoned_after_seconds = max(config.stale_after_seconds, config.stale_history_after_seconds)
+    rail: list[RailEntry] = []
+    for failed, runs, horizon in (
+        (True, failed_outcomes, config.failed_lookback_seconds),
+        (False, live_runs, abandoned_after_seconds),
+    ):
+        for run in runs:
+            if run.node_id in revoked_node_ids:
+                continue
+            kind = "failed" if failed else run.bucket
+            if not failed and kind not in ("awaiting approval", "stale", "unknown"):
+                continue
+            if kind != "awaiting approval" and run.age_seconds is not None and run.age_seconds > horizon:
+                continue
+            rail.append(RailEntry(kind, run.node_id, run.repo, run.run_id, run.state, run.age_seconds))
     from .fleet_deck_activity import parallel_entries
 
     labels = dict(enrolled_labels)

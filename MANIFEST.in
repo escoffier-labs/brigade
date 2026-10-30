@@ -1,4 +1,5 @@
 recursive-include src/brigade/templates *
+recursive-include src/brigade/fixtures *
 include README.md
 include QUICKSTART.md
 include LICENSE

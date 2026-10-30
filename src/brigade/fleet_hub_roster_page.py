@@ -10,6 +10,7 @@ No token, cookie value, or identity is ever rendered.
 from __future__ import annotations
 
 from . import fleet_investigation as investigation
+from . import fleet_admin_explorer as explorer
 
 import hashlib
 import hmac
@@ -183,6 +184,7 @@ def load_view(
             policy=dict(policy),
         )
         for name, policy in sorted(providers.items())
+        if name in config.cloud.providers
     )
     cloud_state = hashlib.sha256(
         fleet_model_roster.canonical_json([[row.provider, row.enabled] for row in cloud]).encode("ascii")
@@ -414,7 +416,7 @@ def _authority_banner(activation: fleet_policy_page.Activation) -> str:
     )
 
 
-def _read_only(view: RosterView, *, nonce: str, now: datetime) -> str:
+def _read_only(view: RosterView, *, nonce: str, now: datetime, query: str = "") -> str:
     """Use the loaded authority decision, never a second settings store."""
     from . import fleet_admin_explorer as explorer
     from .fleet_admin_pages import facts, document
@@ -477,6 +479,7 @@ def _read_only(view: RosterView, *, nonce: str, now: datetime) -> str:
         + explorer.render(
             entries,
             label="roles",
+            query=query,
             empty="No roles reported",
             empty_hint="Roles appear here when the model roster reports them.",
         )
@@ -504,6 +507,7 @@ def render(
     error: str | None = None,
     submission: Submission | None = None,
     policy_csrf: str = "",
+    query: str = "",
 ) -> str:
     """The roster page. ``submission`` re-selects what the operator sent on a 409 or 422.
 
@@ -512,7 +516,7 @@ def render(
     scoped policy preview instead of a legacy run-preference write.
     """
     if not editable:
-        return _read_only(view, nonce=nonce, now=now)
+        return _read_only(view, nonce=nonce, now=now, query=query)
     roles = dict(view.preference)
     notes = view.preference.get("notes") or ""
     seats_on = {row.seat for row in view.seats if row.enabled}
@@ -560,19 +564,30 @@ def render(
         parts.append(
             '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'
         )
-    # 1. roles. Under an active authority this panel is its own policy form, so
-    # it is emitted before the legacy form opens rather than nested inside it.
+    from .fleet_roster_layout import owned_controls
+
+    entries: list[explorer.Entry] = []
+    legacy: list[str] = []
+
+    def entry(key: str, title: str, content: str, *, status: str = "", owned: bool = True) -> None:
+        if owned:
+            content = (
+                owned_controls(content)
+                + '<p class="roster-actions"><button type="submit" form="roster-save">Save</button></p>'
+            )
+        entries.append(explorer.Entry(key, title, status, content))
+
     if authoritative:
-        parts.append(_authoritative_roles_panel(view, policy_csrf))
-        parts.append(_authoritative_admission_panel(view, policy_csrf))
-    parts.append('<form method="post" action="/deck/roster" class="roster-form">')
-    parts.append(f'<input type="hidden" name="expected_revision" value="{view.revision}">')
-    parts.append(
+        entry("roles", "Roles", _authoritative_roles_panel(view, policy_csrf), owned=False)
+        entry("defaults", "Admission fallback seat", _authoritative_admission_panel(view, policy_csrf), owned=False)
+    legacy.append('<form id="roster-save" method="post" action="/deck/roster" class="roster-form">')
+    legacy.append(f'<input type="hidden" name="expected_revision" value="{view.revision}">')
+    legacy.append(
         f'<input type="hidden" name="expected_preference_updated_at" value="{_esc(view.preference_updated_at)}">'
     )
-    parts.append(f'<input type="hidden" name="expected_cloud_state" value="{_esc(view.cloud_state)}">')
+    legacy.append(f'<input type="hidden" name="expected_cloud_state" value="{_esc(view.cloud_state)}">')
     if editable:
-        parts.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
+        legacy.append(f'<input type="hidden" name="csrf" value="{_esc(csrf)}">')
     if not authoritative:
         role_cells = "".join(
             f"<label>{_esc(fleet_policy_page.ROLE_LABELS.get(role, role))} ({_esc(role)})"
@@ -591,50 +606,64 @@ def render(
             else ""
         )
         role_source = "live policy" if view.activation.active else "run preference"
-        parts.append(
+        entry(
+            "roles",
+            "Roles",
             '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2></header>'
             f'<div class="roster-grid">{role_cells}</div>'
             f'<p class="hint">These are the {role_source} roles a dispatch reads when it does not name a seat '
             "explicitly. The keys (impl, review, research, scout, security, chef) are what consumers read; the "
             f"names beside them are labels only.</p>{unreadable}"
-            f"{notes_control}</section>"
+            f"{notes_control}</section>",
         )
-    parts.append("<details><summary>Seat models, bindings and cloud settings</summary>")
     # 2. seats
-    seat_rows = []
     operational_seats = tuple(
         row
         for row in view.seats
         if not row.retired and not (view.activation.active and row.seat in view.policy.retired_seats)
     )
-    for row in operational_seats:
-        cls = ' class="seat--off"' if row.seat not in seats_on else ""
-        flag = ' <span class="flag">retired</span>' if row.retired else ""
-        box = _checkbox(
-            f"seat.{row.seat}", row.seat in seats_on and not row.retired, editable=editable and not row.retired
-        )
-        seat_rows.append(
-            f"<tr{cls}><td>{_esc(row.seat)}{flag}</td><td>{_esc(row.provider)}/{_esc(row.model)}</td>"
-            f"<td>{_esc(row.reasoning)}</td><td>{_esc('-' if row.limit is None else row.limit)}</td>"
-            f"<td>{_esc(row.brigade_cli or '-')}</td><td>{_esc(row.t3_instance_id or '-')}</td><td>{box}</td></tr>"
-        )
-    parts.append(
+    seat_rows = "".join(
+        f"<tr><td>{_esc(row.seat)}</td><td>{_esc(row.provider)}/{_esc(row.model)}</td>"
+        f"<td>{'yes' if row.seat in seats_on else 'no'}</td></tr>"
+        for row in operational_seats
+    )
+    entry(
+        "seats",
+        "Seats",
         '<section class="panel" aria-labelledby="seats"><header><h2 id="seats">Seats</h2>'
-        f'<p class="panel-count">{len(operational_seats)} seat(s)</p></header><div class="table-wrap"><table class="roster-table">'
-        "<thead><tr><th>Seat</th><th>Provider/model</th><th>Reasoning</th><th>Limit</th><th>Brigade CLI</th>"
-        f"<th>T3 instance</th><th>On</th></tr></thead><tbody>{''.join(seat_rows)}</tbody></table></div></section>"
+        f'<p class="panel-count">{len(operational_seats)} seat(s)</p></header>'
+        '<div class="table-wrap"><table class="roster-table"><thead><tr><th>Seat</th><th>Provider/model</th><th>On</th></tr></thead>'
+        f"<tbody>{seat_rows}</tbody></table></div></section>",
+        owned=False,
     )
+    for row in operational_seats:
+        box = _checkbox(f"seat.{row.seat}", row.seat in seats_on, editable=editable)
+        entry(
+            "seat:" + row.seat,
+            row.seat,
+            explorer.hero(row.seat, "Enabled" if row.seat in seats_on else "Disabled")
+            + explorer.facts(
+                {
+                    "Provider/model": row.provider + "/" + row.model,
+                    "Reasoning": row.reasoning,
+                    "Limit": row.limit,
+                    "Brigade CLI": row.brigade_cli,
+                    "T3 instance": row.t3_instance_id,
+                }
+            )
+            + f"<label>Enabled {box}</label>",
+            status=row.provider + "/" + row.model,
+        )
     # 3. cloud lanes
-    cloud_rows = "".join(
-        f"<tr><td>{_esc(row.provider)}</td><td>{_checkbox(f'cloud.{row.provider}', row.provider in cloud_on, editable=editable)}</td>"
-        f"<td>{row.limit}</td><td>{'yes' if row.hosted else 'no'}</td><td>{_esc(row.circuit_state)}</td></tr>"
-        for row in view.cloud
-    )
-    parts.append(
-        '<section class="panel" aria-labelledby="cloud"><header><h2 id="cloud">Cloud lanes</h2></header>'
-        '<div class="table-wrap"><table class="roster-table"><thead><tr><th>Provider</th><th>On</th><th>Limit</th>'
-        f"<th>Hosted</th><th>Circuit</th></tr></thead><tbody>{cloud_rows}</tbody></table></div></section>"
-    )
+    for cloud_row in view.cloud:
+        entry(
+            "cloud:" + cloud_row.provider,
+            cloud_row.provider,
+            explorer.hero(cloud_row.provider, cloud_row.circuit_state)
+            + explorer.facts({"Limit": cloud_row.limit, "Hosted": "yes" if cloud_row.hosted else "no"})
+            + f"<label>Enabled {_checkbox(f'cloud.{cloud_row.provider}', cloud_row.provider in cloud_on, editable=editable)}</label>",
+            status="Cloud lanes",
+        )
     # 4. admission fallback seat (the old "consumer defaults")
     default_cells = "".join(
         f"<label>{_esc(consumer)}{_select(f'default.{consumer}', defaults.get(consumer) or '', view.seats, editable=legacy_editable, binding='brigade_cli' if consumer == 'brigade-run' else 't3_instance_id')}</label>"
@@ -647,13 +676,14 @@ def render(
             if view.activation.active
             else ADMISSION_HINT
         )
-        parts.append(
+        entry(
+            "defaults",
+            "Admission fallback seat",
             '<section class="panel" aria-labelledby="defaults"><header>'
             f'<h2 id="defaults">{default_heading}</h2></header>'
             f'<div class="roster-grid">{default_cells}</div>'
-            f"{default_hint}</section>"
+            f"{default_hint}</section>",
         )
-    parts.append("</details><details><summary>Retirement history</summary>")
     # 5. retired
     retired_items = "".join(
         f"<li>{_esc(item['provider'])}/{_esc(item['family'])} &middot; "
@@ -668,18 +698,29 @@ def render(
         if retired_seats
         else ""
     )
-    parts.append(
+    entry(
+        "retired",
+        "Retirement history",
         '<section class="panel" aria-labelledby="retired"><header><h2 id="retired">Retired families</h2></header>'
         + (f'<ul class="observer-list">{retired_items}</ul>' if retired_items else '<p class="empty">None.</p>')
         + retired_seat_history
-        + "</section>"
+        + "</section>",
     )
-    parts.append("</details>")
-    if editable:
-        parts.append('<p class="roster-actions"><button type="submit">Save</button></p>')
-    parts.append("</form></main>")
+    legacy.append('<p class="roster-actions"><button type="submit">Save</button></p></form>')
+    owner = next(i for i, item in enumerate(entries) if not authoritative or item.key not in {"roles", "defaults"})
+    save = '<p class="roster-actions"><button type="submit" form="roster-save">Save</button></p>'
+    entries[owner] = replace(entries[owner], detail=entries[owner].detail.replace(save, "") + "".join(legacy))
+    parts.append(explorer.render(entries, label="roster", query=query))
+    parts.append("</main>")
     return fleet_command_deck._document(
-        "\n".join(parts), nonce=nonce, now=now, title="Roster", refresh=False, active="roster"
+        "\n".join(parts),
+        nonce=nonce,
+        now=now,
+        title="Roster",
+        refresh=False,
+        active="roster",
+        extra_css=explorer.CSS,
+        script=explorer.SCRIPT,
     )
 
 

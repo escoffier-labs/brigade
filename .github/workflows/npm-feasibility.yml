@@ -7,6 +7,9 @@ on:
       - '.github/workflows/npm-feasibility.yml'
       - '.github/workflows/ci.yml'
       - 'npm/feasibility/**'
+      - 'src/brigade/**'
+      - 'README.md'
+      - 'LICENSE'
       - 'src/brigade/work_cmd/verif*.py'
       - 'src/brigade/proc.py'
       - 'src/brigade/distribution.py'
@@ -63,22 +66,17 @@ jobs:
           PYTHONPATH=src python -m brigade work verify run --target .
           --argv-json '["node","--test","npm/feasibility/provenance.test.cjs"]'
           --timeout 300 --capture brigade-work
-      - name: Build six stable payload archives once from clean source
+      - name: Build six current-source candidate archives once from clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 600 --capture brigade-work
-      - name: Verify stable payload and packaging identities against clean source
+      - name: Verify candidate payload and packaging identities against clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
-      - name: Verify release-generated manifest attestation
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh attestation verify "$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json" --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml
       # Retained artifacts in this public repository are public, not confidential.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -138,10 +136,10 @@ jobs:
         with:
           name: unreleased-npm-candidate-archives
           path: ${{ runner.temp }}/npm-artifacts
-      - name: Verify stable payload and packaging identities against clean source
+      - name: Verify candidate payload and packaging identities against clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
         run: |

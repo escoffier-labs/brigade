@@ -13,7 +13,6 @@ from brigade import (
     cursor_cloud,
     fleet_client,
     fleet_client_grokbot,
-    jules_cloud,
     proc,
 )
 
@@ -568,29 +567,36 @@ def test_cli_codex_launch_rejects_unsupported_flags_before_mutation(monkeypatch,
         return _result(stdout="task_unsupported99")
 
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-    rc = cli.main(
-        [
-            "run",
-            "cloud",
-            "launch",
-            "--target",
-            str(tmp_path),
-            "--provider",
-            "codex-cloud",
-            "--repo",
-            "owner/repo",
-            "--label",
-            "launch",
-            "--prompt-file",
-            str(prompt_file),
-            "--json",
-            *flag,
-        ]
-    )
+    try:
+        rc = cli.main(
+            [
+                "run",
+                "cloud",
+                "launch",
+                "--target",
+                str(tmp_path),
+                "--provider",
+                "codex-cloud",
+                "--repo",
+                "owner/repo",
+                "--label",
+                "launch",
+                "--prompt-file",
+                str(prompt_file),
+                "--json",
+                *flag,
+            ]
+        )
 
-    assert rc == 2
-    payload = json.loads(capsys.readouterr().out)
-    assert payload == {"ok": False, "provider": "codex-cloud", "label": "launch", "reason": "unsupported-flag"}
+    except SystemExit as rejected:
+        assert flag != ["--auto-create-pr"]
+        assert rejected.code == 2
+        assert "unrecognized arguments" in capsys.readouterr().err
+    else:
+        assert rc == 2
+        payload = json.loads(capsys.readouterr().out)
+        assert payload == {"ok": False, "provider": "codex-cloud", "label": "launch", "reason": "unsupported-flag"}
+
     assert all(not values for values in calls.values())
     assert provider_calls == []
     assert cloud_tracker.load_registry(tmp_path)["entries"] == []
@@ -2470,9 +2476,7 @@ class TestCodexCloudCli:
 
     def test_cloud_doctor_and_canary_route_to_supported_provider_adapters(self, tmp_path, capsys, monkeypatch):
         monkeypatch.setenv("CURSOR_API_KEY", "cursor-key")
-        monkeypatch.setenv("JULES_API_KEY", "jules-key")
         monkeypatch.setattr(cursor_cloud, "list_agents", lambda *a, **k: [])
-        monkeypatch.setattr(jules_cloud, "list_sessions", lambda *a, **k: [{"id": "sess-1", "state": "running"}])
         whoami_calls = []
         monkeypatch.setattr(
             fleet_client_grokbot,
@@ -2496,8 +2500,6 @@ class TestCodexCloudCli:
             cli.main(["run", "cloud", "doctor", "--provider", "cursor-cloud", "--target", str(tmp_path), "--json"]) == 0
         )
         assert json.loads(capsys.readouterr().out)["provider"] == "cursor-cloud"
-        assert cli.main(["run", "cloud", "canary", "--provider", "jules", "--target", str(tmp_path), "--json"]) == 0
-        assert json.loads(capsys.readouterr().out)["task_count"] == 1
         assert (
             cli.main(["run", "cloud", "doctor", "--provider", "grokbot-cloud", "--target", str(tmp_path), "--json"])
             == 0
@@ -2525,11 +2527,6 @@ class TestCodexCloudCli:
             cursor_cloud,
             "list_agents",
             lambda *a, **k: (_ for _ in ()).throw(AssertionError("cursor must not run")),
-        )
-        monkeypatch.setattr(
-            jules_cloud,
-            "list_sessions",
-            lambda *a, **k: (_ for _ in ()).throw(AssertionError("jules must not run")),
         )
         monkeypatch.setattr(
             fleet_client_grokbot,

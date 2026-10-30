@@ -2,7 +2,7 @@
 
 ## Status
 
-Proposed on 2026-08-25 for the beta line. Updated on 2026-08-26 with verified provider URLs and the Jules adapter. This is not a release-cut plan.
+Proposed on 2026-08-25 for the beta line. Updated on 2026-08-26 with verified provider URLs. This is not a release-cut plan.
 
 ## Problem
 
@@ -14,7 +14,7 @@ indefinitely.
 
 Cloud tracking has a separate gap. Codex Cloud dispatches are registered, but
 Cursor Cloud only reports whether a key exists, Claude Code cloud sessions are not
-a provider, Jules sessions are not tracked, and GitHub branches are inferred as
+a provider, and GitHub branches are inferred as
 orphaned work. Historical branches can dominate the tracker without proving that
 a cloud worker is active. There is no shared subscription-aware admission limit
 across orchestrators.
@@ -35,7 +35,6 @@ Cloud capacity is separate from physical-machine capacity:
 | Cursor Cloud | 3 | Cursor subscription and spend controls |
 | Codex Cloud | 2 | ChatGPT/Codex subscription pool |
 | Claude Code Cloud | 0 | Claude Max is available; cloud launch stays disabled until sessions have a structured bindable status surface |
-| Jules Cloud | 15 | Google AI Pro subscription |
 | All hosted cloud providers | 4 | Brigade fleet policy |
 | Grok Bot | tracked, not hosted | Local/self-hosted seat policy |
 | workstation | 10 | Existing physical station configuration |
@@ -142,34 +141,6 @@ The first slice inventories `claude agents --json --all` through a bounded
 subprocess parser and labels it as installed-CLI observation. It does not call
 `claude --cloud` while the provider limit is zero.
 
-### Jules Cloud
-
-Add a Jules Cloud provider adapter using only stdlib `urllib`. Jules is
-included with the Google AI Pro subscription at 100 tasks per rolling 24 hours
-and 15 concurrent tasks. The official alpha REST base is
-https://jules.googleapis.com/v1alpha, documented at
-https://jules.google/docs/api/reference/overview/ and
-https://developers.google.com/jules/api/reference/rest. API keys are created at
-https://jules.google.com/settings and passed in the `X-Goog-Api-Key` header.
-
-Supported operations for the adapter are:
-
-- `GET /v1alpha/sources` and `GET /v1alpha/sources/{sourceId}` to list and get
-  connected repositories
-- `POST /v1alpha/sessions`, `GET /v1alpha/sessions`, and
-  `GET /v1alpha/sessions/{sessionId}` to create, list, and get sessions
-- `POST /v1alpha/sessions/{sessionId}:approvePlan` to approve a generated plan
-- `GET /v1alpha/sessions/{sessionId}/activities` to poll activities
-
-Hub admission must precede `POST /v1alpha/sessions`. The session ID is bound to
-the lease immediately after a successful create. The default is
-`requirePlanApproval: true`. `AUTO_CREATE_PR` and applying patches are off unless
-explicitly requested. Unknown session states hold capacity until a later poll
-proves the session terminal. There is no documented idempotency key, so the
-adapter does not blindly retry after an ambiguous create timeout; it surfaces the
-uncertainty as a bounded Needs You item and keeps the lease open until the next
-poll clarifies the state.
-
 ## Cloud lease contract
 
 A cloud lease contains:
@@ -187,8 +158,7 @@ response body is stored.
 
 Admission is atomic at the fleet authority. It checks the provider limit and the
 global cloud limit in the same transaction. The Fleet Hub Task 2
-implementation already includes the Jules provider cap of 15 and the
-model/provider policy table; the global hosted cap remains 4. A launch that
+implementation already includes the model/provider policy table; the global hosted cap remains 4. A launch that
 cannot acquire a lease does not call the provider. A lease without a provider task
 ID has a short submission TTL. Active leases renew from provider observations.
 Terminal and expired leases stop consuming capacity but remain queryable as
@@ -196,7 +166,7 @@ outcomes.
 
 Hub admission must precede any mutating provider call, including `POST
 /v1/agents` and `POST /v1/agents/{id}/runs` for Cursor, `codex cloud exec` for
-Codex, `POST /v1alpha/sessions` for Jules, and any future Claude launch.
+Codex, and any future Claude launch.
 
 Browser-launched work is not exempt. An operator may adopt an existing task, but
 new browser automation must acquire the same lease before opening the provider
@@ -208,8 +178,8 @@ The deck separates four concepts:
 
 1. Physical stations show only current non-terminal runs heard within the
    configured active window.
-2. Cloud Workers shows active leased work grouped by Cursor, Codex, Claude, and
-   Jules, with `used/limit` counts and provider circuit state.
+2. Cloud Workers shows active leased work grouped by Cursor, Codex, and Claude,
+   with `used/limit` counts and provider circuit state.
 3. Needs You contains approvals, collisions, provider errors, and one bounded
    abandoned-run row per run.
 4. Recent outcomes contains terminal history and remains bounded.
@@ -227,10 +197,10 @@ unexpired adopted lease.
 
 ## Public contracts
 
-- `brigade run cloud status --json` reports all five providers (Cursor, Codex,
-  Claude, Jules, and Grok Bot), admission limits, active counts, circuit state,
+- `brigade run cloud status --json` reports all four providers (Cursor, Codex,
+  Claude and Grok Bot), admission limits, active counts, circuit state,
   and normalized task rows.
-- `brigade run cloud register` and `adopt` accept `claude-cloud` and `jules`.
+- `brigade run cloud register` and `adopt` accept `claude-cloud`.
 - Cloud launchers fail with a stable capacity or disabled-provider result before
   provider mutation when admission is denied.
 - Fleet status and dashboard JSON/HTML expose Cloud Workers without exposing
@@ -246,14 +216,12 @@ Tests must first demonstrate these failures on the current implementation:
 - An old non-terminal event still consumes station capacity.
 - A wired Cursor key does not produce live API task observations.
 - Claude cannot be registered or reported.
-- Jules cannot be registered or reported.
 - Two simultaneous admissions can exceed a shared limit.
 - Inferred historical branches appear in recovery data but never active capacity.
 
 Implementation tests then cover terminal-family normalization, age filtering,
 bounded Cursor pagination and error handling, Claude's disabled fail-closed
-state, Jules stdlib HTTP adapter behavior, no blind retry on ambiguous Jules
-create timeouts, atomic global/provider admission, lease expiry/release,
+state, atomic global/provider admission, lease expiry/release,
 sanitized payloads, and the Cloud Workers HTML projection. Network calls use
 fakes. Live canaries are bounded read-only checks and are not part of the unit
 suite.
@@ -263,7 +231,7 @@ suite.
 1. Land the schema, admission, and projection changes on the beta line.
 2. Deploy the beta checkout to the hub and all three physical nodes.
 3. Keep Claude limit at zero.
-4. Run read-only Cursor, Codex, and Jules inventory canaries.
+4. Run read-only Cursor and Codex inventory canaries.
 5. Confirm the dashboard has no terminal cards in station capacity and shows
    provider limits even when no cloud work is active.
 6. Launch one Cursor Cloud canary through Brigade, observe it in Cloud Workers,

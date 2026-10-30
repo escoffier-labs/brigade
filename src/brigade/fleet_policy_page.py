@@ -37,7 +37,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from . import fleet_admin_explorer as explorer
 from . import fleet_command_deck, fleet_hub_model_roster, fleet_hub_policy, fleet_policy
 from .fleet_hub import FleetHubConflict, FleetHubError
 from .ui_theme import empty_state
@@ -1884,109 +1883,20 @@ def render(
     plan: Plan | None = None,
     draft: Submission | None = None,
     review: str | None = None,
+    query: str = "",
 ) -> str:
-    """The policy page. ``draft`` re-renders what the operator sent on a refusal.
+    from .fleet_policy_layout import render as render_layout
 
-    ``review`` is the server-minted token for the previewed document; it is
-    what turns the proposed-change panel into a confirm-save control.
-    """
-    error_prompt = (
-        investigation.render(
-            "Policy validation",
-            route="/deck/policy",
-            observation=now,
-            facts={"Reported error": error, "Revision": view.revision},
-            limits="Rendered error only; submitted document and credentials omitted.",
-        )
-        if error
-        else ""
-    )
-    if not editable:
-        return fleet_command_deck._document(
-            '<main class="deck-shell admin-page policy-page">'
-            '<p class="policy-access">Access: read-only. You can inspect saved settings; editing requires an authorized admin request.</p>'
-            + (f'<p class="banner">{_esc(banner)}</p>' if banner else "")
-            + (f'<p class="banner banner--error">{_esc(error)}</p>' if error else "")
-            + error_prompt
-            + _activation_panel(view)
-            + _assignment_summary(view)
-            + _inventory_note(view.inventory)
-            + "</main>",
-            nonce=nonce,
-            now=now,
-            title="Saved assignments",
-            refresh=False,
-            active="policy",
-            extra_css=_POLICY_CSS,
-        )
-    parts: list[str] = ['<main class="deck-shell admin-page policy-page">']
-    if banner:
-        parts.append(f'<p class="banner">{_esc(banner)}</p>')
-    if error:
-        parts.append(f'<p class="banner banner--error">{_esc(error)}</p>' + error_prompt)
-    if not editable:
-        parts.append(
-            '<p class="policy-access">Access: read-only. You can inspect saved settings; editing requires an authorized admin request.</p>'
-        )
-    parts.append(_activation_panel(view))
-    parts.append(_plan_panel(plan, activation=view.activation, draft=draft, review=review if editable else None))
-    parts.append(_assignment_summary(view))
-    parts.append(_limits_summary(view))
-    draft_scope = draft.scope if editable and draft is not None else None
-    opened = " open" if draft_scope is not None else ""
-    parts.append(f'<details id="policy-advanced"{opened}><summary>Advanced details</summary>')
-    parts.append(explorer.agent("<h3>Document identity and inventory</h3>" + _identity_panel(view)))
-    if editable:
-        opened = " open" if draft_scope == "defaults" else ""
-        parts.append(
-            f"<details{opened}><summary>Edit saved fleet defaults</summary>"
-            + _defaults_form(view, editable=True, csrf=csrf, draft=draft)
-            + "</details>"
-        )
-    else:
-        parts.append(_defaults_form(view, editable=False, csrf=csrf, draft=None))
-    opened = " open" if draft_scope == "seat" else ""
-    parts.append(f"<details{opened}><summary>Seat matrix and model settings</summary>" + _seat_table(view))
-    if editable:
-        seat_forms = "".join(_seat_form(view, row, csrf=csrf, draft=draft) for row in view.seats)
-        parts.append(
-            '<section class="panel" aria-labelledby="seat-edit"><header><h2 id="seat-edit">Edit a seat</h2>'
-            f'<p class="panel-count">{len(view.seats)} seat(s)</p></header>{seat_forms}</section>'
-        )
-    parts.append("</details>")
-    consumer_label = "Edit consumer integrations and overrides" if editable else "Consumer integrations and overrides"
-    opened = " open" if draft_scope == "consumer" else ""
-    parts.append(
-        f"<details{opened}><summary>{consumer_label}</summary>"
-        + _consumer_section(view, editable=editable, csrf=csrf, draft=draft)
-        + "</details>"
-    )
-    repo_label = "Edit repository settings and overrides" if editable else "Repository settings and overrides"
-    opened = " open" if draft_scope == "repository" else ""
-    parts.append(
-        f"<details{opened}><summary>{repo_label}</summary>"
-        + _repository_section(view, editable=editable, csrf=csrf, draft=draft)
-        + "</details>"
-    )
-    history_label = (
-        "Session acknowledgements, audit history and rollback"
-        if editable
-        else "Session acknowledgements and audit history"
-    )
-    opened = " open" if draft_scope == "rollback" else ""
-    from . import fleet_policy_page_sessions  # imports this module, so load it lazily
-
-    parts.append(
-        f"<details{opened}><summary>{history_label}</summary>" + fleet_policy_page_sessions.sessions_section(view)
-    )
-    parts.append(fleet_policy_page_sessions.history_section(view, editable=editable, csrf=csrf) + "</details>")
-    parts.append("</details></main>")
-    return fleet_command_deck._document(
-        "\n".join(parts),
+    return render_layout(
+        view,
         nonce=nonce,
         now=now,
-        title="Model assignments",
-        refresh=False,
-        active="policy",
-        extra_css=_POLICY_CSS,
+        csrf=csrf,
+        editable=editable,
+        banner=banner,
+        error=error,
+        plan=plan,
+        draft=draft,
+        review=review,
+        query=query,
     )

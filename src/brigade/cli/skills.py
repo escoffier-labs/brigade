@@ -3,7 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
+
+
+def _expected_binding(value: str) -> dict:
+    from ..skills_cmd.registry import _validate_expected_binding
+
+    try:
+        return _validate_expected_binding(json.loads(value))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -69,6 +79,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_install.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
     p_skills_install.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
     p_skills_install.add_argument("--force", action="store_true", help="Overwrite an existing installed skill.")
+    p_skills_install.add_argument(
+        "--expected-binding-json",
+        type=_expected_binding,
+        default=None,
+        help="Require exact reviewed package identities before mutation.",
+    )
     p_skills_install.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_sync = skills_sub.add_parser("sync", help="Reconcile the reviewed registry across one or all harnesses.")
     p_skills_sync.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to reconcile.")
@@ -119,6 +135,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_uninstall.add_argument("skill", help="Installed skill id.")
     p_skills_uninstall.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
     p_skills_uninstall.add_argument("--target", dest="install_target", required=True, help="Harness target or all.")
+    p_skills_uninstall.add_argument(
+        "--expected-binding-json",
+        type=_expected_binding,
+        default=None,
+        help="Require exact reviewed package identities before mutation.",
+    )
     p_skills_uninstall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_rollback = skills_sub.add_parser(
         "rollback", help="Rollback one installed skill target to the latest snapshot."
@@ -126,6 +148,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_rollback.add_argument("skill", help="Skill id.")
     p_skills_rollback.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
     p_skills_rollback.add_argument("--target", dest="install_target", required=True, help="Harness target to rollback.")
+    p_skills_rollback.add_argument(
+        "--expected-binding-json",
+        type=_expected_binding,
+        default=None,
+        help="Require exact reviewed package identities before mutation.",
+    )
     p_skills_rollback.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_serve = skills_sub.add_parser("serve-mcp", help="Report the local MCP skills resource contract.")
     p_skills_serve.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace registry to inspect.")
@@ -186,6 +214,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_inbox_add.add_argument("source", type=Path, help="SKILL.md file or directory containing SKILL.md.")
     p_skills_inbox_add.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace inbox to update.")
     p_skills_inbox_add.add_argument("--id", dest="skill_id", default=None, help="Override proposed skill id.")
+    p_skills_inbox_add.add_argument(
+        "--behavioral-contract-json", default=None, help="Versioned behavioral contract JSON object."
+    )
     p_skills_inbox_add.add_argument("--summary", default=None, help="Short review summary.")
     p_skills_inbox_add.add_argument("--force", action="store_true", help="Overwrite an existing generated proposal id.")
     p_skills_inbox_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -274,6 +305,7 @@ def dispatch(args) -> int:
             skill=args.skill,
             harness=args.install_target,
             force=args.force,
+            expected_binding=args.expected_binding_json,
             json_output=args.json,
         )
     if args.skills_command == "sync":
@@ -289,6 +321,7 @@ def dispatch(args) -> int:
             workspace=args.workspace,
             skill=args.skill,
             harness=args.install_target,
+            expected_binding=args.expected_binding_json,
             json_output=args.json,
         )
     if args.skills_command == "compatibility":
@@ -316,7 +349,11 @@ def dispatch(args) -> int:
         return 2
     if args.skills_command == "rollback":
         return skills_cmd.rollback(
-            workspace=args.workspace, skill=args.skill, harness=args.install_target, json_output=args.json
+            workspace=args.workspace,
+            skill=args.skill,
+            harness=args.install_target,
+            expected_binding=args.expected_binding_json,
+            json_output=args.json,
         )
     if args.skills_command == "serve-mcp":
         return skills_cmd.serve_mcp(
@@ -344,11 +381,18 @@ def dispatch(args) -> int:
         return 2
     if args.skills_command == "inbox":
         if args.skills_inbox_command == "add":
+            try:
+                contract = (
+                    json.loads(args.behavioral_contract_json) if args.behavioral_contract_json is not None else None
+                )
+            except ValueError:
+                args._brigade_parser.error("--behavioral-contract-json must be valid JSON")
             return skills_cmd.inbox_add(
                 target=args.target,
                 source=args.source,
                 skill_id=args.skill_id,
                 summary=args.summary,
+                behavioral_contract=contract,
                 force=args.force,
                 json_output=args.json,
             )

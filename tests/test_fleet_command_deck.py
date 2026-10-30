@@ -251,7 +251,7 @@ def test_reported_cloud_agent_survives_hub_projection_without_becoming_a_job(tmp
         work = overview_page.split('aria-labelledby="working-title"', 1)[1].split("</section>", 1)[0]
         assert "Miller" not in work and "local-session" not in work
         capacity = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
-        assert "Use: 0 / 4 slots" in capacity
+        assert "Managed runs: 0 / 4 slots" in capacity
 
 
 @pytest.mark.parametrize("providers", [(), (deck.CloudWorker("codex", 0, 2, "closed", ()),)])
@@ -1218,7 +1218,7 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert status == 200
         machine_list = body.split('aria-label="machines"', 1)[1].split("</nav>", 1)[0]
         assert machine_list.index("BravoBox") < machine_list.index("Alpha")
-        assert "Use: 1 / 1 slots" in body and "Use: 1 / 2 slots" in body
+        assert "Managed runs: 1 / 1 slots" in body and "Managed runs: 1 / 2 slots" in body
         activity = _request(hub, "GET", "/deck/activity", headers=_bearer())[2]
         assert activity.count("Recorded outcome ·") == 2
 
@@ -1327,7 +1327,7 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
         assert HOLDER_TOKEN not in body and "a" * 64 not in body
         machine = _request(hub, "GET", "/deck/capacity", headers=_bearer())[2]
-        assert "Use: 1 / 4 slots" in machine
+        assert "Managed runs: 1 / 4 slots" in machine
 
 
 def test_command_deck_projects_hub_grokbot_rows_and_ignores_terminal_capacity(tmp_path):
@@ -1997,6 +1997,103 @@ def test_failed_outcomes_and_rail_entries_carry_the_receipt_age(conn):
     assert [(entry.kind, entry.age_seconds) for entry in view.rail] == [("failed", 60), ("stale", 3600)]
 
 
+@pytest.mark.parametrize("bucket,state", [("unknown", "external.unknown"), ("stale", "run.stale")])
+@pytest.mark.parametrize("horizon", [7200, 86400])
+def test_attention_bounds_abandoned_runs_without_hiding_current_work(bucket, state, horizon):
+    from brigade import fleet_deck_overview as overview
+
+    config = deck.DeckConfig(
+        stations=(deck.StationConfig(NODE_A, "Alpha", 2),),
+        stale_history_after_seconds=horizon,
+    )
+    fresh = deck.LiveRun(NODE_A, "fresh", "example-current", "seat", "claude", state, bucket, 30, 30)
+    boundary = replace(fresh, run_id="boundary", age_seconds=horizon)
+    old = replace(fresh, run_id="abandoned", repo="example-abandoned", age_seconds=horizon + 1)
+    missing_age = replace(fresh, run_id="missing-age", age_seconds=None)
+    running = replace(old, run_id="running", state="run.started", bucket="running")
+    view = deck.build_view(
+        config,
+        live_runs=[fresh, boundary, old, missing_age, running],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+    )
+    assert [entry.run_id for entry in view.rail] == ["fresh", "boundary", "missing-age"]
+    assert [tile.run.run_id for tile in view.stations[0].tiles] == ["running"]
+    assert "example-abandoned on Alpha" not in [alert.title for alert in overview.page_alerts(view, NOW)]
+    assert "example-abandoned" not in admin_pages.overview_attention(view, NOW)
+
+
+def test_attention_rejects_expired_failures_and_revoked_runs():
+    failure = deck.LiveRun(NODE_A, "recent", "example-current", "seat", "claude", "run.failed", "failed", 60, 60)
+    old = replace(failure, run_id="expired", age_seconds=3601)
+    revoked = replace(failure, node_id=NODE_B, run_id="revoked-failure")
+    unknown = replace(revoked, run_id="revoked-unknown", state="external.unknown", bucket="unknown")
+    view = deck.build_view(
+        deck.DeckConfig(
+            stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Bravo", 2)),
+            failed_lookback_seconds=3600,
+        ),
+        live_runs=[unknown],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        revoked_node_ids=frozenset({NODE_B}),
+        last_heard={},
+        outcomes=[old, revoked],
+        failed_outcomes=[failure, old, revoked],
+        observers=[],
+        now=NOW,
+    )
+    assert [entry.run_id for entry in view.rail] == ["recent"]
+    assert view.outcomes == (old, revoked)  # Retained history is not rewritten.
+
+
+@pytest.mark.parametrize("offset_hours", [0, 2])
+def test_failed_lookback_uses_elapsed_time_and_keeps_boundary(conn, offset_hours):
+    stamp = (NOW - timedelta(seconds=3601)).astimezone(timezone(timedelta(hours=offset_hours))).isoformat()
+    _insert(conn, NODE_A, "expired", 1, "run.failed", received_at=stamp, repo="example-expired")
+    _insert(conn, NODE_A, "boundary", 1, "run.failed", ts=_ts(3600), repo="example-boundary")
+    _insert(conn, NODE_A, "recent", 1, "run.failed", ts=_ts(60), repo="example-current")
+    assert [(run.run_id, run.age_seconds) for run in _failed(conn, lookback_seconds=3600)] == [
+        ("recent", 60),
+        ("boundary", 3600),
+    ]
+
+
+@pytest.mark.parametrize("offset_hours", [0, -2])
+def test_later_success_clears_failure_by_elapsed_time(conn, offset_hours):
+    stamp = (NOW - timedelta(seconds=30)).astimezone(timezone(timedelta(hours=offset_hours))).isoformat()
+    _insert(conn, NODE_A, "failure", 1, "run.failed", ts=_ts(180), repo="example-retry")
+    _insert(conn, NODE_A, "success", 1, "run.completed", received_at=stamp, repo="example-retry")
+    _insert(conn, NODE_A, "current-failure", 1, "run.failed", ts=_ts(60), repo="example-current")
+    assert [run.run_id for run in _failed(conn)] == ["current-failure"]
+
+
+def test_revoked_failures_do_not_crowd_current_attention_out_of_the_read_limit(tmp_path):
+    from brigade import fleet_deck_pages_http
+
+    with _start_hub(tmp_path, CONFIG) as (_hub, db):
+        conn = fleet_hub.open_db(db)
+        try:
+            fleet_hub.add_node(conn, NODE_A, "Alpha")
+            fleet_hub.add_node(conn, NODE_B, "Bravo")
+            fleet_hub.revoke_node(conn, NODE_B)
+            _insert(conn, NODE_A, "current-failure", 1, "run.failed", ts=_ts(60), repo="example-current")
+            for index in range(deck.RAIL_FAILURE_LIMIT):
+                _insert(conn, NODE_B, f"revoked-{index}", 1, "run.failed", repo=f"example-revoked-{index}")
+            _insert(conn, NODE_B, "revoked-unknown", 1, "external.unknown", repo="example-revoked")
+            view, _, _ = fleet_deck_pages_http.build_view(
+                conn, deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2),)), NOW
+            )
+            assert [entry.run_id for entry in view.rail] == ["current-failure"]
+        finally:
+            conn.close()
+
+
 def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
     with _start_hub(tmp_path, CONFIG) as (hub, db):
         for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
@@ -2120,7 +2217,7 @@ def test_capacity_keeps_resources_visible_and_folds_provider_and_control_evidenc
     )
     view = replace(_mixed_view(), cloud_workers=(worker,), octopool_observation=_octopool_capture())
     html = overview.render_capacity_page(view, resource_now, nonce="n", worklore_enabled=False)
-    assert "Capacity: 10 configured slots" in html and "Use: 2 / 10 slots" in html
+    assert "Capacity: 10 configured slots" in html and "Managed runs: 2 / 10 slots" in html
     assert "stale-telemetry" in html and "1m" in html
     assert "41 requests" not in html and "Lease &lt;fixture&gt;" not in html
     investigation_markup(html, only_investigation_details=True)

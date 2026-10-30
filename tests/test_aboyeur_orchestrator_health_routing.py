@@ -392,7 +392,10 @@ def test_direct_worker_fallback_prints_requested_and_effective(monkeypatch, tmp_
     assert (
         run_aboyeur_guarded(
             "build feature",
-            _roster(worker_fallback=("coder-fallback",)),
+            replace(
+                _roster(worker_fallback=("coder-fallback",)),
+                seat_routing=({"task_role": {"status": "matched", "workload": "writing", "matched": ["writing"]}},),
+            ),
             worker="coder",
             output_dir=output_dir,
             code_graph_enabled=False,
@@ -405,6 +408,9 @@ def test_direct_worker_fallback_prints_requested_and_effective(monkeypatch, tmp_
     assert "requested worker coder; effective seat coder-fallback [auth-required]" in stderr
     run_meta = json.loads((output_dir / "run.json").read_text())
     assert run_meta["health"]["fallbacks_selected"] == 1
+
+    assert run_meta["seat_routing"][0]["task_role"]["workload"] == "writing"
+    assert any(item.get("outcome") == "fallback" for item in run_meta["seat_routing"])
 
 
 def test_direct_worker_run_ignores_unhealthy_orchestrator(monkeypatch, tmp_path, capsys):

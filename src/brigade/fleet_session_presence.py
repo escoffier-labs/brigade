@@ -16,6 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 from urllib.parse import unquote, urlparse
@@ -91,6 +92,12 @@ class DirtyPathSnapshot:
     truncated: bool
 
 
+class ProviderLinkState(str, Enum):
+    """Unknown lookup preserves enrichment. None authoritatively removes it."""
+
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class SessionSnapshot:
     harness: str
@@ -104,6 +111,7 @@ class SessionSnapshot:
     dirty_truncated: bool
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     cloud_context: Mapping[str, object] | None = None
+    provider_link: Mapping[str, str] | None | ProviderLinkState = ProviderLinkState.UNKNOWN
 
 
 _IDENTITY_CACHE: dict[str, tuple[RepositoryIdentity, int | None]] = {}
@@ -526,14 +534,18 @@ def _publish_presence(event: str, target: Path, session_id: str, *, harness: str
     """
     try:
         from . import fleet_client
+        from .fleet_session_heartbeat_state import publish_tracked
 
         if not _hub_url_configured():
             return None
         snapshot = build_snapshot(target, harness=harness, session_id=session_id)
         if event in _END_EVENTS:
-            return None if fleet_client.end_session(snapshot) else "end_unpublished"
+            ended = publish_tracked(snapshot, lambda: fleet_client.end_session(snapshot), successful=bool, ended=True)
+            return None if ended else "end_unpublished"
         if event in _UPSERT_EVENTS:
-            return None if fleet_client.upsert_session(snapshot) else "unpublished"
+            if not publish_tracked(snapshot, lambda: fleet_client.upsert_session(snapshot), successful=bool):
+                return "unpublished"
+            return None
         return None
     except Exception as exc:
         return _bounded_presence_error(exc)

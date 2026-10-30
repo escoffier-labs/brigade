@@ -1,4 +1,4 @@
-"""Inspect built-in station profiles."""
+"""Inspect built-in component profiles."""
 
 from __future__ import annotations
 
@@ -58,13 +58,13 @@ def show_profile(name: str, *, json_output: bool = False) -> int:
     if payload["aliases"]:
         print(f"aliases: {', '.join(payload['aliases'])}")
     print(payload["summary"])
-    print("selected stations:")
+    print("selected components:")
     for station in payload["selected_stations"]:
         print(f"  - {station}")
-    print("optional stations:")
+    print("optional components:")
     for station in payload["optional_stations"]:
         print(f"  - {station}")
     if payload["missing_stations"]:
-        print(f"missing stations: {', '.join(payload['missing_stations'])}")
+        print(f"missing components: {', '.join(payload['missing_stations'])}")
         return 1
     return 0

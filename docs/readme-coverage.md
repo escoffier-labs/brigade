@@ -29,7 +29,7 @@ The root README is a short landing page. Every topic that left the previous READ
 | MCP sync walkthrough and per-tool table | [mcp-sync](mcp-sync.md) |
 | Shared memory workflow diagram | [memory care](memory-care.md), [memory operations](memory-operations.md), assets under `docs/assets/` |
 | Outcome rank / capture / reconcile / explain | [outcome scoring](outcome-scoring.md) |
-| Optional stations table (Pantry, Token Glace, Skillet, Bootstrap Doctor, notifications) | [overview](overview.md), [station contract](station-contract.md) |
+| Optional components table (Pantry, Token Glace, Skillet, Bootstrap Doctor, notifications) | [overview](overview.md), [component contract](station-contract.md) |
 | Short "why not something else" bullets | Detailed tables in [comparison](comparison.md), linked from the README |
 | "What Brigade is not" / name collisions | [execution model](execution-model.md) and project identity in the README footer |
 | "Why I built this" origin story | [overview](overview.md#why-this-exists), Cookbook link retained there |

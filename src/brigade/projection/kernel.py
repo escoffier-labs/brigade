@@ -264,6 +264,15 @@ def build_plan(
 
 
 def execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None) -> Receipt:
+    if plan.projector in {"skills", "harness-profile"}:
+        from ..skills_cmd.mutation import skill_mutation
+
+        with skill_mutation(target):
+            return _execute(plan, target=target, inject=inject)
+    return _execute(plan, target=target, inject=inject)
+
+
+def _execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None) -> Receipt:
     target = target.expanduser().resolve()
     inject = inject or FailureInjector()
     for spec in plan.mutations:
@@ -290,6 +299,15 @@ def execute(plan: Plan, *, target: Path, inject: FailureInjector | None = None) 
 
 
 def recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt:
+    if operation_id.startswith(("skills-", "harness-profile-")):
+        from ..skills_cmd.mutation import skill_mutation
+
+        with skill_mutation(target):
+            return _recover(operation_id, target=target, force=force)
+    return _recover(operation_id, target=target, force=force)
+
+
+def _recover(operation_id: str, *, target: Path, force: bool = False) -> Receipt:
     target = target.expanduser().resolve()
     op_dir = operation_dir(target, operation_id)
     journal = _read_journal(op_dir)

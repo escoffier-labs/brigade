@@ -156,3 +156,41 @@ A run whose seats all exited ok but produced no non-`.brigade` file changes is r
 | `ok` | +1 |
 | `error` | -1 |
 | `failed` / `incomplete` without infrastructure-only attribution | -1 |
+
+## Failed card verification review
+
+A registered manifest-backed failed effectiveness check can produce a
+`negative-outcome` reflection log row after durable card outcome capture.
+Admission requires an eligible trial with verification failure attribution,
+retained receipt integrity, and the current card and linked-card fingerprint.
+Infrastructure failures, unknown failure taxonomy, reused receipts and
+utility-only checks do not qualify. Successful outcomes retain their existing
+support contract.
+
+`memory reflect run` revalidates these bindings and the original receipt time.
+Pending eligible failures produce a `negative-outcome-review` candidate with
+receipt pointers and manifest/artifact bindings, `semantic_contradiction:
+unadjudicated`, tier 2, zero proof count and sources, and an empty diff.
+Repeated captures of one receipt supply one signal. Independent receipts remain
+distinct. Historical signals are excluded. A pending row whose receipt or
+linked-card binding no longer validates remains unresolved review evidence. It
+does not establish an eligible failure, and it cannot clear the review blocker.
+
+Failed verification receipts never supply positive proof or consolidation
+support, including when cited in card metadata or appended through a proposal.
+This check also applies before capture or when the optional review-log append
+fails. Malformed verification receipts remain subject to validation after
+corruption. Intact passing command and skill receipts retain their existing
+generic citation support. Completed native receipts need a matching run identity,
+valid command results and an intact digest. An erased or malformed binding does
+not make a card receipt generic. Pending negative rows, including
+unresolved rows, keep same-card candidates at tier 2 with an empty diff and block
+retained proposals at propose, review and apply. Missing or invalid review dates
+do not dismiss negative rows. Pending negatives outside the newest-64 receipt
+validation window remain unresolved blockers without additional receipt reads.
+Manual consolidation cannot
+advance its cutoff past a pending negative row. Other cards can still produce
+deterministic candidates. Proposal admission refuses translation of the negative
+review candidate.
+A failed check does not establish that a claim is false. This workflow adds no
+semantic adjudication or card mutation operation.

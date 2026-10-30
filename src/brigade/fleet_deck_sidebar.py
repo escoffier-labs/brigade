@@ -149,8 +149,8 @@ def _capacity_inventory(view: DeckView | None) -> str:
     machines = "".join(
         '<li class="tree-line" data-status="'
         + _esc(status)
-        + '"><a class="tree-label sidebar-capacity-link" href="/deck/capacity#'
-        + explorer.anchor(station.station.node_id)
+        + '"><a class="tree-label sidebar-capacity-link" href="/deck/capacity'
+        + explorer.selection_href(station.station.node_id)
         + '">'
         + _esc(station.label)
         + '</a><span class="tree-meta">'

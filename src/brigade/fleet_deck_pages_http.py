@@ -53,7 +53,11 @@ def build_view(
 ) -> tuple[fleet_command_deck.DeckView, Any, Any]:
     """The deck view plus the live runs and interactive sessions it was built from."""
     deck = fleet_command_deck
-    live_runs = deck.fetch_live_runs(conn, now=now, stale_after_seconds=config.stale_after_seconds)
+    nodes = _hub.list_nodes(conn)
+    revoked_node_ids = tuple(node["node_id"] for node in nodes if node.get("revoked_at") is not None)
+    live_runs = deck.fetch_live_runs(
+        conn, now=now, stale_after_seconds=config.stale_after_seconds, revoked_node_ids=revoked_node_ids
+    )
     station_ids = [station.node_id for station in config.stations]
     interactive_sessions = deck.fetch_interactive_sessions(conn, now=now)
     view = deck.build_view(
@@ -61,11 +65,7 @@ def build_view(
         live_runs=live_runs,
         claims=claims_from_rows(_hub.list_claims(conn), now),
         # Only unrevoked enrollments feed the label/enrolled mapping.
-        enrolled_labels={
-            node["node_id"]: str(node["label"] or "")
-            for node in _hub.list_nodes(conn)
-            if node.get("revoked_at") is None
-        },
+        enrolled_labels={node["node_id"]: str(node["label"] or "") for node in nodes if node.get("revoked_at") is None},
         last_heard=deck.fetch_last_heard(conn, station_ids),
         outcomes=deck.fetch_outcomes(conn, outcome_window=config.outcome_window),
         failed_outcomes=deck.fetch_failed_outcomes(
@@ -73,6 +73,7 @@ def build_view(
             now=now,
             lookback_seconds=config.failed_lookback_seconds,
             stale_after_seconds=config.stale_after_seconds,
+            revoked_node_ids=revoked_node_ids,
         ),
         observers=deck.fetch_observers(conn, frozenset(station_ids)),
         now=now,
@@ -81,6 +82,7 @@ def build_view(
         control_plane=control_plane_from_hub(conn),
         # Uncapped per-node counts: the Activity list above stops at a row limit.
         session_counts=fleet_hub_sessions.count_live_by_node(conn, now_epoch=now.timestamp()),
+        revoked_node_ids=revoked_node_ids,
     )
     return view, live_runs, interactive_sessions
 
@@ -130,12 +132,13 @@ def render(
     worklore_enabled: bool,
     extras: AdminExtras,
     board_options: Any,
+    query: str = "",
 ) -> str:
     from . import fleet_admin_pages
 
     if path in CAPACITY_TABS:
         return fleet_admin_pages.render_capacity(
-            view, now, nonce=nonce, worklore_enabled=worklore_enabled, tab=CAPACITY_TABS[path]
+            view, now, nonce=nonce, worklore_enabled=worklore_enabled, tab=CAPACITY_TABS[path], query=query
         )
     if path == "/deck/reporting":
         return fleet_admin_pages.render_reporting(

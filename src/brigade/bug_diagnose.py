@@ -310,7 +310,29 @@ def _export(path: Path, text: str) -> None:
 
 def diagnose(args: argparse.Namespace) -> int:
     try:
-        result = _compare(args)
+        component = getattr(args, "component", "mcp")
+        if component == "instructions":
+            from .bug_instruction_diagnose import compare
+
+            result = compare(args)
+        else:
+            if any(
+                getattr(args, key, None) is not None
+                for key in (
+                    "cwd",
+                    "codex_version",
+                    "trust",
+                    "read_access",
+                    "project_doc_max_bytes",
+                    "fallback_filenames",
+                    "root_markers",
+                    "instruction_path",
+                )
+            ) or getattr(args, "assume_codex_defaults", False):
+                raise ValueError("instruction settings require instruction mode")
+            if args.target is None:
+                args.target = Path(".")
+            result = _compare(args)
     except (OSError, ValueError, TypeError, KeyError, RecursionError, OverflowError):
         result = {
             "status": "unavailable",
@@ -318,6 +340,12 @@ def diagnose(args: argparse.Namespace) -> int:
             "runtime": "unknown",
             "text": "Diagnosis unavailable: selected project evidence is unsupported, unsafe, malformed or exceeds limits. Review the selected configuration locally; no runtime check was run.",
         }
+        if getattr(args, "component", "mcp") == "instructions":
+            result["actual_session_observed"] = False
+            result["text"] += "\nactual_session_observed: false\nruntime: unknown\nverification: not-run"
+        print(json.dumps(result) if args.json else result["text"])
+        return 2
+    if result["status"] != "available":
         print(json.dumps(result) if args.json else result["text"])
         return 2
     try:
@@ -338,7 +366,9 @@ def diagnose(args: argparse.Namespace) -> int:
                 "last_error": None,
                 "user": {
                     "summary": result["text"],
-                    "title": "MCP configuration diagnosis",
+                    "title": "Codex project instruction diagnosis"
+                    if component == "instructions"
+                    else "MCP configuration diagnosis",
                     "kind": "bug",
                     "output_tail": "",
                 },
@@ -376,6 +406,9 @@ def diagnose(args: argparse.Namespace) -> int:
             "runtime": "unknown",
             "text": message,
         }
+        if component == "instructions":
+            result["actual_session_observed"] = False
+            result["text"] += "\nactual_session_observed: false\nruntime: unknown\nverification: not-run"
         print(json.dumps(result) if args.json else result["text"])
         return 2
     print(json.dumps(result, ensure_ascii=False) if args.json else result["text"])

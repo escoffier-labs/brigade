@@ -41,10 +41,10 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
 
     p_launch = cloud_sub.add_parser(
         "launch",
-        help="Launch a Codex Cloud, Cursor Cloud, or Jules session from a private prompt file.",
+        help="Launch a Codex Cloud or Cursor Cloud session from a private prompt file.",
     )
     p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
-    p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "jules"))
+    p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud"))
     p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
     p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
     p_launch.add_argument(
@@ -54,39 +54,16 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         help="Bounded private prompt file. Prompt text is never an argv value.",
     )
     p_launch.add_argument(
-        "--starting-branch",
-        default=None,
-        help="Jules starting branch. Rejected for Codex Cloud and Cursor Cloud.",
-    )
-    p_launch.add_argument(
-        "--title", default=None, help="Jules session title. Rejected for Codex Cloud and Cursor Cloud."
-    )
-    p_launch.add_argument(
         "--auto-create-pr",
         action="store_true",
         help="Opt in to provider autoCreatePR. Default is off. Rejected for Codex Cloud.",
     )
-    p_launch.add_argument(
-        "--no-plan-approval",
-        action="store_true",
-        help="Jules: skip requirePlanApproval. Default for headless conductor launches. Rejected for Codex and Cursor Cloud.",
-    )
     p_launch.add_argument("--json", action="store_true", help="Emit the public launch JSON contract.")
-
-    p_approve = cloud_sub.add_parser("approve", help="Approve a Jules session plan.")
-    p_approve.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
-    p_approve.add_argument(
-        "--provider",
-        required=True,
-        choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules"),
-    )
-    p_approve.add_argument("--task", required=True, help="Jules session id.")
-    p_approve.add_argument("--json", action="store_true", help="Emit the public approve JSON contract.")
 
     p_register = cloud_sub.add_parser("register", help="Register a dispatched cloud task.")
     p_register.add_argument("--target", type=Path, default=Path("."))
     p_register.add_argument(
-        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud")
     )
     p_register.add_argument("--task-id", default=None)
     p_register.add_argument("--label", required=True)
@@ -104,7 +81,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_adopt = cloud_sub.add_parser("adopt", help="Back-register an already-running task or orphaned branch.")
     p_adopt.add_argument("--target", type=Path, default=Path("."))
     p_adopt.add_argument(
-        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud")
     )
     p_adopt.add_argument("--task-id", default=None)
     p_adopt.add_argument("--branch", default=None)
@@ -153,7 +130,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_doctor = cloud_sub.add_parser("doctor", help="Check one cloud provider without submitting a task.")
     p_doctor.add_argument("--target", type=Path, default=Path("."))
     p_doctor.add_argument(
-        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud")
     )
     p_doctor.add_argument("--json", action="store_true")
     p_doctor.add_argument(
@@ -165,7 +142,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_canary = cloud_sub.add_parser("canary", help="Bounded cloud inventory check. Never exec or apply.")
     p_canary.add_argument("--target", type=Path, default=Path("."))
     p_canary.add_argument(
-        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud", "jules")
+        "--provider", required=True, choices=("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud")
     )
     p_canary.add_argument("--json", action="store_true")
     p_canary.add_argument(
@@ -568,8 +545,6 @@ def dispatch(args) -> int:
 
     if command == "launch":
         return _dispatch_launch(args, target)
-    if command == "approve":
-        return _dispatch_approve(args, target)
 
     if command == "register":
         if not args.task_id and not (args.provider == "claude-cloud" and args.repo and args.session_id):
@@ -773,7 +748,7 @@ def dispatch(args) -> int:
 
 def _dispatch_launch(args, target: Path) -> int:
     """Launch a hosted task from a private prompt file and register it."""
-    from .. import cloud_tracker, cursor_cloud, jules_cloud
+    from .. import cloud_tracker, cursor_cloud
 
     provider = args.provider
     try:
@@ -784,20 +759,7 @@ def _dispatch_launch(args, target: Path) -> int:
             as_json=args.json,
             exit_code=2,
         )
-    if provider == "cursor-cloud" and (
-        args.starting_branch is not None or args.title is not None or bool(getattr(args, "no_plan_approval", False))
-    ):
-        return _emit_launch_payload(
-            {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
-            as_json=args.json,
-            exit_code=2,
-        )
-    if provider == "codex-cloud" and (
-        args.starting_branch is not None
-        or args.title is not None
-        or bool(getattr(args, "no_plan_approval", False))
-        or args.auto_create_pr
-    ):
+    if provider == "codex-cloud" and args.auto_create_pr:
         return _emit_launch_payload(
             {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
             as_json=args.json,
@@ -850,28 +812,14 @@ def _dispatch_launch(args, target: Path) -> int:
             exit_code=2,
         )
 
-    launched: Any
-    if provider == "cursor-cloud":
-        launched = cursor_cloud.launch_agent(
-            api_key,
-            repo=args.repo,
-            prompt=prompt,
-            auto_create_pr=bool(args.auto_create_pr),
-            register_target=target,
-            label=label,
-        )
-    else:
-        launched = jules_cloud.launch_agent(
-            api_key,
-            repo=args.repo,
-            prompt=prompt,
-            title=args.title,
-            starting_branch=args.starting_branch,
-            auto_create_pr=bool(args.auto_create_pr),
-            require_plan_approval=not bool(args.no_plan_approval),
-            register_target=target,
-            label=label,
-        )
+    launched = cursor_cloud.launch_agent(
+        api_key,
+        repo=args.repo,
+        prompt=prompt,
+        auto_create_pr=bool(args.auto_create_pr),
+        register_target=target,
+        label=label,
+    )
     payload = _public_launch_payload(provider=provider, label=label, prompt_hash=prompt_hash, result=launched)
     return _emit_launch_payload(payload, as_json=args.json, exit_code=0 if launched.ok else 1)
 
@@ -882,8 +830,6 @@ def _resolve_launch_key(provider: str) -> str | None:
 
     if provider == "cursor-cloud":
         return cloud_tracker._cursor_api_key()
-    if provider == "jules":
-        return cloud_tracker._jules_api_key()
     return None
 
 
@@ -962,11 +908,6 @@ def _public_launch_payload(*, provider: str, label: str, prompt_hash: str, resul
     if provider == "cursor-cloud":
         payload["task_id"] = result.agent_id
         payload["run_id"] = result.run_id
-    elif provider == "jules":
-        payload["task_id"] = result.session_id
-        payload["session_id"] = result.session_id
-        payload["source_name"] = result.source_name
-        payload["starting_branch"] = result.starting_branch
     else:
         payload["task_id"] = result.get("task_id")
     return payload
@@ -989,65 +930,6 @@ def _emit_launch_payload(payload: dict[str, Any], *, as_json: bool, exit_code: i
         if isinstance(task_id, str) and codex_cloud.parse_task_id(task_id) == task_id:
             extra = f" task={task_id}"
     print(f"error: {payload.get('reason', 'launch-failed')}{extra}", file=sys.stderr)
-    return exit_code
-
-
-def _dispatch_approve(args, _target: Path) -> int:
-    """Approve a Jules plan. Other providers are rejected without a provider call."""
-    from .. import jules_cloud
-
-    provider = str(args.provider)
-    task_id = str(args.task).strip() if isinstance(args.task, str) else ""
-    if provider != "jules":
-        return _emit_approve_payload(
-            {"ok": False, "provider": provider, "task_id": task_id or args.task, "reason": "unsupported-provider"},
-            as_json=args.json,
-            exit_code=2,
-        )
-    if not task_id:
-        return _emit_approve_payload(
-            {"ok": False, "provider": provider, "task_id": args.task, "reason": "bad-task"},
-            as_json=args.json,
-            exit_code=2,
-        )
-    api_key = _resolve_launch_key(provider)
-    if not api_key:
-        return _emit_approve_payload(
-            {"ok": False, "provider": provider, "task_id": task_id, "reason": "missing-key"},
-            as_json=args.json,
-            exit_code=2,
-        )
-    try:
-        jules_cloud.approve_plan(task_id, api_key)
-    except jules_cloud.JulesCloudError as exc:
-        reason = exc.reason if isinstance(exc.reason, str) and exc.reason else "provider-error"
-        return _emit_approve_payload(
-            {"ok": False, "provider": provider, "task_id": task_id, "reason": reason},
-            as_json=args.json,
-            exit_code=1,
-        )
-    except Exception:
-        return _emit_approve_payload(
-            {"ok": False, "provider": provider, "task_id": task_id, "reason": "provider-error"},
-            as_json=args.json,
-            exit_code=1,
-        )
-    return _emit_approve_payload(
-        {"ok": True, "provider": provider, "task_id": task_id},
-        as_json=args.json,
-        exit_code=0,
-    )
-
-
-def _emit_approve_payload(payload: dict[str, Any], *, as_json: bool, exit_code: int) -> int:
-    """Print a bounded approve result. Bodies and tracebacks stay out."""
-    if as_json:
-        print(json.dumps(payload, indent=2, sort_keys=True))
-        return exit_code
-    if payload.get("ok"):
-        print(f"approved {payload.get('provider')} task={payload.get('task_id')}")
-        return exit_code
-    print(f"error: {payload.get('reason', 'approve-failed')}", file=sys.stderr)
     return exit_code
 
 
