@@ -17,7 +17,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://brigade.tools"
+Homepage = "https://brigadestack.com"
 Documentation = "https://brigade.tools/docs"
 Repository = "https://github.com/escoffier-labs/brigade"
 Source = "https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack/pypi"
