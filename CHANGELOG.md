@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Stop the content guard from blocking code-shaped hostname lookalikes: an indented `key: value,` object member with an unquoted value ending the line, and a `delete`, `typeof`, `void` or `await` operand ending a statement, are code. The `home-path` rule now requires a username segment that does not start with a dot, so username-less sandbox paths (a dot-directory directly under the home root) no longer block. Prose, config, and quoted hosts and real user home paths stay detected.
+- Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
@@ -38,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
+
+- Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
 
 - Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
@@ -84,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Store sealed Hub messages with retry lookup, post-ack content purge, storage quotas, and optional required sealing (#2045).
 - Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
 
+- Add internal Windows handle-relative owner-only storage primitives with protected DACL creation and verification, not yet used by any command. Model-roster LKG and audit replay remain fail-closed pending lock fencing, publication ordering, and native qualification. (Refs #1739)
 - Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
 - Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
 - Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
