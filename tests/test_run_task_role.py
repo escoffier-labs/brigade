@@ -2,7 +2,7 @@
 
 import pytest
 
-from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference
+from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference, task_roles
 from brigade.cli import run as run_cli
 
 from tests.test_aboyeur_orchestrator_health_routing import _install_probe, PerSeatFakeAdapter
@@ -37,6 +37,7 @@ fallback = ["coder"]
             "sources": {"roles.writing": {"layer": "repo:example/project"}},
         },
     )
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda: {"document": {"seats": {}}})
     seen = []
 
     def fake_run(task, roster, **kwargs):
@@ -234,3 +235,230 @@ def test_role_resolution_error_does_not_echo_arbitrary_diagnostic_text(run_task,
     assert invoke("Draft release notes") == 2
     assert fragment not in capsys.readouterr().err
     assert seen == []
+
+
+def test_policy_fallback_replaces_local_and_drops_unusable(run_task, monkeypatch):
+    invoke, seen = run_task
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda: {"document": {"seats": {"author": {"fallback": ["coder", "missing"]}}}},
+    )
+    original = run_cli._direct_worker_error
+    monkeypatch.setattr(
+        run_cli,
+        "_direct_worker_error",
+        lambda seat, *a, **kw: "denied" if seat == "missing" else original(seat, *a, **kw),
+    )
+    assert invoke("Draft a blog post") == 0
+    roster = seen[0][1]
+    assert roster.agents["author"].fallback == ("coder",)
+    assert roster.agents["coder"].fallback == ()
+    assert roster.agents["coder"].invalid_final_fallback is None
+    assert roster.seat_routing[0]["task_role"]["fallback"] == ["coder"]
+
+
+@pytest.mark.parametrize("role,task", [("writing", "Draft a blog post"), ("frontend", "Redesign the login page")])
+def test_role_instructions_preserve_detached_original(run_task, tmp_path, role, task):
+    import hashlib
+    from brigade import aboyeur as module
+
+    invoke, seen = run_task
+    rules = tmp_path / "rules.md"
+    rules.write_text("Use concrete examples.")
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write(f"\n[task_roles.{role}]\ninstructions_file = '{rules}'\n")
+    assert invoke(task, "--worker", "author", "--applied-preference", "--task-role-workload", role) == 0
+    original, roster, _ = seen[0]
+    assert original == task
+    assert roster.worker_instructions == rules.read_text()
+    evidence = roster.seat_routing[0]["task_role"]["instructions"]
+    assert evidence == {"file": "rules.md", "sha256": hashlib.sha256(rules.read_bytes()).hexdigest()[:12]}
+    for seat in ("author", "coder"):
+        prompt = module._worker_prompt(
+            roster.agents[seat], module.Assignment(worker=seat, task=task), instructions=roster.worker_instructions
+        )
+        assert prompt.startswith("Use concrete examples.\n\n")
+        assert task in prompt
+
+
+@pytest.mark.parametrize("task,extra", [("Write a function", ()), ("Draft a blog post", ("--worker", "coder"))])
+def test_instructions_do_not_apply_to_general_or_explicit_worker(run_task, tmp_path, task, extra):
+    invoke, seen = run_task
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write('\n[task_roles.writing]\ninstructions_file = "missing-rules.md"\n')
+    assert invoke(task, *extra) == 0
+    assert seen[0][1].worker_instructions == ""
+
+
+@pytest.mark.parametrize("mode", ["missing", "oversize", "directory", "invalid-utf8"])
+def test_instructions_fail_closed(run_task, tmp_path, capsys, mode):
+    invoke, seen = run_task
+    path = tmp_path / "rules.md"
+    if mode == "oversize":
+        path.write_bytes(b"x" * 65537)
+    elif mode == "directory":
+        path.mkdir()
+    elif mode == "invalid-utf8":
+        path.write_bytes(b"\xff")
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{path}'\n")
+    assert invoke("Draft a blog post") == 2
+    assert seen == []
+    assert "instructions file 'rules.md' is unreadable or exceeds 64 KiB" in capsys.readouterr().err
+
+
+def test_resolved_policy_fallback_synthesizes_hub_seat(run_task, monkeypatch):
+    from brigade.roster import Agent
+
+    invoke, seen = run_task
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "resolve_policy",
+        lambda **kw: {
+            "effective": {"roles": {"writing": "author"}},
+            "seats": {"author": {"fallback": ["remote-author"]}},
+        },
+    )
+
+    def no_fetch():
+        raise AssertionError("resolved policy seats must take precedence")
+
+    monkeypatch.setattr(fleet_client_policy, "show_policy", no_fetch)
+    monkeypatch.setattr(
+        run_cli,
+        "_hub_synthesized_agent",
+        lambda seat, roster: (Agent(name=seat, cli="claude", role="code", fallback=("coder",)), None),
+    )
+    assert invoke("Draft a blog post") == 0
+    roster = seen[0][1]
+    assert roster.agents["author"].fallback == ("remote-author",)
+    assert roster.agents["remote-author"].fallback == ()
+    assert roster.seat_routing[0]["task_role"]["fallback"] == ["remote-author"]
+
+
+def test_role_prompt_dispatch_builder_covers_fallback(run_task, monkeypatch, tmp_path):
+    from brigade.aboyeur import planning
+    from brigade import run_transport
+
+    invoke, seen = run_task
+    rules = tmp_path / "rules.md"
+    rules.write_text("R" * 65536)
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{rules}'\n")
+    monkeypatch.setattr(
+        fleet_client_policy, "show_policy", lambda: {"document": {"seats": {"author": {"fallback": ["coder"]}}}}
+    )
+    assert invoke("Draft a blog post") == 0
+    roster = seen[0][1]
+
+    def dispatch(assignments, effective, *, build_prompt, **kwargs):
+        for name in ("author", *effective.agents["author"].fallback):
+            prompt = build_prompt(
+                effective.agents[name], run_transport.Assignment(worker=name, task="Draft a blog post")
+            )
+            assert prompt.startswith("R" * 65536 + "\n\n")
+        return []
+
+    monkeypatch.setattr(run_transport, "dispatch", dispatch)
+    assert planning.dispatch([], roster, cwd=tmp_path) == []
+
+
+def test_relative_instructions_resolve_against_roster_directory(tmp_path, monkeypatch):
+    from brigade.roster import load_roster
+
+    roster_dir = tmp_path / "config"
+    roster_dir.mkdir()
+    (roster_dir / "rules.md").write_text("Use plain words.")
+    roster_path = roster_dir / "roster.toml"
+    roster_path.write_text(
+        'orchestrator = "planner"\n[agents.planner]\ncli = "codex"\nrole = "plan"\n'
+        '[task_roles.writing]\ninstructions_file = "rules.md"\n'
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    roster = load_roster(roster_path)
+    assert roster.task_role_instructions["writing"] == str(roster_dir / "rules.md")
+    text, evidence = task_roles.load_instructions(roster, "writing")
+    assert text == "Use plain words."
+    assert evidence is not None and evidence["file"] == "rules.md"
+
+
+def test_writing_health_fallback_dispatches_and_leases_its_own_seat(run_task, monkeypatch, tmp_path):
+    import json
+
+    from brigade import agents
+    from tests.run_test_helpers import run_aboyeur_guarded
+    from tests.test_fleet_model_admission import (
+        _mock_exact_runtime_admission,
+        _versioned_seat,
+        _versioned_snapshot,
+    )
+
+    invoke, seen = run_task
+    rules = tmp_path / "rules.md"
+    rules.write_text("Use concrete examples.")
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{rules}'\n")
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda: {"document": {"seats": {"author": {"fallback": ["coder"]}}}},
+    )
+    assert invoke("Draft a blog post") == 0
+    effective = seen[0][1]
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": "", "admin_token": ""}
+    )
+    monkeypatch.setattr(aboyeur, "run", _REAL_RUN)
+    snapshot = _versioned_snapshot(
+        _versioned_seat("chef", "openai", "model-chef", instance_id="codex"),
+        _versioned_seat("author", "anthropic", "model-author", instance_id="claude"),
+        _versioned_seat("coder", "openai", "model-coder", instance_id="codex"),
+        expires_at="2099-08-30T14:15:00Z",
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    admissions = _mock_exact_runtime_admission(monkeypatch, snapshot)
+    leases = []
+
+    def lease(seat, provider, model):
+        leases.append((seat, provider, model))
+        return fleet_client.ModelLeaseDecision(True, "ok", None, None)
+
+    monkeypatch.setattr(fleet_client, "acquire_model_lease", lease)
+    launches = []
+
+    def launch(cli, prompt, **kwargs):
+        launches.append((cli, prompt, kwargs.get("model")))
+        return agents.AgentResult(text="Written.", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", launch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"author"})))
+    output_dir = tmp_path / "fallback-run"
+    assert (
+        run_aboyeur_guarded(
+            "Draft a blog post",
+            effective,
+            worker="author",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert leases == [("coder", "openai", "model-coder")]
+    assert [call["seat"] for call in admissions if call.get("phase") == "target"] == ["coder"]
+    assert len(launches) == 1
+    assert launches[0][0] == "codex"
+    assert launches[0][1].startswith("Use concrete examples.\n\n")
+    assert launches[0][2] == "model-coder"
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["worker"] == "coder"
+    role = run["seat_routing"][0]["task_role"]
+    assert role["seat"] == "coder"
+    assert role["requested_seat"] == "author"
+    assert role["effective_seat"] == "coder"
+    routing = json.loads((output_dir / "seat-routing.json").read_text())
+    assert routing["decisions"][0]["requested_seat"] == "author"
+    assert routing["decisions"][0]["effective_seat"] == "coder"

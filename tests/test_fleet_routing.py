@@ -1081,7 +1081,7 @@ def _task_policy(conn, *, missing=False, disabled=False, patch=False):
         "model": "model-author",
         "enabled": not disabled,
         "eligible_machines": ["worker-cloud-1"],
-        "fallback": ["seat-grok"],
+        "fallback": [],
         "concurrency": 1,
     }
     if patch:
@@ -1185,3 +1185,37 @@ def test_task_quota_does_not_use_seat_fallback(conn):
     denied = _route(conn, workload="writing")
     assert denied["selected"] is None
     assert all(row["seat"] == "seat-author" for row in denied["candidates"])
+
+
+@pytest.mark.parametrize("workload", ["writing", "frontend"])
+def test_task_role_policy_fallback_candidates(conn, workload):
+    _task_policy(conn, disabled=True)
+    current = fleet_hub_policy.current_policy(conn)
+    document = current["document"]
+    document["seats"]["seat-author"]["fallback"] = ["seat-grok"]
+    document["seats"]["seat-grok"]["fallback"] = []
+    fleet_hub_policy.save_policy(
+        conn, document, expected_version=current["revision"], actor="operator", reason="role fallback"
+    )
+    decision = _route(conn, workload=workload)
+    assert decision["selected"]["seat"] == "seat-grok"
+    assert {row["seat"] for row in decision["candidates"]} == {"seat-author", "seat-grok"}
+    assert decision["task_role"]["fallback"] == ["seat-grok"]
+
+
+def test_task_role_unknown_fallback_is_ignored():
+    from brigade.fleet_hub_routing import _collect_candidates
+    from datetime import datetime, timezone
+
+    candidates, eligible, selected, denial = _collect_candidates(
+        None,
+        document={"seats": {"author": {"fallback": ["missing"], "eligible_machines": []}}, "machines": {}},
+        routing={},
+        workload="writing",
+        requirements={},
+        resolution={"effective": {"roles": {"writing": "author"}}},
+        now=datetime.now(timezone.utc),
+    )
+    assert candidates == eligible == []
+    assert selected is None
+    assert denial != "unknown-role"

@@ -1040,7 +1040,11 @@ def _collect_candidates(
     role = task_roles.role_for_workload(workload)
     start_seat = seat or (resolution.get("effective", {}).get("roles", {}) or {}).get(role)
     if seat is None and role != "impl":
-        seats = [start_seat] if isinstance(start_seat, str) and start_seat in document["seats"] else []
+        seats = (
+            _chain(start_seat, document["seats"], "fallback")
+            if isinstance(start_seat, str) and start_seat in document["seats"]
+            else []
+        )
     else:
         seats = _chain(start_seat, document["seats"], "fallback")
     if not seats:
@@ -1261,7 +1265,12 @@ def route(conn: sqlite3.Connection, request: Any, caller_node: str) -> dict[str,
                 "role": role,
                 "seat": parsed["seat"] or resolution["effective"].get("roles", {}).get(role),
                 "source_layer": resolution["sources"].get(f"roles.{role}", {}).get("layer"),
-                "fallback": "disabled" if parsed["seat"] is None else "explicit-seat",
+                "fallback": (
+                    _chain(resolution["effective"].get("roles", {}).get(role), document["seats"], "fallback")[1:]
+                    or "disabled"
+                )
+                if parsed["seat"] is None
+                else "explicit-seat",
                 "explicit_seat": parsed["seat"] is not None,
             }
         candidates, _eligible, selected_row, denial = _collect_candidates(
