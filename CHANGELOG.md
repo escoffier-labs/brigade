@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add node-authenticated Fleet reservation acceptance with current target, policy, expiry and model-retirement checks. Exact retries preserve the original reservation and expiry.
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.

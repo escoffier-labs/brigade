@@ -990,3 +990,317 @@ def test_plan_uses_consumer_launch_bindings_not_seat_native_inference(monkeypatc
     assert payload["model"] == "cursor-grok-4.6-high-fast"
     assert payload["binding"]["model"] == "cursor/native-id"
     assert payload["binding"]["instance_id"] == "cursor"
+
+
+def _accept_route(conn, *, consumer="t3-fleet", brigade_model=None, launch_overrides=None):
+    from brigade import fleet_hub_routing
+
+    _activate(conn)
+    current = fleet_hub_policy.current_policy(conn)
+    document = current["document"]
+    document["defaults"]["roles"] = {"impl": SEAT}
+    document["routing"]["enabled"] = True
+    document["routing"]["workload_requirements"] = {"general": {"os": "linux", "capabilities": []}}
+    document["seats"][SEAT]["bindings"]["native"] = {"instance_id": "inst-alpha", "model": "provider-a/native-model"}
+    if brigade_model is not None:
+        document["seats"][SEAT]["bindings"]["brigade"]["model"] = brigade_model
+    for name, launch_model in (launch_overrides or {}).items():
+        document["consumers"][name]["seat_bindings"] = {SEAT: {"native": {"model": launch_model}}}
+    document["machines"]["worker-linux-1"]["concurrency"] = 1
+    fleet_hub_policy.save_policy(conn, document, expected_version=current["revision"], actor="test", reason="route")
+    fleet_hub_routing.observe_machine(
+        conn,
+        {
+            "node_id": NODE_A,
+            "observed_at": fleet_hub_routing._iso(),
+            "status": "available",
+            "credential_state": "ok",
+            "usable_seats": [SEAT],
+        },
+        NODE_A,
+    )
+    _, decision = fleet_hub_policy_api.handle_policy(
+        conn,
+        {
+            "action": "route",
+            "consumer": consumer,
+            "session_id": SESSION,
+            "repo_identity": REPO,
+            "origin": "worker-linux-1",
+            "workload": "general",
+        },
+        caller_node=NODE_A,
+        is_admin=False,
+    )
+    assert decision["reservation_id"], decision
+    return {
+        "action": "reservation-accept",
+        "reservation_id": decision["reservation_id"],
+        "decision_id": decision["decision_id"],
+        "session_id": SESSION,
+    }
+
+
+def _accept_state(conn):
+    return (
+        conn.execute("SELECT * FROM fleet_reservations").fetchall(),
+        conn.execute("SELECT * FROM fleet_dispatch_intents").fetchall(),
+        conn.execute("SELECT * FROM model_leases").fetchall(),
+    )
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("accepted_first", [False, True])
+@pytest.mark.parametrize("identity", [MODEL, "provider-a/native-model", "provider-a/brigade-model"])
+def test_reservation_accept_rechecks_operator_retirement_without_policy_change(
+    conn, consumer, accepted_first, identity
+):
+    body = _accept_route(conn, consumer=consumer, brigade_model="provider-a/brigade-model")
+    if accepted_first:
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    policy = fleet_hub_policy.current_policy(conn)
+    conn.execute(
+        "INSERT INTO retired_models (provider, family, match_kind, permanent, reason_code, created_at) "
+        "VALUES (?, ?, 'family-prefix', 0, 'operator-retired', ?)",
+        (PROVIDER, identity, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before
+    current = fleet_hub_policy.current_policy(conn)
+    assert (current["revision"], current["digest"]) == (policy["revision"], policy["digest"])
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("selected_consumer", [True, False])
+def test_reservation_accept_scopes_overrides_and_retains_base_identity(conn, selected_consumer):
+    overrides = {
+        "t3-fleet" if selected_consumer else "brigade-run": "provider-a/override-model",
+    }
+    body = _accept_route(conn, launch_overrides=overrides)
+    retired = "provider-a/native-model" if selected_consumer else "provider-a/override-model"
+    conn.execute(
+        "INSERT INTO retired_models (provider, family, match_kind, permanent, reason_code, created_at) "
+        "VALUES (?, ?, 'family-prefix', 0, 'operator-retired', ?)",
+        (PROVIDER, retired, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    before = _accept_state(conn)
+    if selected_consumer:
+        with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
+            fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert _accept_state(conn) == before
+    else:
+        _, result = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert result["state"] == "accepted"
+        assert result["reservation_id"] == body["reservation_id"]
+    assert not conn.in_transaction
+
+
+def test_reservation_accept_replays_without_renewal_and_preserves_lifecycle(conn):
+    body = _accept_route(conn)
+    before = _accept_state(conn)
+    _, accepted = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert set(accepted) == {"schema", "reservation_id", "decision_id", "state", "expires_at"}
+    assert accepted["expires_at"] == before[0][0][9]
+    assert accepted["state"] == "accepted"
+    assert accepted["decision_id"] == body["decision_id"]
+    assert accepted["reservation_id"] == body["reservation_id"]
+    after = _accept_state(conn)
+    assert len(after[0]) == len(before[0]) == 1
+    assert len(after[1]) == len(before[1]) == 1
+    assert after[0][0][9] == before[0][0][9]
+    assert after[2] == before[2] == []
+    _, replay = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert replay == accepted
+    assert _accept_state(conn) == after
+    for action in ["reservation-renew", "reservation-release"]:
+        _, result = fleet_hub_policy_api.handle_policy(
+            conn, {**body, "action": action}, caller_node=NODE_A, is_admin=False
+        )
+        assert result["reservation_id"] == body["reservation_id"]
+    assert result["state"] == "released"
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [
+        "reservation",
+        "decision",
+        "session",
+        "wrong-node",
+        "anonymous",
+        "admin",
+        "missing-expiry",
+        "malformed-expiry",
+        "naive-expiry",
+        "expired",
+        "accepted-expired",
+        "released",
+        "reciprocal-reservation",
+        "reciprocal-machine",
+        "reciprocal-seat",
+        "target-binding",
+        "stale-policy",
+        "disabled-seat",
+        "retired-seat",
+        "retired-native",
+        "disabled-target",
+        "health",
+        "occupancy",
+    ],
+)
+def test_reservation_accept_refuses_without_mutation(conn, monkeypatch, fault):
+    from brigade import fleet_hub_routing
+
+    body = _accept_route(conn)
+    caller, admin = NODE_A, False
+    if fault in {"reservation", "decision", "session"}:
+        body[f"{fault}_id"] = "wrong-id"
+    elif fault == "wrong-node":
+        caller = "22222222-2222-4222-8222-222222222222"
+    elif fault in {"anonymous", "admin"}:
+        caller, admin = None, fault == "admin"
+    elif fault.endswith("expiry") or fault in {"expired", "accepted-expired"}:
+        if fault == "accepted-expired":
+            fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        expires = {
+            "missing-expiry": "",
+            "malformed-expiry": "not-a-timestamp",
+            "naive-expiry": "2099-01-01T00:00:00",
+        }.get(fault, "2000-01-01T00:00:00Z")
+        conn.execute(
+            "UPDATE fleet_reservations SET expires_at=?, accepted=?", (expires, int(fault == "accepted-expired"))
+        )
+    elif fault == "released":
+        conn.execute("UPDATE fleet_reservations SET state='released'")
+    elif fault.startswith("reciprocal-"):
+        column = {
+            "reciprocal-reservation": "reservation_id",
+            "reciprocal-machine": "selected_machine",
+            "reciprocal-seat": "selected_seat",
+        }[fault]
+        conn.execute(f"UPDATE fleet_route_decisions SET {column}='wrong-binding'")
+    elif fault == "target-binding":
+        conn.execute("UPDATE fleet_reservations SET node_id='wrong-node'")
+    elif fault == "stale-policy":
+        current = fleet_hub_policy.current_policy(conn)
+        fleet_hub_policy.save_policy(
+            conn, current["document"], expected_version=current["revision"], actor="test", reason="change"
+        )
+    elif fault in {"health", "occupancy"}:
+        conn.execute(
+            "UPDATE fleet_machine_telemetry SET status=? , running=?",
+            (
+                "busy" if fault == "health" else "available",
+                json.dumps({"session_ids": ["other-session"] if fault == "occupancy" else [], "run_ids": []}),
+            ),
+        )
+    else:
+        current = fleet_hub_policy.current_policy(conn)
+        if fault == "disabled-seat":
+            current["document"]["seats"][SEAT]["enabled"] = False
+        elif fault in {"retired-seat", "retired-native"}:
+            current["document"]["seats"][SEAT]["provider"] = "openai"
+            if fault == "retired-seat":
+                current["document"]["seats"][SEAT]["model"] = "gpt-5.4"
+            else:
+                current["document"]["seats"][SEAT]["bindings"]["native"]["model"] = "gpt-5.4"
+        else:
+            current["document"]["machines"]["worker-linux-1"]["enabled"] = False
+        monkeypatch.setattr(fleet_hub_policy, "current_policy", lambda _conn: current)
+    conn.commit()
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=caller, is_admin=admin)
+    assert _accept_state(conn) == before
+    assert not conn.in_transaction
+    assert fleet_hub_routing._decision_row(conn, decision_id=body["decision_id"]) is not None or fault == "decision"
+
+
+def test_accepted_t3_route_composes_with_real_native_launch_proof(conn):
+    body = _accept_route(conn)
+    _, accepted = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert accepted["state"] == "accepted"
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A)
+    assert roster["consumer_launch_bindings"]["t3-fleet"][SEAT]["native"]["model"] == "provider-a/native-model"
+    _, prepared = fleet_hub_policy_api.handle_policy(
+        conn,
+        {
+            "action": "prepare",
+            "consumer": "t3-fleet",
+            "repo_identity": REPO,
+            "session_id": SESSION,
+            "decision_id": body["decision_id"],
+            "provider": PROVIDER,
+            "model": "provider-a/native-model",
+            "instance_id": "inst-alpha",
+        },
+        caller_node=NODE_A,
+        is_admin=False,
+    )
+    proof = {
+        "policy_session_id": SESSION,
+        "policy_version": prepared["version"],
+        "policy_digest": prepared["digest"],
+        "repo_identity": REPO,
+        "policy_context_hash": prepared["context_hash"],
+        "decision_id": body["decision_id"],
+    }
+    status, target = _admit(
+        conn, phase="target", request_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", consumer="t3-fleet", extra=proof
+    )
+    assert status == 200, target
+    _, ack = fleet_hub_policy_api.handle_policy(
+        conn,
+        {
+            "action": "acknowledge",
+            "consumer": "t3-fleet",
+            "repo_identity": REPO,
+            "session_id": SESSION,
+            "version": prepared["version"],
+            "digest": prepared["digest"],
+            "context_hash": prepared["context_hash"],
+        },
+        caller_node=NODE_A,
+        is_admin=False,
+    )
+    assert ack["applied"] is True
+    status, launch = _admit(
+        conn, phase="launch", request_id="bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", consumer="t3-fleet", extra=proof
+    )
+    assert status == 200, launch
+
+
+def test_reservation_accept_rolls_back_claim_failure_in_outer_transaction(conn, monkeypatch):
+    from brigade import fleet_hub_routing
+    from brigade.fleet_hub import FleetHubError
+
+    body = _accept_route(conn)
+    before = _accept_state(conn)
+    claim = fleet_hub_routing.claim_dispatch_intent
+
+    def failing_claim(connection, request, caller):
+        assert connection.in_transaction
+        claim(connection, request, caller)
+        raise FleetHubError("injected failure after claim")
+
+    monkeypatch.setattr(fleet_hub_routing, "claim_dispatch_intent", failing_claim)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="injected failure"):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before
+    assert not conn.in_transaction
+
+
+def test_reservation_accept_checks_expiry_at_transaction_time(conn, monkeypatch):
+    from brigade import fleet_hub_routing
+
+    body = _accept_route(conn)
+    expiry = conn.execute("SELECT expires_at FROM fleet_reservations").fetchone()[0]
+    monkeypatch.setattr(fleet_hub_routing, "_now", lambda: datetime.fromisoformat(expiry.replace("Z", "+00:00")))
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before

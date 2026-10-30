@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from datetime import datetime
 from typing import Any, Mapping, Sequence
 
 from . import (
@@ -32,6 +33,7 @@ NODE_ACTIONS = frozenset(
         "acknowledge",
         "route",
         "work-next",
+        "reservation-accept",
         "reservation-renew",
         "reservation-release",
         "telemetry-observe",
@@ -794,6 +796,9 @@ def handle_policy(
             if caller_node is None:
                 raise _error("auth-failed", "a node token is required to read the next burn item", status=403)
             status_payload = (200, _work_next(conn, body))
+        elif action == "reservation-accept":
+            assert caller_node is not None
+            status_payload = (200, _accept_reservation(conn, body, caller_node))
         elif action == "reservation-renew":
             if caller_node is None:
                 raise _error("auth-failed", "a node token is required to renew a reservation", status=403)
@@ -833,6 +838,69 @@ def handle_policy(
     finally:
         if opened:
             conn.rollback()
+
+
+def _accept_reservation(conn: Any, body: Mapping[str, Any], caller_node: str) -> dict[str, Any]:
+    """Validate the stored authority and claim it within handle_policy's transaction."""
+    from . import fleet_hub_model_roster
+
+    parsed = fleet_hub_routing._reservation_request(body)
+    row = fleet_hub_routing._load_reservation(conn, parsed)
+    decision = fleet_hub_routing._decision_row(conn, decision_id=parsed["decision_id"])
+    if decision is None:
+        raise _error("invalid-request", "fleet routing decision does not exist")
+    current = fleet_hub_policy.current_policy(conn)
+    document = current["document"]
+    selected = decision.get("selected") or {}
+    if (
+        decision.get("_reservation_id") != row["reservation_id"]
+        or decision.get("_selected_machine") != row["machine"]
+        or decision.get("_selected_seat") != row["seat"]
+        or selected.get("machine") != row["machine"]
+        or selected.get("seat") != row["seat"]
+        or fleet_hub_routing._node_for_machine(document, row["machine"]) != row["node_id"]
+    ):
+        raise _error("invalid-request", "stored decision and reservation bindings disagree")
+    if row["node_id"] != caller_node:
+        raise _error("auth-failed", "only the selected target node may accept this reservation", status=403)
+    if row["state"] == "released":
+        raise _error("invalid-request", "fleet reservation is already released")
+    try:
+        expires = datetime.fromisoformat(row["expires_at"].replace("Z", "+00:00"))
+        valid_expiry = expires.tzinfo is not None and expires > fleet_hub_routing._now()
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        valid_expiry = False
+    if not valid_expiry:
+        raise _error("invalid-request", "fleet reservation expiry is invalid or expired")
+    consumer = _text(decision.get("_consumer"), "consumer")
+    assert consumer is not None
+    _require_enrolled(document, consumer)
+    request = decision.get("_request_document") or {}
+    workload = request.get("workload")
+    if not isinstance(workload, str) or not workload:
+        raise _error("invalid-request", "stored decision workload is missing")
+    fleet_hub_routing._revalidate(
+        conn,
+        {
+            "decision_id": parsed["decision_id"],
+            "session_id": parsed["session_id"],
+            "consumer": consumer,
+            "repo_identity": decision.get("_repo_identity"),
+            "workload": workload,
+        },
+        caller_node,
+    )
+    seat = document["seats"][row["seat"]]
+    bindings = fleet_policy.effective_seat_bindings(document, consumer, row["seat"])
+    retirements = fleet_hub_model_roster.raw_retired_rows(conn)
+    if any(
+        fleet_model_roster.retired_reason(seat["provider"], identity, retirements)
+        for identity in fleet_model_roster.binding_launch_models(seat, launch_groups=bindings)
+    ):
+        raise _error("retired", "the selected model is retired")
+    if not row["accepted"]:
+        fleet_hub_routing.claim_dispatch_intent(conn, parsed, caller_node)
+    return {**fleet_hub_routing._reservation_payload(row), "state": "accepted"}
 
 
 def _session_row_with_state(conn: Any, recorded: Mapping[str, Any]) -> dict[str, Any]:
