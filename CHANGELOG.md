@@ -252,6 +252,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
+- Keep external Worklore scopes reserved across later legacy events, and refuse expiry cleanup of unsupported ownership histories.
 
 ## [0.30.0] - 2026-10-20
 
