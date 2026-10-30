@@ -279,13 +279,17 @@ def test_negative_uses_original_pending_window(tmp_path, failed_card, cutoff):
 
 
 @pytest.mark.parametrize("phase", ["propose", "review", "apply"])
-@pytest.mark.parametrize("drift", [None, "receipt", "linked"])
+@pytest.mark.parametrize("drift", [None, "receipt", "linked", "outside-window", "missing-cutoff", "invalid-cutoff"])
 def test_pending_negative_blocks_retained_positive_candidate(tmp_path, failed_card, phase, drift):
     from brigade import memory_proposals as api
     from brigade.memory_proposal_v2_reflect import propose_payload
     from tests.test_memory_reflect import evidence, log as write_log
 
-    path, receipt, _ = failed_card
+    path, receipt, rerun = failed_card
+    if drift in {"missing-cutoff", "invalid-cutoff"}:
+        replacement = "" if drift == "missing-cutoff" else "last_reviewed: invalid-date\n"
+        path.write_text(path.read_text().replace("last_reviewed: 2026-10-01\n", replacement))
+        receipt = rerun()
     support = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
     write_log(tmp_path, path, (support, "outcome", "2026-10-19T12:00:00Z"))
     candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
@@ -310,12 +314,22 @@ def test_pending_negative_blocks_retained_positive_candidate(tmp_path, failed_ca
             return api.review_payload(**values, reason="Inspect current evidence.")
         return api.apply_payload(**values)
 
-    if drift is not None:
+    if drift in {"receipt", "linked", "outside-window"}:
         from tests.test_memory_outcome_evidence import drift_support
 
         with pytest.raises(api.ProposalError):
             attempt()
-        drift_support(tmp_path, path, receipt, drift)
+        if drift == "outside-window":
+            write_log(
+                tmp_path,
+                path,
+                *[
+                    (evidence(tmp_path, f".brigade/receipts/recent-{i:02}.json"), "outcome", "2026-10-21T12:00:00Z")
+                    for i in range(64)
+                ],
+            )
+        else:
+            drift_support(tmp_path, path, receipt, drift)
     before = snapshot(tmp_path)
     with pytest.raises(api.ProposalError):
         attempt()
@@ -679,4 +693,50 @@ def test_malformed_completed_receipt_cannot_become_generic_support(tmp_path, ver
                 )
             ],
         )
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("boundary", ["outside-window", "missing-cutoff", "invalid-cutoff"])
+def test_pending_negative_boundaries_keep_review_and_bounded_reads(tmp_path, failed_card, boundary, monkeypatch):
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt, rerun = failed_card
+    if boundary != "outside-window":
+        replacement = "" if boundary == "missing-cutoff" else "last_reviewed: invalid-date\n"
+        path.write_text(path.read_text().replace("last_reviewed: 2026-10-01\n", replacement))
+        receipt = rerun()
+    support = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    healthy = card(tmp_path, "healthy", body="Preserve unrelated healthy state.")
+    write_log(tmp_path, path, (support, "outcome", "2026-10-19T12:00:00Z"))
+    write_log(tmp_path, healthy, (support, "outcome", "2026-10-19T12:00:00Z"))
+    (tmp_path / log.LOG_PATH).chmod(0o600)
+    assert capture(tmp_path, receipt) == 0
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    if boundary == "outside-window":
+        write_log(
+            tmp_path,
+            path,
+            *[
+                (evidence(tmp_path, f".brigade/receipts/recent-{i:02}.json"), "outcome", "2026-10-21T12:00:00Z")
+                for i in range(64)
+            ],
+        )
+        original = log.negative_outcome_binding
+
+        def bounded_binding(target, **kwargs):
+            assert kwargs["ref"] != ref, "out-of-window negative expanded receipt validation"
+            return original(target, **kwargs)
+
+        monkeypatch.setattr(log, "negative_outcome_binding", bounded_binding)
+    before = snapshot(tmp_path)
+    candidates = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    affected = [c for c in candidates if c["card_ids"] == ["cache"]]
+    assert any(c["kind"] == "reinforce" for c in affected)
+    assert all(c["tier"] == 2 and c["diff"] == "" and ref in c["review_evidence_ids"] for c in affected)
+    if boundary == "outside-window":
+        assert all(ref in c["unresolved_evidence_ids"] and "outcome_bindings" not in c for c in affected)
+    else:
+        negative = [c for c in affected if c["kind"] == "negative-outcome-review"]
+        assert len(negative) == 1 and negative[0]["proof_count"] == 0
+    assert any(c["card_ids"] == ["healthy"] and c["tier"] == 0 and c["diff"] for c in candidates)
     assert snapshot(tmp_path) == before

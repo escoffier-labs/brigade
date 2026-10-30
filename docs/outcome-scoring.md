@@ -185,7 +185,10 @@ generic citation support. Completed native receipts need a matching run identity
 valid command results and an intact digest. An erased or malformed binding does
 not make a card receipt generic. Pending negative rows, including
 unresolved rows, keep same-card candidates at tier 2 with an empty diff and block
-retained proposals at propose, review and apply. Manual consolidation cannot
+retained proposals at propose, review and apply. Missing or invalid review dates
+do not dismiss negative rows. Pending negatives outside the newest-64 receipt
+validation window remain unresolved blockers without additional receipt reads.
+Manual consolidation cannot
 advance its cutoff past a pending negative row. Other cards can still produce
 deterministic candidates. Proposal admission refuses translation of the negative
 review candidate.

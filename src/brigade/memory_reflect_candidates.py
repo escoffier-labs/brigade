@@ -401,12 +401,18 @@ def _negative_outcome_bindings(
 
     negative_stamps: dict[str, set[str]] = {}
     pending = _pending_rows(card)
+    reference = _timestamp(card.meta.get("last_consolidated")) or _timestamp(
+        memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+    )
+    if reference is None:
+        pending = card.rows
     for row in card.rows:
         if row["kind"] == "negative-outcome" and row["evidence_id"] in selected:
             negative_stamps.setdefault(row["evidence_id"], set()).add(row["ts"])
     bindings: dict[str, dict[str, Any]] = {}
-    unresolved: set[str] = set()
     pending_ids = {row["evidence_id"] for row in pending if row["kind"] == "negative-outcome"}
+    # The receipt window bounds validation IO, not the lifetime of review state.
+    unresolved = pending_ids - selected
     for ref, stamps in negative_stamps.items():
         if ref not in pending_ids:
             continue
