@@ -2508,14 +2508,15 @@ booleans used as integers are refused. Policy files are limited to 16 KiB.
 Omitting the policy reports `policy_missing` and creates nothing.
 
 The report always has `diagnostic_only: true` and `eligible: false`. Exit 0
-means the diagnostic completed with holds. Missing or unaddressable evidence,
-or references beyond the binding window, keep useful checks visible with a
-`binding_incomplete` hold and null evaluation hash. Exit 2 means an unsafe,
-invalid or unreadable required input prevented evaluation. JSON and text show
+means the diagnostic completed with holds. Missing evidence, references rejected
+by name or evidence-root checks, and references beyond the binding window keep
+useful checks visible with a `binding_incomplete` hold and null evaluation hash.
+Exit 2 means an invalid required input or file-open error prevented evaluation.
+Unsafe links and special files also refuse. JSON and text show
 ordered gate states and sanitized reason codes without card bodies, summaries,
 diffs, raw policy or exception text. Hashes bind observed policy bytes, retained
-candidate and run inputs, source and evidence bytes, configuration, evidence log and the
-strictly composed delta. Incomplete bindings have a null evaluation hash.
+candidate and run inputs, source and evidence bytes, configuration, evidence log
+and the strictly composed delta. Incomplete bindings have a null evaluation hash.
 
 `delta_satisfied` describes an exact metadata delta only. Initial anchoring,
 body changes, deletions and reference rewrites require review. The blast cap
