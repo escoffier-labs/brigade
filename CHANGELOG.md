@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Stop the content guard from blocking code-shaped hostname lookalikes: an indented `key: value,` object member with an unquoted value ending the line, and a `delete`, `typeof`, `void` or `await` operand ending a statement, are code. The `home-path` rule now requires a username segment that does not start with a dot, so username-less sandbox paths (a dot-directory directly under the home root) no longer block. Prose, config, and quoted hosts and real user home paths stay detected.
+
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
 - Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.

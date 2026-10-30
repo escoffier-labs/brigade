@@ -1030,6 +1030,15 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     # Complete earlier shell assignment words are opaque to code keywords.
     if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
+    # A unary operand that ends the statement (`delete process.env.HOME;`) is
+    # code. Prose keeps detection when more words follow the host.
+    if re.search(r"\b(?:delete|typeof|void|await)\s+$", before) and re.fullmatch(r"\s*;\s*", after):
+        return False
+    # An indented `key: value,` member with an unquoted value ending the line
+    # is an object-literal expression (`local: args.local,`). Quoted values were
+    # accepted above, and prose that continues after the comma stays detected.
+    if re.fullmatch(r"[ \t]+[A-Za-z_$][\w$]*:[ \t]*", before) and re.fullmatch(r"\s*,\s*", after):
+        return False
     if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
         return True
     if before.rstrip().endswith("("):
