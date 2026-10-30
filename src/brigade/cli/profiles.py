@@ -11,7 +11,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     profiles_sub.required = True
     p_profiles_list = profiles_sub.add_parser("list", help="List built-in component profiles.")
     p_profiles_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_profiles_show = profiles_sub.add_parser("show", help="Show one built-in station profile.")
+    p_profiles_show = profiles_sub.add_parser("show", help="Show one built-in component profile.")
     p_profiles_show.add_argument("profile", help="Profile name or alias.")
     p_profiles_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_profiles.set_defaults(func=dispatch)

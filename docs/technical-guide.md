@@ -2017,7 +2017,7 @@ The `brigade components` catalog command is unreleased, targeted for the next 0.
 > **In plain terms:** "components" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
 
 Some components can install and wire external tools for you.
-Run `brigade setup` first to install the code map and evidence log engines and their companion binaries from the running CLI's exact release manifest. Independent engine installation commands remain one-release compatibility paths and are not required after setup. Use `brigade add <component>` for component-specific tools that setup does not manage, then wire their default config.
+Run `brigade setup` first to install the code map and evidence log engines, their companion binaries, and `agent-notify` when published on the running CLI's exact release manifest. The `brigade add evidence` and `brigade add search` commands remain one-release compatibility paths and are not required after setup. Use `brigade add <component>` for component-specific tools that setup does not manage, then wire their default config.
 Tools are never imported in process; Brigade Stack shells out to each CLI, so the boundary stays model-neutral and mixed-language.
 `brigade add <path>` also discovers a local `station.json` manifest from an external component repo. The manifest path reports the component name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 

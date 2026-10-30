@@ -2,9 +2,7 @@ import json
 
 import pytest
 
-from brigade import cli
-
-from brigade import profiles, profiles_cmd, stations_cmd
+from brigade import cli, profiles, profiles_cmd, stations_cmd
 
 
 def test_repo_profile_selects_priority_stations():

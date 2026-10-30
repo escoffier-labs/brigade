@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
+
 - Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
 - Add the bundled `fleet-hub-upgrade` skill: a generic Hub-first upgrade checklist covering the node-to-Hub payload and `SCHEMA_VERSION` pre-flight diff, snapshot-and-switch Hub deploy with rollback, and node verification (#2167).
 

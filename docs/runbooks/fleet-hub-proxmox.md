@@ -702,9 +702,7 @@ delivery. JSON errors have a non-null local code for token-file validation,
 admin-token refusal, client-ID validation, spool conflicts, and other invalid
 arguments. Transport failures use `hub_unavailable`.
 
-<a id="fleet-mcp-station"></a>
-
-## Fleet MCP component
+## Fleet MCP station
 
 `brigade fleet mcp` exposes `fleet_who`, `fleet_send`, `fleet_inbox`, `fleet_ack`,
 `fleet_reply`, `fleet_sent`, and `fleet_claims` through the shared MCP harness.
@@ -712,7 +710,7 @@ Stdio is the default. Message bodies are fenced as `peer-message` data, with
 sender attribution outside the body and injection scan findings in `scan`.
 Findings remain visible alongside the message.
 
-The component uses the same credential resolution as `fleet msg`: an explicit
+The station uses the same credential resolution as `fleet msg`: an explicit
 `--principal-token-file PATH`, then `BRIGADE_FLEET_MESSAGE_TOKEN_FILE`, then the
 configured node token. Tool arguments cannot select a sender or credential.
 Admin credentials are refused. Agent recipient discovery follows send grants.
