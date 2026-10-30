@@ -878,3 +878,48 @@ def test_valid_release_stored_as_blob_cannot_free_scope_for_another_registration
     assert caught.value.code == "path-scope-unavailable"
     assert conn.total_changes == before
     assert ownership._external_current(conn, candidate)["state"] == "admitted"
+
+
+@pytest.mark.parametrize("external_state", ["unknown-text", "unknown-blob", "active", "released"])
+@pytest.mark.parametrize("legacy_type", ["ownership-released", "ownership-checkpoint"])
+def test_later_legacy_events_cannot_replace_external_scope_history(db, external_state, legacy_type):
+    conn, _ = db
+    work_id, _ = active(conn)
+    if external_state.startswith("unknown"):
+        raw_event(conn, work_id, "external-ownership-future", {})
+        if external_state == "unknown-blob":
+            conn.execute(
+                "UPDATE work_events SET event_type=? WHERE work_id=? AND event_type=?",
+                (sqlite3.Binary(b"external-ownership-future"), work_id, "external-ownership-future"),
+            )
+            conn.commit()
+    elif external_state == "released":
+        act(conn, work_id, {"action": "release", "generation": 1}, 2)
+    raw_event(
+        conn,
+        work_id,
+        legacy_type,
+        {
+            "action": "checkpoint",
+            "ownership": {
+                "state": "owned",
+                "owner_node": "node-a",
+                "holder_hash": "3" * 64,
+                "write_scope": [],
+            },
+        },
+    )
+    conn.execute("UPDATE work_events SET node_id='node-a' WHERE work_id=? AND event_type=?", (work_id, legacy_type))
+    conn.commit()
+    candidate, _ = offer(conn)
+    before = conn.total_changes
+    if external_state == "released":
+        assert register(conn, candidate)["state"] == "active"
+    else:
+        with pytest.raises(scope.ScopeAdmissionError) as caught:
+            register(conn, candidate)
+        assert caught.value.code == (
+            "path-scope-unavailable" if external_state.startswith("unknown") else "path-scope-conflict"
+        )
+        assert conn.total_changes == before
+        assert ownership._external_current(conn, candidate)["state"] == "admitted"

@@ -61,7 +61,7 @@ def _reject_reflection(digests: set[str], texts: list[str]) -> None:
 
 
 def _reservation_rows(conn: sqlite3.Connection, work_id: str) -> sqlite3.Cursor:
-    """Latest complete namespace first, excluding only trusted exact typed endings."""
+    """Latest row in the permanent ownership domain, excluding trusted typed endings."""
     from . import worklore_ownership as ownership
 
     # CASE nesting guards JSON access independently of SQL predicate ordering.
@@ -80,7 +80,10 @@ def _reservation_rows(conn: sqlite3.Connection, work_id: str) -> sqlite3.Cursor:
     return conn.execute(
         "SELECT e.work_id,substr(e.event_type,1,129),substr(e.node_id,1,?),"
         "substr(CAST(e.detail_json AS BLOB),1,?),substr(e.actor_type,1,16),substr(e.actor_id,1,129),e.seq "
-        "FROM work_events e JOIN (SELECT work_id,MAX(seq) AS seq FROM work_events WHERE work_id!=? AND "
+        # Once external history exists, later legacy rows cannot release or replace it.
+        "FROM work_events e JOIN (SELECT work_id,COALESCE(MAX(CASE WHEN "
+        + ownership._EXTERNAL_NAMESPACE_PREDICATE
+        + " THEN seq END),MAX(seq)) AS seq FROM work_events WHERE work_id!=? AND "
         + ownership._OWNERSHIP_PREDICATE
         + " GROUP BY work_id) latest ON e.work_id=latest.work_id AND e.seq=latest.seq "
         "WHERE (e.event_type IN (" + ",".join("?" for _ in retaining) + ") OR "
