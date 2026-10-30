@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
