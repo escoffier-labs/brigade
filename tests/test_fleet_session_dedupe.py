@@ -106,11 +106,14 @@ def test_provider_link_survives_missing_lookup_and_accepts_replacement(monkeypat
     fleet_hub_sessions.init_schema(conn)
     first = {"harness": "codex", "session_id": "first-session"}
     second = {"harness": "claude", "session_id": "second-session"}
-    for link in (first, None, second):
-        _, result = fleet_hub_sessions.handle_session(
-            conn, body("t3", "app-thread", provider_link=link), caller_node=NODE
-        )
-        assert result["session"]["provider_link"] == (first if link is None else link)
+    for updates, expected in (
+        ({"provider_link": first}, first),
+        ({}, first),
+        ({"provider_link": None}, None),
+        ({"provider_link": second}, second),
+    ):
+        _, result = fleet_hub_sessions.handle_session(conn, body("t3", "app-thread", **updates), caller_node=NODE)
+        assert result["session"].get("provider_link") == expected
     conn.close()
 
 

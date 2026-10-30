@@ -842,3 +842,26 @@ def test_nested_checkout_beneath_wired_workspace_is_renewed(setup):
     report = heartbeat.observe([nested], processes=processes, publisher=send, publish=True)
     assert report["live"] == report["published"] == 1
     assert sent == [inner]
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_heartbeat_roundtrip_preserves_provider_lookup_state(setup, known):
+    target, snapshot, _, sent, observe = setup
+    if known:
+        snapshot = replace(snapshot, provider_link=None)
+    _remember(snapshot)
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    record = anchored_io.read_json(target, name)
+    assert ("provider_link" in record["snapshot"]) is known
+    assert observe(publish=True)["published"] == 1
+    restored = sent[-1]
+    assert restored == snapshot
+    wire = fleet_client._session_request_body(replace(restored, harness="t3"), action="upsert")
+    assert ("provider_link" in wire) is known
+    if known:
+        assert wire["provider_link"] is None
+    # Hook-published Claude and Codex rows never carry observer enrichment.
+    for harness in ("claude", "codex"):
+        assert "provider_link" not in fleet_client._session_request_body(
+            replace(restored, harness=harness), action="upsert"
+        )

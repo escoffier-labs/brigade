@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Callable, TypeVar
 
 from .claude_hooks import anchored_io
-from .fleet_session_presence import DEFAULT_TTL_SECONDS, SessionSnapshot
+from .fleet_session_presence import DEFAULT_TTL_SECONDS, ProviderLinkState, SessionSnapshot
 from .fleet_session_process import ProcessTable
 
 SUFFIX = ".presence"
@@ -43,7 +43,10 @@ def publish_tracked(
     name = record_name(snapshot.harness, snapshot.session_id)
     with anchored_io.session_directory(target, create=True) as anchor:
         with anchor.held_lock(name + ".lock", deadline_seconds=2.25 if ended else LOCK_SECONDS):
-            record = {"version": 2, "enabled": False, "process": proof, "snapshot": asdict(snapshot)}
+            saved = asdict(snapshot)
+            if snapshot.provider_link is ProviderLinkState.UNKNOWN:
+                saved.pop("provider_link")
+            record = {"version": 2, "enabled": False, "process": proof, "snapshot": saved}
             # Disable the previous payload before sending. A failed write,
             # process crash, or failed state save cannot renew stale metadata.
             anchor.write_json(name, record)

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Sequence, cast
 
 from . import fleet_client, proc
-from .fleet_session_presence import SessionSnapshot, _parse_remote
+from .fleet_session_presence import ProviderLinkState, SessionSnapshot, _parse_remote
 
 WINDOW_SECONDS = 900
 TTL_SECONDS = 300
@@ -39,7 +39,7 @@ class RecentSession:
     session_id: str
     workspace: Path
     updated_at: int
-    provider_link: dict[str, str] | None = None
+    provider_link: dict[str, str] | None | ProviderLinkState = ProviderLinkState.UNKNOWN
 
 
 def _remaining(deadline: float, *, cap: float, reserve: float = 0) -> float:

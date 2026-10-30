@@ -16,6 +16,7 @@ import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
 from typing import Literal, Mapping, Sequence
 from urllib.parse import unquote, urlparse
@@ -91,6 +92,12 @@ class DirtyPathSnapshot:
     truncated: bool
 
 
+class ProviderLinkState(str, Enum):
+    """Unknown lookup preserves enrichment. None authoritatively removes it."""
+
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True)
 class SessionSnapshot:
     harness: str
@@ -104,7 +111,7 @@ class SessionSnapshot:
     dirty_truncated: bool
     ttl_seconds: int = DEFAULT_TTL_SECONDS
     cloud_context: Mapping[str, object] | None = None
-    provider_link: Mapping[str, str] | None = None
+    provider_link: Mapping[str, str] | None | ProviderLinkState = ProviderLinkState.UNKNOWN
 
 
 _IDENTITY_CACHE: dict[str, tuple[RepositoryIdentity, int | None]] = {}

@@ -32,6 +32,8 @@ from .fleet_openclaw_observer import (
     _select_publication_batch,
 )
 
+from .fleet_session_presence import ProviderLinkState
+
 NATIVE_TIMEOUT_SECONDS = 8
 DETAIL_RESERVE_SECONDS = 1.5
 MAX_THREADS = 10_000
@@ -89,6 +91,7 @@ try:
     if DETAIL_THREAD_IDS is not None:
         active = [row for row in active if row.get("id") in DETAIL_THREAD_IDS]
     linked = active if DETAIL_THREAD_IDS is not None or len(active) <= PUBLISH_LIMIT else []
+    UNKNOWN = object()
     def provider_link(row):
         active_provider = row.get("activeProviderThreadId")
         if not active_provider:
@@ -97,13 +100,15 @@ try:
             detail = client.thread_snapshot(row["id"])["thread"]
             if detail.get("activeProviderThreadId") != active_provider:
                 return None
-            provider = next(p for p in detail.get("providerThreads", []) if p.get("id") == active_provider)
+            provider = next((p for p in detail.get("providerThreads", []) if p.get("id") == active_provider), None)
+            if provider is None:
+                return None
             ref = provider.get("nativeThreadRef")
             harness = {"claudeAgent": "claude", "codex": "codex"}.get(provider.get("driver"))
             if harness and isinstance(ref, dict) and ref.get("strength") == "strong" and ref.get("driver") == provider.get("driver"):
                 return {"harness": harness, "session_id": ref.get("nativeId")}
         except Exception:
-            pass  # An unavailable link leaves a separate observation, never a guessed match.
+            return UNKNOWN  # Failed lookups cannot invalidate cached enrichment.
         return None
     # Optional links get at most 4s, and never the slack reserved to print the snapshot.
     detail_wait = min(4.0, BUDGET_SECONDS - RESERVE_SECONDS - (time.monotonic() - STARTED))
@@ -113,7 +118,7 @@ try:
     done, _ = wait(futures, timeout=max(detail_wait, 0)) if futures else (set(), set())
     for future in done:
         link = future.result()
-        if link is not None:
+        if link is not UNKNOWN:
             futures[future]["provider_link"] = link
     pool.shutdown(wait=False, cancel_futures=True)
     needed = {row.get("projectId") for row in active if isinstance(row.get("projectId"), str)}
@@ -185,14 +190,16 @@ def _presence_id(native_id: str) -> str:
         return "t3-" + hashlib.sha256(native_id.encode("utf-8")).hexdigest()
 
 
-def _optional_link(link: object) -> dict[str, str] | None:
-    """Return a valid provider link, or None: bad enrichment never drops the session."""
-    if not isinstance(link, dict) or link.get("harness") not in ("claude", "codex"):
+def _optional_link(link: object) -> dict[str, str] | None | ProviderLinkState:
+    """Malformed or missing enrichment is unknown. Only explicit null removes a link."""
+    if link is None:
         return None
+    if not isinstance(link, dict) or link.get("harness") not in ("claude", "codex"):
+        return ProviderLinkState.UNKNOWN
     try:
         return {"harness": link["harness"], "session_id": _opaque_id(link.get("session_id"))}
     except ObservationError:
-        return None
+        return ProviderLinkState.UNKNOWN
 
 
 def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
@@ -263,7 +270,7 @@ def _active_threads(payload: object) -> tuple[list[RecentSession], int, int]:
                 if project_id not in roots:
                     raise ObservationError("native_metadata_invalid")
                 raw = roots[project_id]
-            link = _optional_link(row.get("provider_link"))
+            link = _optional_link(row.get("provider_link", ProviderLinkState.UNKNOWN))
             active.append(RecentSession(session_id, _absolute_workspace(raw), now_ms, link))
         except ObservationError:
             invalid += 1
@@ -289,7 +296,10 @@ def _link_publication_batch(
         links = {(s.session_id, s.workspace): s.provider_link for s in details}
         return replace(
             batch,
-            selected=[replace(s, provider_link=links.get((s.session_id, s.workspace))) for s in batch.selected],
+            selected=[
+                replace(s, provider_link=links.get((s.session_id, s.workspace), ProviderLinkState.UNKNOWN))
+                for s in batch.selected
+            ],
         )
     except Exception:
         # Native details are optional. Keep the already validated shell batch.

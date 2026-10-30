@@ -362,7 +362,8 @@ def _validate_session_request(raw: object, *, caller_node: str | None) -> dict[s
         ):
             raise FleetHubError("session provider_link must identify a Claude or Codex session observed by T3")
         link = {"harness": link["harness"], "session_id": _opaque_id(link["session_id"], "provider_link.session_id")}
-    request["provider_link"] = link
+    if "provider_link" in raw:
+        request["provider_link"] = link
     return request
 
 
@@ -517,7 +518,8 @@ def _upsert_session(
         "ttl_seconds = excluded.ttl_seconds, "
         "expires_at = excluded.expires_at, "
         "cloud_context_json = excluded.cloud_context_json, "
-        "provider_link_json = COALESCE(excluded.provider_link_json, interactive_sessions.provider_link_json)",
+        "provider_link_json = CASE WHEN ? THEN excluded.provider_link_json "
+        "ELSE interactive_sessions.provider_link_json END",
         (
             request["node_id"],
             request["harness"],
@@ -534,8 +536,9 @@ def _upsert_session(
             request["ttl_seconds"],
             expires_at,
             cloud_json,
-            json.dumps(request["provider_link"]) if request["provider_link"] is not None else None,
+            json.dumps(request["provider_link"]) if request.get("provider_link") is not None else None,
             now,
+            "provider_link" in request,
         ),
     )
     payload = _fetch_session(

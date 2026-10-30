@@ -1316,8 +1316,10 @@ def _session_request_body(snapshot: SessionSnapshot, *, action: str, node_id: st
         return body
     if snapshot.cloud_context is not None:
         body["cloud_context"] = dict(snapshot.cloud_context)
-    if snapshot.provider_link is not None:
-        body["provider_link"] = dict(snapshot.provider_link)
+    from .fleet_session_presence import ProviderLinkState
+
+    if snapshot.harness == "t3" and not isinstance(snapshot.provider_link, ProviderLinkState):
+        body["provider_link"] = dict(snapshot.provider_link) if snapshot.provider_link is not None else None
     body.update(
         {
             "identity_scope": snapshot.identity_scope,
