@@ -126,7 +126,7 @@ def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
     from dataclasses import replace
 
     from .memory_reflect import _evidence_log
-    from .memory_reflect_candidates import Card, _evidence_id, _pending_rows
+    from .memory_reflect_candidates import Card, _evidence_id, _negative_outcome_bindings, _pending_rows
 
     ledger = _evidence_log(target)
     if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
@@ -140,6 +140,9 @@ def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
         card = Card(
             source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
         )
+        bindings, unresolved = _negative_outcome_bindings(target, card)
+        if bindings or unresolved:
+            raise legacy.ProposalError("current verification evidence needs review; refresh the candidate")
         cited = {_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)}
         if any(
             row["kind"] in ("opposite-polarity", "near-match") and row["evidence_id"] not in cited
@@ -188,22 +191,24 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     )
     support = {_evidence_id(ref) for ref in refs}
     invalid = _invalid_outcome_ids(target, card, set(list(newest)[: io.MAX_LIST]) | cited | support)
+    negative_pending = [row for row in _pending_rows(card) if row["kind"] == "negative-outcome"]
+    original_rows = rows
     rows = [row for row in rows if row["evidence_id"] not in invalid]
     card.rows = rows
     stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and row["evidence_id"] in support]
     if not stamps:
         return None
     stamp = max(stamps, key=_consolidation_boundary)
-    pending = _pending_rows(card)
+    pending = _pending_rows(card) + negative_pending
     if _timestamp(card.meta.get("last_consolidated")) is None:
         value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
         if not isinstance(value, str) or _timestamp(value) is None:
-            pending = rows
+            pending = rows + [row for row in original_rows if row["kind"] == "negative-outcome"]
     accounted = support | cited
     if any(
         row["kind"] != "reinforced"
         and _sort_timestamp(row["ts"]) <= _consolidation_boundary(stamp)
-        and _evidence_id(row["evidence_id"]) not in accounted
+        and (row["kind"] == "negative-outcome" or _evidence_id(row["evidence_id"]) not in accounted)
         for row in pending
     ):
         raise legacy.ProposalError("consolidation would hide uncited pending evidence")
