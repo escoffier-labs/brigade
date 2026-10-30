@@ -11,7 +11,7 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 
 ## Definition of Done
 
-Development slices use the focused gate through Brigade:
+During development and before opening a PR, run relevant focused checks through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work
@@ -22,8 +22,13 @@ check, managed snapshot, template-profile snapshot, mypy, and only the named
 pytest selectors. Report the actual result, paste any failure verbatim, and
 never claim success you did not observe.
 
-Reserve the full coverage gate for pull requests, merges, releases, and
-verification-infrastructure changes. Run it once through Brigade:
+Required CI supplies the final full-suite and coverage gate for code changes.
+Keep all required CI, coverage, review, and merge-queue gates intact. A successful
+equivalent required CI run does not require a duplicate local full run before
+PR or merge completion, including verification-infrastructure changes.
+
+Local full verification is explicit opt-in for CI reproduction, broad offline
+validation, or an operator request. When needed, run it through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work
@@ -33,20 +38,28 @@ brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 
 to retry status 75.
 
 Do not pass `--no-reuse` for a full gate. Status 75 means all full
-verification slots for this Git common directory are occupied. It must not be retried
+verification slots for this user on this host are occupied. It must not be retried
 with a larger timeout. Use `./scripts/verify-focused` or wait for an active
 Brigade receipt. Set `BRIGADE_VERIFY_WAIT=<seconds>` before starting a gate
 to wait for a slot within a bounded deadline.
 
 The full gate reuses CI's deterministic pytest hash shards, combines their
 coverage, and enforces the 78% floor once. `BRIGADE_VERIFY_SHARDS` overrides
-N (default: CPU count / 2, rounded down, bounded to 1 through 8).
-`BRIGADE_VERIFY_SLOTS` overrides K (default: max(1, CPU count / N, rounded
-down)). On 24 CPUs this permits three full gates with eight shards each.
-Overrides must be positive integers. Coordinate overrides across linked
-worktrees: each caller must use the same K to preserve the shared limit.
+N (default: CPU count / 2, rounded down, bounded to 1 through 4).
+`BRIGADE_VERIFY_SLOTS` overrides K (default: 1, independent of N).
+The default pool is shared across linked worktrees and separate clones under
+`/tmp/brigade-verify-<uid>/`, with owner-only directory and file permissions.
+Overrides must be positive integers. Coordinate overrides across all callers
+on the host: each must use the same K and lock path to share the limit.
 `BRIGADE_VERIFY_LOCK_PATH` names an existing slot directory or a file prefix.
+changing it creates a separate admission pool. Do not remove active lock files.
 The focused gate runs only named selectors, without coverage or full-gate slots.
+
+Reuse the existing passing Brigade receipt for unchanged code and the same
+planned command; do not create another cache. Reuse consults the latest receipt
+in the target workspace and its tree fingerprint. It does not discover another
+clone's receipts, wait for an active run, or certify changed environments,
+dependencies, or external state. An audit receipt is not required CI evidence.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
@@ -66,8 +79,8 @@ Format: trigger, then the rule, then what to do instead.
 
 - About to report a code change as complete: run focused verification through
   `brigade work verify run` with `./scripts/verify-focused` and the relevant
-  pytest selector. Reserve `./scripts/verify` for pull requests, merges,
-  releases, and verification-infrastructure changes. If you cannot run the
+  pytest selector. Required CI supplies final suite and coverage evidence.
+  `./scripts/verify` is optional local full validation. If you cannot run the
   focused gate, do not guess. Report the exact command and error that blocked
   you. Status 75 from the full gate must not be retried with a larger timeout.
 - A test fails after your change: never weaken, skip, or delete the test to
@@ -139,11 +152,10 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
   `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
   (or `./scripts/verify-focused <pytest-selector>` for a development slice)
 - Tests: `pytest -q` (full suite; expect a long run, ~30+ minutes)
-- Fast full gate while iterating: `./scripts/verify-fast` (same checks, pytest
-  parallelized via pytest-xdist, ~4 minutes). A few timing-sensitive tests flake
-  under parallel CPU load; re-run any parallel-only failure serially before
-  acting on it. Reserve the sharded `./scripts/verify` completion gate for pull
-  requests, merges, releases, and verification-infrastructure changes.
+- Development and pre-PR gate: `./scripts/verify-focused <pytest-selector>`.
+- Optional local full gate: `./scripts/verify`. `./scripts/verify-fast` delegates
+  to the same admission and shard limits. Positive integer `JOBS` values remain
+  a deprecated alias for `BRIGADE_VERIFY_SHARDS`. Unset `JOBS=auto` for defaults.
 - End-to-end smoke (same shape as CI `install-from-source`):
 
 ```bash

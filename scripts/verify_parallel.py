@@ -22,7 +22,7 @@ def positive_setting(name: str, default: int) -> int:
 
 
 def shard_count() -> int:
-    return positive_setting("BRIGADE_VERIFY_SHARDS", min(8, max(1, (os.cpu_count() or 1) // 2)))
+    return positive_setting("BRIGADE_VERIFY_SHARDS", min(4, max(1, (os.cpu_count() or 1) // 2)))
 
 
 def stop_process_group(process: subprocess.Popen, *, kill: bool = False) -> None:
@@ -45,6 +45,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"verify: {exc}", file=sys.stderr)
         return 2
     arguments = sys.argv[1:] if argv is None else argv
+    # scripts/verify execs this runner with its admission descriptor still open.
+    # Each shard retains it too, so killing the runner cannot free a live shard's
+    # slot. Ignore stale state inherited by nested test subprocesses.
+    lock_fds = ()
+    if os.name == "posix" and os.environ.get("BRIGADE_VERIFY_LOCK_HELD") == str(os.getpid()):
+        lock_fds = (int(os.environ["BRIGADE_VERIFY_LOCK_FD"]),)
     processes: list[subprocess.Popen] = []
     pending: set[subprocess.Popen] = set()
     totals = dict(passed=0, failed=0, skipped=0, errors=0)
@@ -95,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
                         stdout=log,
                         stderr=subprocess.STDOUT,
                         start_new_session=(os.name == "posix"),
+                        pass_fds=lock_fds,
                     )
                 )
                 pending.add(processes[-1])

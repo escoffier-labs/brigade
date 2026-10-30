@@ -1,4 +1,5 @@
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
@@ -6,6 +7,25 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("cpus,expected", [(None, 1), (1, 1), (2, 1), (4, 2), (8, 4), (24, 4)])
+def test_default_shards_bound_cpu_and_worker_use(monkeypatch, cpus, expected):
+    monkeypatch.delenv("BRIGADE_VERIFY_SHARDS", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: cpus)
+    runner = runpy.run_path(str(ROOT / "scripts/verify_parallel.py"))
+    assert runner["shard_count"]() == expected
+
+
+@pytest.mark.parametrize("setting", ["1", "7", "0", "-1", "auto"])
+def test_shards_require_positive_explicit_override(monkeypatch, setting):
+    monkeypatch.setenv("BRIGADE_VERIFY_SHARDS", setting)
+    runner = runpy.run_path(str(ROOT / "scripts/verify_parallel.py"))
+    if setting in {"1", "7"}:
+        assert runner["shard_count"]() == int(setting)
+    else:
+        with pytest.raises(ValueError):
+            runner["shard_count"]()
 
 
 @pytest.mark.parametrize("failing", [False, True])
@@ -80,6 +100,7 @@ def test_shard_runner_keeps_subtest_counts_separate(tmp_path):
 @pytest.mark.skipif(os.name != "posix", reason="process group cancellation is POSIX")
 @pytest.mark.parametrize("repeat", [False, True])
 def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
+    import fcntl
     import signal
     import time
 
@@ -102,6 +123,8 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
         + f"    subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
         "    time.sleep(30)\n"
     )
+    lock = (tmp_path / "full.lock").open("w")
+    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     runner = subprocess.Popen(
         [
             sys.executable,
@@ -114,7 +137,10 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        pass_fds=(lock.fileno(),),
     )
+    lock.close()
+    contender = (tmp_path / "full.lock").open("w")
     try:
         deadline = time.monotonic() + 15
         while not heartbeat.exists():
@@ -125,13 +151,18 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
         if repeat:
             time.sleep(0.7)
             runner.terminate()
+            # SIGTERM-resistant workers still own the resource during cleanup.
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
         runner.communicate(timeout=15)
         assert runner.returncode == 130
         time.sleep(0.2)
         stopped = heartbeat.read_text()
         time.sleep(0.2)
         assert heartbeat.read_text() == stopped
+        fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
     finally:
+        contender.close()
         if runner.poll() is None:
             runner.kill()
             runner.communicate()

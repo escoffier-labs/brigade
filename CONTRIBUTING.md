@@ -8,7 +8,7 @@ External contributions are welcome. This section is the short path. [Pull reques
 
 1. **Pick work.** Look for issues labeled `good first issue` or `help wanted`. If nothing fits, comment on an existing issue or open one before you spend time on a surprise scope.
 2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
-3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change: content-guard for docs, the focused gate while developing code, and the full gate before a code PR.
+3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change: content-guard for docs and relevant focused checks during development and before a code PR. Required CI supplies final full-suite and coverage evidence.
 4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
 5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge waits on the applicable review and gate rules in [Pull requests](#pull-requests), plus any explicit maintainer hold.
 
@@ -149,7 +149,15 @@ brigade guard scan CONTRIBUTING.md --policy src/brigade/guard/policies/public-re
 brigade guard scan README.md --policy src/brigade/guard/policies/public-repo.json
 ```
 
-**Code or test changes:** use the focused gate for bounded development slices. Run the full local gate before opening a code PR, merging, releasing, or changing verification infrastructure:
+**Code or test changes:** run relevant focused checks during development and
+before opening a PR. Required CI runs the final full-suite and coverage gate
+under the CI workload contract above. Preserve all required checks, coverage
+floors, review requirements, and merge-queue validation. When equivalent
+required CI succeeds, a duplicate local full run is not required before PR or
+merge completion, including changes to verification infrastructure.
+
+The local full gate is explicit opt-in for CI reproduction, broad offline
+validation, or an operator request:
 
 ```bash
 ./scripts/verify
@@ -161,28 +169,56 @@ prints each shard's pytest output, aggregates results, then combines coverage
 and enforces the 78% floor once. A failing shard fails the gate.
 
 `BRIGADE_VERIFY_SHARDS` sets the shard count (N). The default is half the CPU
-count, rounded down, with a minimum of one and a maximum of eight.
-`BRIGADE_VERIFY_SLOTS` sets concurrent full gates per Git common directory (K).
-Its default is max(1, CPU count / N, rounded down), so a 24-CPU host runs up to
-three gates of eight shards. Set consistent overrides across linked worktrees.
-Slot files are `brigade-full-verify.lock.<i>` under the Git common directory.
+count, rounded down, with a minimum of one and a maximum of four.
+`BRIGADE_VERIFY_SLOTS` sets concurrent full gates per user on the host (K).
+Its default is one regardless of shard count, including when N is lowered.
+Both overrides must be positive integers. All callers must use the same K and
+lock prefix to share the limit across linked worktrees and separate clones.
+Default slot files live under `/tmp/brigade-verify-<uid>/`, independent of Git,
+HOME, and temporary-directory environment variables. The directory requires
+owner-only access. Slot files require owner-only permissions and a single link.
+Symlinked slot files and final lock directories are rejected.
 `BRIGADE_VERIFY_LOCK_PATH` overrides their prefix or names an existing directory.
+Changing it creates a separate admission pool. Never remove an active lock file:
+that would let another process acquire a different inode for the same slot.
 All slots busy means exit 75. `BRIGADE_VERIFY_WAIT=<seconds>` optionally waits
 for a free slot until that deadline. Do not retry contention with a larger
 Brigade verification timeout or `--no-reuse`.
 
-While iterating, use the focused gate through Brigade. It runs lint, format,
-type and snapshot checks plus only the named tests. It does not acquire a full
-slot or enforce coverage. Use it for bounded development slices, then run the
-full gate for PRs and verification-infrastructure changes:
+During development and before a PR, use the focused gate through Brigade. It
+runs lint, format, type and snapshot checks plus only the named tests. It does not acquire a full
+slot or enforce coverage:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","tests/test_verify_script.py"]' --capture brigade-work
+```
+
+For an explicitly selected local full run, use:
+
+```bash
 brigade work verify run --target . --command "./scripts/verify" --timeout 3600 --capture brigade-work
 ```
 
-`./scripts/verify-fast` remains an optional pytest-xdist development helper.
-`JOBS=8` caps its worker count. It does not replace the full coverage gate.
+Existing receipt reuse checks the target workspace's latest completed passing
+receipt for the same tree fingerprint and planned command. Leave reuse enabled
+for unchanged code. It does not search other clones, wait for in-flight work,
+or fingerprint dependencies, environment variables, and external state. Review
+those limits when reproducing an environment-sensitive failure. Reuse does not
+replace current-head required CI or broaden a focused check into full coverage.
+
+`./scripts/verify-fast` delegates to `./scripts/verify` with identical admission,
+worker defaults, and coverage enforcement. Positive integer `JOBS` values remain
+a deprecated alias for `BRIGADE_VERIFY_SHARDS`. Unset `JOBS=auto` to use bounded
+defaults. Conflicting `JOBS` and `BRIGADE_VERIFY_SHARDS` values fail with guidance.
+
+On POSIX, the gate and shard workers retain the admission descriptor. Normal
+SIGINT/SIGTERM cancellation cleans up shard process groups before exit, including
+repeated cancellation. Forced termination of the runner retains admission while
+shard leaders live, but cannot guarantee cleanup of descendants that detach or
+close the descriptor after their leader is killed. Separate users, containers
+with private `/tmp`, old checkouts using Git-local locks, and explicit alternate
+lock paths do not share this pool. Bash/fcntl behavior needs POSIX validation;
+native Windows tests do not prove it.
 
 To smoke-test an install end-to-end the same way CI does:
 

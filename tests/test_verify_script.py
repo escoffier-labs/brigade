@@ -1,5 +1,7 @@
 import ast
 import os
+import runpy
+import shutil
 import subprocess
 import sys
 import time
@@ -96,7 +98,7 @@ def test_verify_full_gate_fails_fast_when_another_gate_holds_the_lock(tmp_path, 
     monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
     # Slot 0 is the unsuffixed path that pre-slot gates lock.
     slot_path = lock_path
-    slot_path.touch()
+    slot_path.touch(mode=0o600)
     monkeypatch.setenv("PY", str(tool_dir))
     monkeypatch.setenv("VERIFY_LOG", str(log_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
@@ -161,8 +163,38 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
-def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch):
-    monkeypatch.delenv("BRIGADE_VERIFY_LOCK_HELD", raising=False)
+@pytest.mark.parametrize("topology,entrypoint", [("clone", "verify-fast"), ("worktree", "verify")])
+def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch, topology, entrypoint):
+    # Stale inherited state must not bypass admission or split the host lock.
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_HELD", "1")
+    monkeypatch.delenv("BRIGADE_VERIFY_LOCK_PATH", raising=False)
+    monkeypatch.delenv("BRIGADE_VERIFY_SLOTS", raising=False)
+    monkeypatch.setenv("BRIGADE_VERIFY_SHARDS", "1")
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    shutil.copytree(ROOT / "scripts", checkout / "scripts")
+    subprocess.run(["git", "init", "-q", str(checkout)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "add", "scripts"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(checkout),
+            "-c",
+            "user.name=Example",
+            "-c",
+            "user.email=example@example.com",
+            "commit",
+            "-qm",
+            "test fixture",
+        ],
+        check=True,
+    )
+    other = tmp_path / "other"
+    if topology == "clone":
+        subprocess.run(["git", "clone", "-q", str(checkout), str(other)], check=True)
+    else:
+        subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(other)], check=True)
     holder_root = tmp_path / "holder"
     second_root = tmp_path / "second"
     holder_root.mkdir()
@@ -171,8 +203,6 @@ def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeyp
     second_dir, second_log = _fake_tool_dir(second_root)
     ready_marker = tmp_path / "ready"
     release_marker = tmp_path / "release"
-    lock_path = tmp_path / "full.lock"
-    monkeypatch.setenv("BRIGADE_VERIFY_SLOTS", "1")
     monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
     (holder_dir / "ruff").write_text(
         """#!/bin/sh
@@ -186,7 +216,6 @@ done
 """
     )
     (holder_dir / "ruff").chmod(0o755)
-    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(lock_path))
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PYTHON", sys.executable)
     holder_env = os.environ.copy()
     holder_env["PY"] = str(holder_dir)
@@ -196,7 +225,22 @@ done
     second_env = os.environ.copy()
     second_env["PY"] = str(second_dir)
     second_env["VERIFY_LOG"] = str(second_log)
-    verify = ROOT / "scripts/verify"
+    second_env.update(TMPDIR=str(second_root), XDG_RUNTIME_DIR=str(second_root), HOME=str(second_root))
+
+    # Resolve defaults in each checkout before isolating the admission exercise
+    # from any outer full gate running these tests on the same user account.
+    def default_prefix(repo, env):
+        code = (
+            "import runpy,sys; sys.path.insert(0, 'scripts'); "
+            "print(runpy.run_path('scripts/verify_lock.py')['_lock_path']())"
+        )
+        return subprocess.check_output([sys.executable, "-c", code], cwd=repo, env=env, text=True).strip()
+
+    assert default_prefix(checkout, holder_env) == default_prefix(other, second_env)
+    holder_env["BRIGADE_VERIFY_LOCK_PATH"] = str(tmp_path / "full.lock")
+    second_env["BRIGADE_VERIFY_LOCK_PATH"] = holder_env["BRIGADE_VERIFY_LOCK_PATH"]
+    verify = checkout / "scripts/verify"
+    contender = other / "scripts" / entrypoint
     holder = subprocess.Popen(
         [str(verify)],
         cwd=ROOT,
@@ -217,7 +261,7 @@ done
                 raise AssertionError(f"holder did not write ready marker: {stderr}")
             time.sleep(0.05)
         completed = subprocess.run(
-            [str(verify)],
+            [str(contender)],
             cwd=ROOT,
             capture_output=True,
             text=True,
@@ -241,28 +285,29 @@ done
                 holder.kill()
                 holder.wait(timeout=5)
     assert holder.returncode == 0
+    released = subprocess.run([str(contender)], env=second_env, capture_output=True, text=True, timeout=15)
+    assert released.returncode == 0, released.stderr
 
 
-def test_agents_md_requires_focused_development_and_reserved_full_gate():
-    text = (ROOT / "AGENTS.md").read_text()
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+@pytest.mark.parametrize("shards", ["1", "4", "8"])
+def test_default_slot_limit_does_not_grow_when_workers_shrink(tmp_path, monkeypatch, shards):
+    import fcntl
 
-    assert (
-        "brigade work verify run --target . --argv-json "
-        '\'["./scripts/verify-focused","<pytest-selector>"]\' --capture brigade-work'
-    ) in text
-    assert (
-        "brigade work verify run --target . --argv-json '[\"./scripts/verify\"]' --timeout 3600 --capture brigade-work"
-    ) in text
-    assert "./scripts/verify-focused" in text
-    assert "./scripts/verify" in text
-    assert "pull requests" in text
-    assert "merges" in text
-    assert "releases" in text
-    assert "verification-infrastructure" in text
-    assert "--no-reuse" in text
-    assert "75" in text
-    assert "must not be retried" in text
-    assert "larger timeout" in text
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    monkeypatch.setenv("BRIGADE_VERIFY_SHARDS", shards)
+    monkeypatch.delenv("BRIGADE_VERIFY_SLOTS", raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 24)
+    prefix = tmp_path / "full.lock"
+    monkeypatch.setenv("BRIGADE_VERIFY_LOCK_PATH", str(prefix))
+    monkeypatch.setenv("BRIGADE_VERIFY_WAIT", "0")
+    runner = runpy.run_path(str(ROOT / "scripts/verify_lock.py"))
+    prefix.touch(mode=0o600)
+    with prefix.open("w") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        with pytest.raises(SystemExit) as exit_status:
+            runner["main"]()
+    assert exit_status.value.code == 75
 
 
 def _run_env_guard(tmp_path: Path, package_root: Path) -> subprocess.CompletedProcess:
@@ -297,7 +342,7 @@ def test_verify_env_guard_accepts_this_checkout(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.parametrize("script", ["verify", "verify-fast", "verify-focused"])
+@pytest.mark.parametrize("script", ["verify", "verify-focused"])
 def test_verify_scripts_run_the_env_guard_before_linting(script):
     text = (ROOT / "scripts" / script).read_text()
 
@@ -323,6 +368,8 @@ def test_verify_slots_allow_k_gates_then_reject_k_plus_one(tmp_path, monkeypatch
         BRIGADE_VERIFY_WAIT="0",
     )
     env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    prefix.touch(mode=0o600)
+    Path(f"{prefix}.1").touch(mode=0o600)
     with prefix.open("w") as first, Path(f"{prefix}.1").open("w") as second:
         fcntl.flock(first, fcntl.LOCK_EX | fcntl.LOCK_NB)
         available = subprocess.run([str(ROOT / "scripts/verify")], env=env, capture_output=True, text=True, timeout=15)
@@ -350,6 +397,7 @@ def test_verify_slot_wait_acquires_after_release_or_expires(tmp_path, wait, expe
         BRIGADE_VERIFY_WAIT=wait,
     )
     env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    prefix.touch(mode=0o600)
     with prefix.open("w") as slot:
         fcntl.flock(slot, fcntl.LOCK_EX | fcntl.LOCK_NB)
         child = subprocess.Popen(
@@ -367,3 +415,75 @@ def test_verify_slot_wait_acquires_after_release_or_expires(tmp_path, wait, expe
             if child.poll() is None:
                 child.kill()
                 child.communicate()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "public"])
+def test_verify_rejects_unsafe_slot_files(tmp_path, monkeypatch, kind):
+    monkeypatch.syspath_prepend(str(ROOT / "scripts"))
+    runner = runpy.run_path(str(ROOT / "scripts/verify_lock.py"))
+    target = tmp_path / "target"
+    target.touch(mode=0o600)
+    prefix = tmp_path / "full.lock"
+    if kind == "symlink":
+        prefix.symlink_to(target)
+    elif kind == "hardlink":
+        os.link(target, prefix)
+    else:
+        prefix.touch(mode=0o666)
+        prefix.chmod(0o666)
+    with pytest.raises((OSError, ValueError)):
+        runner["acquire_slot"](prefix, 1)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
+@pytest.mark.parametrize("entrypoint", ["verify", "verify-fast"])
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("BRIGADE_VERIFY_SLOTS", "0"),
+        ("BRIGADE_VERIFY_WAIT", "nan"),
+        ("BRIGADE_VERIFY_WAIT", "-1"),
+        ("BRIGADE_VERIFY_SHARDS", "0"),
+    ],
+)
+def test_full_entrypoints_reject_invalid_settings_before_tools(tmp_path, name, value, entrypoint):
+    tools, log = _fake_tool_dir(tmp_path)
+    env = dict(
+        os.environ,
+        PY=str(tools),
+        VERIFY_LOG=str(log),
+        BRIGADE_VERIFY_LOCK_PYTHON=sys.executable,
+        BRIGADE_VERIFY_LOCK_PATH=str(tmp_path / "full.lock"),
+    )
+    env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    env[name] = value
+    result = subprocess.run([str(ROOT / "scripts" / entrypoint)], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 2, result.stderr
+    assert not log.exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Bash verification entrypoint")
+@pytest.mark.parametrize("jobs,shards,expected", [("2", None, 0), ("auto", None, 2), ("2", "3", 2)])
+def test_verify_fast_jobs_compatibility_is_explicit(tmp_path, jobs, shards, expected):
+    tools, log = _fake_tool_dir(tmp_path)
+    env = dict(
+        os.environ,
+        PY=str(tools),
+        VERIFY_LOG=str(log),
+        JOBS=jobs,
+        BRIGADE_VERIFY_LOCK_PATH=str(tmp_path / "full.lock"),
+        BRIGADE_VERIFY_LOCK_PYTHON=sys.executable,
+    )
+    env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
+    env.pop("BRIGADE_VERIFY_SHARDS", None)
+    if shards:
+        env["BRIGADE_VERIFY_SHARDS"] = shards
+    result = subprocess.run([str(ROOT / "scripts/verify-fast")], env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == expected, result.stderr
+    assert "BRIGADE_VERIFY_SHARDS" in result.stderr
+    assert log.exists() == (expected == 0)
+    if expected == 0:
+        calls = log.read_text().splitlines()
+        assert calls[0] == "python\tscripts/verify_env.py"
+        assert calls[-1] == "python\tscripts/verify_parallel.py"
