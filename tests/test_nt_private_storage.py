@@ -603,7 +603,8 @@ class TestNativePrivateStorage:
             assert stored_owner == owner_sid
             assert control & PROTECTED == PROTECTED
             assert aces == [(0, 3, FULL, owner_sid), (0, 3, 0x120089, everyone)]
-            # No creation descriptor: the held parent's inheritable ACEs supply the DACL.
+            # Native creation can return a legacy DACL with unflagged ACEs.
+            # Enable auto-inheritance explicitly for this fixture below.
             raw_child = nt_dirfd._nt_create(
                 nt_api,
                 parent,
@@ -614,10 +615,39 @@ class TestNativePrivateStorage:
                 attributes=0x80,
             )
             try:
+                created = self._stored_security(raw_child)
+                self._set_fixture_security(tmp_path / "inheriting" / "unsafe", "D:", information=4 | 0x20000000)
+                before = self._stored_security(raw_child)
                 # TokenOwner can differ from TokenUser. Set only the owner so
                 # the refusal reaches the DACL guard without changing inheritance.
                 self._set_fixture_security(tmp_path / "inheriting" / "unsafe", f"O:{owner}", information=1)
                 stored_owner, control, aces = self._stored_security(raw_child)
+                for stage, snapshot in (
+                    ("after-native-create", created),
+                    ("before-owner-update", before),
+                    ("after-owner-update", (stored_owner, control, aces)),
+                ):
+                    snapshot_owner, snapshot_control, snapshot_aces = snapshot
+                    # Report SID roles, never machine/account identifiers in CI output.
+                    print(
+                        stage,
+                        {
+                            "control": f"0x{snapshot_control:04x}",
+                            "owner_is_token_user": snapshot_owner == owner_sid,
+                            "aces": None
+                            if snapshot_aces is None
+                            else [
+                                (
+                                    kind,
+                                    flags,
+                                    f"0x{mask:08x}",
+                                    "token-user" if sid == owner_sid else "everyone" if sid == everyone else "other",
+                                )
+                                for kind, flags, mask, sid in snapshot_aces
+                            ],
+                        },
+                    )
+                assert (control, aces) == before[1:]  # Owner-only update preserves the inherited DACL.
                 assert stored_owner == owner_sid
                 assert control & 4 and not control & 0x1000
                 assert aces is not None
