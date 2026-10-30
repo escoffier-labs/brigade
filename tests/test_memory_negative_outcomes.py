@@ -599,15 +599,29 @@ def test_negative_receipt_disappears_without_blocking_healthy_cards(tmp_path, fa
         "failed-command",
         "missing-digest",
         "missing-schema",
+        "missing-manifest-identity",
+        "mismatched-manifest-identity",
     ],
 )
-def test_malformed_completed_receipt_cannot_become_generic_support(tmp_path, verified_card, corruption):
+def test_malformed_completed_receipt_cannot_become_generic_support(tmp_path, verified_card, corruption, monkeypatch):
     from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
     from tests.test_memory_reflect import evidence, log as write_log
 
     path, receipt = verified_card
+    if corruption in {"missing-manifest-identity", "mismatched-manifest-identity"}:
+        from tests.test_verify_trial import _run_manifest_verify, _write_fixture_manifest, _write_skill_subject
+
+        _write_skill_subject(tmp_path)
+        _write_fixture_manifest(tmp_path)
+        receipt = _run_manifest_verify(tmp_path, "test-skill-fixture", monkeypatch=monkeypatch, start_session=False)
+        assert receipt["subject_binding"]["artifact_kind"] == "skill"
+        assert verify_trial.project_trial(receipt, target=tmp_path).eligible
     ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
-    if corruption == "empty-binding":
+    if corruption == "missing-manifest-identity":
+        receipt.pop("verify_manifest_id")
+    elif corruption == "mismatched-manifest-identity":
+        receipt["verify_manifest_id"] = "other-manifest"
+    elif corruption == "empty-binding":
         receipt["subject_binding"] = {}
     elif corruption == "null-binding":
         receipt["subject_binding"] = None

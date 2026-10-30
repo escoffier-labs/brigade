@@ -157,6 +157,8 @@ def _generic_completed_verify(receipt: dict[str, Any], run_id: str, *, native: b
         and all(isinstance(binding.get(key), str) and binding[key] for key in ("artifact_id", "content_fingerprint"))
         and isinstance(binding.get("manifest_binding"), dict)
         and verify_trial._manifest_binding_structure_complete(binding["manifest_binding"])
+        and isinstance(receipt.get("verify_manifest_id"), str)
+        and receipt["verify_manifest_id"] == binding["manifest_binding"]["manifest_id"]
         and verify_trial._verifier_identity_complete(binding)
     )
 
