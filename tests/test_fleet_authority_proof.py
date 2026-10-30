@@ -992,7 +992,7 @@ def test_plan_uses_consumer_launch_bindings_not_seat_native_inference(monkeypatc
     assert payload["binding"]["instance_id"] == "cursor"
 
 
-def _accept_route(conn):
+def _accept_route(conn, *, consumer="t3-fleet", brigade_model=None, launch_overrides=None):
     from brigade import fleet_hub_routing
 
     _activate(conn)
@@ -1002,6 +1002,10 @@ def _accept_route(conn):
     document["routing"]["enabled"] = True
     document["routing"]["workload_requirements"] = {"general": {"os": "linux", "capabilities": []}}
     document["seats"][SEAT]["bindings"]["native"] = {"instance_id": "inst-alpha", "model": "provider-a/native-model"}
+    if brigade_model is not None:
+        document["seats"][SEAT]["bindings"]["brigade"]["model"] = brigade_model
+    for name, launch_model in (launch_overrides or {}).items():
+        document["consumers"][name]["seat_bindings"] = {SEAT: {"native": {"model": launch_model}}}
     document["machines"]["worker-linux-1"]["concurrency"] = 1
     fleet_hub_policy.save_policy(conn, document, expected_version=current["revision"], actor="test", reason="route")
     fleet_hub_routing.observe_machine(
@@ -1019,7 +1023,7 @@ def _accept_route(conn):
         conn,
         {
             "action": "route",
-            "consumer": "t3-fleet",
+            "consumer": consumer,
             "session_id": SESSION,
             "repo_identity": REPO,
             "origin": "worker-linux-1",
@@ -1043,6 +1047,56 @@ def _accept_state(conn):
         conn.execute("SELECT * FROM fleet_dispatch_intents").fetchall(),
         conn.execute("SELECT * FROM model_leases").fetchall(),
     )
+
+
+@pytest.mark.parametrize("consumer", ["brigade-run", "t3-fleet"])
+@pytest.mark.parametrize("accepted_first", [False, True])
+@pytest.mark.parametrize("identity", [MODEL, "provider-a/native-model", "provider-a/brigade-model"])
+def test_reservation_accept_rechecks_operator_retirement_without_policy_change(
+    conn, consumer, accepted_first, identity
+):
+    body = _accept_route(conn, consumer=consumer, brigade_model="provider-a/brigade-model")
+    if accepted_first:
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    policy = fleet_hub_policy.current_policy(conn)
+    conn.execute(
+        "INSERT INTO retired_models (provider, family, match_kind, permanent, reason_code, created_at) "
+        "VALUES (?, ?, 'family-prefix', 0, 'operator-retired', ?)",
+        (PROVIDER, identity, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before
+    current = fleet_hub_policy.current_policy(conn)
+    assert (current["revision"], current["digest"]) == (policy["revision"], policy["digest"])
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("selected_consumer", [True, False])
+def test_reservation_accept_scopes_overrides_and_retains_base_identity(conn, selected_consumer):
+    overrides = {
+        "t3-fleet" if selected_consumer else "brigade-run": "provider-a/override-model",
+    }
+    body = _accept_route(conn, launch_overrides=overrides)
+    retired = "provider-a/native-model" if selected_consumer else "provider-a/override-model"
+    conn.execute(
+        "INSERT INTO retired_models (provider, family, match_kind, permanent, reason_code, created_at) "
+        "VALUES (?, ?, 'family-prefix', 0, 'operator-retired', ?)",
+        (PROVIDER, retired, datetime.now(timezone.utc).isoformat()),
+    )
+    conn.commit()
+    before = _accept_state(conn)
+    if selected_consumer:
+        with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
+            fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert _accept_state(conn) == before
+    else:
+        _, result = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert result["state"] == "accepted"
+        assert result["reservation_id"] == body["reservation_id"]
+    assert not conn.in_transaction
 
 
 def test_reservation_accept_replays_without_renewal_and_preserves_lifecycle(conn):

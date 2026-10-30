@@ -842,6 +842,8 @@ def handle_policy(
 
 def _accept_reservation(conn: Any, body: Mapping[str, Any], caller_node: str) -> dict[str, Any]:
     """Validate the stored authority and claim it within handle_policy's transaction."""
+    from . import fleet_hub_model_roster
+
     parsed = fleet_hub_routing._reservation_request(body)
     row = fleet_hub_routing._load_reservation(conn, parsed)
     decision = fleet_hub_routing._decision_row(conn, decision_id=parsed["decision_id"])
@@ -890,11 +892,10 @@ def _accept_reservation(conn: Any, body: Mapping[str, Any], caller_node: str) ->
     )
     seat = document["seats"][row["seat"]]
     bindings = fleet_policy.effective_seat_bindings(document, consumer, row["seat"])
-    native = bindings.get("native") or {}
-    t3 = bindings.get("t3_fleet") or {}
-    launch_model = native.get("model") or t3.get("model") or seat["model"]
-    if fleet_model_roster.retired_reason(seat["provider"], seat["model"]) or fleet_model_roster.retired_reason(
-        seat["provider"], launch_model
+    retirements = fleet_hub_model_roster.raw_retired_rows(conn)
+    if any(
+        fleet_model_roster.retired_reason(seat["provider"], identity, retirements)
+        for identity in fleet_model_roster.binding_launch_models(seat, launch_groups=bindings)
     ):
         raise _error("retired", "the selected model is retired")
     if not row["accepted"]:
