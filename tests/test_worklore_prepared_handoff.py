@@ -390,3 +390,70 @@ def test_bounded_indexed_reads_ignore_unrelated_event_history(ledger):
     assert "work_events_attempt_work_seq" in plan
     assert "TEMP B-TREE" not in plan
     assert "detail_json" not in selects[0] and "LIMIT 51" in selects[0]
+
+
+@pytest.mark.parametrize(
+    "event_type,detail",
+    [
+        ("external-ownership-admitted", {"external_ownership_version": 1, "action": "admit"}),
+        ("external-ownership-released", {"external_ownership_version": 1, "action": "release"}),
+        ("external-ownership-future", {"external_ownership_version": 2}),
+        ("external-ownership-REGISTERED", {}),
+    ],
+)
+def test_external_history_refuses_prepared_handoff_even_before_newer_legacy_rows(ledger, event_type, detail):
+    conn, work_id, _ = ledger
+    store._append_event(
+        conn,
+        work_id=work_id,
+        event_type=event_type,
+        from_status=None,
+        to_status=None,
+        actor_id="admin",
+        actor_type="admin",
+        now=STAMP,
+        detail=detail,
+    )
+    store._append_event(
+        conn,
+        work_id=work_id,
+        event_type="ownership-released",
+        from_status=None,
+        to_status=None,
+        actor_id="node-a",
+        actor_type="node",
+        now=STAMP,
+        detail={"action": "release", "ownership": ownership._initial()},
+    )
+    conn.commit()
+    with pytest.raises(store.WorkloreConflict) as caught:
+        query(conn, work_id)
+    assert caught.value.code == "ownership-conflict"
+    assert not conn.in_transaction
+
+
+def test_external_history_probe_is_binary_index_bounded_and_preserves_legacy_seeks(ledger):
+    conn, work_id, _ = ledger
+    store._append_event(
+        conn,
+        work_id=work_id,
+        event_type="External-ownership-future",
+        from_status=None,
+        to_status=None,
+        actor_id="admin",
+        actor_type="admin",
+        now=STAMP,
+        detail={},
+    )
+    conn.commit()
+    statements = []
+    conn.set_trace_callback(statements.append)
+    assert query(conn, work_id)["ownership"]["state"] == "unowned"
+    conn.set_trace_callback(None)
+    probes = [sql for sql in statements if "external-ownership-" in sql]
+    assert len(probes) == 1
+    plan = " ".join(str(row) for row in conn.execute("EXPLAIN QUERY PLAN " + probes[0]))
+    assert "COVERING INDEX" in plan and "event_type>? AND event_type<?" in plan
+    assert "SCAN work_events" not in plan and "TEMP B-TREE" not in plan
+    seeks = [sql for sql in statements if "SELECT seq, detail_json" in sql]
+    assert len(seeks) == len(ownership.EVENT_TYPES)
