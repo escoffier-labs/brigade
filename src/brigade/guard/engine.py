@@ -306,8 +306,9 @@ _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w
 _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
 # Receivers whose dotted members are code in practice and implausible as host
 # labels. Words that double as device or service names (context, input, ctx,
-# self, window, module) are deliberately excluded.
-_JS_RECEIVER = r"(?:args|argv|options|opts|params|props|this|process|globalThis)"
+# self, window, module, bare process) are deliberately excluded; `process` is
+# accepted only as `process.env`.
+_JS_RECEIVER = r"(?:(?:args|argv|options|opts|params|props|this|globalThis)|process\.env)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:

@@ -51,6 +51,8 @@ def test_code_shaped_members_are_not_hostnames(text: str) -> None:
         "delete context" + ".internal;",
         "  primary: input" + ".lan,",
         "  primary: ctx" + ".corp,",
+        "  primary: process" + ".internal,",
+        "delete process" + ".internal;",
     ],
 )
 def test_prose_config_and_quoted_hosts_stay_detected(text: str) -> None:
