@@ -786,3 +786,82 @@ def test_versioned_claude_owner_requires_verified_native_installation(tmp_path, 
     assert table.owner("claude") == (proof if native_layout else None)
     binary.chmod(0o777)
     assert not table.alive(proof, "claude")
+
+
+def test_legacy_attribution_records_are_not_renewed(setup):
+    target, snapshot, _, sent, observe = setup
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    record = anchored_io.read_json(target, name)
+    record["version"] = 1
+    anchored_io.write_json(target, name, record)
+    assert observe(publish=True)["published"] == 0
+    assert sent == []
+    # The next correctly attributed hook replaces the legacy sidecar.
+    _remember(snapshot)
+    assert observe(publish=True)["published"] == 1
+
+
+def test_secondary_legacy_checkout_does_not_survive_primary_root_refresh(setup):
+    from brigade.config import Config, write_config
+    from brigade.selection import Selection
+
+    target, snapshot, processes, sent, _ = setup
+    secondary = target / "other"
+    write_config(secondary, Config(version=1, selection=Selection(depth="repo", harnesses=("claude",))))
+    wrong = replace(snapshot, checkout_path=str(secondary), repo_identity="github.com/example/other")
+    _remember(wrong)
+    name = state.record_name(wrong.harness, wrong.session_id)
+    record = anchored_io.read_json(secondary, name)
+    record["version"] = 1
+    anchored_io.write_json(secondary, name, record)
+    report = heartbeat.observe(
+        [secondary, target],
+        processes=processes,
+        publish=True,
+        publisher=lambda s: sent.append(s) or fleet_client.SessionWriteResult(ok=True),
+    )
+    assert report["published"] == 1
+    assert sent == [snapshot]
+
+
+def test_nested_checkout_beneath_wired_workspace_is_renewed(setup):
+    import subprocess
+    from dataclasses import replace
+
+    target, snapshot, processes, sent, _ = setup
+    nested = target / "checkouts" / "inner"
+    nested.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested)], check=True)
+    inner = replace(snapshot, session_id="session-nested", checkout_path=str(nested))
+    _remember(inner)
+
+    def send(value):
+        sent.append(value)
+        return fleet_client.SessionWriteResult(ok=True)
+
+    report = heartbeat.observe([nested], processes=processes, publisher=send, publish=True)
+    assert report["live"] == report["published"] == 1
+    assert sent == [inner]
+
+
+@pytest.mark.parametrize("known", [False, True])
+def test_heartbeat_roundtrip_preserves_provider_lookup_state(setup, known):
+    target, snapshot, _, sent, observe = setup
+    if known:
+        snapshot = replace(snapshot, provider_link=None)
+    _remember(snapshot)
+    name = state.record_name(snapshot.harness, snapshot.session_id)
+    record = anchored_io.read_json(target, name)
+    assert ("provider_link" in record["snapshot"]) is known
+    assert observe(publish=True)["published"] == 1
+    restored = sent[-1]
+    assert restored == snapshot
+    wire = fleet_client._session_request_body(replace(restored, harness="t3"), action="upsert")
+    assert ("provider_link" in wire) is known
+    if known:
+        assert wire["provider_link"] is None
+    # Hook-published Claude and Codex rows never carry observer enrichment.
+    for harness in ("claude", "codex"):
+        assert "provider_link" not in fleet_client._session_request_body(
+            replace(restored, harness=harness), action="upsert"
+        )

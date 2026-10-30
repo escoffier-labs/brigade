@@ -274,6 +274,11 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 # Register nullable additions here so current-version databases self-heal too.
 _ADDITIVE_COLUMNS = (
     (
+        "interactive_sessions",
+        "provider_link_json",
+        "ALTER TABLE interactive_sessions ADD COLUMN provider_link_json TEXT",
+    ),
+    (
         "fleet_message_principals",
         "role",
         "ALTER TABLE fleet_message_principals ADD COLUMN role TEXT NOT NULL DEFAULT 'agent'",
