@@ -1226,3 +1226,35 @@ def test_d4_identity_and_migration_read_use_one_snapshot(hub):
         assert ids.identity(hub) == replacement
     finally:
         reader.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("proof_kind", ["malformed-json", "malformed-object", "unrelated"])
+def test_d4_retained_migration_blocks_keys_until_admin_cleanup(hub, legacy, proof_kind):
+    from brigade import fleet_hub_identity as ids
+
+    a = _d4_identity()
+    old = record("node-b", seed=2, hub=a["hub_id"])
+    publish(hub, old)
+    ids.upload_identity(hub, a)
+    bad = {"malformed-json": "{", "malformed-object": "{}", "unrelated": json.dumps(_d4_migration(_d4_identity(1, 1)))}[
+        proof_kind
+    ]
+    hub.execute("INSERT INTO hub_meta VALUES('migration',?)", (bad,))
+    if legacy:
+        hub.execute("DELETE FROM hub_meta WHERE key='identity_marks'")
+    hub.commit()
+    before_keys = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    before_meta = _d4_meta(hub)
+    marks = hub.execute("SELECT value FROM hub_meta WHERE key='identity_marks'").fetchone()
+    successor = record("node-b", seed=4, hub=a["hub_id"], prev_kid=old["kid"], prev_sig=binary(bytes(64)))
+    with pytest.raises(messages.MessageError) as error:
+        publish(hub, successor)
+    assert error.value.code == "hub_identity_invalid"
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before_keys
+    assert _d4_meta(hub) == before_meta
+    assert ids.upload_identity(hub, a) == a
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone() is None
+    if marks is not None:
+        assert hub.execute("SELECT value FROM hub_meta WHERE key='identity_marks'").fetchone() == marks
+    assert publish(hub, successor)[1]["key"]["record"] == successor

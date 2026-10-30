@@ -1797,10 +1797,18 @@ def d4_hub(tmp_path):
 @pytest.mark.parametrize(
     "sender_current,recipient_current", [(False, False), (True, False), (False, True), (True, True)]
 )
-def test_d4_new_envelope_requires_both_current_hub_key_records(d4_hub, sender_current, recipient_current):
+def test_d4_new_envelope_requires_both_current_hub_key_records(d4_hub, monkeypatch, sender_current, recipient_current):
     from brigade import fleet_hub_identity as ids
     from tests.test_fleet_hub_message_keys import _d4_identity
 
+    from brigade import fleet_hub_events as events
+
+    monkeypatch.setattr(events, "_CONFIG", events.EventsConfig(frozenset({"callback.invalid"})))
+    d4_hub.execute(
+        "INSERT INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,created_at) "
+        "VALUES('sub-d4-records','node-b','message.created','{}','node-b','https://callback.invalid/events','fixture-only',0)"
+    )
+    d4_hub.commit()
     hub = d4_hub
     a, b = _d4_identity(), _d4_identity(1, 1)
     ids.upload_identity(hub, a)
@@ -1829,7 +1837,7 @@ def test_d4_new_envelope_requires_both_current_hub_key_records(d4_hub, sender_cu
     if sender_current and recipient_current:
         accepted = send(hub, current)
         assert accepted["envelope"] == current
-        expected = [before[0] + 1, before[1] + 1, before[2]]
+        expected = [before[0] + 1, before[1] + 1, before[2] + 1]
     else:
         with pytest.raises(messages.MessageConflict) as error:
             send(hub, current)
@@ -1840,3 +1848,53 @@ def test_d4_new_envelope_requires_both_current_hub_key_records(d4_hub, sender_cu
         hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         for table in ("fleet_messages", "fleet_message_sends", "fleet_events")
     ] == expected
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("proof_kind", ["malformed-json", "malformed-object", "unrelated"])
+def test_d4_retained_migration_blocks_new_send_but_preserves_retry_and_cleanup(d4_hub, legacy, proof_kind):
+    from brigade import fleet_hub_identity as ids
+    from tests.test_fleet_hub_message_keys import _d4_identity, _d4_migration, _d4_meta
+
+    hub = d4_hub
+    a = _d4_identity()
+    ids.upload_identity(hub, a)
+    original = envelope(hub=a["hub_id"])
+    accepted = send(hub, original)
+    bad = {"malformed-json": "{", "malformed-object": "{}", "unrelated": json.dumps(_d4_migration(_d4_identity(1, 1)))}[
+        proof_kind
+    ]
+    hub.execute("INSERT INTO hub_meta VALUES('migration',?)", (bad,))
+    if legacy:
+        hub.execute("DELETE FROM hub_meta WHERE key='identity_marks'")
+    hub.commit()
+    before_meta = _d4_meta(hub)
+    before_keys = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    tables = ("fleet_messages", "fleet_message_sends", "fleet_events")
+    counts = [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+    fresh = envelope(hub=a["hub_id"], client_id="d4-after-cleanup")
+    with pytest.raises(messages.MessageError) as error:
+        send(hub, fresh)
+    assert error.value.code == "hub_identity_invalid"
+    assert send(hub, original) == accepted
+    assert [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == counts
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before_keys
+    assert _d4_meta(hub) == before_meta
+    assert ids.upload_identity(hub, a) == a
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone() is None
+    current = send(hub, fresh)
+    assert send(hub, fresh) == current
+    assert [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == [
+        counts[0] + 1,
+        counts[1] + 1,
+        counts[2],
+    ]
+
+
+def test_d4_unconfigured_hub_preserves_foreign_envelope_storage(hub):
+    from tests.test_fleet_hub_message_keys import _d4_identity
+
+    assert hub.execute("SELECT COUNT(*) FROM hub_meta").fetchone()[0] == 0
+    raw = envelope(hub=_d4_identity(3)["hub_id"], client_id="unconfigured-foreign")
+    assert send(hub, raw)["envelope"] == raw
+    assert hub.execute("SELECT COUNT(*) FROM hub_meta").fetchone()[0] == 0

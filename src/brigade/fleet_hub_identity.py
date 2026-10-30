@@ -178,6 +178,13 @@ def _installed(conn: sqlite3.Connection) -> tuple[dict[str, Any] | None, dict[st
 def require_current_hub(conn: sqlite3.Connection, hub: str) -> bool:
     """Fence new writes and report configured state under the caller's writer lock."""
     value, _ = _installed(conn)
+    if value is not None:
+        retained = conn.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone()
+        if retained is not None:
+            try:
+                _migration(json.loads(retained[0]), value)
+            except (MessageError, ValueError, TypeError, RecursionError, UnicodeError):
+                raise MessageError("installed Hub migration metadata is invalid", code="hub_identity_invalid") from None
     if value is not None and value["hub_id"] != hub:
         raise MessageConflict("Hub identity changed", code="hub_identity_changed")
     return value is not None
