@@ -495,7 +495,24 @@ def test_identity_upload_requires_admin_and_matching_hub_id(hub):
         )
         assert request(address, "POST", "/mesh/identity", "fixture-admin", value)[0] == 200
         assert request(address, "GET", "/mesh/identity") == (200, value)
-        migration = {"old_hub_id": value["hub_id"], "new_hub_id": value["hub_id"], "sig": "opaque"}
+        migration = {
+            "v": 1,
+            "old_hub_id": "h_" + binary(bytes(16)),
+            "new_hub_id": value["hub_id"],
+            "new_hub_sig_pub": value["hub_sig_pub"],
+            "new_identity_seq": value["seq"],
+            "new_identity_sha256": binary(
+                hashlib.sha256(
+                    json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode(
+                        "ascii"
+                    )
+                ).digest()
+            ),
+            "endpoint": value["endpoint"],
+            "created_at": value["created_at"],
+            "seq": 1,
+            "sig": binary(bytes(64)),
+        }
         assert (
             request(address, "POST", "/mesh/identity", "fixture-admin", {"identity": value, "migration": migration})[0]
             == 200
@@ -797,3 +814,447 @@ def test_statement_aggregate_wire_bound_is_atomic(hub):
                 assert json.loads(body) == {"statements": {**statements, "revocation": valid}}
             finally:
                 connection.close()
+
+
+def _d4_identity(seed=0, seq=7, **changes):
+    value = identity()
+    public = bytes([seed]) * 32
+    value.update(
+        hub_sig_pub=binary(public),
+        hub_id="h_" + binary(hashlib.sha256(b"brigade-mesh/v1/hub-id\0" + public).digest()[:16]),
+        seq=seq,
+    )
+    return {**value, **changes}
+
+
+def _d4_migration(value, old=None):
+    return {
+        "v": 1,
+        "old_hub_id": (old or _d4_identity(9))["hub_id"],
+        "new_hub_id": value["hub_id"],
+        "new_hub_sig_pub": value["hub_sig_pub"],
+        "new_identity_seq": value["seq"],
+        "new_identity_sha256": binary(
+            hashlib.sha256(
+                json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode(
+                    "ascii"
+                )
+            ).digest()
+        ),
+        "endpoint": value["endpoint"],
+        "created_at": value["created_at"],
+        "seq": 1,
+        "sig": binary(bytes(64)),
+    }
+
+
+def _d4_meta(conn):
+    return conn.execute("SELECT key,value FROM hub_meta ORDER BY key").fetchall()
+
+
+def test_d4_signer_history_and_canonical_replay(hub):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    ids.upload_identity(hub, b)
+    before = _d4_meta(hub)
+    assert ids.upload_identity(hub, dict(reversed(list(a.items())))) == b
+    assert _d4_meta(hub) == before
+    for value, code in (
+        ({**a, "seq": 6}, "signed_statement_rollback"),
+        ({**a, "sig": binary(bytes([1]) * 64)}, "signed_statement_conflict"),
+        ({**a, "future": True}, "signed_statement_conflict"),
+    ):
+        with pytest.raises(messages.MessageConflict) as error:
+            ids.upload_identity(hub, value)
+        assert error.value.code == code
+        assert _d4_meta(hub) == before
+    assert ids.upload_identity(hub, {**a, "seq": 8})["seq"] == 8
+
+
+def test_d4_legacy_seed_and_nested_rollback(hub):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    hub.execute("INSERT INTO hub_meta VALUES('identity',?)", (json.dumps(a),))
+    hub.commit()
+    hub.execute("BEGIN")
+    hub.execute("INSERT INTO hub_meta VALUES('unrelated','kept')")
+    ids.upload_identity(hub, b)
+    assert hub.in_transaction
+    hub.rollback()
+    assert ids.identity(hub) == a
+    ids.upload_identity(hub, b)
+    with pytest.raises(messages.MessageConflict):
+        ids.upload_identity(hub, {**a, "seq": 6})
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"new_identity_seq": 8},
+        {"new_identity_sha256": binary(bytes(32))},
+        {"endpoint": "https://other.invalid"},
+        {"new_hub_sig_pub": binary(bytes([3]) * 32)},
+        {"old_hub_id": "invalid"},
+        {"seq": True},
+        {"sig": "opaque"},
+        {"extra": 1},
+    ],
+)
+def test_d4_migration_pairing_is_atomic(hub, change):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    before = _d4_meta(hub)
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, {"identity": b, "migration": {**_d4_migration(b, a), **change}})
+    assert error.value.code == "hub_migration_invalid"
+    assert _d4_meta(hub) == before
+
+
+def test_d4_migration_cleanup(hub):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    proof = _d4_migration(b, a)
+    ids.upload_identity(hub, {"identity": b, "migration": proof})
+    assert ids.upload_identity(hub, b) == {"identity": b, "migration": proof}
+    ids.upload_identity(hub, {**b, "seq": 2})
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone() is None
+    hub.execute("INSERT INTO hub_meta VALUES('migration','broken')")
+    hub.commit()
+    ids.upload_identity(hub, {**b, "seq": 3})
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone() is None
+
+
+def test_d4_publish_fence_preserves_history_and_caller_work(hub):
+    from brigade import fleet_hub_identity as ids, fleet_hub_message_keys as keys
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    old = record(hub=a["hub_id"])
+    keys.publish(hub, {"action": "keys_publish", "record": old}, caller="node-b")
+    assert hub.in_transaction
+    hub.commit()
+    ids.upload_identity(hub, b)
+    hub.execute("INSERT INTO hub_meta VALUES('unrelated','kept')")
+    before = hub.execute("SELECT * FROM fleet_message_keys").fetchall()
+    with pytest.raises(messages.MessageConflict) as error:
+        keys.publish(
+            hub,
+            {
+                "action": "keys_publish",
+                "record": record(seed=2, hub=a["hub_id"], prev_kid=old["kid"], prev_sig=binary(bytes(64))),
+            },
+            caller="node-b",
+        )
+    assert error.value.code == "hub_identity_changed"
+    assert hub.execute("SELECT * FROM fleet_message_keys").fetchall() == before
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='unrelated'").fetchone() == ("kept",)
+    assert action(hub, "keys_get", kid=old["kid"])[1]["key"]["record"] == old
+    hub.rollback()
+
+
+@pytest.mark.parametrize(
+    "key,value", [("identity", "{}"), ("identity", "broken"), ("identity_marks", "{}"), ("migration", "{}")]
+)
+def test_d4_corrupt_metadata_refuses_new_keys(hub, key, value):
+    hub.execute("INSERT INTO hub_meta VALUES(?,?)", (key, value))
+    hub.commit()
+    with pytest.raises(messages.MessageError) as error:
+        publish(hub, record())
+    assert error.value.code == "hub_identity_invalid"
+    assert hub.execute("SELECT COUNT(*) FROM fleet_message_keys").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("corrupt", ["broken", '{"v":1,"signers":{}}'])
+def test_d4_history_corruption_blocks_upload(hub, corrupt):
+    from brigade import fleet_hub_identity as ids
+
+    ids.upload_identity(hub, _d4_identity())
+    hub.execute("UPDATE hub_meta SET value=? WHERE key='identity_marks'", (corrupt,))
+    hub.commit()
+    before = _d4_meta(hub)
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, _d4_identity(1, 1))
+    assert error.value.code == "hub_identity_invalid"
+    assert _d4_meta(hub) == before
+
+
+def test_d4_history_capacity_no_eviction(hub):
+    from brigade import fleet_hub_identity as ids
+
+    ids.upload_identity(hub, _d4_identity())
+    history = json.loads(hub.execute("SELECT value FROM hub_meta WHERE key='identity_marks'").fetchone()[0])
+    history["signers"].update({f"{n:064x}": {"seq": 1, "digest": "0" * 64} for n in range(1023)})
+    hub.execute("UPDATE hub_meta SET value=? WHERE key='identity_marks'", (json.dumps(history),))
+    hub.commit()
+    before = _d4_meta(hub)
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, _d4_identity(1, 1))
+    assert error.value.code == "hub_identity_history_full"
+    assert _d4_meta(hub) == before
+
+
+def test_d4_retirement_failure_restores_only_local_work(hub):
+    from brigade import fleet_hub_message_keys as keys
+
+    old = record()
+    keys.publish(hub, {"action": "keys_publish", "record": old}, caller="node-b")
+    hub.commit()
+    hub.execute(
+        "CREATE TEMP TRIGGER fail_key BEFORE INSERT ON fleet_message_keys BEGIN SELECT RAISE(ABORT,'injected key insert'); END"
+    )
+    hub.execute("INSERT INTO hub_meta VALUES('unrelated','kept')")
+    before = hub.execute("SELECT * FROM fleet_message_keys").fetchall()
+    with pytest.raises(sqlite3.IntegrityError, match="injected key insert"):
+        keys.publish(
+            hub,
+            {"action": "keys_publish", "record": record(seed=2, prev_kid=old["kid"], prev_sig=binary(bytes(64)))},
+            caller="node-b",
+        )
+    assert hub.execute("SELECT * FROM fleet_message_keys").fetchall() == before
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='unrelated'").fetchone() == ("kept",)
+    hub.rollback()
+
+
+@pytest.mark.parametrize("operation", ["upload", "publish"])
+def test_d4_stale_deferred_reader_refuses_without_retry(hub, operation):
+    from brigade import fleet_hub_identity as ids, fleet_hub_message_keys as keys
+
+    ids.upload_identity(hub, _d4_identity())
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    hub.execute("PRAGMA journal_mode=WAL")
+    hub.execute("BEGIN")
+    before = _d4_meta(hub)
+    other = sqlite3.connect(path)
+    try:
+        ids.upload_identity(other, _d4_identity(1, 1))
+        with pytest.raises(sqlite3.OperationalError, match="locked"):
+            if operation == "upload":
+                ids.upload_identity(hub, _d4_identity(2, 1))
+            else:
+                keys.publish(
+                    hub, {"action": "keys_publish", "record": record(hub=_d4_identity()["hub_id"])}, caller="node-b"
+                )
+        assert hub.in_transaction
+        assert _d4_meta(hub) == before
+    finally:
+        hub.rollback()
+        other.close()
+
+
+@contextmanager
+def _d4_queued_writer(path):
+    """Expose a real second connection's writer attempt without timing sleeps."""
+    attempted = threading.Event()
+
+    class Queued(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql == "BEGIN IMMEDIATE":
+                attempted.set()
+            return super().execute(sql, parameters)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+
+        def run(operation):
+            conn = sqlite3.connect(path, factory=Queued, timeout=5)
+            try:
+                result = operation(conn)
+                conn.commit()
+                return result
+            finally:
+                conn.close()
+
+        yield pool, run, attempted
+
+
+@pytest.mark.parametrize("replacement_first", [False, True])
+@pytest.mark.parametrize("rollback_replacement", [False, True])
+def test_d4_publish_replacement_writer_order(hub, replacement_first, rollback_replacement):
+    from brigade import fleet_hub_identity as ids, fleet_hub_message_keys as keys
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    value = record(hub=a["hub_id"])
+
+    def write(conn):
+        return keys.publish(conn, {"action": "keys_publish", "record": value}, caller="node-b")
+
+    hub.execute("BEGIN IMMEDIATE")
+    with _d4_queued_writer(path) as (pool, run, attempted):
+        if replacement_first:
+            ids.upload_identity(hub, b)
+            pending = pool.submit(run, write)
+        else:
+            write(hub)
+            pending = pool.submit(run, lambda conn: ids.upload_identity(conn, b))
+        assert attempted.wait(5)
+        if replacement_first and rollback_replacement:
+            hub.rollback()
+        else:
+            hub.commit()
+        if replacement_first and not rollback_replacement:
+            with pytest.raises(messages.MessageConflict) as error:
+                pending.result(timeout=10)
+            assert error.value.code == "hub_identity_changed"
+            assert hub.execute("SELECT COUNT(*) FROM fleet_message_keys").fetchone()[0] == 0
+        else:
+            pending.result(timeout=10)
+            assert action(hub, "keys_get", kid=value["kid"])[1]["key"]["record"] == value
+
+
+def test_d4_identity_commit_failure_rolls_back(hub):
+    from brigade import fleet_hub_identity as ids
+
+    ids.upload_identity(hub, _d4_identity())
+    before = _d4_meta(hub)
+
+    class FailingCommit(sqlite3.Connection):
+        def commit(self):
+            raise sqlite3.OperationalError("injected identity commit failure")
+
+    conn = sqlite3.connect(hub.execute("PRAGMA database_list").fetchone()[2], factory=FailingCommit)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected identity commit failure"):
+            ids.upload_identity(conn, _d4_identity(1, 1))
+        assert not conn.in_transaction
+        assert _d4_meta(hub) == before
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("revoked", [False, True])
+def test_d4_existing_kid_conflict_precedes_new_write_fence(hub, revoked):
+    from brigade import fleet_hub_identity as ids, fleet_hub_message_keys as keys
+
+    a = _d4_identity()
+    ids.upload_identity(hub, a)
+    value = record(hub=a["hub_id"])
+    keys.publish(hub, {"action": "keys_publish", "record": value}, caller="node-b")
+    if revoked:
+        keys.revoke(hub, "node-b")
+    hub.commit()
+    ids.upload_identity(hub, _d4_identity(1, 1))
+    before = hub.execute("SELECT * FROM fleet_message_keys").fetchall()
+    with pytest.raises(messages.MessageConflict) as error:
+        keys.publish(hub, {"action": "keys_publish", "record": value}, caller="node-b")
+    assert error.value.code == ("principal_key_revoked" if revoked else "principal_key_exists")
+    assert hub.execute("SELECT * FROM fleet_message_keys").fetchall() == before
+
+
+def test_d4_historical_exact_migration_wrapper_is_noop(hub):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    original = {"identity": a, "migration": _d4_migration(a)}
+    ids.upload_identity(hub, original)
+    ids.upload_identity(hub, b)
+    before = _d4_meta(hub)
+    assert ids.upload_identity(hub, original) == b
+    assert _d4_meta(hub) == before
+    malformed = {**original["migration"], "new_identity_sha256": binary(bytes(32))}
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, {"identity": a, "migration": malformed})
+    assert error.value.code == "hub_migration_invalid"
+    assert _d4_meta(hub) == before
+
+
+@pytest.mark.parametrize("same_target", [False, True])
+def test_d4_migration_old_id_pairing_is_not_just_format_validation(hub, same_target):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    before = _d4_meta(hub)
+    target = a if same_target else b
+    old = target if same_target else _d4_identity(9)
+    proof = _d4_migration(target, old)
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, {"identity": target, "migration": proof})
+    assert error.value.code == "hub_migration_invalid"
+    assert _d4_meta(hub) == before
+
+
+def test_d4_identity_and_migration_read_use_one_snapshot(hub):
+    from brigade import fleet_hub_identity as ids
+
+    class FrozenRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class InterleavedConnection(sqlite3.Connection):
+        after_read = None
+
+        def execute(self, sql, *args, **kwargs):
+            cursor = super().execute(sql, *args, **kwargs)
+            if self.after_read is not None and sql.startswith("SELECT") and "FROM hub_meta" in sql:
+                rows = cursor.fetchall()
+                cursor.close()
+                callback, self.after_read = self.after_read, None
+                callback()
+                return FrozenRows(rows)
+            return cursor
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    original = {"identity": a, "migration": _d4_migration(a)}
+    replacement = {"identity": b, "migration": _d4_migration(b, a)}
+    ids.upload_identity(hub, original)
+    reader = sqlite3.connect(hub.execute("PRAGMA database_list").fetchone()[2], factory=InterleavedConnection)
+    observed = []
+
+    def replace_after_snapshot():
+        ids.upload_identity(hub, replacement)
+        observed.append(ids.identity(hub))
+
+    reader.after_read = replace_after_snapshot
+    try:
+        assert ids.identity(reader) == original
+        assert observed == [replacement]
+        assert not reader.in_transaction
+        assert ids.identity(hub) == replacement
+    finally:
+        reader.close()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("proof_kind", ["malformed-json", "malformed-object", "unrelated"])
+def test_d4_retained_migration_blocks_keys_until_admin_cleanup(hub, legacy, proof_kind):
+    from brigade import fleet_hub_identity as ids
+
+    a = _d4_identity()
+    old = record("node-b", seed=2, hub=a["hub_id"])
+    publish(hub, old)
+    ids.upload_identity(hub, a)
+    bad = {"malformed-json": "{", "malformed-object": "{}", "unrelated": json.dumps(_d4_migration(_d4_identity(1, 1)))}[
+        proof_kind
+    ]
+    hub.execute("INSERT INTO hub_meta VALUES('migration',?)", (bad,))
+    if legacy:
+        hub.execute("DELETE FROM hub_meta WHERE key='identity_marks'")
+    hub.commit()
+    before_keys = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    before_meta = _d4_meta(hub)
+    marks = hub.execute("SELECT value FROM hub_meta WHERE key='identity_marks'").fetchone()
+    successor = record("node-b", seed=4, hub=a["hub_id"], prev_kid=old["kid"], prev_sig=binary(bytes(64)))
+    with pytest.raises(messages.MessageError) as error:
+        publish(hub, successor)
+    assert error.value.code == "hub_identity_invalid"
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before_keys
+    assert _d4_meta(hub) == before_meta
+    assert ids.upload_identity(hub, a) == a
+    assert hub.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone() is None
+    if marks is not None:
+        assert hub.execute("SELECT value FROM hub_meta WHERE key='identity_marks'").fetchone() == marks
+    assert publish(hub, successor)[1]["key"]["record"] == successor

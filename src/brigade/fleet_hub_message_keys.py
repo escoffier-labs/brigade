@@ -127,10 +127,31 @@ def publish(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> di
     if set(raw) != {"action", "record"}:
         raise MessageError("keys_publish requires a record")
     value = validate_record(raw["record"], caller=caller)
+    opened = not conn.in_transaction
+    if opened:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT hub_key_publish")
+    try:
+        conn.execute("UPDATE hub_meta SET value=value WHERE key='identity'")
+        result = _publish_locked(conn, value, caller=caller)
+        conn.execute("RELEASE hub_key_publish")
+        return result
+    except BaseException:
+        conn.execute("ROLLBACK TO hub_key_publish")
+        conn.execute("RELEASE hub_key_publish")
+        if opened:
+            conn.rollback()
+        raise
+
+
+def _publish_locked(conn: sqlite3.Connection, value: dict[str, Any], *, caller: str) -> dict[str, Any]:
+    from .fleet_hub_identity import require_current_hub
+
     existing = conn.execute("SELECT state FROM fleet_message_keys WHERE kid=?", (value["kid"],)).fetchone()
     if existing:
         code = "principal_key_revoked" if existing[0] == "revoked" else "principal_key_exists"
         raise MessageConflict("key id was already published", code=code)
+    require_current_hub(conn, value["hub"])
     active = conn.execute(
         "SELECT kid,created_at FROM fleet_message_keys WHERE principal_id=? AND state='active'", (caller,)
     ).fetchone()

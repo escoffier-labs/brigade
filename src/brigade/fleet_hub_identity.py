@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import ipaddress
 import json
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from .fleet_hub_message_keys import decode_binary
+from .fleet_hub_message_keys import decode_binary, timestamp
 from .fleet_hub_messages import MessageConflict, MessageError
 
 if TYPE_CHECKING:
@@ -53,12 +55,11 @@ def _blob(value: Any) -> str:
 
 
 def identity(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    row = conn.execute("SELECT value FROM hub_meta WHERE key='identity'").fetchone()
-    if row is None:
+    rows = dict(conn.execute("SELECT key,value FROM hub_meta WHERE key IN ('identity','migration')"))
+    if "identity" not in rows:
         return None
-    value = json.loads(row[0])
-    migration = conn.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone()
-    return {"identity": value, "migration": json.loads(migration[0])} if migration else value
+    value = json.loads(rows["identity"])
+    return {"identity": value, "migration": json.loads(rows["migration"])} if "migration" in rows else value
 
 
 def validate_storage_policy(raw: Any, policy: StoragePolicy | None = None) -> None:
@@ -93,13 +94,14 @@ def validate_storage_policy(raw: Any, policy: StoragePolicy | None = None) -> No
             )
 
 
-def upload_identity(
-    conn: sqlite3.Connection, raw: Any, *, storage_policy: StoragePolicy | None = None
-) -> dict[str, Any]:
-    _blob(raw)
-    value = raw.get("identity", raw)
-    blob = _blob(value)
-    validate_storage_policy(value, storage_policy)
+def _canonical(value: Any) -> bytes:
+    _blob(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode("ascii")
+
+
+def _validate_identity(value: Any) -> None:
+    _blob(value)
+    validate_storage_policy(value)
     public = decode_binary(value.get("hub_sig_pub"), 32)
     expected = (
         "h_"
@@ -121,19 +123,237 @@ def upload_identity(
         raise MessageError("invalid hub capabilities")
     if type(value.get("seq")) is not int or not 0 <= value["seq"] <= 2**63 - 1:
         raise MessageError("invalid identity sequence")
-    migration = _blob(raw["migration"]) if "identity" in raw and "migration" in raw else None
-    with conn:
-        conn.execute(
-            "INSERT INTO hub_meta VALUES('identity',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (blob,)
+
+
+def _mark(value: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    signer = hashlib.sha256(decode_binary(value["hub_sig_pub"], 32)).hexdigest()
+    return signer, {"seq": value["seq"], "digest": hashlib.sha256(_canonical(value)).hexdigest()}
+
+
+def _installed(conn: sqlite3.Connection) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Validate retained metadata, bootstrapping only the installed legacy signer."""
+    try:
+        rows = dict(
+            conn.execute("SELECT key,value FROM hub_meta WHERE key IN ('identity','identity_marks','migration')")
         )
-        if migration is not None:
-            conn.execute(
-                "INSERT INTO hub_meta VALUES('migration',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                (migration,),
+        if "identity" not in rows:
+            if rows:
+                raise ValueError
+            return None, {}
+        value = json.loads(rows["identity"])
+        _validate_identity(value)
+        signer, mark = _mark(value)
+        if "identity_marks" not in rows:
+            return value, {signer: mark}
+        if len(rows["identity_marks"].encode()) > 256 * 1024:
+            raise ValueError
+        history = json.loads(rows["identity_marks"])
+        if (
+            not isinstance(history, dict)
+            or set(history) != {"v", "signers"}
+            or type(history["v"]) is not int
+            or history["v"] != 1
+        ):
+            raise ValueError
+        marks = history["signers"]
+        if not isinstance(marks, dict) or not 1 <= len(marks) <= 1024:
+            raise ValueError
+        for key, item in marks.items():
+            if not re.fullmatch(r"[0-9a-f]{64}", key) or not isinstance(item, dict) or set(item) != {"seq", "digest"}:
+                raise ValueError
+            if (
+                type(item["seq"]) is not int
+                or not 0 <= item["seq"] <= 2**63 - 1
+                or not isinstance(item["digest"], str)
+                or not re.fullmatch(r"[0-9a-f]{64}", item["digest"])
+            ):
+                raise ValueError
+        if marks.get(signer) != mark:
+            raise ValueError
+        return value, marks
+    except (MessageError, ValueError, TypeError, KeyError, RecursionError, UnicodeError):
+        raise MessageError("installed Hub identity metadata is invalid", code="hub_identity_invalid") from None
+
+
+def require_current_hub(conn: sqlite3.Connection, hub: str) -> bool:
+    """Fence new writes and report configured state under the caller's writer lock."""
+    value, _ = _installed(conn)
+    if value is not None:
+        retained = conn.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone()
+        if retained is not None:
+            try:
+                _migration(json.loads(retained[0]), value)
+            except (MessageError, ValueError, TypeError, RecursionError, UnicodeError):
+                raise MessageError("installed Hub migration metadata is invalid", code="hub_identity_invalid") from None
+    if value is not None and value["hub_id"] != hub:
+        raise MessageConflict("Hub identity changed", code="hub_identity_changed")
+    return value is not None
+
+
+def _origin_require(condition: Any, code: str) -> None:
+    if not condition:
+        raise ValueError(code)
+
+
+def _origin(value: str) -> str:
+    """Strict D4 HTTP(S) origin normalization, without network or acceptance."""
+    code = "hub_migration_invalid"
+    _origin_require(isinstance(value, str) and value.isascii() and len(value) <= 4096, code)
+    _origin_require(not any(ord(c) <= 32 or ord(c) == 127 or c in "%\\?#@" for c in value), code)
+    match = re.fullmatch(r"(https?)://([^/]+)(?:/)?", value, re.IGNORECASE | re.ASCII)
+    _origin_require(match is not None, code)
+    assert match is not None
+    scheme, authority = match.groups()
+    scheme = scheme.lower()
+    port = None
+    if authority.startswith("["):
+        match = re.fullmatch(r"\[([^\[\]]+)\](?::([0-9]+))?", authority, re.ASCII)
+        _origin_require(match is not None, code)
+        assert match is not None
+        host, port = match.groups()
+        try:
+            host = "[" + ipaddress.IPv6Address(host).compressed + "]"
+        except ValueError:
+            raise ValueError(code) from None
+    else:
+        match = re.fullmatch(r"([^:\[\]]+)(?::([0-9]+))?", authority, re.ASCII)
+        _origin_require(match is not None, code)
+        assert match is not None
+        host, port = match.groups()
+        _origin_require(len(host) <= 253, code)
+        # WHATWG treats a final decimal/hex label, including bare 0x, as an
+        # IPv4 candidate. Require strict dotted decimal for that entire host
+        # so clients cannot disagree about whether it names an address or DNS.
+        final_label = host.rsplit(".", 1)[-1]
+        if re.fullmatch(r"[0-9]+|0[xX][0-9a-fA-F]*", final_label, re.ASCII):
+            try:
+                host = str(ipaddress.IPv4Address(host))
+            except ValueError:
+                raise ValueError(code) from None
+        else:
+            _origin_require(
+                all(re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?", label) for label in host.split(".")),
+                code,
             )
-    result = identity(conn)
-    assert result is not None
-    return result
+            host = host.lower()
+    suffix = ""
+    if port is not None:
+        _origin_require(len(port) <= 5 and not port.startswith("0") and 1 <= int(port) <= 65535, code)
+        if (scheme, port) not in {("https", "443"), ("http", "80")}:
+            suffix = ":" + port
+    origin = scheme + "://" + host + suffix
+    _origin_require(len(origin) <= 2048, code)
+    return origin
+
+
+def _migration(raw: Any, value: dict[str, Any], old: dict[str, Any] | None = None) -> str:
+    try:
+        blob = _canonical(raw)
+        fields = {
+            "v",
+            "old_hub_id",
+            "new_hub_id",
+            "new_hub_sig_pub",
+            "new_identity_seq",
+            "new_identity_sha256",
+            "endpoint",
+            "created_at",
+            "seq",
+            "sig",
+        }
+        if len(blob) > 16 * 1024 or set(raw) != fields or type(raw["v"]) is not int or raw["v"] != 1:
+            raise ValueError
+        for field in ("seq", "new_identity_seq"):
+            if type(raw[field]) is not int or not 0 <= raw[field] <= 2**53 - 1:
+                raise ValueError
+        old_id = raw["old_hub_id"]
+        if not isinstance(old_id, str) or not old_id.startswith("h_"):
+            raise ValueError
+        decode_binary(old_id[2:], 16)
+        decode_binary(raw["new_hub_sig_pub"], 32)
+        decode_binary(raw["new_identity_sha256"], 32)
+        decode_binary(raw["sig"], 64)
+        timestamp(raw["created_at"])
+        if (
+            old_id == value["hub_id"]
+            or raw["new_hub_id"] != value["hub_id"]
+            or raw["new_hub_sig_pub"] != value["hub_sig_pub"]
+            or raw["new_identity_seq"] != value["seq"]
+            or decode_binary(raw["new_identity_sha256"], 32) != hashlib.sha256(_canonical(value)).digest()
+            or raw["endpoint"] != value["endpoint"]
+            or _origin(raw["endpoint"]) != raw["endpoint"]
+        ):
+            raise ValueError
+        if old is not None and old["hub_id"] != value["hub_id"] and old_id != old["hub_id"]:
+            raise ValueError
+        return blob.decode("ascii")
+    except (ValueError, TypeError, KeyError, MessageError, RecursionError, UnicodeError):
+        raise MessageError("Hub migration does not match identity", code="hub_migration_invalid") from None
+
+
+def upload_identity(
+    conn: sqlite3.Connection, raw: Any, *, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any]:
+    _blob(raw)
+    value = raw.get("identity", raw)
+    _validate_identity(value)
+    validate_storage_policy(value, storage_policy)
+    supplied = "identity" in raw and "migration" in raw
+    proof = _migration(raw["migration"], value) if supplied else None
+    opened = not conn.in_transaction
+    if opened:
+        conn.execute("BEGIN IMMEDIATE")
+    conn.execute("SAVEPOINT hub_identity_upload")
+    try:
+        # A savepoint alone does not upgrade a caller's deferred read transaction.
+        conn.execute("UPDATE hub_meta SET value=value WHERE key='identity'")
+        current, marks = _installed(conn)
+        signer, mark = _mark(value)
+        previous = marks.get(signer)
+        if previous is not None:
+            if mark["seq"] < previous["seq"]:
+                raise MessageConflict("identity sequence decreased", code="signed_statement_rollback")
+            if mark["seq"] == previous["seq"] and mark != previous:
+                raise MessageConflict("identity sequence has different bytes", code="signed_statement_conflict")
+        # A historical exact replay cannot reactivate an old signer.
+        historical = previous == mark and current is not None and current["hub_id"] != value["hub_id"]
+        if supplied:
+            proof = _migration(raw["migration"], value, None if historical else current)
+        if not historical:
+            if signer not in marks and len(marks) >= 1024:
+                raise MessageError("Hub identity history is full", code="hub_identity_history_full")
+            if not supplied:
+                stored = conn.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone()
+                if stored:
+                    try:
+                        proof = _migration(json.loads(stored[0]), value)
+                    except (ValueError, MessageError, RecursionError):
+                        proof = None
+            marks[signer] = mark
+            conn.execute(
+                "INSERT INTO hub_meta VALUES('identity',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (_blob(value),),
+            )
+            conn.execute("DELETE FROM hub_meta WHERE key='migration'")
+            if proof is not None:
+                conn.execute("INSERT INTO hub_meta VALUES('migration',?)", (proof,))
+        conn.execute(
+            "INSERT INTO hub_meta VALUES('identity_marks',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (json.dumps({"v": 1, "signers": marks}),),
+        )
+        result = identity(conn)
+        assert result is not None
+        conn.execute("RELEASE hub_identity_upload")
+        if opened:
+            conn.commit()
+        return result
+    except BaseException:
+        if opened:
+            conn.rollback()
+        else:
+            conn.execute("ROLLBACK TO hub_identity_upload")
+            conn.execute("RELEASE hub_identity_upload")
+        raise
 
 
 def upload_statement(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:

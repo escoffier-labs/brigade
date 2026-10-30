@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Stop the content guard from blocking code-shaped hostname lookalikes: when the dotted value starts with a well-known JavaScript receiver (`args`, `process`, `this`, `options` and similar), an indented `key: value,` object member ending the line or a `delete`, `typeof`, `void` or `await` operand ending a statement is code. The `home-path` rule no longer matches a known tool config directory rendered directly under a sandbox home root with no username segment. Real hosts in YAML, shell and prose, and real user home paths including `.`-segment and hidden homes, stay detected.
+- Fence new key publication and sealed admission to an installed Hub identity, retaining per-signer sequence history, paired migration readback and exact retained retries. Older Hub binaries must not rewrite identity metadata after history exists: inconsistent signer state refuses new mesh writes and requires operator recovery from a consistent backup without discarding signer history.
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
