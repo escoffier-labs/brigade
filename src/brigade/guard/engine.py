@@ -1030,14 +1030,18 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     # Complete earlier shell assignment words are opaque to code keywords.
     if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
-    # A unary operand that ends the statement (`delete process.env.HOME;`) is
-    # code. Prose keeps detection when more words follow the host.
-    if re.search(r"\b(?:delete|typeof|void|await)\s+$", before) and re.fullmatch(r"\s*;\s*", after):
+    # A unary operand forming a whole statement (`delete process.env.HOME;`)
+    # is code. The keyword must start the line, so prose such as
+    # `Please delete <host>;` keeps detection.
+    if re.fullmatch(r"[ \t]*(?:delete|typeof|void|await)[ \t]+", before) and re.fullmatch(r"\s*;\s*", after):
         return False
     # An indented `key: value,` member with an unquoted value ending the line
-    # is an object-literal expression (`local: args.local,`). Quoted values were
-    # accepted above, and prose that continues after the comma stays detected.
-    if re.fullmatch(r"[ \t]+[A-Za-z_$][\w$]*:[ \t]*", before) and re.fullmatch(r"\s*,\s*", after):
+    # is an object-literal expression (`local: args.local,`). Host-related keys
+    # stay configuration (a YAML plain scalar may end with a comma), quoted
+    # values were accepted above, and prose continuing after the comma stays
+    # detected.
+    member = re.fullmatch(r"[ \t]+([A-Za-z_$][\w$]*):[ \t]*", before)
+    if member and not re.fullmatch(_HOSTNAME_KEY, member.group(1), re.IGNORECASE) and re.fullmatch(r"\s*,\s*", after):
         return False
     if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
         return True

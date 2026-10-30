@@ -37,6 +37,9 @@ def test_code_shaped_members_are_not_hostnames(text: str) -> None:
         "Please delete " + LITERAL + " entries.",
         "Then delete " + LITERAL,
         '    local: "' + LITERAL + '",',
+        "services:\n  host: " + LITERAL + ",\n",
+        "  server_url: " + LITERAL + ",",
+        "Please delete " + LITERAL + ";",
     ],
 )
 def test_prose_config_and_quoted_hosts_stay_detected(text: str) -> None:
