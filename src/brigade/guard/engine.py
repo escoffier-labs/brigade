@@ -304,10 +304,10 @@ _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$"
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
 _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
-# Receivers whose dotted members are code in practice, never host labels.
-_JS_RECEIVER = (
-    r"(?:args|argv|options|opts|params|props|this|self|process|ctx|context|input|globalThis|window|module|exports)"
-)
+# Receivers whose dotted members are code in practice and implausible as host
+# labels. Words that double as device or service names (context, input, ctx,
+# self, window, module) are deliberately excluded.
+_JS_RECEIVER = r"(?:args|argv|options|opts|params|props|this|process|globalThis)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:
