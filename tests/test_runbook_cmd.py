@@ -2,11 +2,19 @@ from __future__ import annotations
 
 import json
 import hashlib
+import io
 import os
+import select
+import shlex
 import shutil
+import signal
 import subprocess
+import sys
+import threading
 import time
 from pathlib import Path
+
+import pytest
 
 from brigade import cli, localio, runbook_cmd
 
@@ -629,3 +637,768 @@ def test_runbook_step_timeout_reaps_descendants_and_records_receipt(tmp_path, ca
         time.sleep(0.2)
         probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
     assert probe.returncode != 0, f"descendant survived timeout: {probe.stdout.decode()}"
+
+
+@pytest.mark.skipif(
+    sys.platform != "linux" or not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"),
+    reason="Linux process handles are required for isolated signal probes",
+)
+@pytest.mark.parametrize("repeat_interrupt", [False, True])
+def test_runbook_cli_interrupt_reaps_worker_and_descendant(tmp_path, repeat_interrupt):
+    ready = tmp_path / "ready.json"
+    terminating = tmp_path / "terminating"
+    heartbeat = tmp_path / "heartbeat"
+    worker = tmp_path / "worker.py"
+    worker.write_text(
+        "\n".join(
+            [
+                "import json, os, signal, subprocess, sys, time",
+                "from pathlib import Path",
+                "root = Path(sys.argv[1])",
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])",
+                "def terminate(signum, frame):",
+                "    child.terminate()",
+                "    child.wait(timeout=5)",
+                "    (root / 'terminating').touch()",
+                "    time.sleep(0.2)",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, terminate)",
+                "ready_tmp = root / 'ready.json.tmp'",
+                "ready_tmp.write_text(json.dumps({'worker': os.getpid(), 'child': child.pid}))",
+                "ready_tmp.replace(root / 'ready.json')",
+                "while True:",
+                "    with (root / 'heartbeat').open('a') as stream:",
+                "        stream.write('tick\\n')",
+                "    time.sleep(0.02)",
+            ]
+        )
+    )
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "interrupt",
+                "steps": [{"id": "worker", "run": "exec " + shlex.join([sys.executable, str(worker), str(tmp_path)])}],
+            }
+        )
+    )
+    owner = subprocess.Popen(
+        [sys.executable, "-m", "brigade", "runbook", "run", str(runbook), "--target", str(tmp_path), "--approved"],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    handles = []
+    try:
+        deadline = time.monotonic() + 10
+        while not ready.exists() and owner.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert ready.exists(), owner.communicate(timeout=5)
+        pids = json.loads(ready.read_text())
+        handles = [os.pidfd_open(pids[name]) for name in ("worker", "child")]
+        owner.send_signal(signal.SIGINT)
+        if repeat_interrupt:
+            while not terminating.exists() and owner.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.005)
+            assert terminating.exists(), "worker never entered cancellation cleanup"
+            owner.send_signal(signal.SIGINT)
+        stdout, stderr = owner.communicate(timeout=5)
+        assert owner.returncode == -signal.SIGINT, (stdout, stderr)
+        for handle in handles:
+            assert select.select([handle], [], [], 0)[0], "runbook process survived CLI interruption"
+        before = heartbeat.read_bytes()
+        time.sleep(0.05)
+        assert heartbeat.read_bytes() == before
+    finally:
+        # These handles bind cleanup to this probe's processes, even on RED.
+        for handle in handles:
+            if not select.select([handle], [], [], 0)[0]:
+                signal.pidfd_send_signal(handle, signal.SIGTERM)
+        for handle in handles:
+            if not select.select([handle], [], [], 5)[0]:
+                signal.pidfd_send_signal(handle, signal.SIGKILL)
+            os.close(handle)
+        if owner.poll() is None:
+            owner.kill()
+        owner.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("as_shell", [False, True])
+@pytest.mark.parametrize("failure", [KeyboardInterrupt(), SystemExit(7), UnicodeError("invalid child output")])
+def test_runbook_command_exception_preserves_failure_and_releases_resources(monkeypatch, tmp_path, as_shell, failure):
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise failure
+
+        def wait(self, **kwargs):
+            events.append(("wait", kwargs))
+
+    child = Child()
+    events = []
+    original_handler = signal.getsignal(signal.SIGINT)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+
+    def terminate(process, **kwargs):
+        assert process is child
+        events.append(("terminate", kwargs))
+        if not kwargs:
+            raise KeyboardInterrupt("repeated interruption during cleanup")
+
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", terminate)
+    with pytest.raises(type(failure)) as raised:
+        runbook_cmd._shell_or_argv_command("worker" if as_shell else ["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is failure
+    assert events == [
+        ("terminate", {}),
+        ("terminate", {"terminate_grace": 0.0, "kill_grace": 0.0}),
+        ("wait", {"timeout": runbook_cmd._TIMEOUT_DRAIN_SECONDS}),
+    ]
+    assert child.stdout.closed and child.stderr.closed
+    assert signal.getsignal(signal.SIGINT) == original_handler
+
+
+@pytest.mark.parametrize("fault", ["lookup", "ignore", "ignore-after", "restore", "restore-after"])
+@pytest.mark.parametrize("previous", [signal.SIG_IGN, lambda signum, frame: None], ids=["ignored", "custom"])
+def test_runbook_cleanup_signal_fault_preserves_exception_and_handler(monkeypatch, tmp_path, fault, previous):
+    original = UnicodeError("primary failure")
+    events = []
+    state = {"handler": previous, "failed": False}
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def lookup(signum):
+        if fault == "lookup" and not state["failed"]:
+            state["failed"] = True
+            raise KeyboardInterrupt("during signal lookup")
+        return state["handler"]
+
+    def install(signum, handler):
+        phase = "ignore" if handler == signal.SIG_IGN and "ignored" not in events else "restore"
+        if fault in {phase, phase + "-after"} and not state["failed"]:
+            state["failed"] = True
+            if fault.endswith("-after"):
+                state["handler"] = handler
+            raise KeyboardInterrupt("during signal update")
+        state["handler"] = handler
+        events.append("ignored" if phase == "ignore" else "restored")
+
+    monkeypatch.setattr(runbook_cmd.signal, "getsignal", lookup)
+    monkeypatch.setattr(runbook_cmd.signal, "signal", install)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: events.append("terminate"))
+    with pytest.raises(BaseException) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
+    assert state["failed"] and state["handler"] is previous
+    assert "terminate" in events and "wait" in events
+    assert child.stdout.closed and child.stderr.closed
+
+
+def test_runbook_command_exception_from_worker_thread_avoids_signal_apis(monkeypatch, tmp_path):
+    original = KeyboardInterrupt("worker cancellation")
+    caught = []
+    events = []
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def unexpected_signal_call(*args):
+        raise AssertionError("signal API called from worker thread")
+
+    def run():
+        try:
+            runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+        except BaseException as exc:
+            caught.append(exc)
+
+    monkeypatch.setattr(runbook_cmd.signal, "getsignal", unexpected_signal_call)
+    monkeypatch.setattr(runbook_cmd.signal, "signal", unexpected_signal_call)
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: events.append("terminate"))
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    worker.join(timeout=5)
+    assert not worker.is_alive() and caught == [original]
+    assert events == ["terminate", "wait"]
+    assert child.stdout.closed and child.stderr.closed
+
+
+@pytest.mark.parametrize("both_blocked", [False, True])
+def test_runbook_cleanup_bounds_blocked_capture_close(monkeypatch, both_blocked):
+    release = threading.Event()
+    closers = []
+
+    class Capture:
+        def __init__(self, blocked):
+            self.blocked = blocked
+            self.closed = threading.Event()
+
+        def close(self):
+            closers.append(threading.current_thread())
+            if self.blocked:
+                release.wait(timeout=5)
+            self.closed.set()
+
+    class Child:
+        stdout = Capture(True)
+        stderr = Capture(both_blocked)
+
+        def wait(self, **kwargs):
+            pass
+
+    monkeypatch.setattr(runbook_cmd, "_TIMEOUT_DRAIN_SECONDS", 0.05)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: None)
+    cleanup = threading.Thread(target=runbook_cmd._cleanup_interrupted_command, args=(Child(),), daemon=True)
+    started = time.monotonic()
+    cleanup.start()
+    try:
+        cleanup.join(timeout=0.5)
+        assert not cleanup.is_alive(), "capture close blocked cancellation cleanup"
+        assert time.monotonic() - started < 0.5
+        assert len(closers) == 2 and all(thread.daemon and thread is not cleanup for thread in closers)
+    finally:
+        release.set()
+        cleanup.join(timeout=5)
+        for closer in closers:
+            closer.join(timeout=5)
+        assert Child.stdout.closed.is_set() and Child.stderr.closed.is_set()
+
+
+def test_runbook_capture_closers_share_one_deadline(monkeypatch):
+    joins = []
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+    class Closer:
+        def __init__(self, *, target, args, daemon):
+            assert daemon
+            self.target, self.args = target, args
+
+        def start(self):
+            self.target(*self.args)
+
+        def join(self, *, timeout):
+            joins.append(timeout)
+
+    clock = iter([10.0, 10.25, 10.9])
+    with monkeypatch.context() as patch:
+        patch.setattr(runbook_cmd, "_TIMEOUT_DRAIN_SECONDS", 1.0)
+        patch.setattr(runbook_cmd.threading, "Thread", Closer)
+        patch.setattr(runbook_cmd.time, "monotonic", lambda: next(clock))
+        runbook_cmd._close_command_streams(Child())
+    assert joins == pytest.approx([0.75, 0.1])
+    assert Child.stdout.closed and Child.stderr.closed
+
+
+@pytest.mark.parametrize("failure", [OSError("taskkill unavailable"), subprocess.TimeoutExpired("taskkill", 0.1)])
+def test_runbook_cleanup_preserves_exception_after_windows_taskkill_failure(monkeypatch, tmp_path, failure):
+    original = KeyboardInterrupt("primary cancellation")
+    events = []
+
+    class Child:
+        pid = 4242
+        returncode = None
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            self.returncode = -9
+            events.append("kill")
+
+        def wait(self, **kwargs):
+            events.append("wait")
+
+    child = Child()
+
+    def taskkill(argv, **kwargs):
+        assert argv == ["taskkill", "/PID", "4242", "/T", "/F"]
+        assert kwargs["timeout"] == 0.1
+        raise failure
+
+    # Exercise the existing Windows fallback on this platform without invoking
+    # taskkill or claiming execution of the native Windows process APIs.
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: child)
+    monkeypatch.setattr(runbook_cmd.brigade_proc.subprocess, "run", taskkill)
+    monkeypatch.setattr(
+        runbook_cmd.brigade_proc,
+        "terminate_process_tree",
+        lambda process: runbook_cmd.brigade_proc._terminate_windows_process_tree(process, timeout=0.1),
+    )
+    with pytest.raises(KeyboardInterrupt) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
+    assert events == ["kill", "wait"]
+    assert child.stdout.closed and child.stderr.closed
+
+
+@pytest.mark.parametrize("failure_stage", ["construction", "start"])
+def test_runbook_capture_closer_start_failure_preserves_primary_exception(monkeypatch, tmp_path, failure_stage):
+    original = SystemExit(7)
+
+    class Child:
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        def communicate(self, **kwargs):
+            raise original
+
+        def wait(self, **kwargs):
+            pass
+
+    class Closer:
+        def __init__(self, **kwargs):
+            if failure_stage == "construction":
+                raise RuntimeError("no cleanup thread available")
+
+        def start(self):
+            raise RuntimeError("no cleanup thread available")
+
+    monkeypatch.setattr(runbook_cmd.subprocess, "Popen", lambda *args, **kwargs: Child())
+    monkeypatch.setattr(runbook_cmd.threading, "Thread", Closer)
+    monkeypatch.setattr(runbook_cmd.brigade_proc, "terminate_process_tree", lambda process: None)
+    with pytest.raises(SystemExit) as raised:
+        runbook_cmd._shell_or_argv_command(["worker"], cwd=tmp_path, timeout=5)
+    assert raised.value is original
+
+
+def _versioned_tool(path, label):
+    return _write_tool(
+        path,
+        '#!/bin/sh\nif [ "$1" = "--version" ]; then\n'
+        f'  printf "{label} version\\n"\n  exit 0\nfi\nprintf "{label}" > "$1"\n',
+    )
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_pin_path_drift_refuses_or_records_actual_selected_tool(tmp_path, monkeypatch, capsys, override):
+    accepted = tmp_path / "accepted"
+    changed = tmp_path / "changed"
+    accepted.mkdir()
+    changed.mkdir()
+    tool_a = _versioned_tool(accepted / "tool", "accepted")
+    tool_b = _versioned_tool(changed / "tool", "changed")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "id": "drift",
+                "pins": [{"command": "tool", "version_cmd": "--version"}],
+                "steps": [{"run": f"tool {marker}"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(accepted))
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("PATH", str(changed))
+    assert runbook_cmd.plan(target=tmp_path, runbook=runbook, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)["steps"][0]["pin"]
+    assert planned["status"] == "mismatch"
+    assert planned["expected_path"] == str(tool_a)
+    assert planned["resolved_path"] == str(tool_b)
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["expected_sha256"] == _sha256(tool_a)
+    assert check["observed_sha256"] == _sha256(tool_b)
+    assert check["expected_path"] == str(tool_a) and check["resolved_path"] == str(tool_b)
+    assert check["status"] == "mismatch"
+    if override:
+        assert rc == 0 and marker.read_text() == "changed"
+        assert check["override"] is True and check["version_output"] == "changed version"
+        assert check["step_index"] == 1 and check["step_id"] == "step-1"
+        assert result["steps"][0]["pin"] == check
+    else:
+        assert rc == 2 and result["status"] == "pin-check-failed"
+        assert not marker.exists() and not (tmp_path / ".brigade" / "runbooks" / "runs").exists()
+        assert "version_output" not in check
+
+
+def test_pin_path_only_drift_keeps_hash_contract_and_actual_evidence(tmp_path, monkeypatch, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = _write_tool(first / "tool")
+    b = _write_tool(second / "tool", a.read_text())
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(json.dumps({"steps": [{"run": f"tool {marker}"}]}))
+    monkeypatch.setenv("PATH", str(first))
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    capsys.readouterr()
+    monkeypatch.setenv("PATH", str(second))
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["expected_sha256"] == check["observed_sha256"] == _sha256(b)
+    assert check["expected_path"] == str(a) and check["resolved_path"] == str(b)
+    assert check["status"] == "ok" and check["override"] is False
+    assert marker.read_text() == "ran"
+
+
+def test_missing_selected_tool_does_not_validate_or_probe_stored_pin(tmp_path, monkeypatch, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "stored")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": "tool marker"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(tmp_path / "missing"))
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["status"] == "missing" and check["resolved_path"] is None
+    assert check["observed_sha256"] is None and "version_output" not in check
+    assert tool.exists()
+
+
+def _cwd_lookup_tool(path, label, *, windows):
+    if not windows:
+        return _versioned_tool(path, label)
+    writer = path.with_name(path.name + "_marker.py")
+    writer.write_text(
+        f"import sys\nfrom pathlib import Path\nPath(sys.argv[1]).write_text({label!r}, encoding='utf-8')\n"
+    )
+    tool = path.with_suffix(".CMD")
+    tool.write_text(
+        f'@echo off\r\n"{sys.executable}" "%~dp0{writer.name}" "%~1"\r\n',
+        encoding="utf-8",
+        newline="",
+    )
+    tool.chmod(0o755)
+    return tool
+
+
+def _cwd_lookup_command(command, marker, *, windows):
+    if windows:
+        command = command.replace("/", "\\")
+        return f'"{command}" "{marker}"'
+    return shlex.join([command, str(marker)])
+
+
+@pytest.mark.parametrize(
+    "command,path", [("./tool", "/missing"), ("../bin/tool", "/missing"), ("tool", "bin"), ("tool", "")]
+)
+def test_pinning_uses_effective_step_cwd_and_relative_search_path(tmp_path, monkeypatch, capsys, command, path):
+    target = tmp_path / "target"
+    cwd = target / "work"
+    cwd.mkdir(parents=True)
+    (cwd / "bin").mkdir()
+    tool_path = cwd / ("bin/tool" if path == "bin" else "tool")
+    if command == "../bin/tool":
+        (target / "bin").mkdir()
+        tool_path = target / "bin/tool"
+    windows = sys.platform == "win32"
+    tool = _cwd_lookup_tool(tool_path, "local", windows=windows)
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    run_command = _cwd_lookup_command(command, marker, windows=windows)
+    runbook.write_text(json.dumps({"steps": [{"run": run_command, "cwd": "work"}]}))
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", path)
+    if windows:
+        monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    assert runbook_cmd.pin(target=target, runbook=runbook, json_output=True) == 0
+    pin = json.loads(capsys.readouterr().out)["pins"][0]
+    assert pin["path"] == str(tool)
+    assert runbook_cmd.run(target=target, runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert marker.read_text() == "local"
+    assert receipt["steps"][0]["cwd"] == str(cwd)
+    assert receipt["pin_checks"][0]["resolved_path"] == str(tool)
+
+
+@pytest.mark.parametrize("path", ["bin", ""])
+def test_cwd_lookup_windows_fixture_pins_wrapper_and_writes_exact_marker(tmp_path, monkeypatch, path):
+    cwd = tmp_path / "work space"
+    directory = cwd / "bin" if path else cwd
+    directory.mkdir(parents=True)
+    tool = _cwd_lookup_tool(directory / "tool", "local", windows=True)
+    marker = tmp_path / "marker with space"
+    writer = directory / "tool_marker.py"
+    monkeypatch.setenv("PATH", path)
+    # Exercise the payload independently of cmd.exe on every platform. Native
+    # wrapper execution belongs to the four real runbook cases above.
+    subprocess.run([sys.executable, str(writer), str(marker)], check=True, timeout=5)
+    assert marker.read_text() == "local"
+    assert tool.read_bytes() == f'@echo off\r\n"{sys.executable}" "%~dp0{writer.name}" "%~1"\r\n'.encode()
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "1")
+    pins, error = runbook_cmd._pin_payload_from_runbook(tmp_path, {"steps": [{"run": "tool marker", "cwd": str(cwd)}]})
+    assert error is None
+    assert pins == [{"command": "tool", "path": str(tool), "sha256": _sha256(tool)}]
+
+
+@pytest.mark.parametrize("command,expected", [("./tool", r".\tool"), ("../bin/tool", r"..\bin\tool"), ("tool", "tool")])
+def test_cwd_lookup_windows_command_preserves_tokens(command, expected):
+    marker = r"C:\fixture space\marker"
+    run = _cwd_lookup_command(command, marker, windows=True)
+    assert runbook_cmd._command_tokens(run) == [expected, marker]
+
+
+def test_pinning_refuses_distinct_executables_with_same_command_name(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    _write_tool(first / "tool")
+    _versioned_tool(second / "tool", "different-bytes")
+    runbook = tmp_path / "runbook.json"
+    original = json.dumps(
+        {"steps": [{"run": "./tool marker", "cwd": str(first)}, {"run": "./tool marker", "cwd": str(second)}]}
+    )
+    runbook.write_text(original)
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 2
+    assert "different executables" in capsys.readouterr().err
+    assert runbook.read_text() == original
+
+
+def test_runtime_pin_checks_each_step_after_prior_step_changes_executable(tmp_path, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "original")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [
+                    {"id": "replace", "run": f"printf replacement > {tool}"},
+                    {"id": "later", "run": f"{tool} {marker}"},
+                ],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] == "failed" and result["steps"][0]["status"] == "completed"
+    assert result["steps"][1]["status"] == "blocked" and not marker.exists()
+    check = result["pin_checks"][0]
+    assert check["status"] == "mismatch" and check["step_id"] == "later"
+    assert check["override"] is False and "version_output" not in check
+
+
+def test_per_step_pin_checks_do_not_collapse_matching_command_names(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    tool_a = _versioned_tool(first / "tool", "first")
+    tool_b = _versioned_tool(second / "tool", "second")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool_a), "sha256": _sha256(tool_a)}],
+                "steps": [
+                    {"id": "one", "run": "./tool marker", "cwd": str(first)},
+                    {"id": "two", "run": "./tool marker", "cwd": str(second)},
+                ],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 2
+    checks = json.loads(capsys.readouterr().out)["pin_checks"]
+    assert [(c["step_id"], c["status"]) for c in checks] == [("one", "ok"), ("two", "mismatch")]
+    assert checks[1]["observed_sha256"] == _sha256(tool_b)
+    assert not (first / "marker").exists()
+
+
+def test_version_probe_that_changes_selected_executable_does_not_leave_stale_evidence(tmp_path, capsys):
+    tool = _write_tool(tmp_path / "tool", '#!/bin/sh\nprintf changed > "$0"\nprintf old-version\n')
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"{tool} {marker}"}],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 1
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["version_changed_executable"] is True and check["status"] == "mismatch"
+    assert "version_output" not in check and not marker.exists()
+
+
+@pytest.mark.parametrize("search_cwd", [False, True])
+@pytest.mark.parametrize(
+    "command,filename", [("tool", "tool.CMD"), ("tool.CMD", "tool.CMD"), ("tool.EXE", "tool.EXE.CMD")]
+)
+def test_windows_pin_resolution_uses_child_cwd_and_pathext(tmp_path, monkeypatch, search_cwd, command, filename):
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    tool = _write_tool(cwd / filename)
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "/missing")
+    monkeypatch.setenv("PATHEXT", ".EXE;.CMD")
+    if search_cwd:
+        monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    else:
+        monkeypatch.setenv("NoDefaultCurrentDirectoryInExePath", "1")
+    assert runbook_cmd._resolve_step_argv0(command, cwd) == (str(tool) if search_cwd else None)
+
+
+def test_windows_pin_resolution_uses_default_pathext_for_empty_value(tmp_path, monkeypatch):
+    tool = _write_tool(tmp_path / "tool.CMD")
+    monkeypatch.setattr(runbook_cmd.sys, "platform", "win32")
+    monkeypatch.setenv("PATH", "/missing")
+    monkeypatch.setenv("PATHEXT", "")
+    monkeypatch.delenv("NoDefaultCurrentDirectoryInExePath", raising=False)
+    assert runbook_cmd._resolve_step_argv0("tool", tmp_path) == str(tool)
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("explicit_cwd", [False, True])
+def test_relative_target_uses_same_cwd_for_pinning_and_execution(tmp_path, monkeypatch, capsys, pinned, explicit_cwd):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / "project"
+    cwd = target / "work" if explicit_cwd else target
+    cwd.mkdir(parents=True)
+    tool = _write_tool(cwd / "tool", '#!/bin/sh\npwd > "$1"\n')
+    marker = tmp_path / "marker"
+    step = {"run": f"{tool} {marker}"}
+    if explicit_cwd:
+        step["cwd"] = "work"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(json.dumps({"steps": [step]}))
+    assert runbook_cmd._step_cwd(Path("project"), step) == cwd
+    if pinned:
+        assert runbook_cmd.pin(target=Path("project"), runbook=runbook, json_output=True) == 0
+        capsys.readouterr()
+    assert runbook_cmd.run(target=Path("project"), runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["steps"][0]["cwd"] == marker.read_text().strip() == str(cwd)
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_relative_stored_pin_path_does_not_hide_actual_override_evidence(tmp_path, monkeypatch, capsys, override):
+    tool = _versioned_tool(tmp_path / "tool", "actual")
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": "tool", "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"tool {marker}"}],
+            }
+        )
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    result = json.loads(capsys.readouterr().out)
+    check = result["pin_checks"][0]
+    assert check["status"] == "mismatch" and check["expected_path"] == "tool"
+    assert check["resolved_path"] == str(tool) and check["observed_sha256"] == _sha256(tool)
+    if override:
+        assert rc == 0 and marker.read_text() == "actual"
+        assert check["version_output"] == "actual version" and check["override"] is True
+    else:
+        assert rc == 2 and not marker.exists() and "version_output" not in check
+
+
+def test_unused_configured_pin_preserves_runtime_version_metadata(tmp_path, capsys):
+    tool = _versioned_tool(tmp_path / "tool", "unused")
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": "printf hello"}],
+            }
+        )
+    )
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    check = json.loads(capsys.readouterr().out)["pin_checks"][0]
+    assert check["version_output"] == "unused version" and check["status"] == "ok"
+    assert "step_index" not in check
+
+
+@pytest.mark.parametrize("override", [False, True])
+def test_unused_pin_version_mutation_is_rechecked_before_steps(tmp_path, capsys, override):
+    tool = _write_tool(tmp_path / "tool", '#!/bin/sh\nprintf changed > "$0"\nprintf old-version\n')
+    marker = tmp_path / "marker"
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "pins": [{"command": "tool", "path": str(tool), "sha256": _sha256(tool), "version_cmd": "--version"}],
+                "steps": [{"run": f"printf executed > {marker}"}],
+            }
+        )
+    )
+    rc = runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, allow_pin_mismatch=override, json_output=True)
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    check = result["pin_checks"][0]
+    assert check["version_changed_executable"] is True and check["status"] == "mismatch"
+    assert "version_output" not in check
+    if override:
+        assert rc == 0 and marker.read_text() == "executed"
+        assert check["override"] is True and "pin mismatch override allowed" in captured.err
+    else:
+        assert rc == 2 and result["status"] == "pin-check-failed" and not marker.exists()
+
+
+def test_same_command_same_hash_at_distinct_paths_keeps_truthful_step_evidence(tmp_path, capsys):
+    first, second = tmp_path / "first", tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    a = _write_tool(first / "tool")
+    b = _write_tool(second / "tool", a.read_text())
+    runbook = tmp_path / "runbook.json"
+    runbook.write_text(
+        json.dumps(
+            {
+                "steps": [
+                    {"id": "one", "run": "./tool marker", "cwd": str(first)},
+                    {"id": "two", "run": "./tool marker", "cwd": str(second)},
+                ]
+            }
+        )
+    )
+    assert runbook_cmd.pin(target=tmp_path, runbook=runbook, json_output=True) == 0
+    pins = json.loads(capsys.readouterr().out)["pins"]
+    assert len(pins) == 1 and pins[0]["sha256"] == _sha256(a)
+    assert runbook_cmd.run(target=tmp_path, runbook=runbook, approved=True, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert [(c["step_id"], c["resolved_path"], c["status"]) for c in receipt["pin_checks"]] == [
+        ("one", str(a), "ok"),
+        ("two", str(b), "ok"),
+    ]
+    assert all(not c["override"] and c["observed_sha256"] == _sha256(a) for c in receipt["pin_checks"])
+    assert (first / "marker").read_text() == (second / "marker").read_text() == "ran"

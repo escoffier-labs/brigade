@@ -495,6 +495,7 @@ def companion_package_manifest(runtime: dict, platform: str) -> dict:
             "url": "git+https://github.com/escoffier-labs/brigade.git",
             "directory": "npm/feasibility",
         },
+        "homepage": "https://brigadestack.com",
         "license": "MIT OR Apache-2.0",
         "os": [system],
         "cpu": [cpu],
