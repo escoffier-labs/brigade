@@ -793,3 +793,15 @@ def test_external_lifecycle_and_expiry_leave_public_item_metadata_unchanged(db, 
     assert ownership._external_current(conn, old_id)["state"] == "expired"
     assert metadata(old_id) == old_before
     assert metadata(successor) == successor_before
+
+
+@pytest.mark.parametrize("nonce", ["", "x", "A" * 42, "A" * 45, "\u00e9"])
+def test_malformed_holder_nonce_is_a_validation_refusal_without_writes(db, nonce):
+    conn, _ = db
+    work_id, _ = offer(conn)
+    before = conn.total_changes
+    with pytest.raises(WorkloreValidationError) as caught:
+        register(conn, work_id, nonce=nonce)
+    assert caught.value.code == "field-bound"
+    assert conn.total_changes == before
+    assert ownership._external_current(conn, work_id)["state"] == "admitted"

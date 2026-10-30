@@ -1047,6 +1047,7 @@ def external_ownership_action(
     expected_revision = _integer(expected_revision)
     key = _text(idempotency_key, "idempotency_key", IDEMPOTENCY_KEY_MAX)
     if isinstance(holder_nonce, str):
+        nonce_hash(holder_nonce)
         _reject_nonce_echo(raw, key, holder_nonce)
     try:
         if not isinstance(raw, Mapping):
