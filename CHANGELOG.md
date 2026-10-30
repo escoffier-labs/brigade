@@ -116,6 +116,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
 
+- Add explicit offline admission of signed key-manifest evidence with rollback floors and retained conflicts. Manifest entries do not accept peers, and transport bundles containing manifests remain unsupported.
+
 ### Fixed
 
 - Content guard recognizes a whole hostname expression after a completed quoted-subscript f-string field, while retaining literal URL hostname detection (partial #1983).
