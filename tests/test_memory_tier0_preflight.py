@@ -75,6 +75,130 @@ def codes(report):
     return {check["code"] for check in report["checks"]}
 
 
+def retained_change(target, candidate, **changes):
+    """Model same-UID retained-state tampering with a self-consistent digest."""
+    from brigade import memory_proposal_io as io
+
+    updated = {k: v for k, v in candidate.items() if k != "candidate_id"} | changes
+    updated["candidate_id"] = "candidate-" + io.sha256(io.json_bytes(updated))[:24]
+    for path in (target / memory_reflect.ROOT).glob("*/candidates.jsonl"):
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        if candidate in rows:
+            path.write_text("".join(json.dumps(updated if row == candidate else row) + "\n" for row in rows))
+            return updated
+    raise AssertionError("retained candidate not found")
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        dict(card_paths=[]),
+        dict(card_paths="memory/cards/cache.md"),
+        dict(card_paths={"cache": []}),
+        dict(card_paths={"wrong": "memory/cards/cache.md"}),
+        dict(base_sha256=[]),
+        dict(base_sha256={"cache": "not-a-digest"}),
+        dict(evidence_sources=[]),
+        dict(kind=[]),
+        dict(proof_count=True),
+    ],
+)
+def test_preflight_malformed_retained_mapping_is_sanitized(tmp_path, capsys, changes):
+    _, candidate = prepared(tmp_path)
+    candidate = retained_change(tmp_path, candidate, **changes)
+    before = tree(tmp_path)
+    assert (
+        cli.main(["memory", "reflect", "preflight", candidate["candidate_id"], "--target", str(tmp_path), "--json"])
+        == 2
+    )
+    output = capsys.readouterr()
+    report = json.loads(output.out)
+    assert "candidate_invalid" in codes(report)
+    assert report["evaluation_sha256"] is None
+    assert not output.err
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["opposite-polarity", "near-match"])
+def test_preflight_review_evidence_does_not_satisfy_proof_floors(tmp_path, kind):
+    path = card(tmp_path, "cache", body="Keep the cache warm. ^c-123abc")
+    refs = [
+        evidence(tmp_path, ref)
+        for ref in (".brigade/receipts/a.json", ".brigade/receipts/b.json", "memory/evidence/c.json")
+    ]
+    log(tmp_path, path, *((ref, kind, "2026-10-20T12:00:00Z") for ref in refs))
+    candidate = next(
+        c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "stale-newer-evidence"
+    )
+    assert candidate["proof_count"] == 0
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate)
+    assert {"evidence_floor_unmet", "source_group_floor_unmet"} <= codes(report)
+    assert "evidence_floor_satisfied" not in codes(report)
+    assert "source_group_floor_satisfied" not in codes(report)
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("counter", ["proof_count", "proof_sources"])
+def test_preflight_inconsistent_retained_proof_is_not_satisfied(tmp_path, counter):
+    _, candidate = prepared(tmp_path)
+    candidate = retained_change(tmp_path, candidate, **{counter: 0})
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    assert "candidate_proof_mismatch" in codes(report)
+    assert all(
+        check["state"] != "satisfied"
+        for check in report["checks"]
+        if check["gate"] in ("evidence_floor", "source_group_floor")
+    )
+    assert report["evaluation_sha256"] is None
+
+
+@pytest.mark.parametrize("extra", ["missing", "outside-root", "window"])
+def test_preflight_incomplete_ledger_binding_preserves_diagnostics(tmp_path, extra):
+    path, candidate = prepared(tmp_path)
+    if extra == "window":
+        refs = [evidence(tmp_path, f".brigade/receipts/new-{n}.json") for n in range(64)]
+    else:
+        refs = [".brigade/receipts/deleted.json" if extra == "missing" else "docs/note.json"]
+    log(tmp_path, path, *((ref, "outcome", "2026-10-21T12:00:00Z") for ref in refs))
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert report["status"] == "held"
+    assert {"binding_incomplete", "delta_satisfied", "evidence_floor_satisfied"} <= codes(report)
+    assert report["evaluation_sha256"] is None
+    assert len(report["evidence_sha256"]) <= 64
+    assert tree(tmp_path) == before
+
+
+def test_preflight_skips_unrelated_corrupt_newer_run(tmp_path):
+    _, candidate = prepared(tmp_path)
+    older = memory_reflect.inspect_payload(target=tmp_path, command="status")["latest_run"]["run_id"]
+    newer = memory_reflect.run_payload(target=tmp_path)["run_id"]
+    assert newer > older
+    path = tmp_path / memory_reflect.ROOT / newer / "candidates.jsonl"
+    path.write_text(path.read_text() + path.read_text().splitlines()[0] + "\n")
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate)
+    assert report["run_id"] == older
+    assert "delta_satisfied" in codes(report)
+    assert report["status"] == "held"
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("missing", ["target", "source"])
+def test_preflight_missing_inputs_have_specific_reasons(tmp_path, missing):
+    path, candidate = prepared(tmp_path)
+    if missing == "target":
+        tmp_path = tmp_path / "absent"
+    else:
+        path.unlink()
+    report = evaluate(tmp_path, candidate)
+    assert report["status"] == "refused"
+    assert ("target_invalid" if missing == "target" else "source_invalid") in codes(report)
+    assert "card_trust_denied" not in codes(report)
+
+
 def test_preflight_counts_never_grant_authority(tmp_path):
     _, candidate = prepared(tmp_path)
     name = policy(tmp_path)

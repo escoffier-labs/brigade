@@ -149,18 +149,54 @@ def _candidate(snapshot: Snapshot, candidate_id: str) -> tuple[dict[str, Any], s
         "outcome_bindings",
         "semantic_contradiction",
     }
-    if set(candidate) - allowed or type(candidate.get("tier")) is not int:
+    if (
+        set(candidate) - allowed
+        or type(candidate.get("tier")) is not int
+        or type(candidate.get("kind")) is not str
+        or not 1 <= len(candidate["kind"]) <= 64
+    ):
         raise Refusal("candidate_invalid")
     for key in ("evidence_ids", "contrary_ids", "review_evidence_ids", "unresolved_evidence_ids", "card_ids"):
         values = candidate[key]
-        if not isinstance(values, list) or len(values) > io.MAX_LIST or any(type(v) is not str for v in values):
+        if (
+            not isinstance(values, list)
+            or len(values) > io.MAX_LIST
+            or any(type(v) is not str or not 1 <= len(v) <= 1024 for v in values)
+            or len(set(values)) != len(values)
+        ):
             raise Refusal("candidate_invalid")
+    for key in ("card_paths", "base_sha256", "evidence_sources"):
+        values = candidate[key]
+        if (
+            not isinstance(values, dict)
+            or len(values) > io.MAX_LIST
+            or any(type(k) is not str or not 1 <= len(k) <= 1024 for k in values)
+            or any(type(v) is not str or not 1 <= len(v) <= 1024 for v in values.values())
+        ):
+            raise Refusal("candidate_invalid")
+    if (
+        not 1 <= len(candidate["card_ids"]) <= v2.MAX_SOURCES
+        or set(candidate["card_paths"]) != set(candidate["card_ids"])
+        or set(candidate["base_sha256"]) != set(candidate["card_ids"])
+        or len(set(candidate["card_paths"].values())) != len(candidate["card_ids"])
+        or any(not re.fullmatch(r"[0-9a-f]{64}", digest) for digest in candidate["base_sha256"].values())
+        or set(candidate["evidence_sources"]) != set(candidate["evidence_ids"])
+        or any(
+            type(candidate[k]) is not int or not 0 <= candidate[k] <= io.MAX_LIST
+            for k in ("proof_count", "proof_sources")
+        )
+    ):
+        raise Refusal("candidate_invalid")
     for name in candidate["card_paths"].values():
         _safe_name(name)
     for run in reflect._runs(target)[0]:
         if run["status"] != "completed":
             continue
-        if candidate in reflect._candidates(target, run):
+        try:
+            candidates = reflect._candidates(target, run)
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            continue
+        if candidate in candidates:
             root = target / reflect.ROOT / run["run_id"]
             receipt = snapshot.read(root / "receipt.json", io.MAX_STATE_BYTES, private=True)
             rows = snapshot.read(root / "candidates.jsonl", io.MAX_STATE_BYTES, private=True)
@@ -191,38 +227,69 @@ def _corpus(snapshot: Snapshot, care: Any) -> list[str]:
 
 def _evidence(
     snapshot: Snapshot, candidate: dict[str, Any], sources: list[dict[str, Any]], ledger: Any
-) -> dict[str, str]:
+) -> tuple[dict[str, str], bool]:
     refs = {derive._evidence_id(ref) for ref in candidate["evidence_ids"]}
     for source in sources:
         refs.update(derive._evidence_id(ref) for ref in memory_cmd._evidence_refs(source["metadata"]))
+    primary = set(refs)
+    for source in sources:
         rows = [row for key in (source["id"], *source["aliases"]) for row in ledger.by_identity.get(key, [])]
         newest = sorted(rows, key=lambda row: (derive._sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         refs.update(list(dict.fromkeys(derive._evidence_id(row["evidence_id"]) for row in newest))[: io.MAX_LIST])
-    if len(refs) > io.MAX_LIST:
-        raise Refusal("binding_incomplete")
+    complete = len(refs) <= io.MAX_LIST
+    # Preserve candidate/citation diagnostics when unrelated ledger history fills the window.
+    selected = sorted(primary) + sorted(refs - primary)
     roots = derive._evidence_roots(snapshot.target)
     raw_inputs: dict[str, bytes] = {}
     total = 0
     # Check the aggregate before hashing any evidence or invoking composition.
-    for ref in sorted(refs):
+    for ref in selected[: io.MAX_LIST]:
         bundle = memory_cmd._miseledger_evidence_id(ref)
         if bundle:
             path = memory_cmd._miseledger_evidence_path(bundle)
         else:
             _safe_name(ref)
             if not any(ref.startswith(root + "/") for root in roots):
-                raise Refusal("binding_incomplete")
+                complete = False
+                continue
             path = snapshot.target / ref
         if path is None:
-            raise Refusal("binding_incomplete")
+            complete = False
+            continue
         raw = snapshot.read(path, io.MAX_INPUT_BYTES)
         if raw is None:
-            raise Refusal("binding_incomplete")
+            complete = False
+            continue
         total += len(raw)
         if total > io.MAX_CORPUS_BYTES:
             raise Refusal("binding_incomplete")
         raw_inputs[ref] = raw
-    return {ref: io.sha256(raw) for ref, raw in raw_inputs.items()}
+    return {ref: io.sha256(raw) for ref, raw in raw_inputs.items()}, complete
+
+
+def _proof(
+    target: Path, candidate: dict[str, Any], sources: list[dict[str, Any]], ledger: Any, bound: dict[str, str]
+) -> tuple[set[str], dict[str, str], bool]:
+    excluded = {
+        derive._evidence_id(ref)
+        for key in ("contrary_ids", "review_evidence_ids", "unresolved_evidence_ids")
+        for ref in candidate[key]
+    }
+    refs = {derive._evidence_id(ref) for ref in candidate["evidence_ids"]} - excluded
+    for source in sources:
+        rows = [row for key in (source["id"], *source["aliases"]) for row in ledger.by_identity.get(key, [])]
+        card = derive.Card(
+            source["path"],
+            source["text"],
+            source["metadata"],
+            derive.card_identity(source["metadata"], source["path"]),
+            rows,
+        )
+        refs -= derive._invalid_outcome_ids(target, card, refs & bound.keys())
+    groups = derive._resolved(target, sorted(refs & bound.keys()), derive._evidence_roots(target))
+    proof = set(groups)
+    consistent = candidate["proof_count"] == len(proof) and candidate["proof_sources"] == len(set(groups.values()))
+    return proof, groups, consistent
 
 
 def _delta(
@@ -312,13 +379,14 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         evaluation_sha256=None,
         checks=[],
     )
-    stage = "candidate_invalid"
+    stage = "target_invalid"
     try:
         with io.directory(target):
             pass
         target = target.absolute()
         snapshot = Snapshot(target)
         policy, report["policy_sha256"] = _policy(snapshot, policy_path)
+        stage = "candidate_invalid"
         if not isinstance(candidate_id, str) or not re.fullmatch(r"candidate-[0-9a-f]{24}", candidate_id):
             raise Refusal("candidate_invalid")
         report["candidate_id"] = candidate_id
@@ -364,25 +432,44 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
             or ledger.summary["unsupported"]
         ):
             raise Refusal("evidence_window_incomplete")
-        stage = "card_trust_denied"
+        stage = "source_invalid"
+        if any(name not in names for name in candidate["card_paths"].values()):
+            raise Refusal("source_invalid")
+        for name in candidate["card_paths"].values():
+            raw = snapshot.inputs[target / name][0]
+            assert raw is not None
+            text = raw.decode("utf-8")
+            meta = legacy._meta(text)
+            stage = "card_trust_denied"
+            legacy._admit(text, meta)
+            stage = "source_invalid"
         sources, _ = v2._sources(target, care, list(candidate["card_paths"].values()))
+        if {s["id"]: s["path"] for s in sources} != candidate["card_paths"]:
+            raise Refusal("candidate_invalid")
         stage = "binding_incomplete"
         report["source_sha256"] = {s["path"]: s["sha256"] for s in sources}
         drift = any(candidate["base_sha256"].get(s["id"]) != s["sha256"] for s in sources)
         _check(report, "snapshot", "base_drift" if drift else None)
-        report["evidence_sha256"] = _evidence(snapshot, candidate, sources, ledger)
+        report["evidence_sha256"], complete_binding = _evidence(snapshot, candidate, sources, ledger)
+        if not complete_binding:
+            _check(report, "snapshot", "binding_incomplete")
         if not drift:
             _delta(report, snapshot, care, binding, candidate, policy, sources)
         else:
             _check(report, "delta", "delta_invalid", state="not_evaluated")
-        groups = derive._resolved(target, candidate["evidence_ids"], derive._evidence_roots(target))
-        count = len(set(candidate["evidence_ids"]) & report["evidence_sha256"].keys())
-        _check(report, "evidence_floor", "evidence_floor_unmet" if count < policy["minimum_evidence_ids"] else None)
-        _check(
-            report,
-            "source_group_floor",
-            "source_group_floor_unmet" if len(set(groups.values())) < policy["minimum_source_groups"] else None,
-        )
+        proof, groups, consistent_proof = _proof(target, candidate, sources, ledger, report["evidence_sha256"])
+        if not consistent_proof:
+            _check(report, "candidate", "candidate_proof_mismatch")
+        for gate, count, minimum in (
+            ("evidence_floor", len(proof), policy["minimum_evidence_ids"]),
+            ("source_group_floor", len(set(groups.values())), policy["minimum_source_groups"]),
+        ):
+            _check(
+                report,
+                gate,
+                "proof_binding_incomplete" if not consistent_proof else gate + "_unmet" if count < minimum else None,
+                state="not_evaluated" if not consistent_proof else "held",
+            )
         _check(
             report,
             "host",
@@ -399,7 +486,7 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
             or binding != legacy._configuration(target)[1]
         ):
             raise Refusal("input_drift")
-        if report["delta_sha256"] is not None:
+        if report["delta_sha256"] is not None and complete_binding and consistent_proof:
             report["evaluation_sha256"] = io.sha256(
                 io.json_bytes(
                     {
@@ -429,7 +516,8 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
             "policy"
             if code == "policy_invalid"
             else "snapshot"
-            if code in ("input_drift", "binding_incomplete", "evidence_window_incomplete")
+            if code
+            in ("input_drift", "binding_incomplete", "evidence_window_incomplete", "source_invalid", "target_invalid")
             else "card_trust"
             if code == "card_trust_denied"
             else "candidate"

@@ -2508,8 +2508,11 @@ booleans used as integers are refused. Policy files are limited to 16 KiB.
 Omitting the policy reports `policy_missing` and creates nothing.
 
 The report always has `diagnostic_only: true` and `eligible: false`. Exit 0
-means the diagnostic completed with holds. Exit 2 means an unsafe, invalid or
-incomplete input prevented evaluation. JSON and text show ordered gate states
+means the diagnostic completed with holds. Missing or unaddressable evidence,
+or references beyond the binding window, keep useful checks visible with a
+`binding_incomplete` hold and null evaluation hash. Exit 2 means an unsafe,
+invalid or unreadable required input prevented evaluation. JSON and text show
+ordered gate states
 and sanitized reason codes without card bodies, summaries, diffs, raw policy
 or exception text. Hashes bind observed policy bytes, retained candidate and
 run inputs, source and evidence bytes, configuration, evidence log and the
@@ -2521,6 +2524,9 @@ counts actual changed paths. Current pending negative outcomes remain review
 fences, including negatives outside the newest receipt-validation window and
 cards without a valid cutoff. Three evidence IDs in two filesystem root groups
 satisfy count floors only. They cannot establish independent trusted sources.
+Contrary, review-only, unresolved and invalid current outcome references never
+count as supporting proof. A mismatch with retained proof counters holds the
+candidate and leaves the floor checks unevaluated.
 
 Promotion remains held by `evidence_authority_unbound`,
 `owner_authority_unbound`, `retrieval_eval_unbound` and
@@ -2536,7 +2542,8 @@ events. Stdout and stderr are its only product outputs. It never runs reflection
 or applies a proposal. Descriptor reads reject unsafe links and special files.
 Cards are bounded to 256 KiB, the corpus to 1024 cards and 16 MiB, evidence to
 64 selected IDs, 4 MiB per file and 16 MiB combined before evidence hashing or
-composition. A final bounded reread detects input drift. Legacy readers retain
-the existing same-UID operator boundary. This optimistic snapshot check does
+composition. The evidence log has a 4 MiB read limit. An oversized or invalid
+log prevents evaluation. A final bounded reread detects input drift. Legacy
+readers retain the existing same-UID operator boundary. This optimistic snapshot check does
 not protect against a hostile same-UID process racing those readers, and the
 report is never a reusable approval token.
