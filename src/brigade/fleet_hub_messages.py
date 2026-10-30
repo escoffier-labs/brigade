@@ -826,6 +826,9 @@ def _send(
             raise MessageError("recipient is not an active hub principal")
         require_recipient_cap(conn, sender, recipient)
         if envelope is not None:
+            from .fleet_hub_identity import require_current_hub
+
+            require_current_hub(conn, envelope["hub"])
             sealed.require_current_keys(conn, envelope)
             sealed.admit(conn, sender, len(raw["envelope"]), policy)
         count = conn.execute(

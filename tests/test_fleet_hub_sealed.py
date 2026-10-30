@@ -1077,12 +1077,19 @@ def test_compatible_identity_and_opaque_fields_are_preserved(hub):
     from brigade.fleet_hub_sealed import StoragePolicy
     from tests.test_fleet_hub_message_keys import identity
 
-    for statement, policy in (
-        ({**identity(), "require_sealed": True}, StoragePolicy(require_sealed=True)),
-        ({**identity(), "max_envelope_bytes": 32768}, StoragePolicy(max_envelope_bytes=32768)),
-        (identity(), StoragePolicy(max_envelope_bytes=98305)),
-        ({k: v for k, v in identity().items() if k not in ("require_sealed", "max_envelope_bytes")}, StoragePolicy()),
+    for seq, (statement, policy) in enumerate(
+        (
+            ({**identity(), "require_sealed": True}, StoragePolicy(require_sealed=True)),
+            ({**identity(), "max_envelope_bytes": 32768}, StoragePolicy(max_envelope_bytes=32768)),
+            (identity(), StoragePolicy(max_envelope_bytes=98305)),
+            (
+                {k: v for k, v in identity().items() if k not in ("require_sealed", "max_envelope_bytes")},
+                StoragePolicy(),
+            ),
+        ),
+        start=3,
     ):
+        statement["seq"] = seq
         statement["future"] = {"opaque": "unchanged"}
         fleet_hub_identity.upload_identity(hub, statement)
         before = hub.execute("SELECT value FROM hub_meta WHERE key='identity'").fetchone()[0]
@@ -1695,3 +1702,78 @@ def test_require_sealed_environment_preserves_explicit_policy_overlay(
         assert policy.require_sealed is base_required
     finally:
         server.server_close()
+
+
+def test_d4_sealed_fence_preserves_exact_retry(hub):
+    from brigade import fleet_hub_identity as ids
+    from tests.test_fleet_hub_message_keys import _d4_identity
+
+    raw = envelope()
+    accepted = send(hub, raw)
+    ids.upload_identity(hub, _d4_identity())
+    before = [
+        hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("fleet_messages", "fleet_message_sends", "fleet_events")
+    ]
+    assert send(hub, raw) == accepted
+    with pytest.raises(messages.MessageConflict) as error:
+        send(hub, envelope(client_id="new-old-hub"))
+    assert error.value.code == "hub_identity_changed"
+    changed = json.loads(raw)
+    changed["sig"] = binary(bytes([1]) * 64)
+    with pytest.raises(messages.MessageConflict) as error:
+        send(hub, canonical(changed))
+    assert error.value.code == "message_client_id_conflict"
+    assert [
+        hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("fleet_messages", "fleet_message_sends", "fleet_events")
+    ] == before
+
+
+@pytest.mark.parametrize("replacement_first", [False, True])
+@pytest.mark.parametrize("rollback_replacement", [False, True])
+def test_d4_sealed_replacement_writer_order(hub, monkeypatch, replacement_first, rollback_replacement):
+    from brigade import fleet_hub_identity as ids
+    from tests.test_fleet_hub_message_keys import _d4_identity, _d4_queued_writer
+    from brigade import fleet_hub_events as events
+
+    monkeypatch.setattr(events, "_CONFIG", events.EventsConfig(frozenset({"callback.invalid"})))
+    hub.execute(
+        "INSERT INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,created_at) "
+        "VALUES('sub-d4','node-b','message.created','{}','node-b','https://callback.invalid/events','fixture-only',0)"
+    )
+    hub.commit()
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    raw = envelope(hub=a["hub_id"])
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    tables = ("fleet_messages", "fleet_message_sends", "fleet_events")
+    before = [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables]
+    hub.execute("BEGIN IMMEDIATE")
+    with _d4_queued_writer(path) as (pool, run, attempted):
+        if replacement_first:
+            ids.upload_identity(hub, b)
+            pending = pool.submit(run, lambda conn: send(conn, raw))
+        else:
+            accepted = send(hub, raw)
+            pending = pool.submit(run, lambda conn: ids.upload_identity(conn, b))
+        assert attempted.wait(5)
+        if replacement_first and rollback_replacement:
+            hub.rollback()
+        else:
+            hub.commit()
+        if replacement_first and not rollback_replacement:
+            with pytest.raises(messages.MessageConflict) as error:
+                pending.result(timeout=10)
+            assert error.value.code == "hub_identity_changed"
+            assert [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == before
+        else:
+            result = pending.result(timeout=10)
+            if replacement_first:
+                accepted = result
+            assert send(hub, raw) == accepted
+            assert lookup(hub)[1]["message"] == accepted
+            assert [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == [
+                n + 1 for n in before
+            ]
