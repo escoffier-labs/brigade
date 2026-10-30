@@ -201,9 +201,10 @@ def _invalid_outcome_ids(target: Path, card: Card, refs: set[str]) -> set[str]:
     stamps: dict[str, set[str]] = {}
     for row in card.rows:
         ref = _evidence_id(row["evidence_id"])
-        if ref in refs and row["kind"] == "outcome" and verify_outcome_ref(ref):
+        if ref in refs and row["kind"] in {"outcome", "negative-outcome"} and verify_outcome_ref(ref):
             stamps.setdefault(ref, set()).add(row["ts"])
-    return {
+    negative = {_evidence_id(row["evidence_id"]) for row in card.rows if row["kind"] == "negative-outcome"}
+    return (negative & refs) | {
         ref
         for ref, values in stamps.items()
         if len(values) != 1
@@ -288,6 +289,7 @@ def _candidate(
     diff: str = "",
     review: list[str] | None = None,
     summary: str,
+    outcome_bindings: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     cards = sorted(cards, key=lambda c: c.identity.card_id)
     scopes = sorted({str(card.meta.get("scope", "repo")) for card in cards})
@@ -315,6 +317,9 @@ def _candidate(
         "diff": "" if review_only else diff,
         "summary": summary,
     }
+    if outcome_bindings is not None:
+        payload["outcome_bindings"] = outcome_bindings
+        payload["semantic_contradiction"] = "unadjudicated"
     payload["candidate_id"] = "candidate-" + io.sha256(io.json_bytes(payload))[:24]
     return payload
 
@@ -370,6 +375,36 @@ def _grouping_text(text: str) -> str:
     return text
 
 
+def _negative_outcome_bindings(target: Path, card: Card, selected: set[str] | None = None) -> dict[str, dict[str, Any]]:
+    """Revalidate pending negative signals within the same bounded receipt window."""
+    if not any(row["kind"] == "negative-outcome" for row in card.rows):
+        return {}
+    if selected is None:
+        newest = dict.fromkeys(
+            row["evidence_id"]
+            for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+        )
+        selected = set(list(newest)[: io.MAX_LIST])
+    from .memory_evidence_log import negative_outcome_binding
+
+    negative_stamps: dict[str, set[str]] = {}
+    pending = _pending_rows(card)
+    for row in card.rows:
+        if row["kind"] == "negative-outcome" and row["evidence_id"] in selected:
+            negative_stamps.setdefault(row["evidence_id"], set()).add(row["ts"])
+    bindings: dict[str, dict[str, Any]] = {}
+    pending_ids = {row["evidence_id"] for row in pending if row["kind"] == "negative-outcome"}
+    for ref, stamps in negative_stamps.items():
+        if len(stamps) != 1 or ref not in pending_ids:
+            continue
+        binding = negative_outcome_binding(
+            target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(stamps))
+        )
+        if binding is not None:
+            bindings[ref] = binding
+    return bindings
+
+
 def generate(
     target: Path, care: memory_cmd.MemoryCareConfig, ledger: EvidenceLog, cards: list[Card]
 ) -> list[dict[str, Any]]:
@@ -392,7 +427,24 @@ def generate(
             for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         )
         selected = list(newest)[: io.MAX_LIST]
+        bindings = _negative_outcome_bindings(target, card, set(selected))
+        negative_ids = sorted(bindings)
+        negative_sources = _resolved(target, negative_ids, roots)
+        if negative_ids:
+            candidates.append(
+                _candidate(
+                    "negative-outcome-review",
+                    [card],
+                    negative_ids,
+                    [],
+                    sources=negative_sources,
+                    review=negative_ids,
+                    outcome_bindings=bindings,
+                    summary="Failed effectiveness verification requires human review. Claim truth is unadjudicated.",
+                )
+            )
         invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
+        invalid |= {row["evidence_id"] for row in card.rows if row["kind"] == "negative-outcome"}
         retained_refs = refs
         refs = [ref for ref in refs if ref not in invalid]
         card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
@@ -410,7 +462,10 @@ def generate(
         contrary = sorted(
             {row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} - set(refs)
         )
-        review = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
+        review = sorted(
+            ({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
+            | set(negative_ids)
+        )
         blockers = sorted(set(contrary) | set(review))
         for start in range(0, len(blockers), io.MAX_LIST):
             sources.update(_resolved(target, blockers[start : start + io.MAX_LIST], roots))
@@ -489,7 +544,13 @@ def generate(
                 summary="would merge exact normalized duplicates: " + ", ".join(sorted(c.path for c in group)),
             )
         )
-    priority = {"opposite-polarity": 0, "stale-newer-evidence": 1, "reinforce": 2, "duplicate": 3}
+    priority = {
+        "negative-outcome-review": 0,
+        "opposite-polarity": 0,
+        "stale-newer-evidence": 1,
+        "reinforce": 2,
+        "duplicate": 3,
+    }
     return sorted(candidates, key=lambda c: (priority[c["kind"]], c["card_ids"], c["candidate_id"]))
 
 

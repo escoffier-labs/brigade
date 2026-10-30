@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 LOG_PATH = ".brigade/memory/reflect/evidence-log.jsonl"
 MAX_LINE_BYTES = 4096
 MAX_SCAN_BYTES = 4 * 1024 * 1024
-KINDS = {"near-match", "opposite-polarity", "reinforced", "outcome"}
+KINDS = {"near-match", "opposite-polarity", "reinforced", "outcome", "negative-outcome"}
 _FIELDS = {"ts", "card_id", "card_path", "evidence_id", "kind", "similarity"}
 
 
@@ -198,7 +198,7 @@ def _snapshot_fingerprint(target: Path, card_path: str, text: str, artifact_id: 
     return fingerprint if _linked_snapshot(path) == snapshot else None
 
 
-def validate_outcome_support(
+def _validate_outcome(
     target: Path,
     *,
     card_path: str,
@@ -206,6 +206,7 @@ def validate_outcome_support(
     ref: str,
     timestamp: str | None = None,
     observed: dict[str, Any] | None = None,
+    negative: bool = False,
 ) -> bool:
     """Revalidate logged verify support against a specific card and retained receipt.
 
@@ -224,7 +225,7 @@ def validate_outcome_support(
             return False
         if receipt.get("run_id") != path.parent.name or receipt.get("path") != str(path.parent):
             return False
-        if receipt.get("status") != "completed" or receipt.get("reused_from"):
+        if receipt.get("status") != ("failed" if negative else "completed") or receipt.get("reused_from"):
             return False
         binding = receipt.get("subject_binding")
         if not isinstance(binding, dict) or binding.get("artifact_kind") != "card":
@@ -237,7 +238,7 @@ def validate_outcome_support(
             return False
         if not verify_trial.project_trial(receipt, target=target).eligible:
             return False
-        if scorecard.effectiveness_outcome(receipt) != 1:
+        if scorecard.effectiveness_outcome(receipt) != (-1 if negative else 1):
             return False
         # Admission may read other state. Recheck both retained bytes and the
         # full linked-card fingerprint after it, rather than trusting old data.
@@ -247,13 +248,57 @@ def validate_outcome_support(
         return False
 
 
+def validate_outcome_support(
+    target: Path,
+    *,
+    card_path: str,
+    card_text: str,
+    ref: str,
+    timestamp: str | None = None,
+    observed: dict[str, Any] | None = None,
+) -> bool:
+    """Accept only completed, eligible effectiveness support."""
+    return _validate_outcome(
+        target, card_path=card_path, card_text=card_text, ref=ref, timestamp=timestamp, observed=observed
+    )
+
+
+def negative_outcome_binding(
+    target: Path, *, card_path: str, card_text: str, ref: str, timestamp: str
+) -> dict[str, Any] | None:
+    """Return body-free provenance only for an eligible failed effectiveness run."""
+    if not verify_outcome_ref(ref):
+        return None
+    try:
+        raw = io.read_bytes(target / io.relative(ref))
+        receipt = json.loads(raw or b"")
+        if not _validate_outcome(
+            target,
+            card_path=card_path,
+            card_text=card_text,
+            ref=ref,
+            timestamp=timestamp,
+            observed=receipt,
+            negative=True,
+        ):
+            return None
+        return {
+            "run_id": receipt["run_id"],
+            "timestamp": timestamp,
+            "receipt_sha256": io.sha256(raw or b""),
+            "subject_binding": receipt["subject_binding"],
+        }
+    except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
+        return None
+
+
 def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) -> None:
     """Admit a durable card outcome, preserving original time and distinct proof."""
     from . import outcome_cmd, scorecard, verify_trial
 
     if record.source != "verify" or record.artifact_kind != "card":
         return
-    if receipt.get("status") != "completed" or receipt.get("reused_from"):
+    if receipt.get("status") not in {"completed", "failed"} or receipt.get("reused_from"):
         return
     binding = receipt.get("subject_binding")
     if (
@@ -279,21 +324,27 @@ def log_outcome(target: Path, record: OutcomeRecord, receipt: dict[str, Any]) ->
         return
     if not eligible:
         return
-    if scorecard.effectiveness_outcome(receipt) != 1:
+    negative = receipt.get("status") == "failed"
+    if scorecard.effectiveness_outcome(receipt) != (-1 if negative else 1):
         return
     timestamp = receipt.get("completed_at") or receipt.get("started_at")
     if _timestamp(timestamp) is None:
         return
     ref = Path(record.evidence_ref).relative_to(target).as_posix()
-    if not validate_outcome_support(
-        target, card_path=path.relative_to(target).as_posix(), card_text=text, ref=ref, observed=receipt
+    if not _validate_outcome(
+        target,
+        card_path=path.relative_to(target).as_posix(),
+        card_text=text,
+        ref=ref,
+        observed=receipt,
+        negative=negative,
     ):
         raise ValueError("outcome support is not consistent with retained evidence")
     append_evidence(
         target,
         card_path=path,
         evidence_id=ref,
-        kind="outcome",
+        kind="negative-outcome" if negative else "outcome",
         similarity=1.0,
         ts=timestamp,
         expected_card_text=text,

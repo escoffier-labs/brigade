@@ -126,7 +126,7 @@ def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
     from dataclasses import replace
 
     from .memory_reflect import _evidence_log
-    from .memory_reflect_candidates import Card, _evidence_id, _pending_rows
+    from .memory_reflect_candidates import Card, _evidence_id, _negative_outcome_bindings, _pending_rows
 
     ledger = _evidence_log(target)
     if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
@@ -140,6 +140,8 @@ def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
         card = Card(
             source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
         )
+        if _negative_outcome_bindings(target, card):
+            raise legacy.ProposalError("current verification failure needs review; refresh the candidate")
         cited = {_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)}
         if any(
             row["kind"] in ("opposite-polarity", "near-match") and row["evidence_id"] not in cited

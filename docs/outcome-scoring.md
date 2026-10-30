@@ -156,3 +156,28 @@ A run whose seats all exited ok but produced no non-`.brigade` file changes is r
 | `ok` | +1 |
 | `error` | -1 |
 | `failed` / `incomplete` without infrastructure-only attribution | -1 |
+
+## Failed card verification review
+
+A registered manifest-backed failed effectiveness check can produce a
+`negative-outcome` reflection log row after durable card outcome capture.
+Admission requires an eligible trial with verification failure attribution,
+retained receipt integrity, and the current card and linked-card fingerprint.
+Infrastructure failures, unknown failure taxonomy, reused receipts and
+utility-only checks do not qualify. Successful outcomes retain their existing
+support contract.
+
+`memory reflect run` revalidates these bindings and the original receipt time.
+Pending eligible failures produce a `negative-outcome-review` candidate with
+receipt pointers and manifest/artifact bindings, `semantic_contradiction:
+unadjudicated`, tier 2, zero proof count and sources, and an empty diff.
+Repeated captures of one receipt supply one signal. Independent receipts remain
+distinct. Historical or mismatched signals are excluded from current candidates.
+
+Negative rows never supply positive proof or consolidation support, including
+when cited in card metadata or appended through a proposal. Pending current
+negative signals block deterministic candidates for that card with review
+evidence. Other cards can still produce deterministic candidates. The existing
+proposal admission refuses translation of the negative review candidate.
+A failed check does not establish that a claim is false. This workflow adds no
+semantic adjudication or card mutation operation.
