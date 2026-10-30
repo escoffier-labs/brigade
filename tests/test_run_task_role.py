@@ -267,7 +267,7 @@ def test_role_instructions_preserve_detached_original(run_task, tmp_path, role, 
     rules = tmp_path / "rules.md"
     rules.write_text("Use concrete examples.")
     with (tmp_path / "roster.toml").open("a") as stream:
-        stream.write(f'\n[task_roles.{role}]\ninstructions_file = "{rules}"\n')
+        stream.write(f"\n[task_roles.{role}]\ninstructions_file = '{rules}'\n")
     assert invoke(task, "--worker", "author", "--applied-preference", "--task-role-workload", role) == 0
     original, roster, _ = seen[0]
     assert original == task
@@ -302,7 +302,7 @@ def test_instructions_fail_closed(run_task, tmp_path, capsys, mode):
     elif mode == "invalid-utf8":
         path.write_bytes(b"\xff")
     with (tmp_path / "roster.toml").open("a") as stream:
-        stream.write(f'\n[task_roles.writing]\ninstructions_file = "{path}"\n')
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{path}'\n")
     assert invoke("Draft a blog post") == 2
     assert seen == []
     assert "instructions file 'rules.md' is unreadable or exceeds 64 KiB" in capsys.readouterr().err
@@ -345,7 +345,7 @@ def test_role_prompt_dispatch_builder_covers_fallback(run_task, monkeypatch, tmp
     rules = tmp_path / "rules.md"
     rules.write_text("R" * 65536)
     with (tmp_path / "roster.toml").open("a") as stream:
-        stream.write(f'\n[task_roles.writing]\ninstructions_file = "{rules}"\n')
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{rules}'\n")
     monkeypatch.setattr(
         fleet_client_policy, "show_policy", lambda: {"document": {"seats": {"author": {"fallback": ["coder"]}}}}
     )
@@ -400,7 +400,7 @@ def test_writing_health_fallback_dispatches_and_leases_its_own_seat(run_task, mo
     rules = tmp_path / "rules.md"
     rules.write_text("Use concrete examples.")
     with (tmp_path / "roster.toml").open("a") as stream:
-        stream.write(f'\n[task_roles.writing]\ninstructions_file = "{rules}"\n')
+        stream.write(f"\n[task_roles.writing]\ninstructions_file = '{rules}'\n")
     monkeypatch.setattr(
         fleet_client_policy,
         "show_policy",
