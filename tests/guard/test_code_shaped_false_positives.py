@@ -7,6 +7,7 @@ from brigade.guard.engine import scan_text
 HOST = "args" + ".local"
 ENV_HOST = "process.env" + ".HOME"
 LITERAL = "db" + ".local"
+REAL = "db01" + ".internal"
 
 
 def rule_ids(text: str) -> list[str]:
@@ -42,6 +43,11 @@ def test_code_shaped_members_are_not_hostnames(text: str) -> None:
         "services:\n  host: " + LITERAL + ",\n",
         "  server_url: " + LITERAL + ",",
         "Please delete " + LITERAL + ";",
+        "services: {\n  primary: " + REAL + ",\n}\n",
+        "  primary: " + REAL + ",",
+        "do delete " + REAL + ";",
+        "delete " + REAL + ";",
+        "    delete " + REAL + ";",
     ],
 )
 def test_prose_config_and_quoted_hosts_stay_detected(text: str) -> None:
@@ -53,7 +59,7 @@ def test_prose_config_and_quoted_hosts_stay_detected(text: str) -> None:
     [
         "<SANDBOX>/home/" + ".claude/settings.json",
         "/home/" + ".config/opencode/plugins/plugin.js",
-        "/Users/" + ".Trash",
+        "/Users/" + ".config/app/state.json",
     ],
 )
 def test_username_less_dot_paths_are_not_home_paths(text: str) -> None:
@@ -67,6 +73,10 @@ def test_username_less_dot_paths_are_not_home_paths(text: str) -> None:
         "/Users/" + "jane/Library",
         "/home/" + "_svc/data",
         "/home/" + "a.b/notes",
+        "artifact=/home/" + "./alice/build/report.txt",
+        "HOME=/home/" + ".svc",
+        "/Users/" + ".Trash/old",
+        "/home/" + ".claudette/notes",
     ],
 )
 def test_user_home_paths_stay_detected(text: str) -> None:

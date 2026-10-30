@@ -129,9 +129,15 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # Matches absolute paths under conventional home roots including the
         # username segment and any subpath. The username leaks personal data,
         # so the whole path is redacted.
-        # A username never starts with a dot, so a dot-directory directly
-        # under the home root is a sandbox path without a username segment.
-        pattern=r"(?<![\w.-])/(?:home|Users)/[A-Za-z0-9_][A-Za-z0-9._-]*(?:/[A-Za-z0-9._@+-]+)*",
+        # Tool config directories rendered directly under a sandbox home root
+        # (no username segment) are excluded; every other first segment,
+        # including `.`, `..` and other dot names, still matches.
+        pattern=(
+            r"(?<![\w.-])/(?:home|Users)/"
+            r"(?!\.(?:agents|cache|claude|codebuddy|codex|commandcode|config|copilot|cursor|factory|gemini|grok"
+            r"|kimi|local|localcode|pi|tabby)(?:/|$|[^A-Za-z0-9._-]))"
+            r"[A-Za-z0-9._-]+(?:/[A-Za-z0-9._@+-]+)*"
+        ),
         replacement="<PRIVATE_HOME_PATH>",
         description="Filesystem path under a user home directory.",
     ),

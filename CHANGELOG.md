@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Stop the content guard from blocking code-shaped hostname lookalikes: an indented `key: value,` object member with an unquoted value ending the line, and a `delete`, `typeof`, `void` or `await` operand ending a statement, are code. The `home-path` rule now requires a username segment that does not start with a dot, so username-less sandbox paths (a dot-directory directly under the home root) no longer block. Prose, config, and quoted hosts and real user home paths stay detected.
+- Stop the content guard from blocking code-shaped hostname lookalikes: when the dotted value starts with a well-known JavaScript receiver (`args`, `process`, `this`, `options` and similar), an indented `key: value,` object member ending the line or a `delete`, `typeof`, `void` or `await` operand ending a statement is code. The `home-path` rule no longer matches a known tool config directory rendered directly under a sandbox home root with no username segment. Real hosts in YAML, shell and prose, and real user home paths including `.`-segment and hidden homes, stay detected.
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
