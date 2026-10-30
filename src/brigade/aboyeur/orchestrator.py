@@ -1552,6 +1552,7 @@ def run(
     active_seat = active_seats[0] if len(active_seats) == 1 else None
     worker_prompt_builder = partial(
         planning._worker_prompt,
+        instructions=roster.worker_instructions,
         skill_policy=skill_policy,
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,

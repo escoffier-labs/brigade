@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, replace
 from typing import Any
+from pathlib import Path
 
 from .roster import Roster
 
@@ -192,3 +194,28 @@ def strict_roster(roster: Roster, seat: str) -> Roster:
     agents = dict(roster.agents)
     agents[seat] = replace(agents[seat], fallback=(), invalid_final_fallback=None)
     return replace(roster, agents=agents)
+
+
+def policy_roster(roster: Roster, seat: str, fallback: tuple[str, ...]) -> Roster:
+    """Allow exactly the validated policy list, with no local fallback escape."""
+    agents = dict(roster.agents)
+    for name in (seat, *fallback):
+        agents[name] = replace(agents[name], fallback=fallback if name == seat else (), invalid_final_fallback=None)
+    return replace(roster, agents=agents)
+
+
+def load_instructions(roster: Roster, role: str) -> tuple[str, dict[str, str] | None]:
+    """Read host-local rules without persisting their contents or full path."""
+    configured = roster.task_role_instructions.get(role)
+    if not configured:
+        return "", None
+    path = Path(configured).expanduser()
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(65537)
+        if len(raw) > 65536:
+            raise ValueError("file exceeds 64 KiB")
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError(f"task role {role} instructions file {path.name!r} is unreadable or exceeds 64 KiB") from exc
+    return text, {"file": path.name, "sha256": hashlib.sha256(raw).hexdigest()[:12]}
