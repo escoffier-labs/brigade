@@ -805,3 +805,58 @@ def test_malformed_holder_nonce_is_a_validation_refusal_without_writes(db, nonce
     assert caught.value.code == "field-bound"
     assert conn.total_changes == before
     assert ownership._external_current(conn, work_id)["state"] == "admitted"
+
+
+@pytest.mark.parametrize("reader", ["legacy", "external", "prepared", "scope"])
+@pytest.mark.parametrize(
+    "event_type",
+    [
+        b"external-ownership-",
+        b"external-ownership-future",
+        b"external-ownership-registered",
+        b"external-ownership-released",
+    ],
+)
+def test_blob_external_namespace_cannot_bypass_domain_or_scope_fences(db, reader, event_type):
+    conn, _ = db
+    work_id = item(conn)
+    raw_event(conn, work_id, "external-ownership-future", {})
+    conn.execute(
+        "UPDATE work_events SET event_type=? WHERE work_id=? AND event_type=?",
+        (sqlite3.Binary(event_type), work_id, "external-ownership-future"),
+    )
+    conn.commit()
+    if reader == "scope":
+        candidate, _ = offer(conn)
+        with pytest.raises(scope.ScopeAdmissionError) as caught:
+            register(conn, candidate)
+        assert caught.value.code == "path-scope-unavailable"
+    else:
+        from brigade import worklore_prepared_handoff as prepared
+
+        read = {
+            "legacy": ownership.get_ownership,
+            "external": ownership._external_current,
+            "prepared": prepared._current_ownership,
+        }
+        with pytest.raises(store.WorkloreConflict) as caught:
+            read[reader](conn, work_id)
+        assert caught.value.code == "ownership-conflict"
+
+
+@pytest.mark.parametrize("blob", [False, True])
+@pytest.mark.parametrize("event_type", ["External-ownership-future", "external-ownershipX"])
+def test_near_matching_event_names_do_not_quarantine_unrelated_work(db, event_type, blob):
+    conn, _ = db
+    work_id = item(conn)
+    raw_event(conn, work_id, event_type, {})
+    if blob:
+        conn.execute(
+            "UPDATE work_events SET event_type=? WHERE work_id=? AND event_type=?",
+            (sqlite3.Binary(event_type.encode()), work_id, event_type),
+        )
+        conn.commit()
+    assert ownership.get_ownership(conn, work_id)["state"] == "unowned"
+    assert ownership._external_current(conn, work_id) is None
+    candidate, _ = offer(conn)
+    assert register(conn, candidate)["state"] == "active"

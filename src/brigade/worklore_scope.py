@@ -84,7 +84,7 @@ def _reservation_rows(conn: sqlite3.Connection, work_id: str) -> sqlite3.Cursor:
         + ownership._OWNERSHIP_PREDICATE
         + " GROUP BY work_id) latest ON e.work_id=latest.work_id AND e.seq=latest.seq "
         "WHERE (e.event_type IN (" + ",".join("?" for _ in retaining) + ") OR "
-        "(substr(e.event_type,1,19) COLLATE BINARY='external-ownership-' AND (" + ending + ")=0)) "
+        "((" + ownership._EXTERNAL_NAMESPACE_PREDICATE + ") AND (" + ending + ")=0)) "
         "ORDER BY e.work_id LIMIT ?",
         (
             ownership.NODE_ID_MAX + 1,

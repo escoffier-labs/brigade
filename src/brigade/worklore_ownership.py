@@ -66,15 +66,21 @@ EXTERNAL_EVENT_TYPES = {
 }
 ALL_OWNERSHIP_EVENT_TYPES = (*EVENT_TYPES.values(), *EXTERNAL_EVENT_TYPES.values())
 _OWNERSHIP_BINDS = tuple(EVENT_TYPES.values())
+_EXTERNAL_NAMESPACE_PREDICATE = """CASE typeof(event_type)
+ WHEN 'text' THEN substr(event_type,1,19) COLLATE BINARY = 'external-ownership-'
+ WHEN 'blob' THEN substr(event_type,1,19) = X'65787465726e616c2d6f776e6572736869702d'
+ ELSE 0
+END"""
 _OWNERSHIP_PREDICATE = (
-    "(event_type IN ("
-    + ",".join("?" for _ in _OWNERSHIP_BINDS)
-    + ") OR substr(event_type,1,19) COLLATE BINARY = 'external-ownership-')"
+    "(event_type IN (" + ",".join("?" for _ in _OWNERSHIP_BINDS) + ") OR (" + _EXTERNAL_NAMESPACE_PREDICATE + "))"
 )
 _EXTERNAL_HISTORY_SQL = (
-    "SELECT 1 FROM work_events WHERE work_id=? "
+    "SELECT 1 FROM work_events WHERE work_id=? AND typeof(event_type)='text' "
     "AND event_type COLLATE BINARY >= 'external-ownership-' "
-    "AND event_type COLLATE BINARY < 'external-ownership.' LIMIT 1"
+    "AND event_type COLLATE BINARY < 'external-ownership.' "
+    "UNION ALL SELECT 1 FROM work_events WHERE work_id=? AND typeof(event_type)='blob' "
+    "AND event_type >= X'65787465726e616c2d6f776e6572736869702d' "
+    "AND event_type < X'65787465726e616c2d6f776e6572736869702e' LIMIT 1"
 )
 _EXTERNAL_UNSUPPORTED = "unsupported external ownership version; ownership unchanged"
 _FIELDS = {
@@ -297,7 +303,7 @@ def _initial() -> dict[str, Any]:
 
 
 def _current(conn: sqlite3.Connection, work_id: str) -> dict[str, Any]:
-    if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None:
+    if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id, work_id)).fetchone() is not None:
         raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict")
     row = conn.execute(
         f"SELECT detail_json FROM work_events WHERE work_id=? AND {_EVENT_PREDICATE} ORDER BY seq DESC LIMIT 1",
@@ -558,7 +564,7 @@ def ownership_action(
             )
         # Permanent domain fence also precedes historical legacy replay. Pure
         # legacy items retain their original replay ordering and validation.
-        if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None:
+        if conn.execute(_EXTERNAL_HISTORY_SQL, (work_id, work_id)).fetchone() is not None:
             raise store.WorkloreConflict(_EXTERNAL_UNSUPPORTED, code="ownership-conflict")
         replay = conn.execute(
             "SELECT actor_type, actor_id, detail_json FROM work_events WHERE work_id=? AND event_id=?",
@@ -803,7 +809,7 @@ def _external_current(conn: sqlite3.Connection, work_id: str) -> dict[str, Any] 
         "FROM work_events WHERE work_id=? AND " + _OWNERSHIP_PREDICATE + " ORDER BY seq DESC LIMIT 1",
         (OWNERSHIP_EVENT_MAX_BYTES + 1, work_id, *_OWNERSHIP_BINDS),
     ).fetchone()
-    external_history = conn.execute(_EXTERNAL_HISTORY_SQL, (work_id,)).fetchone() is not None
+    external_history = conn.execute(_EXTERNAL_HISTORY_SQL, (work_id, work_id)).fetchone() is not None
     if not external_history:
         return None
     if row is None:
