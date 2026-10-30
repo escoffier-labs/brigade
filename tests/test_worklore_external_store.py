@@ -923,3 +923,23 @@ def test_later_legacy_events_cannot_replace_external_scope_history(db, external_
         )
         assert conn.total_changes == before
         assert ownership._external_current(conn, candidate)["state"] == "admitted"
+
+
+@pytest.mark.parametrize("legacy_type", ["ownership-released", "ownership-checkpoint"])
+def test_expiry_cleanup_cannot_clear_mixed_history_quarantine(db, monkeypatch, legacy_type):
+    conn, _ = db
+    old, _ = active(conn)
+    raw_event(conn, old, legacy_type, {})
+    with pytest.raises(store.WorkloreConflict):
+        ownership._external_current(conn, old)
+    candidate, _ = offer(conn)
+    monkeypatch.setattr(store, "_utc_now", lambda: (NOW + timedelta(seconds=120)).isoformat())
+    before_changes, before_count = conn.total_changes, count(conn, old)
+    with pytest.raises(scope.ScopeAdmissionError) as caught:
+        register(conn, candidate, nonce=NONCE_B)
+    assert caught.value.code == "path-scope-unavailable"
+    assert conn.total_changes == before_changes
+    assert count(conn, old) == before_count
+    with pytest.raises(store.WorkloreConflict):
+        ownership._external_current(conn, old)
+    assert ownership._external_current(conn, candidate)["state"] == "admitted"

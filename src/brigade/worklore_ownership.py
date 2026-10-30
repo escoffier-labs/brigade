@@ -1011,6 +1011,12 @@ def _expire_external_overlaps(conn: sqlite3.Connection, work_id: str, binding: A
             raise scope.ScopeAdmissionError("path-scope-capacity-exhausted")
     # Check every affected item's own exit slot before inserting any ending.
     for identifier, snapshot in eligible:
+        try:
+            current = _external_current(conn, identifier)
+        except store.WorkloreConflict:
+            raise scope.ScopeAdmissionError("path-scope-unavailable") from None
+        if current is None or any(current[key] != snapshot[key] for key in ("generation", "revision", "last_seq")):
+            raise scope.ScopeAdmissionError("path-scope-unavailable")
         _external_capacity(conn, identifier, "expired")
         if snapshot["revision"] == COUNTER_MAX or datetime.fromisoformat(now) < datetime.fromisoformat(
             snapshot["heartbeat"]
