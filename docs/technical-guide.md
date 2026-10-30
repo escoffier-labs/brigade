@@ -2512,10 +2512,9 @@ means the diagnostic completed with holds. Missing or unaddressable evidence,
 or references beyond the binding window, keep useful checks visible with a
 `binding_incomplete` hold and null evaluation hash. Exit 2 means an unsafe,
 invalid or unreadable required input prevented evaluation. JSON and text show
-ordered gate states
-and sanitized reason codes without card bodies, summaries, diffs, raw policy
-or exception text. Hashes bind observed policy bytes, retained candidate and
-run inputs, source and evidence bytes, configuration, evidence log and the
+ordered gate states and sanitized reason codes without card bodies, summaries,
+diffs, raw policy or exception text. Hashes bind observed policy bytes, retained
+candidate and run inputs, source and evidence bytes, configuration, evidence log and the
 strictly composed delta. Incomplete bindings have a null evaluation hash.
 
 `delta_satisfied` describes an exact metadata delta only. Initial anchoring,
@@ -2544,6 +2543,6 @@ Cards are bounded to 256 KiB, the corpus to 1024 cards and 16 MiB, evidence to
 64 selected IDs, 4 MiB per file and 16 MiB combined before evidence hashing or
 composition. The evidence log has a 4 MiB read limit. An oversized or invalid
 log prevents evaluation. A final bounded reread detects input drift. Legacy
-readers retain the existing same-UID operator boundary. This optimistic snapshot check does
-not protect against a hostile same-UID process racing those readers, and the
-report is never a reusable approval token.
+readers retain the existing same-UID operator boundary. This optimistic snapshot
+check does not protect against a hostile same-UID process racing those readers,
+and the report is never a reusable approval token.

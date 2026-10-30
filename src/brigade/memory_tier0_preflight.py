@@ -248,7 +248,11 @@ def _evidence(
         if bundle:
             path = memory_cmd._miseledger_evidence_path(bundle)
         else:
-            _safe_name(ref)
+            try:
+                _safe_name(ref)
+            except ValueError:
+                complete = False
+                continue
             if not any(ref.startswith(root + "/") for root in roots):
                 complete = False
                 continue
@@ -402,8 +406,6 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
             _check(report, "candidate", "tier_requires_review")
         elif any(candidate[key] for key in ("contrary_ids", "review_evidence_ids", "unresolved_evidence_ids")):
             _check(report, "candidate", "candidate_evidence_requires_review")
-        else:
-            _check(report, "candidate")
         stage = "binding_incomplete"
         for name in (
             brigade_config.CONFIG_REL_PATH,
@@ -449,10 +451,13 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         stage = "binding_incomplete"
         report["source_sha256"] = {s["path"]: s["sha256"] for s in sources}
         drift = any(candidate["base_sha256"].get(s["id"]) != s["sha256"] for s in sources)
-        _check(report, "snapshot", "base_drift" if drift else None)
         report["evidence_sha256"], complete_binding = _evidence(snapshot, candidate, sources, ledger)
+        if drift:
+            _check(report, "snapshot", "base_drift")
         if not complete_binding:
             _check(report, "snapshot", "binding_incomplete")
+        if not drift and complete_binding:
+            _check(report, "snapshot")
         if not drift:
             _delta(report, snapshot, care, binding, candidate, policy, sources)
         else:
@@ -460,6 +465,8 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         proof, groups, consistent_proof = _proof(target, candidate, sources, ledger, report["evidence_sha256"])
         if not consistent_proof:
             _check(report, "candidate", "candidate_proof_mismatch")
+        elif not any(check["gate"] == "candidate" for check in report["checks"]):
+            _check(report, "candidate")
         for gate, count, minimum in (
             ("evidence_floor", len(proof), policy["minimum_evidence_ids"]),
             ("source_group_floor", len(set(groups.values())), policy["minimum_source_groups"]),

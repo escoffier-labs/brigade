@@ -7,6 +7,7 @@ import pytest
 from brigade import cli, memory_reflect
 from brigade import memory_proposal_v2_reflect as reflect_proposal
 from tests.test_memory_negative_outcomes import failed_card as failed_card
+from tests.test_memory_outcome_evidence import verified_card as verified_card
 from tests.test_memory_reflect import card, evidence, log
 
 
@@ -168,6 +169,96 @@ def test_preflight_incomplete_ledger_binding_preserves_diagnostics(tmp_path, ext
     assert {"binding_incomplete", "delta_satisfied", "evidence_floor_satisfied"} <= codes(report)
     assert report["evaluation_sha256"] is None
     assert len(report["evidence_sha256"]) <= 64
+    assert not any(c["gate"] == "snapshot" and c["state"] == "satisfied" for c in report["checks"])
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "../outside.json",
+        "/tmp/example-evidence.json",
+        r"memory\evidence\note.json",
+        "https://example.invalid/note",
+        "memory/evidence/" + "x" * 1025,
+    ],
+)
+def test_preflight_unaddressable_citation_is_not_opened(tmp_path, capsys, monkeypatch, ref):
+    from brigade import memory_proposal_io as io
+
+    path, _ = prepared(tmp_path)
+    path.write_text(path.read_text().replace("evidence: []", "evidence: " + ref))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    name = policy(tmp_path)
+    read = io.read_bytes
+
+    def bounded_read(path, **kwargs):
+        assert path.is_relative_to(tmp_path), "unaddressable citation must not be read"
+        return read(path, **kwargs)
+
+    monkeypatch.setattr(io, "read_bytes", bounded_read)
+    before = tree(tmp_path)
+    assert (
+        cli.main(
+            [
+                "memory",
+                "reflect",
+                "preflight",
+                candidate["candidate_id"],
+                "--target",
+                str(tmp_path),
+                "--policy",
+                name,
+                "--json",
+            ]
+        )
+        == 0
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "held"
+    assert {"binding_incomplete", "delta_satisfied", "evidence_floor_satisfied"} <= codes(report)
+    assert not any(c["gate"] == "snapshot" and c["state"] == "satisfied" for c in report["checks"])
+    assert report["evaluation_sha256"] is None
+    assert ref not in report["evidence_sha256"]
+    assert tree(tmp_path) == before
+
+
+def test_preflight_missing_support_replaces_candidate_success(tmp_path):
+    _, candidate = prepared(tmp_path)
+    assert "candidate_satisfied" in codes(evaluate(tmp_path, candidate))
+    (tmp_path / candidate["evidence_ids"][0]).unlink()
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate)
+    assert "candidate_proof_mismatch" in codes(report)
+    assert not any(
+        c["gate"] in ("candidate", "snapshot", "evidence_floor", "source_group_floor") and c["state"] == "satisfied"
+        for c in report["checks"]
+    )
+    assert report["evaluation_sha256"] is None
+    assert tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("verified_card", ["anchored-linked"], indirect=True)
+def test_preflight_invalid_current_receipt_replaces_candidate_success(tmp_path, verified_card, capsys):
+    from tests.test_memory_outcome_evidence import capture
+
+    path, receipt = verified_card
+    assert capture(tmp_path, receipt) == 0
+    capsys.readouterr()
+    refs = [evidence(tmp_path, ref) for ref in (".brigade/receipts/a.json", "memory/evidence/b.json")]
+    log(tmp_path, path, *((ref, "outcome", "2026-10-20T12:00:00Z") for ref in refs))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    assert candidate["proof_count"] == 3
+    assert "candidate_satisfied" in codes(evaluate(tmp_path, candidate))
+    (tmp_path / f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json").write_text("{}")
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate)
+    assert {"delta_invalid", "candidate_proof_mismatch"} <= codes(report)
+    assert not any(
+        c["gate"] in ("candidate", "evidence_floor", "source_group_floor") and c["state"] == "satisfied"
+        for c in report["checks"]
+    )
+    assert report["evaluation_sha256"] is None
     assert tree(tmp_path) == before
 
 
