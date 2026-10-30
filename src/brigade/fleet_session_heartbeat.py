@@ -21,7 +21,7 @@ from .fleet_session_heartbeat_state import (
 )
 from .fleet_session_presence import SessionSnapshot, _hub_url_configured
 from .fleet_session_process import ProcessTable
-from .wiring import resolve_wired_target
+from .fleet_session_root import is_session_root
 
 SESSION_LIMIT = 200
 PUBLISH_LIMIT = 50
@@ -134,7 +134,7 @@ def _discover_worktrees(repositories: Sequence[Path], deadline: float) -> tuple[
                 if not target.is_absolute() or target.is_symlink() or not target.is_dir():
                     continue
                 target = target.resolve()
-                if target in candidates or resolve_wired_target(str(target), harness=None) != target:
+                if target in candidates or not is_session_root(target, harness=None):
                     continue
                 mtime, capped = _presence_mtime(target, deadline)
                 truncated |= capped
@@ -222,7 +222,7 @@ def observe(
                                 if not owner_alive:
                                     _prune_record(anchor, name, snapshot, enabled=enabled, deadline=deadline)
                                     continue
-                                if not enabled or resolve_wired_target(str(target), harness=snapshot.harness) != target:
+                                if not enabled or not is_session_root(target, harness=snapshot.harness):
                                     continue
                                 live += 1
                                 if publish:

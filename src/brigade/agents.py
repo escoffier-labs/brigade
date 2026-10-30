@@ -799,7 +799,6 @@ _MODEL_POLICY_PROVIDER_ALIASES = {
     "codex-cloud": "openai",
     "gemini": "google",
     "grok": "xai",
-    "jules-cloud": "google",
 }
 _MODEL_POLICY_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")
 _MODEL_POLICY_INVALID_RUN_RE = re.compile(r"[^a-z0-9._-]+")

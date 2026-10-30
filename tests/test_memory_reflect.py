@@ -131,6 +131,86 @@ def test_resolution_duplicates_and_polarity_flags(tmp_path, capsys):
     assert snapshot(tmp_path) == before
 
 
+@pytest.mark.parametrize("anchor_names", [("left",), ("left", "right")])
+def test_duplicate_group_survives_reviewed_anchoring(tmp_path, capsys, anchor_names):
+    from brigade import memory_proposals as proposals
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    paths = {name: card(tmp_path, name) for name in ("left", "right")}
+    ref = evidence(tmp_path, ".brigade/receipts/support.json")
+    for path in paths.values():
+        path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([ref])}"))
+    code, initial = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert [c["card_ids"] for c in initial["candidates"] if c["kind"] == "duplicate"] == [["left", "right"]]
+    for name in anchor_names:
+        proposal = proposals.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=[f"memory/cards/{name}.md"],
+            ops=[],
+            anchor_blocks=True,
+            reason="Review claim anchors.",
+        )
+        values = dict(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])
+        proposals.review_payload(**values, reason="Inspected anchor diff.")
+        assert proposals.apply_payload(**values)["status"] == "committed"
+        assert " ^c-" in paths[name].read_text()
+    if len(anchor_names) == 2:
+        assert paths["left"].read_text().split(" ^c-")[1] != paths["right"].read_text().split(" ^c-")[1]
+    before = snapshot(tmp_path)
+    code, first = command(tmp_path, capsys, "run")
+    assert code == 0
+    duplicates = [c for c in first["candidates"] if c["kind"] == "duplicate"]
+    assert len(duplicates) == 1
+    candidate = duplicates[0]
+    assert candidate["card_ids"] == ["left", "right"]
+    assert candidate["base_sha256"] == {
+        name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in paths.items()
+    }
+    assert candidate["evidence_ids"] == [ref]
+    assert command(tmp_path, capsys, "run", "--dry-run")[1]["candidates"] == first["candidates"]
+    preview = propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Review duplicates.")
+    assert preview["schema"] == "brigade.memory-proposal.v2"
+    assert preview["dropped_ops"] == []
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "```text\nLiteral ^c-{ident}\n```",
+        "    Literal ^c-{ident}",
+        "> Literal ^c-{ident}",
+        "<!--\nLiteral ^c-{ident}\n-->",
+        "- ```text\n  Literal ^c-{ident}\n  ```",
+        "- Item.\n\n      Literal ^c-{ident}",
+    ],
+)
+def test_duplicate_group_preserves_opaque_anchor_literals(tmp_path, capsys, body):
+    for name, ident in (("left", "123abc"), ("right", "456def")):
+        path = card(tmp_path, name, body="Keep the cache warm.\n\n" + body.format(ident=ident))
+        log(
+            tmp_path, path, (evidence(tmp_path, ".brigade/receipts/support.json"), "near-match", "2026-10-20T12:00:00Z")
+        )
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert not any(c["kind"] == "duplicate" for c in payload["candidates"])
+    assert snapshot(tmp_path) == before
+
+
+def test_duplicate_group_ignores_anchor_only_empty_content(tmp_path, capsys):
+    for name in ("left", "right"):
+        path = card(tmp_path, name, body="!!! ^c-123abc")
+        log(
+            tmp_path, path, (evidence(tmp_path, ".brigade/receipts/support.json"), "near-match", "2026-10-20T12:00:00Z")
+        )
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert not any(c["kind"] == "duplicate" for c in payload["candidates"])
+
+
 @pytest.mark.parametrize("kind", ["outcome", "reinforced", "near-match", "opposite-polarity"])
 @pytest.mark.parametrize("ref", [".brigade/receipts/missing.json", "sha256:" + "0" * 64])
 def test_unresolved_log_ids_never_create_candidates(tmp_path, capsys, kind, ref):

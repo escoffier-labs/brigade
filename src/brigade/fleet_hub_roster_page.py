@@ -184,6 +184,7 @@ def load_view(
             policy=dict(policy),
         )
         for name, policy in sorted(providers.items())
+        if name in config.cloud.providers
     )
     cloud_state = hashlib.sha256(
         fleet_model_roster.canonical_json([[row.provider, row.enabled] for row in cloud]).encode("ascii")

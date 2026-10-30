@@ -84,7 +84,7 @@ def test_legacy_registration_cannot_duplicate_bound_session(tmp_path):
     assert cloud_tracker.registry_path(tmp_path).read_bytes() == before
 
 
-@pytest.mark.parametrize("provider", ["codex-cloud", "cursor-cloud", "jules"])
+@pytest.mark.parametrize("provider", ["codex-cloud", "cursor-cloud"])
 def test_unbound_adoption_preserves_legacy_branch_label(tmp_path, provider):
     entry = cloud_tracker.adopt(tmp_path, provider=provider, branch="fixture/branch", session_id="session_fixture")
     assert entry["label"] == "fixture/branch"
@@ -187,7 +187,6 @@ def offline(monkeypatch):
     for name in ("admit_cloud", "bind_cloud", "renew_cloud", "release_cloud", "fetch_cloud"):
         monkeypatch.setattr(fleet_client, name, partial(forbidden, f"fleet_client.{name}"))
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
-    monkeypatch.setattr(cloud_tracker, "jules_cloud_wired", lambda: False)
     from brigade import grokbot_jobs
 
     monkeypatch.setattr(grokbot_jobs, "hub_authority", lambda target: False)

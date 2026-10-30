@@ -30,7 +30,7 @@ def test_add_unknown_station_errors(tmp_target, capsys):
     rc = add_mod.run(target=tmp_target, station="nope")
     assert rc == 2
     err = capsys.readouterr().err.lower()
-    assert "unknown station" in err or "unknown station or tool" in err
+    assert "unknown component or tool" in err
 
 
 def test_add_accepts_managed_tool_name(monkeypatch, tmp_target, capsys):
@@ -159,7 +159,7 @@ def test_add_discovers_local_station_manifest_without_installing(monkeypatch, tm
     out = capsys.readouterr().out
     assert rc == 0
     assert calls == []
-    assert "station manifest: agentpantry (pantry)" in out
+    assert "component manifest: agentpantry (pantry)" in out
     assert "surface[doctor-json]: agentpantry doctor --json" in out
     assert "surface[brief-markdown]: agentpantry inventory --markdown" in out
     assert "Re-run with `--install`" in out

@@ -15,7 +15,6 @@ NOW = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
 def isolated_providers(monkeypatch):
     empty = cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
     monkeypatch.setattr(cloud_tracker, "_cursor_cloud_observation", lambda target: empty)
-    monkeypatch.setattr(cloud_tracker, "_jules_cloud_observation", lambda target: empty)
     monkeypatch.setattr(cloud_tracker, "_grokbot_cloud_observation", lambda: empty)
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
 

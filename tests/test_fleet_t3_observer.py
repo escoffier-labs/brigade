@@ -10,6 +10,7 @@ from dataclasses import asdict
 import pytest
 
 from brigade import fleet_client
+from brigade.fleet_session_presence import ProviderLinkState
 from tests._home import set_home
 
 
@@ -25,11 +26,30 @@ def native_t3(tmp_path, monkeypatch):
     package.mkdir()
     (package / "__init__.py").write_text("")
     (package / "agent.py").write_text(
-        "import json, os, time\nfrom pathlib import Path\n"
+        "import json, os, threading, time\nfrom pathlib import Path\n"
+        "if os.environ.get('FIXTURE_NATIVE_TIME'): time.time = lambda: float(os.environ['FIXTURE_NATIVE_TIME'])\n"
+        "_RECORD_LOCK = threading.Lock()\n"
+        "def record(event):\n"
+        " # Detail workers append concurrently; Windows append handles can overwrite each other.\n"
+        " with _RECORD_LOCK, Path(os.environ['FIXTURE_CALLS_PATH']).open('a') as stream:\n"
+        "  stream.write(json.dumps(event) + '\\n')\n"
         "class Client:\n"
         " def shell_snapshot(self):\n"
+        "  record('shell')\n"
+        "  calls = Path(os.environ['FIXTURE_CALLS_PATH']).read_text().count('\\\"shell\\\"')\n"
+        "  if calls > 1 and os.environ.get('FIXTURE_PHASE_FAILURE') == 'error': raise RuntimeError()\n"
+        "  if calls > 1 and os.environ.get('FIXTURE_PHASE_FAILURE') == 'timeout': time.sleep(30)\n"
         "  if os.environ.get('FIXTURE_MODE') == 'sleep': time.sleep(30)\n"
+        "  time.sleep(float(os.environ.get('FIXTURE_SHELL_DELAY', '0')))\n"
         "  return json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
+        " def thread_snapshot(self, thread_id):\n"
+        "  record(thread_id)\n"
+        "  if os.environ.get('FIXTURE_DETAIL_ERROR'): raise RuntimeError()\n"
+        "  time.sleep(float(os.environ.get('FIXTURE_DETAIL_DELAY', '0')))\n"
+        "  shell = json.loads(Path(os.environ['FIXTURE_SHELL_PATH']).read_text())\n"
+        "  detail = next(r for r in shell['threads'] if r['id'] == thread_id)\n"
+        "  if os.environ.get('FIXTURE_PROVIDER_MISMATCH'): detail['activeProviderThreadId'] = 'provider-other'\n"
+        "  return {'thread': detail}\n"
         "class Agent:\n"
         " t3 = Client()\n"
         " @property\n"
@@ -37,6 +57,7 @@ def native_t3(tmp_path, monkeypatch):
         "def _build_agent(environ): return Agent()\n"
     )
     monkeypatch.setenv("PYTHONPATH", str(tmp_path) + os.pathsep + os.environ.get("PYTHONPATH", ""))
+    monkeypatch.setenv("FIXTURE_CALLS_PATH", str(tmp_path / "calls.jsonl"))
     published = []
     monkeypatch.setattr(
         fleet_client, "load_fleet_settings", lambda: {"node_token": "test-only", "hub_url": "https://hub.example"}
@@ -273,6 +294,8 @@ def test_large_idle_shell_projects_only_current_active_metadata(native_t3, capsy
         {"worktreePath": "/definitely-missing-observer-worktree"},
         {"worktreePath": "/" + "x" * 300},
         {"id": "bad id"},
+        {"id": None},
+        {"id": 27},
         {"projectId": "orphan", "worktreePath": None},
         {"projectId": [], "worktreePath": None},
     ],
@@ -368,3 +391,338 @@ def test_duplicate_native_identity_fails_entire_collection(native_t3, capsys):
     assert main(["--t3-python", sys.executable, "--publish"]) == 1
     assert json.loads(capsys.readouterr().out)["error"] == "native_identity_collision"
     assert not published
+
+
+@pytest.mark.parametrize("driver,harness", [("claudeAgent", "claude"), ("codex", "codex")])
+def test_observer_publishes_strong_native_link_not_internal_provider_id(native_t3, capsys, driver, harness):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": driver,
+                        "providerSessionId": "internal-session",
+                        "nativeThreadRef": {"driver": driver, "nativeId": "native-session", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert published[0].provider_link == {"harness": harness, "session_id": "native-session"}
+
+
+@pytest.mark.parametrize("strength,driver", [("weak", "codex"), ("strong", "other")])
+def test_observer_does_not_guess_a_provider_link(native_t3, capsys, strength, driver):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": driver, "nativeId": "native-session", "strength": strength},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert published[0].provider_link is None
+
+
+def test_observer_links_a_batch_within_the_native_budget(native_t3, capsys, monkeypatch):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "0.15")
+    configure(
+        [
+            {
+                "id": f"app-thread-{i:02d}",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": f"provider-{i}",
+                "providerThreads": [
+                    {
+                        "id": f"provider-{i}",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": f"native-{i}", "strength": "strong"},
+                    }
+                ],
+            }
+            for i in range(50)
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert len(published) == 50
+    assert all(isinstance(s.provider_link, dict) for s in published)
+    from pathlib import Path
+
+    calls = [json.loads(line) for line in Path(os.environ["FIXTURE_CALLS_PATH"]).read_text().splitlines()]
+    assert calls.count("shell") == 1 and len(calls) == 51
+
+
+@pytest.mark.parametrize("cursor", [0, 73])
+@pytest.mark.parametrize("failure", [None, "error", "timeout", "removed"])
+def test_large_fleet_resolves_only_the_publication_batch(native_t3, capsys, monkeypatch, cursor, failure):
+    import hashlib
+    from pathlib import Path
+
+    from brigade import fleet_openclaw_observer as shared, fleet_t3_observer as observer
+
+    configure, published, _, _ = native_t3
+    # The old wall-clock detail window starts at 50, independently of the cursor.
+    monkeypatch.setenv("FIXTURE_NATIVE_TIME", "3000")
+    if failure in {"error", "timeout"}:
+        monkeypatch.setenv("FIXTURE_PHASE_FAILURE", failure)
+        monkeypatch.setattr(observer, "NATIVE_TIMEOUT_SECONDS", 1)
+    rows = [
+        {
+            "id": f"app/thread-{i:02d}",
+            "projectId": "p",
+            "status": "running",
+            "activeRunId": "run",
+            "worktreePath": None,
+            "activeProviderThreadId": f"provider-{i}",
+            "providerThreads": [
+                {
+                    "id": f"provider-{i}",
+                    "driver": "codex",
+                    "nativeThreadRef": {"driver": "codex", "nativeId": f"native-{i}", "strength": "strong"},
+                }
+            ],
+        }
+        for i in range(100)
+    ]
+    if failure == "removed":
+        for row in rows:
+            row["providerThreads"] = []
+    configure(rows)
+    cursor_path, _ = shared._rotation_state("t3")
+    shared._save_rotation(cursor_path, cursor)
+    identities = sorted(("t3-" + hashlib.sha256(row["id"].encode()).hexdigest(), row) for row in rows)
+    expected = (identities[cursor:] + identities[:cursor])[:50]
+    assert observer.main(["--t3-python", sys.executable, "--publish"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["published"] == report["skipped"] == 50
+    assert report["active_threads"] == 100 and "error" not in report
+    assert [s.session_id for s in published] == [identity for identity, _ in expected]
+    calls = [json.loads(line) for line in Path(os.environ["FIXTURE_CALLS_PATH"]).read_text().splitlines()]
+    assert calls.count("shell") == 2
+    if failure in {"error", "timeout"}:
+        assert calls == ["shell", "shell"]
+        assert all(s.provider_link is ProviderLinkState.UNKNOWN for s in published)
+        assert all("provider_link" not in fleet_client._session_request_body(s, action="upsert") for s in published)
+    else:
+        assert calls[0:2] == ["shell", "shell"]
+        assert sorted(calls[2:]) == sorted(row["id"] for _, row in expected)
+        if failure == "removed":
+            assert all(s.provider_link is None for s in published)
+            assert all(
+                fleet_client._session_request_body(s, action="upsert")["provider_link"] is None for s in published
+            )
+        else:
+            assert [s.provider_link for s in published] == [
+                {"harness": "codex", "session_id": row["providerThreads"][0]["nativeThreadRef"]["nativeId"]}
+                for _, row in expected
+            ]
+    assert json.loads(cursor_path.read_text())["offset"] == (cursor + 50) % 100
+
+
+def test_stalled_detail_read_does_not_block_publication(native_t3, capsys, monkeypatch):
+    import time
+
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "30")
+    configure(
+        [
+            {
+                "id": "app-thread-stalled",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-stalled",
+                "providerThreads": [
+                    {
+                        "id": "provider-stalled",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": "native-stalled", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    started = time.monotonic()
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert time.monotonic() - started < 8
+    assert len(published) == 1
+    assert published[0].provider_link is ProviderLinkState.UNKNOWN
+    assert "provider_link" not in fleet_client._session_request_body(published[0], action="upsert")
+
+
+def test_slow_shell_read_skips_detail_waits_past_the_budget(native_t3, capsys, monkeypatch):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setenv("FIXTURE_SHELL_DELAY", "5")
+    monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "30")
+    configure(
+        [
+            {
+                "id": "app-thread-slow-shell",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-slow",
+                "providerThreads": [
+                    {
+                        "id": "provider-slow",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": "native-slow", "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    capsys.readouterr()
+    assert len(published) == 1
+    assert published[0].provider_link is ProviderLinkState.UNKNOWN
+    assert "provider_link" not in fleet_client._session_request_body(published[0], action="upsert")
+
+
+@pytest.mark.parametrize("native_id", [None, "", "has space", "x" * 300])
+def test_invalid_optional_link_still_publishes_the_session(native_t3, capsys, native_id):
+    from brigade.fleet_t3_observer import main
+
+    configure, published, _, _ = native_t3
+    configure(
+        [
+            {
+                "id": "app-thread",
+                "projectId": "p",
+                "status": "running",
+                "activeRunId": "run",
+                "worktreePath": None,
+                "activeProviderThreadId": "provider-thread",
+                "providerThreads": [
+                    {
+                        "id": "provider-thread",
+                        "driver": "codex",
+                        "nativeThreadRef": {"driver": "codex", "nativeId": native_id, "strength": "strong"},
+                    }
+                ],
+            }
+        ]
+    )
+    assert main(["--t3-python", sys.executable, "--publish"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["invalid_rows"] == 0
+    assert len(published) == 1
+    assert published[0].provider_link is ProviderLinkState.UNKNOWN
+    assert "provider_link" not in fleet_client._session_request_body(published[0], action="upsert")
+
+
+@pytest.mark.parametrize(
+    "outcome", ["no_active", "no_provider", "mismatch", "weak", "changed", "error", "timeout", "malformed"]
+)
+def test_provider_lookup_updates_stored_link_and_visibility(native_t3, monkeypatch, outcome):
+    import sqlite3
+
+    from brigade import fleet_hub, fleet_hub_sessions, fleet_t3_observer as observer
+
+    configure, published, _, _ = native_t3
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: 1_700_000_000.0)
+    conn = sqlite3.connect(":memory:")
+    fleet_hub_sessions.init_schema(conn)
+    node = "22222222-2222-4222-8222-222222222222"
+    row = {
+        "id": "app-thread",
+        "projectId": "p",
+        "status": "running",
+        "activeRunId": "run",
+        "worktreePath": None,
+        "activeProviderThreadId": "provider-first",
+        "providerThreads": [
+            {
+                "id": "provider-first",
+                "driver": "codex",
+                "nativeThreadRef": {
+                    "driver": "codex",
+                    "nativeId": "native-first",
+                    "strength": "strong",
+                },
+            }
+        ],
+    }
+    configure([row])
+    observer.observe(t3_python=sys.executable, publish=True)
+    first = fleet_client._session_request_body(published[-1], action="upsert")
+    fleet_hub_sessions.handle_session(conn, first, caller_node=node)
+    fleet_hub_sessions.handle_session(
+        conn, {**first, "harness": "codex", "session_id": "native-first", "provider_link": None}, caller_node=node
+    )
+    assert fleet_hub_sessions.count_live_by_node(conn, now_epoch=1_700_000_000.0) == {node: 1}
+    if outcome == "no_active":
+        row.pop("activeProviderThreadId")
+    elif outcome == "no_provider":
+        row["providerThreads"] = []
+    elif outcome == "weak":
+        row["providerThreads"][0]["nativeThreadRef"]["strength"] = "weak"
+    elif outcome == "changed":
+        row["activeProviderThreadId"] = row["providerThreads"][0]["id"] = "provider-second"
+        row["providerThreads"][0]["nativeThreadRef"]["nativeId"] = "native-second"
+    elif outcome == "mismatch":
+        monkeypatch.setenv("FIXTURE_PROVIDER_MISMATCH", "1")
+    elif outcome == "error":
+        monkeypatch.setenv("FIXTURE_DETAIL_ERROR", "1")
+    elif outcome == "timeout":
+        monkeypatch.setenv("FIXTURE_DETAIL_DELAY", "30")
+    else:
+        row["providerThreads"][0]["nativeThreadRef"]["nativeId"] = "bad id"
+    configure([row])
+    observer.observe(t3_python=sys.executable, publish=True)
+    wire = fleet_client._session_request_body(published[-1], action="upsert")
+    _, result = fleet_hub_sessions.handle_session(conn, wire, caller_node=node)
+    stored = result["session"].get("provider_link")
+    if outcome in {"error", "timeout", "malformed"}:
+        assert "provider_link" not in wire
+        assert stored == {"harness": "codex", "session_id": "native-first"}
+        assert fleet_hub_sessions.count_live_by_node(conn, now_epoch=1_700_000_000.0) == {node: 1}
+    else:
+        assert "provider_link" in wire
+        expected = {"harness": "codex", "session_id": "native-second"} if outcome == "changed" else None
+        assert wire["provider_link"] == stored == expected
+        assert fleet_hub_sessions.count_live_by_node(conn, now_epoch=1_700_000_000.0) == {node: 2}
+        assert "app-thread" in {s["session_id"] for s in fleet_hub_sessions.list_sessions(conn)}
+    conn.close()

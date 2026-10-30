@@ -14,6 +14,12 @@ Brigade Stack coordinates coding agents across machines and cloud seats. Agents 
 - **Humans own:** policy, budgets, scopes, and gates. The operator can inspect or stop work and choose where approval is needed.
 - **Artifacts:** local receipts, run journals, memory cards, and configs remain inspectable across harnesses. Optional services coordinate fleet work and serve views or MCP resources. See [`docs/execution-model.md`](execution-model.md).
 
+The catalog command `brigade components list|discover|verify` is unreleased,
+targeted for the next 0.31.x release. On stable 0.30, use `brigade stations`
+with the same subcommands. Profiles select components. See the
+[component reference](station-contract.md) for the quiet alias and unchanged
+`station.json` contracts.
+
 Public names for the built-in engines:
 
 | Public surface | Commands | Historical name |

@@ -231,7 +231,6 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
             assert heading in page
         assert 'name="role.security"' in page and 'name="role.scout"' in page
         assert 'name="seat.agy_flash" value="1" checked' in page
-        assert 'name="cloud.jules" value="1" checked' in page
         assert 'name="cloud.claude" value="1"' in page and 'name="cloud.claude" value="1" checked' not in page
         assert 'name="default.brigade-run"' in page and 'name="default.t3-fleet"' in page
         assert "gpt-5.4" in page and "permanent" in page
@@ -783,7 +782,7 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         cookie = _login_cookie(hub)
         form = _current_form(hub, cookie)
         status, payload = _json(
-            hub, "POST", "/cloud", {"action": "policy", "provider": "jules", "enabled": False, "reason": "quota"}
+            hub, "POST", "/cloud", {"action": "policy", "provider": "cursor", "enabled": False, "reason": "quota"}
         )
         assert status == 200, payload
         before = _tables(db)
@@ -793,13 +792,13 @@ def test_roster_post_stale_cloud_lane_writes_nothing(tmp_path):
         assert _tables(db) == before
         # Reload, re-enable the lane on purpose: the stale reason is cleared.
         form = _current_form(hub, cookie)
-        assert "cloud.jules" not in form
-        form["cloud.jules"] = "1"
+        assert "cloud.cursor" not in form
+        form["cloud.cursor"] = "1"
         status, _headers, _text = _form(hub, form, admin=True)
         assert status == 303
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
-        jules = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "jules")
-        assert jules["enabled"] is True and jules.get("reason") is None
+        cursor = next(row for row in json.loads(cloud)["policy"]["providers"] if row["provider"] == "cursor")
+        assert cursor["enabled"] is True and cursor.get("reason") is None
 
 
 # --- honest labelling and policy-authority compatibility ----------------------

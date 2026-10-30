@@ -8,11 +8,13 @@ from pathlib import Path
 
 def register(sub: argparse._SubParsersAction) -> None:
     p_stations = sub.add_parser(
-        "stations", help="Inspect the built-in station catalog and discover station.json files."
+        "components",
+        aliases=["stations"],
+        help="Inspect the built-in component catalog and discover station.json files.",
     )
-    stations_sub = p_stations.add_subparsers(dest="stations_command", metavar="<stations-command>")
+    stations_sub = p_stations.add_subparsers(dest="stations_command", metavar="<components-command>")
     stations_sub.required = True
-    p_stations_list = stations_sub.add_parser("list", help="List stations for a built-in profile.")
+    p_stations_list = stations_sub.add_parser("list", help="List components for a built-in profile.")
     p_stations_list.add_argument("--profile", default="repo", help="Built-in profile name or alias to compare against.")
     p_stations_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_discover = stations_sub.add_parser(
@@ -60,5 +62,5 @@ def dispatch(args) -> int:
             json_output=args.json,
             check_managed=args.check_managed,
         )
-    args._brigade_parser.error(f"unknown stations command: {args.stations_command}")
+    args._brigade_parser.error(f"unknown components command: {args.stations_command}")
     return 2

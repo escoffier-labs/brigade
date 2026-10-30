@@ -83,7 +83,7 @@ def test_setup_registered_immediately_after_add():
 def test_setup_appears_once_in_command_groups():
     grouped = [name for _, names in cli.COMMAND_GROUPS for name in names]
     assert grouped.count("setup") == 1
-    stations_group = next(names for title, names in cli.COMMAND_GROUPS if title == "Stations and tools")
+    stations_group = next(names for title, names in cli.COMMAND_GROUPS if title == "Components and tools")
     assert stations_group.index("setup") == stations_group.index("add") + 1
 
 

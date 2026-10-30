@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
+
+- Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
+- Add the bundled `fleet-hub-upgrade` skill: a generic Hub-first upgrade checklist covering the node-to-Hub payload and `SCHEMA_VERSION` pre-flight diff, snapshot-and-switch Hub deploy with rollback, and node verification (#2167).
+
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
+- Removed Jules cloud provider
+- Count a T3 thread and its precisely linked Claude or Codex presence once in Fleet session lists and machine totals. Publish presence from the session root and stop renewing legacy tool-attributed checkout records. Clear stale provider links after completed lookups while retaining them when lookups are unavailable.
 
 - Add `context handoff --json` for body-free, locally bound Codex instruction accounting, complete source hashes, and selection observations.
 
@@ -112,6 +119,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native release bundles include canonical engine executables alongside legacy assets. Default setup retains legacy identities, with complete checksums and source-bound attestation checks.
 
 - Add client APIs to observe signed Hub identity, import supported membership/revocation bundles, and publish an existing durable local public key with exact readback recovery. Bundles containing key manifests are refused before import. Active principals can read their own public key records.
+
+- Add explicit offline admission of signed key-manifest evidence with rollback floors and retained conflicts. Manifest entries do not accept peers, and transport bundles containing manifests remain unsupported.
 
 ### Fixed
 
