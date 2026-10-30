@@ -199,12 +199,20 @@ For an explicitly selected local full run, use:
 brigade work verify run --target . --command "./scripts/verify" --timeout 3600 --capture brigade-work
 ```
 
-Existing receipt reuse checks the target workspace's latest completed passing
-receipt for the same tree fingerprint and planned command. Leave reuse enabled
-for unchanged code. It does not search other clones, wait for in-flight work,
+Existing receipt reuse checks only the target workspace's latest receipt
+overall. That receipt itself must be completed and passing, with the same tree
+fingerprint and planned command. A later focused receipt prevents reuse of an
+earlier full-gate receipt. Leave reuse enabled for unchanged code and environment.
+It does not search other clones, wait for in-flight work,
 or fingerprint dependencies, environment variables, and external state. Review
 those limits when reproducing an environment-sensitive failure. Reuse does not
 replace current-head required CI or broaden a focused check into full coverage.
+
+When dependencies or environment state changed and you explicitly select a
+fresh local full run, add `--no-reuse` to the Brigade command above. This uses
+the existing fresh-run option and keeps the same admission and worker limits.
+It is an exception for environment-sensitive reproduction, never a contention
+retry or a required extra full run before PRs or merges.
 
 `./scripts/verify-fast` delegates to `./scripts/verify` with identical admission,
 worker defaults, and coverage enforcement. Positive integer `JOBS` values remain

@@ -98,18 +98,19 @@ def test_shard_runner_keeps_subtest_counts_separate(tmp_path):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="process group cancellation is POSIX")
-@pytest.mark.parametrize("repeat", [False, True])
-def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
+@pytest.mark.parametrize("mode", ["graceful", "repeat", "forced"])
+def test_shard_cancellation_stops_test_grandchildren(tmp_path, mode):
     import fcntl
     import signal
     import time
 
+    resistant = mode != "graceful"
     heartbeat = tmp_path / "heartbeat"
     pid_file = tmp_path / "child.pid"
     leader_file = tmp_path / "leader.pid"
     child_code = (
         "import os,time,signal; from pathlib import Path; "
-        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if repeat else "")
+        + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if resistant else "")
         + f"Path({str(pid_file)!r}).write_text(str(os.getpid())); "
         f"p=Path({str(heartbeat)!r}); "
         "\nfor i in range(400):\n p.write_text(str(i)); time.sleep(0.05)\n"
@@ -119,7 +120,7 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
         "import subprocess,sys,time,signal,os\nfrom pathlib import Path\n"
         "def test_child():\n"
         f"    Path({str(leader_file)!r}).write_text(str(os.getpid()))\n"
-        + ("    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if repeat else "")
+        + ("    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if resistant else "")
         + f"    subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
         "    time.sleep(30)\n"
     )
@@ -127,12 +128,16 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     runner = subprocess.Popen(
         [
+            "sh",
+            "-c",
+            'export BRIGADE_VERIFY_LOCK_HELD=$$ BRIGADE_VERIFY_LOCK_FD="$0"; exec "$@"',
+            str(lock.fileno()),
             sys.executable,
             str(ROOT / "scripts/verify_parallel.py"),
             str(suite),
             f"--confcutdir={tmp_path}",
         ],
-        env=dict(os.environ, BRIGADE_VERIFY_SHARDS="1"),
+        env=dict(os.environ, BRIGADE_VERIFY_SHARDS="1", TMPDIR=str(tmp_path)),
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -147,15 +152,37 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
             assert runner.poll() is None
             assert time.monotonic() < deadline
             time.sleep(0.05)
-        runner.terminate()
-        if repeat:
+        if mode == "forced":
+            runner.kill()
+            runner.communicate(timeout=5)
+            assert runner.returncode == -signal.SIGKILL
+            # Only the shard can retain admission once the runner is gone.
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert int(leader_file.read_text()) != runner.pid
+            assert heartbeat.exists()
+            os.killpg(int(leader_file.read_text()), signal.SIGKILL)
+            # SIGKILL is asynchronous. Wait for the shard's inherited descriptor
+            # to close, rather than inferring release from signal delivery.
+            deadline = time.monotonic() + 5
+            while True:
+                try:
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    assert time.monotonic() < deadline
+                    time.sleep(0.05)
+        else:
+            runner.terminate()
+        if mode == "repeat":
             time.sleep(0.7)
             runner.terminate()
             # SIGTERM-resistant workers still own the resource during cleanup.
             with pytest.raises(BlockingIOError):
                 fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        runner.communicate(timeout=15)
-        assert runner.returncode == 130
+        if mode != "forced":
+            runner.communicate(timeout=15)
+            assert runner.returncode == 130
         time.sleep(0.2)
         stopped = heartbeat.read_text()
         time.sleep(0.2)

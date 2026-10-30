@@ -37,7 +37,11 @@ brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 
 `--timeout 3600` bounds the known-long integration gate and is not permission
 to retry status 75.
 
-Do not pass `--no-reuse` for a full gate. Status 75 means all full
+Keep receipt reuse enabled for unchanged code and environment. If dependencies
+or environment state changed and a fresh local full run was explicitly selected,
+add `--no-reuse` to the Brigade command above. This reruns the existing gate
+under the same admission limits. Never use it to retry contention or make a
+duplicate full run mandatory for PRs or merges. Status 75 means all full
 verification slots for this user on this host are occupied. It must not be retried
 with a larger timeout. Use `./scripts/verify-focused` or wait for an active
 Brigade receipt. Set `BRIGADE_VERIFY_WAIT=<seconds>` before starting a gate
@@ -52,12 +56,13 @@ The default pool is shared across linked worktrees and separate clones under
 Overrides must be positive integers. Coordinate overrides across all callers
 on the host: each must use the same K and lock path to share the limit.
 `BRIGADE_VERIFY_LOCK_PATH` names an existing slot directory or a file prefix.
-changing it creates a separate admission pool. Do not remove active lock files.
+Changing it creates a separate admission pool. Do not remove active lock files.
 The focused gate runs only named selectors, without coverage or full-gate slots.
 
-Reuse the existing passing Brigade receipt for unchanged code and the same
-planned command; do not create another cache. Reuse consults the latest receipt
-in the target workspace and its tree fingerprint. It does not discover another
+Reuse consults only the latest receipt overall in the target workspace. That
+receipt itself must be completed and passing, with the same tree fingerprint
+and planned command. A newer focused receipt prevents reuse of an older full
+receipt. Do not create another cache. Reuse does not discover another
 clone's receipts, wait for an active run, or certify changed environments,
 dependencies, or external state. An audit receipt is not required CI evidence.
 
