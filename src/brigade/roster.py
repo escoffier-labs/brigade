@@ -407,7 +407,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         if role not in {"writing", "frontend"} or not isinstance(config, dict):
             raise ValueError("task_roles supports writing and frontend tables only")
         if "instructions_file" in config:
-            role_instructions[role] = _as_str(config["instructions_file"], f"task_roles.{role}.instructions_file")
+            configured = Path(_as_str(config["instructions_file"], f"task_roles.{role}.instructions_file"))
+            configured = configured.expanduser()
+            # Detached children run from another cwd, so anchor relative paths to the roster file.
+            role_instructions[role] = str(configured if configured.is_absolute() else path.parent / configured)
 
     orchestrator = _as_str(data.get("orchestrator"), "orchestrator")
     raw_agents = data.get("agents")

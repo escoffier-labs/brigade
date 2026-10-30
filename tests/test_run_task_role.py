@@ -2,7 +2,7 @@
 
 import pytest
 
-from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference
+from brigade import aboyeur, cli, fleet_client, fleet_client_policy, run_preference, task_roles
 from brigade.cli import run as run_cli
 
 from tests.test_aboyeur_orchestrator_health_routing import _install_probe, PerSeatFakeAdapter
@@ -362,3 +362,24 @@ def test_role_prompt_dispatch_builder_covers_fallback(run_task, monkeypatch, tmp
 
     monkeypatch.setattr(run_transport, "dispatch", dispatch)
     assert planning.dispatch([], roster, cwd=tmp_path) == []
+
+
+def test_relative_instructions_resolve_against_roster_directory(tmp_path, monkeypatch):
+    from brigade.roster import load_roster
+
+    roster_dir = tmp_path / "config"
+    roster_dir.mkdir()
+    (roster_dir / "rules.md").write_text("Use plain words.")
+    roster_path = roster_dir / "roster.toml"
+    roster_path.write_text(
+        'orchestrator = "planner"\n[agents.planner]\ncli = "codex"\nrole = "plan"\n'
+        '[task_roles.writing]\ninstructions_file = "rules.md"\n'
+    )
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    roster = load_roster(roster_path)
+    assert roster.task_role_instructions["writing"] == str(roster_dir / "rules.md")
+    text, evidence = task_roles.load_instructions(roster, "writing")
+    assert text == "Use plain words."
+    assert evidence is not None and evidence["file"] == "rules.md"
