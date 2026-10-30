@@ -121,6 +121,46 @@ def verify_outcome_ref(ref: str) -> bool:
     return len(parts) == 5 and parts[:3] == (".brigade", "work", "verify-runs") and parts[-1] == "receipt.json"
 
 
+def _generic_completed_verify(receipt: dict[str, Any], run_id: str, *, native: bool) -> bool:
+    """Recognize intact passing non-card receipts without admitting corrupt bindings."""
+    from . import verify_trial
+
+    commands = receipt.get("commands")
+    if (
+        receipt.get("status") != "completed"
+        or receipt.get("run_id") != run_id
+        or not isinstance(commands, list)
+        or not commands
+        or any(
+            not isinstance(command, dict)
+            or command.get("status") != "completed"
+            or type(command.get("exit_code")) is not int
+            or command["exit_code"] != 0
+            or not isinstance(command.get("command"), str)
+            or not command["command"].strip()
+            for command in commands
+        )
+        or _timestamp(receipt.get("started_at")) is None
+        or _timestamp(receipt.get("completed_at")) is None
+    ):
+        return False
+    if native and (type(receipt.get("schema_version")) is not int or receipt["schema_version"] < 1):
+        return False
+    if (native or "digests" in receipt) and verify_trial._receipt_digest_reason(receipt) is not None:
+        return False
+    if "subject_binding" not in receipt:
+        return not receipt.get("verify_manifest_id")
+    binding = receipt["subject_binding"]
+    return (
+        isinstance(binding, dict)
+        and binding.get("artifact_kind") == "skill"
+        and all(isinstance(binding.get(key), str) and binding[key] for key in ("artifact_id", "content_fingerprint"))
+        and isinstance(binding.get("manifest_binding"), dict)
+        and verify_trial._manifest_binding_structure_complete(binding["manifest_binding"])
+        and verify_trial._verifier_identity_complete(binding)
+    )
+
+
 def outcome_ref_requires_support(target: Path, ref: str) -> bool:
     """Recognize unlogged verification receipts without reclassifying legacy text."""
     if not verify_outcome_ref(ref):
@@ -150,9 +190,8 @@ def outcome_ref_requires_support(target: Path, ref: str) -> bool:
             key in receipt for key in ("schema_version", "run_id", "commands", "subject_binding")
         )
         if structured:
-            # Ordinary completed command receipts retain generic citation support.
-            # Failed, corrupt, or card-bound receipts require the strict contract.
-            return receipt.get("status") != "completed" or bool(receipt.get("subject_binding"))
+            # Only intact completed non-card receipts retain generic support.
+            return not _generic_completed_verify(receipt, path.parent.name, native=native)
         return receipt.get("status") not in (None, "completed", "passed", "ok", "success")
     except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
         return True

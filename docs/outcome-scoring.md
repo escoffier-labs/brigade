@@ -180,8 +180,10 @@ Failed verification receipts never supply positive proof or consolidation
 support, including when cited in card metadata or appended through a proposal.
 This check also applies before capture or when the optional review-log append
 fails. Malformed verification receipts remain subject to validation after
-corruption. Ordinary completed command receipts without a card binding retain
-their existing generic citation support. Pending negative rows, including
+corruption. Intact passing command and skill receipts retain their existing
+generic citation support. Completed native receipts need a matching run identity,
+valid command results and an intact digest. An erased or malformed binding does
+not make a card receipt generic. Pending negative rows, including
 unresolved rows, keep same-card candidates at tier 2 with an empty diff and block
 retained proposals at propose, review and apply. Manual consolidation cannot
 advance its cutoff past a pending negative row. Other cards can still produce

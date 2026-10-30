@@ -436,21 +436,38 @@ def test_unlogged_completed_receipt_keeps_valid_direct_support(tmp_path, verifie
     assert snapshot(tmp_path) == before
 
 
-def test_ordinary_completed_receipt_keeps_generic_support(tmp_path, failed_card):
+@pytest.mark.parametrize("subject", ["unbound", "skill"])
+def test_ordinary_completed_receipt_keeps_generic_support(tmp_path, failed_card, subject):
     from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
     from tests.test_memory_reflect import evidence, log as write_log
 
     path, _, _ = failed_card
+    kwargs = {"commands": [[sys.executable, "-c", "pass"]]}
+    if subject == "skill":
+        from tests.test_verify_trial import _write_skill_subject
+
+        skill = _write_skill_subject(tmp_path)
+        manifest = json.loads((tmp_path / "verify/manifests/negative-card.json").read_text())
+        manifest["manifest_id"] = "positive-skill"
+        manifest["subject"] = {
+            "artifact_kind": "skill",
+            "artifact_id": "brigade-work",
+            "subject_path": skill.relative_to(tmp_path).as_posix(),
+        }
+        manifest["checks"][0]["command"] = f'{sys.executable} -c "pass"'
+        verify_manifest.write_workspace_manifest(tmp_path, manifest)
+        _track_workspace_manifest(tmp_path, "positive-skill")
+        kwargs = {"manifest_id": "positive-skill"}
     output = io.StringIO()
     with redirect_stdout(output):
-        assert (
-            verify_mod.verify_run(
-                target=tmp_path, commands=[[sys.executable, "-c", "pass"]], reuse=False, json_output=True
-            )
-            == 0
-        )
+        assert verify_mod.verify_run(target=tmp_path, reuse=False, json_output=True, **kwargs) == 0
     receipt = json.loads(output.getvalue())
-    assert receipt["status"] == "completed" and not receipt.get("subject_binding")
+    assert receipt["status"] == "completed"
+    if subject == "skill":
+        assert receipt["subject_binding"]["artifact_kind"] == "skill"
+        assert verify_trial.project_trial(receipt, target=tmp_path).eligible
+    else:
+        assert "subject_binding" not in receipt
     ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
     path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
     healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
@@ -565,4 +582,87 @@ def test_negative_receipt_disappears_without_blocking_healthy_cards(tmp_path, fa
     result = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
     assert removed and result
     assert all(c["card_ids"] == ["healthy"] and c["tier"] == 0 for c in result)
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "empty-binding",
+        "null-binding",
+        "text-binding",
+        "nested-skill-binding",
+        "removed-binding",
+        "status-only",
+        "identity",
+        "commands",
+        "failed-command",
+        "missing-digest",
+        "missing-schema",
+    ],
+)
+def test_malformed_completed_receipt_cannot_become_generic_support(tmp_path, verified_card, corruption):
+    from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt = verified_card
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    if corruption == "empty-binding":
+        receipt["subject_binding"] = {}
+    elif corruption == "null-binding":
+        receipt["subject_binding"] = None
+    elif corruption == "text-binding":
+        receipt["subject_binding"] = ""
+    elif corruption == "nested-skill-binding":
+        receipt["subject_binding"]["artifact_kind"] = "skill"
+        receipt["subject_binding"]["manifest_binding"] = "malformed"
+    elif corruption == "removed-binding":
+        receipt.pop("subject_binding")
+    elif corruption == "status-only":
+        receipt = {"status": "completed"}
+    else:
+        receipt.pop("subject_binding")
+        if corruption == "identity":
+            receipt["run_id"] = "different-run"
+        elif corruption == "commands":
+            receipt["commands"] = {}
+        elif corruption == "failed-command":
+            receipt["commands"][0]["exit_code"] = 1
+        elif corruption == "missing-digest":
+            receipt.pop("digests")
+        elif corruption == "missing-schema":
+            receipt.pop("schema_version")
+    if corruption not in {"removed-binding", "missing-digest", "missing-schema"}:
+        from tests.test_verify_trial import _stamp_receipt_digest
+
+        # These rows test envelope validation independently of stale checksums.
+        _stamp_receipt_digest(receipt)
+    (tmp_path / ref).write_text(json.dumps(receipt))
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
+    healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    write_log(tmp_path, path, (healthy, "outcome", "2026-10-21T12:00:00Z"))
+    before = snapshot(tmp_path)
+    candidates = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    assert {c["kind"] for c in candidates} == {"reinforce", "stale-newer-evidence"}
+    for candidate in candidates:
+        assert ref not in candidate["evidence_ids"]
+        assert candidate["proof_count"] == 1
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    with pytest.raises(api.ProposalError, match="outcome evidence drift"):
+        api.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=["memory/cards/cache.md"],
+            anchor_blocks=True,
+            reason="Inspect malformed completed receipt.",
+            ops=[
+                dict(
+                    type="append_evidence",
+                    card_path="memory/cards/cache.md",
+                    block_id=block.block_id,
+                    expected_block_hash=block.sha256,
+                    evidence_ids=[ref],
+                )
+            ],
+        )
     assert snapshot(tmp_path) == before
