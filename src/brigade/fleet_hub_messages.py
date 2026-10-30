@@ -828,8 +828,22 @@ def _send(
         if envelope is not None:
             from .fleet_hub_identity import require_current_hub
 
-            require_current_hub(conn, envelope["hub"])
+            configured_hub = require_current_hub(conn, envelope["hub"])
             sealed.require_current_keys(conn, envelope)
+            if configured_hub:
+                for principal, code in (
+                    (sender, "sender_key_stale"),
+                    (recipient, "recipient_key_stale"),
+                ):
+                    row = conn.execute(
+                        "SELECT record FROM fleet_message_keys WHERE principal_id=? AND state='active'", (principal,)
+                    ).fetchone()
+                    try:
+                        record_hub = json.loads(row[0])["hub"] if row is not None else None
+                    except (KeyError, TypeError, ValueError):
+                        record_hub = None
+                    if record_hub != envelope["hub"]:
+                        raise MessageConflict("active key belongs to another Hub", code=code)
             sealed.admit(conn, sender, len(raw["envelope"]), policy)
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)

@@ -55,12 +55,11 @@ def _blob(value: Any) -> str:
 
 
 def identity(conn: sqlite3.Connection) -> dict[str, Any] | None:
-    row = conn.execute("SELECT value FROM hub_meta WHERE key='identity'").fetchone()
-    if row is None:
+    rows = dict(conn.execute("SELECT key,value FROM hub_meta WHERE key IN ('identity','migration')"))
+    if "identity" not in rows:
         return None
-    value = json.loads(row[0])
-    migration = conn.execute("SELECT value FROM hub_meta WHERE key='migration'").fetchone()
-    return {"identity": value, "migration": json.loads(migration[0])} if migration else value
+    value = json.loads(rows["identity"])
+    return {"identity": value, "migration": json.loads(rows["migration"])} if "migration" in rows else value
 
 
 def validate_storage_policy(raw: Any, policy: StoragePolicy | None = None) -> None:
@@ -176,11 +175,12 @@ def _installed(conn: sqlite3.Connection) -> tuple[dict[str, Any] | None, dict[st
         raise MessageError("installed Hub identity metadata is invalid", code="hub_identity_invalid") from None
 
 
-def require_current_hub(conn: sqlite3.Connection, hub: str) -> None:
-    """Fence new writes only. Caller must already own SQLite's writer lock."""
+def require_current_hub(conn: sqlite3.Connection, hub: str) -> bool:
+    """Fence new writes and report configured state under the caller's writer lock."""
     value, _ = _installed(conn)
     if value is not None and value["hub_id"] != hub:
         raise MessageConflict("Hub identity changed", code="hub_identity_changed")
+    return value is not None
 
 
 def _origin_require(condition: Any, code: str) -> None:
@@ -311,7 +311,7 @@ def upload_identity(
         # A historical exact replay cannot reactivate an old signer.
         historical = previous == mark and current is not None and current["hub_id"] != value["hub_id"]
         if supplied:
-            proof = _migration(raw["migration"], value, current)
+            proof = _migration(raw["migration"], value, None if historical else current)
         if not historical:
             if signer not in marks and len(marks) >= 1024:
                 raise MessageError("Hub identity history is full", code="hub_identity_history_full")

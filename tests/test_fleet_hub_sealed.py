@@ -1732,11 +1732,12 @@ def test_d4_sealed_fence_preserves_exact_retry(hub):
 
 @pytest.mark.parametrize("replacement_first", [False, True])
 @pytest.mark.parametrize("rollback_replacement", [False, True])
-def test_d4_sealed_replacement_writer_order(hub, monkeypatch, replacement_first, rollback_replacement):
+def test_d4_sealed_replacement_writer_order(d4_hub, monkeypatch, replacement_first, rollback_replacement):
     from brigade import fleet_hub_identity as ids
     from tests.test_fleet_hub_message_keys import _d4_identity, _d4_queued_writer
     from brigade import fleet_hub_events as events
 
+    hub = d4_hub
     monkeypatch.setattr(events, "_CONFIG", events.EventsConfig(frozenset({"callback.invalid"})))
     hub.execute(
         "INSERT INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,created_at) "
@@ -1777,3 +1778,65 @@ def test_d4_sealed_replacement_writer_order(hub, monkeypatch, replacement_first,
             assert [hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] for table in tables] == [
                 n + 1 for n in before
             ]
+
+
+@pytest.fixture
+def d4_hub(tmp_path):
+    """Start a configured-Hub scenario with matching synthetic key records."""
+    from tests.test_fleet_hub_message_keys import _d4_identity
+
+    conn = fleet_hub.init_db(tmp_path / "d4-hub.db")
+    for principal, seed in (("node-a", 1), ("node-b", 2), ("node-c", 3)):
+        fleet_hub.add_node(conn, principal)
+        publish(conn, record(principal, seed=seed, hub=_d4_identity()["hub_id"]))
+    conn.commit()
+    yield conn
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    "sender_current,recipient_current", [(False, False), (True, False), (False, True), (True, True)]
+)
+def test_d4_new_envelope_requires_both_current_hub_key_records(d4_hub, sender_current, recipient_current):
+    from brigade import fleet_hub_identity as ids
+    from tests.test_fleet_hub_message_keys import _d4_identity
+
+    hub = d4_hub
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    original = envelope(hub=a["hub_id"])
+    stored = send(hub, original)
+    ids.upload_identity(hub, b)
+    sender, recipient = record("node-a", seed=1), record("node-b", seed=2)
+    if sender_current:
+        sender = record("node-a", seed=4, hub=b["hub_id"], prev_kid=sender["kid"], prev_sig=binary(bytes(64)))
+        publish(hub, sender)
+    if recipient_current:
+        recipient = record("node-b", seed=5, hub=b["hub_id"], prev_kid=recipient["kid"], prev_sig=binary(bytes(64)))
+        publish(hub, recipient)
+    before = [
+        hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("fleet_messages", "fleet_message_sends", "fleet_events")
+    ]
+    kids = sorted({sender["kid"], recipient["kid"]})
+    current = envelope(
+        hub=b["hub_id"],
+        client_id="d4-current-records",
+        from_kid=sender["kid"],
+        rcpt=kids,
+        recipients=[{"kid": kid, "wrap": binary(bytes(1168))} for kid in kids],
+    )
+    if sender_current and recipient_current:
+        accepted = send(hub, current)
+        assert accepted["envelope"] == current
+        expected = [before[0] + 1, before[1] + 1, before[2]]
+    else:
+        with pytest.raises(messages.MessageConflict) as error:
+            send(hub, current)
+        assert error.value.code == ("sender_key_stale" if not sender_current else "recipient_key_stale")
+        expected = before
+    assert send(hub, original) == stored
+    assert [
+        hub.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+        for table in ("fleet_messages", "fleet_message_sends", "fleet_events")
+    ] == expected

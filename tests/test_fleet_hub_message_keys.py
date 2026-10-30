@@ -1146,3 +1146,83 @@ def test_d4_existing_kid_conflict_precedes_new_write_fence(hub, revoked):
         keys.publish(hub, {"action": "keys_publish", "record": value}, caller="node-b")
     assert error.value.code == ("principal_key_revoked" if revoked else "principal_key_exists")
     assert hub.execute("SELECT * FROM fleet_message_keys").fetchall() == before
+
+
+def test_d4_historical_exact_migration_wrapper_is_noop(hub):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    original = {"identity": a, "migration": _d4_migration(a)}
+    ids.upload_identity(hub, original)
+    ids.upload_identity(hub, b)
+    before = _d4_meta(hub)
+    assert ids.upload_identity(hub, original) == b
+    assert _d4_meta(hub) == before
+    malformed = {**original["migration"], "new_identity_sha256": binary(bytes(32))}
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, {"identity": a, "migration": malformed})
+    assert error.value.code == "hub_migration_invalid"
+    assert _d4_meta(hub) == before
+
+
+@pytest.mark.parametrize("same_target", [False, True])
+def test_d4_migration_old_id_pairing_is_not_just_format_validation(hub, same_target):
+    from brigade import fleet_hub_identity as ids
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    ids.upload_identity(hub, a)
+    before = _d4_meta(hub)
+    target = a if same_target else b
+    old = target if same_target else _d4_identity(9)
+    proof = _d4_migration(target, old)
+    with pytest.raises(messages.MessageError) as error:
+        ids.upload_identity(hub, {"identity": target, "migration": proof})
+    assert error.value.code == "hub_migration_invalid"
+    assert _d4_meta(hub) == before
+
+
+def test_d4_identity_and_migration_read_use_one_snapshot(hub):
+    from brigade import fleet_hub_identity as ids
+
+    class FrozenRows:
+        def __init__(self, rows):
+            self.rows = rows
+
+        def fetchone(self):
+            return self.rows[0] if self.rows else None
+
+        def __iter__(self):
+            return iter(self.rows)
+
+    class InterleavedConnection(sqlite3.Connection):
+        after_read = None
+
+        def execute(self, sql, *args, **kwargs):
+            cursor = super().execute(sql, *args, **kwargs)
+            if self.after_read is not None and sql.startswith("SELECT") and "FROM hub_meta" in sql:
+                rows = cursor.fetchall()
+                cursor.close()
+                callback, self.after_read = self.after_read, None
+                callback()
+                return FrozenRows(rows)
+            return cursor
+
+    a, b = _d4_identity(), _d4_identity(1, 1)
+    original = {"identity": a, "migration": _d4_migration(a)}
+    replacement = {"identity": b, "migration": _d4_migration(b, a)}
+    ids.upload_identity(hub, original)
+    reader = sqlite3.connect(hub.execute("PRAGMA database_list").fetchone()[2], factory=InterleavedConnection)
+    observed = []
+
+    def replace_after_snapshot():
+        ids.upload_identity(hub, replacement)
+        observed.append(ids.identity(hub))
+
+    reader.after_read = replace_after_snapshot
+    try:
+        assert ids.identity(reader) == original
+        assert observed == [replacement]
+        assert not reader.in_transaction
+        assert ids.identity(hub) == replacement
+    finally:
+        reader.close()
