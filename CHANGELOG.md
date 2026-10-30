@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
 - Add the bundled `fleet-hub-upgrade` skill: a generic Hub-first upgrade checklist covering the node-to-Hub payload and `SCHEMA_VERSION` pre-flight diff, snapshot-and-switch Hub deploy with rollback, and node verification (#2167).
 
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
