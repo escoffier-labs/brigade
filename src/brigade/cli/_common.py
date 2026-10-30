@@ -9,7 +9,7 @@ from __future__ import annotations
 import argparse
 
 
-# Top-level help groups. Every sub.add_parser command must appear in exactly
+# Top-level help groups. Every canonical sub.add_parser command must appear in exactly
 # one group; tests/test_cli_help.py enforces full coverage.
 COMMAND_GROUPS: list[tuple[str, list[str]]] = [
     (
@@ -44,12 +44,12 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
         ],
     ),
     (
-        "Stations and tools",
+        "Components and tools",
         [
             "add",
             "setup",
             "update",
-            "stations",
+            "components",
             "skills",
             "harness",
             "tools",

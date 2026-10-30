@@ -86,7 +86,7 @@ def list_stations(*, profile_name: str = "repo", json_output: bool = False) -> i
         _json_print(payload)
         return 0
 
-    print(f"brigade stations: profile={profile.name}")
+    print(f"brigade components: profile={profile.name}")
     width = max((len(row["station"]) for row in rows), default=8)
     for row in rows:
         tool_labels = [tool["name"] for tool in row["tools"]]
@@ -249,12 +249,12 @@ def discover(
         _json_print(payload)
         return 0
     print(
-        f"brigade stations discover: {payload['count']} station.json file(s) "
+        f"brigade components discover: {payload['count']} station.json file(s) "
         f"({payload['active_count']} active, {payload['non_active_count']} non-active)"
     )
     for row in payload["manifests"]:
         tool_names = ", ".join(tool["name"] for tool in row["tools"]) or "(none)"
-        print(f"  {row['name']}  station={row['station']}  lifecycle={row['lifecycle']}  tools={tool_names}")
+        print(f"  {row['name']}  component={row['station']}  lifecycle={row['lifecycle']}  tools={tool_names}")
         print(f"    path: {row['path']}")
         print(f"    next: {row['add_command']}")
     if payload["errors"]:
@@ -262,7 +262,9 @@ def discover(
         for err in payload["errors"][:10]:
             print(f"  {err['path']}: {err['error']}")
     if not payload["manifests"]:
-        print("next: place a station.json (schema brigade.station.v1) in a sidecar repo, then re-run discover")
+        print(
+            "next: place a station.json (schema brigade.station.v1) in a sidecar repo, then run brigade components discover"
+        )
     return 0
 
 
@@ -787,13 +789,13 @@ def verify(ref: str, *, json_output: bool = False, check_managed: bool = False) 
         if json_output:
             _json_print(error)
         else:
-            print(f"brigade stations verify: error: {_human_field(error['detail'])}")
+            print(f"brigade components verify: error: {_human_field(error['detail'])}")
         return 2
     if json_output:
         _json_print(payload)
     else:
         print(
-            f"brigade stations verify: {payload['status']} "
+            f"brigade components verify: {payload['status']} "
             f"name={_human_field(payload['manifest']['name'])} "
             f"lifecycle={_human_field(payload['manifest']['lifecycle'])}"
         )

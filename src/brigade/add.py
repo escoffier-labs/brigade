@@ -20,20 +20,20 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
     st = resolve_station(station)
     single_tool = managed.resolve(station) if st is None else None
     if st is None and single_tool is None:
-        print(f"error: unknown station or tool {station!r}", file=sys.stderr)
+        print(f"error: unknown component or tool {station!r}", file=sys.stderr)
         return 2
 
     if single_tool is not None:
         tools: tuple[managed.ManagedTool, ...] = (single_tool,)
-        print(f"tool {single_tool.name!r} (station {single_tool.station!r})")
+        print(f"tool {single_tool.name!r} (component {single_tool.station!r})")
     elif st is not None:
         tools = managed.for_station(st.name)
     else:  # pragma: no cover - guarded above
-        print(f"error: unknown station or tool {station!r}", file=sys.stderr)
+        print(f"error: unknown component or tool {station!r}", file=sys.stderr)
         return 2
     if not tools:
         if st is not None and st.name == "skills":
-            print("station 'skills' ships built-in Brigade skills:")
+            print("component 'skills' ships built-in Brigade skills:")
             for skill_id in DEFAULT_WIRED_SKILLS:
                 print(f"  [built-in] {skill_id}")
             print()
@@ -44,7 +44,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
             print("Run `brigade init --harnesses codex` to wire the built-in skills into Codex.")
             return 0
         station_name = st.name if st is not None else station
-        print(f"station {station_name!r} has no managed tools to add.")
+        print(f"component {station_name!r} has no managed tools to add.")
         return 0
 
     if st is not None and st.name == "memory":
@@ -64,7 +64,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "pantry":
-        print("pantry station wires Agent Pantry (separate Go binary; process boundary):")
+        print("pantry component wires Agent Pantry (separate Go binary; process boundary):")
         print("  brigade pantry setup plan --role sink --peer 127.0.0.1:8787")
         print("  brigade pantry setup plan --role source --peer <sink-host>:8787")
         print("  brigade pantry doctor")
@@ -74,7 +74,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "evidence":
-        print("evidence station wires MiseLedger (separate Go binary; process boundary):")
+        print("evidence component wires MiseLedger (separate Go binary; process boundary):")
         print("  brigade evidence crawl plan")
         print("  brigade evidence doctor")
         print("  brigade evidence export plan")
@@ -87,7 +87,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "search":
-        print("search station wires GraphTrail + optional code-search (process-boundary binaries):")
+        print("search component wires GraphTrail + optional code-search (process-boundary binaries):")
         print("  brigade search sync plan")
         print("  brigade search doctor")
         print("  graphtrail sync")
@@ -96,7 +96,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "tokens":
-        print("tokens station wires Token Glace (+ optional usage-tracker; process boundary):")
+        print("tokens component wires Token Glace (+ optional usage-tracker; process boundary):")
         print("  brigade tokens wire plan")
         print("  brigade tokens doctor")
         print("  token-glace install claude-code")
@@ -105,7 +105,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if single_tool is not None and single_tool.name == "plating":
-        print("plating is an optional guard-station publish helper (demo SVG render + leak scan):")
+        print("plating is an optional guard-component publish helper (demo SVG render + leak scan):")
         print("  plating render <spec>")
         print("  plating verify <spec>")
         print("  plating scan <cast> --policy public-repo")
@@ -138,7 +138,7 @@ def _run_manifest_add(ref: str, *, install_manifest: bool) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 2
 
-    print(f"station manifest: {manifest.name} ({manifest.station})")
+    print(f"component manifest: {manifest.name} ({manifest.station})")
     print(f"  summary: {manifest.summary}")
     print(f"  path: {manifest.path}")
     print(f"  lifecycle: {manifest.lifecycle}")

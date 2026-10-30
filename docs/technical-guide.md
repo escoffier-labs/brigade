@@ -58,7 +58,7 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **closeout** | Marking something reviewed or done so it stops nagging you. |
 | **gate** | A checkpoint the operator places where they want approval before work continues. |
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
-| **station** | A subsystem of Brigade Stack (memory, security, tokens, pantry) with its own commands. |
+| **component** | A subsystem of Brigade Stack (memory, security, tokens, pantry) with its own commands. |
 
 Execution model: the operator sets policy, budgets, scopes, and gates, then agents work within that authority. Receipts with real exit codes and run journals record what happened. Agents pass evidence packages and handoffs so the next agent can check their work. Commands and operator-started services share this model. Details: [`docs/execution-model.md`](execution-model.md).
 
@@ -86,7 +86,7 @@ The Token Glace starter card documents Claude Code's PreToolUse wrapper path, Co
 
 ## What you get
 
-> **In plain terms:** the list below is everything Brigade Stack can do today. Skim the bold labels; each one is a "station" documented in detail later. You do not need most of them on day one.
+> **In plain terms:** the list below is everything Brigade Stack can do today. Skim the bold labels; each one is a "component" documented in detail later. You do not need most of them on day one.
 
 Brigade Stack has grown from a bootstrap kit into a local control plane for agent work. The current public surface includes:
 
@@ -102,7 +102,7 @@ Brigade Stack has grown from a bootstrap kit into a local control plane for agen
 - Portable tool catalog: tool discovery, contracts, call planning, approval queues, explicit script and local MCP execution, run receipts, replay candidates, checkpoints, runtimes, host-local policy, parity, packs, sync, and projection health.
 - Shared skills: reviewed `SKILL.md` packs with metadata, provenance, linting, fingerprints, trust score, changelog, install history, diffs, portable packs, publish proposals, and one-command installation across Codex, Claude, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, OpenClaw, Hermes, and MCP-resource targets.
 - Local producers: memory care, chat export sweeps, backup health, code review, context packs, project consolidation, learning candidates and replay, and security scans.
-- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
+- Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the component; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
 The operator can inspect or stop work and place gates where approval is needed. Within an authorized scope, agents can keep working and pass verification evidence to each other. Local receipts and run journals retain the record even when coordination uses the fleet hub or cloud seats. Service lifecycles and record locations are in the [`execution model`](execution-model.md).
@@ -314,7 +314,7 @@ brigade init --target ./repo --depth repo --harnesses codex
 brigade init --target ./repo --harnesses none           # generic install
 ```
 
-Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the station registry.
+Once installed, `brigade doctor` verifies the wiring and `brigade status` reports over the component registry.
 For machines that ingest handoffs from multiple repos, copy `.brigade/handoff-sources.example.json` to `.brigade/handoff-sources.json` and list the repo roots and writer inboxes the canonical ingestor scans.
 `brigade handoff doctor` reports pending `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, and `.crush/memory-handoffs/` files that are not covered by that local source list.
 Run `brigade handoff lint` before ingesting pending handoffs when you want to catch action/target mismatches early.
@@ -1110,7 +1110,7 @@ Local-only runs need no extra dependency. Without the extra, `--web` records a b
 
 ### Daily Work Loop
 
-> **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional station you reach for only when you need it. Read for the command you want and ignore the rest.
+> **In plain terms:** this section is long because it lists every command in the daily routine, but the spine is short. `brigade work bootstrap` once per repo, `brigade work brief` to start the day, `brigade work run` to do a task, `brigade work closeout` to confirm it met its "done" criteria. Everything else (inbox, scanners, sweeps, reviews, backups, tools, the daily driver, phase ledgers) is an optional component you reach for only when you need it. Read for the command you want and ignore the rest.
 
 Use `brigade work bootstrap` once per repo.
 It writes or verifies `.brigade/dogfood.toml`, creates local artifact directories, creates the handoff inbox, updates `.gitignore`, and reports readiness.
@@ -1438,8 +1438,8 @@ Operator notification commands:
 - `brigade add notifications` installs `agent-notify` when missing and reports manual wiring steps.
 - `brigade notifications status --json` inspects the local `agent-notify` binary, config file, selected profile, and referenced environment variables without sending.
 - `brigade notifications setup plan --profile operator` prints reviewed Codex and Claude Code hook snippets.
-- `brigade doctor` includes advisory `agent-notify` health under the notifications station.
-- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications station; they never send.
+- `brigade doctor` includes advisory `agent-notify` health under the notifications component.
+- `brigade center status`, `brigade work brief`, and `brigade daily status/plan` surface notification readiness as local advisory health. They may suggest installing the notifications component; they never send.
 
 Brigade Stack does not send notifications, edit harness hook files, run hook snippets, or store webhook URLs/tokens from these commands. Keep channel secrets in environment variables referenced by `~/.config/agent-notify/config.toml`.
 
@@ -1879,7 +1879,7 @@ Operator surfaces reuse the same audit:
 
 The 1,601 legacy outcome ledger rows reported in the scorecard proposal are audit-only. They cannot be converted into receipt scorecards because scorecards require verifier-attributed verify receipts, not caller-supplied ledger `artifact_id` values.
 
-`brigade operator checkup` runs the six first-run doctors by default and reports optional loop station health alongside them. Missing optional stations warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, GraphTrail health and the latest work receipt delta, and MiseLedger work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
+`brigade operator checkup` runs the six first-run doctors by default and reports optional loop component health alongside them. Missing optional components warn and do not block the default ready verdict. Use repeatable `--surface` values to run only named checks, `--list-surfaces` to inspect the stable names, or `--preset evidence-loop` to gate only work receipt integrity and outcome capture, code map health and the latest work receipt delta, and evidence log work-receipt import state. Scoped JSON reports `selected_ready`, leaves `overall_ready` unevaluated, and includes selected, skipped, and per-surface elapsed data.
 
 Use `--handoff` to bridge a completed run back into the memory system.
 
@@ -2008,14 +2008,18 @@ The managed `.gitignore` block is replaced between its markers without touching 
 
 See [QUICKSTART.md](../QUICKSTART.md) for setup, verification, and the ingest flow.
 
-## Managed stations
+<a id="managed-stations"></a>
 
-> **In plain terms:** "stations" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
+## Managed components
 
-Some stations can install and wire external tools for you.
-Run `brigade setup` first to install GraphTrail, `graphtrail-mcp`, MiseLedger, SessionFind, and `agent-notify` (when published on the release manifest) from the running CLI's exact release manifest. `brigade add evidence`, `brigade add search`, and `brigade add graphtrail` remain one-release compatibility paths for independent installs; they are not required after setup. Use `brigade add <station>` for station-specific tools that setup does not manage, then wire their default config.
+The `brigade components` catalog command is unreleased, targeted for the next 0.31.x release. Stable 0.30 uses `brigade stations` with the same subcommands. See the [component reference](station-contract.md) for alias and manifest compatibility.
+
+> **In plain terms:** "components" group built-in capabilities and optional tools Brigade Stack can install and wire for you. Managed tools run as separate command-line processes. Content Guard is embedded in Brigade Stack, so `brigade add guard` only offers the optional Plating helper.
+
+Some components can install and wire external tools for you.
+Run `brigade setup` first to install the code map and evidence log engines and their companion binaries from the running CLI's exact release manifest. Independent engine installation commands remain one-release compatibility paths and are not required after setup. Use `brigade add <component>` for component-specific tools that setup does not manage, then wire their default config.
 Tools are never imported in process; Brigade Stack shells out to each CLI, so the boundary stays model-neutral and mixed-language.
-`brigade add <path>` also discovers a local `station.json` manifest from an external station repo. The manifest path reports the station name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
+`brigade add <path>` also discovers a local `station.json` manifest from an external component repo. The manifest path reports the component name, install command, and machine surfaces. Install commands from a manifest are not executed unless `--install` is passed.
 
 ```bash
 brigade add memory   # bootstrap-doctor (optional); status/lint/compact are built in
@@ -2024,16 +2028,16 @@ brigade add tokens   # token-glace (+ optional usage-tracker)
 brigade add skills   # built-in skills; optional Skillet installer remains available
 brigade add pantry   # agentpantry (extras surface)
 brigade add notifications   # agent-notify (extras surface)
-brigade stations discover --root ~/repos
+brigade components discover --root ~/repos
 brigade add ../agentpantry   # inspect an external station.json
 ```
 
 For general workflow guidance, install upstream [Superpowers](https://github.com/obra/superpowers) separately alongside the Brigade Stack and T3 specialists you use. `brigade init` does not bundle Superpowers. The optional Skillet installer is retained unchanged.
 
 
-`security` is a built-in station with no external managed tool yet.
+`security` is a built-in component with no external managed tool yet.
 
-First-class station CLIs (always registered; not extras-gated):
+First-class component CLIs (always registered; not extras-gated):
 
 | Command group | Plans / health |
 |---|---|
@@ -2041,11 +2045,11 @@ First-class station CLIs (always registered; not extras-gated):
 | `brigade code` | `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, `diff` |
 | `brigade search` | `status`, `doctor`, `sync`, `context`, `impact`, `sync plan` |
 | `brigade tokens` | `status`, `doctor`, `wire plan` |
-| `brigade stations` | `list`, `discover`, `verify` |
+| `brigade components` | `list`, `discover`, `verify` |
 
 `pantry` and `notifications` remain extras-gated (`brigade extras on` or `BRIGADE_EXTRAS=1`).
 
-`pantry` (alias `larder`) is the agent session auth sync station. Agent Pantry remains a process-boundary Go binary; Brigade Stack never imports it.
+`pantry` (alias `larder`) is the agent session auth sync component. Agent Pantry remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade add pantry` installs agentpantry via `go install github.com/escoffier-labs/agentpantry/cmd/agentpantry@latest` and prints the first-class operator path (setup plan, doctor, expiry-alert).
 Before invoking any installed agentpantry surface, Brigade Stack probes `agentpantry version --json` and accepts only released ASCII semver triples (optional leading `v`, no prerelease or build suffix). Dev builds, prerelease tags, and other non-triple strings are rejected by version policy, not because parsing failed. Brigade Stack never echoes the raw rejected version string in `work brief`, doctor output, logs, or receipts; it surfaces a fixed policy message instead.
 `brigade doctor` health-checks it with `agentpantry doctor --json --no-net` and keeps a compatibility fallback to `agentpantry status --json` for older binaries.
@@ -2054,12 +2058,12 @@ Use `brigade pantry status` and `brigade pantry doctor` for pantry-specific heal
 Use `brigade pantry expiry-alert` to report near-expiry sessions and preview the `agent-notify` message Brigade Stack would send. Add `--send` only after `brigade add notifications` if you want delivery.
 These plan commands do not generate or copy PSKs, start services, or mutate browser, GitHub, OpenClaw, or other auth files. Product page: https://brigade.tools/agentpantry.
 
-`notifications` is the operator notification station. `agent-notify` remains a process-boundary Go binary; Brigade Stack never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
+`notifications` is the operator notification component. `agent-notify` remains a process-boundary Go binary; Brigade Stack never imports it. Source lives in [`stations/notify/`](../stations/notify/) in this repository. Released pipx installs resolve `agent-notify` from the pinned unified release manifest through `brigade setup` once stable publishes its assets. `go install github.com/escoffier-labs/agent-notify/cmd/agent-notify@latest` is the explicit fallback when you are on a source checkout or the component is not yet published on the running manifest. The standalone [agent-notify](https://github.com/escoffier-labs/agent-notify) repository carries a migration notice pointing at the monorepo.
 `brigade add notifications` installs `agent-notify` when missing and prints manual wiring steps.
 Use `brigade notifications status` and `brigade notifications setup plan` for advisory health and reviewed hook snippets without sending.
-`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the station; Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
+`brigade work brief`, `brigade center status`, and `brigade daily status/plan` may surface notification readiness or suggest installing the component; Brigade Stack never sends unless the operator uses an explicit send action such as `brigade pantry expiry-alert --send`.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger component. Its engine remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. `--code-reference <brigade.code-reference.v1 JSON>` is passed to MiseLedger unchanged, so its exact code-reference lookup runs before lexical fallback.
 
@@ -2072,9 +2076,9 @@ Crawl defaults to 900 seconds and can be changed with the positive finite numeri
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
 
-`plating` is an optional guard-station publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
+`plating` is an optional guard-component publish helper (`brigade add plating`) for demo SVG render, leak scan, and output-drift verify. Not required for scrub.
 
-`evidence` (alias `ledger`) is the local evidence-ledger station. MiseLedger remains a process-boundary Go binary; Brigade Stack never imports it.
+`evidence` (alias `ledger`) is the local evidence-ledger component. Its engine remains a process-boundary Go binary; Brigade Stack never imports it.
 `brigade setup` installs MiseLedger and its SessionFind companion from the exact release manifest. `brigade add evidence` remains a one-release compatibility fallback for an independent install.
 Use `brigade evidence status` and `brigade evidence doctor` for advisory health with explicit `next` commands. `brigade evidence crawl <args...>` and `brigade evidence search <args...>` relay a safe argv list to MiseLedger, preserving its text or JSON output and exit status. Brigade Stack selects and health-checks the crawler runtime for supported sources before delegating; MiseLedger still performs the crawl and import. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --new-only --import`. Product page: https://brigade.tools/miseledger.
 
@@ -2134,7 +2138,7 @@ Security config supports policy presets (`personal`, `public-repo`, `strict`), `
 
 The current managed tools:
 
-| Station | Tool | What it does |
+| Component | Tool | What it does |
 |---|---|---|
 | `memory` | embedded `brigade memory status|lint|compact` | index health, dead-link lint, MEMORY.md compact |
 | `memory` | `bootstrap-doctor` | bootstrap-file size and limit audit |
@@ -2151,10 +2155,10 @@ The current managed tools:
 | `notifications` | `agent-notify` | private operator notifications for agent events |
 
 `brigade doctor` folds installed tools into its report and surfaces each tool's own health.
-`brigade stations list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
-`brigade stations discover` finds local `station.json` catalogs (`brigade.station.v1`) under cwd and common repo roots.
+`brigade components list --json` reports the managed machine surfaces each tool exposes, including doctor JSON, bounded markdown briefs, summary JSON, and verify commands where available.
+`brigade components discover` finds local `station.json` catalogs (`brigade.station.v1`) under cwd and common repo roots.
 A missing optional tool is not a failure.
-It shows up as a non-failing `[todo]` hint telling you to run `brigade add <station>`.
+It shows up as a non-failing `[todo]` hint telling you to run `brigade add <component>`.
 
 ### What a green doctor looks like
 

@@ -1,4 +1,4 @@
-"""Built-in station profiles.
+"""Built-in component profiles.
 
 Profiles are catalog metadata only. They describe the stations Brigade treats
 as selected by default for a workspace shape; they do not install external
@@ -25,7 +25,7 @@ class StationProfile:
 
 REPO = StationProfile(
     name="repo",
-    summary="Default repo workspace profile with priority stations and Scout skills selected.",
+    summary="Default repo workspace profile with priority components and Scout skills selected.",
     aliases=("default",),
     selected_stations=("core", "skills", "memory", "guard", "security", "tokens", "evidence", "search"),
     optional_stations=("mcp", "pantry", "notifications"),
