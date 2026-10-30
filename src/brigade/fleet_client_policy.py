@@ -352,6 +352,18 @@ def work_next(*, consumer: str = "brigade-run", workload: str = "general") -> di
     )
 
 
+def accept_reservation(*, reservation_id: str, decision_id: str, session_id: str) -> dict[str, Any]:
+    return post_policy(
+        {
+            "action": "reservation-accept",
+            "reservation_id": reservation_id,
+            "decision_id": decision_id,
+            "session_id": session_id,
+        },
+        admin=False,
+    )
+
+
 def renew_reservation(*, reservation_id: str, decision_id: str, session_id: str) -> dict[str, Any]:
     return post_policy(
         {

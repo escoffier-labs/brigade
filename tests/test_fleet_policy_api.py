@@ -1160,3 +1160,66 @@ def test_inventory_ingest_without_collectors_is_denied(tmp_path):
         )
         assert denied["error"]["code"] == "auth-failed"
         assert "not configured" in denied["error"]["message"]
+
+
+def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, monkeypatch):
+    from brigade import fleet_client_policy, fleet_hub_policy_api, fleet_hub_routing
+
+    with _hub(tmp_path) as hub:
+        token = _enroll(hub)
+        other = _enroll(hub, NODE_B)
+        db = fleet_hub.open_db(hub[2])
+        try:
+            document = _document()
+            document["routing"] = {
+                "enabled": True,
+                "workload_requirements": {"general": {"os": "linux", "capabilities": []}},
+            }
+            fleet_hub_policy.save_policy(db, document, expected_version=1, actor="test", reason="route")
+            fleet_hub_routing.observe_machine(
+                db,
+                {
+                    "node_id": NODE_A,
+                    "observed_at": fleet_hub_routing._iso(),
+                    "status": "available",
+                    "credential_state": "ok",
+                    "usable_seats": ["seat-alpha"],
+                },
+                NODE_A,
+            )
+            _, routed = fleet_hub_policy_api.handle_policy(
+                db,
+                {
+                    "action": "route",
+                    "consumer": "t3-code",
+                    "repo_identity": "repo/public",
+                    "session_id": "accept-http",
+                    "origin": "worker-linux-1",
+                    "workload": "general",
+                },
+                caller_node=NODE_A,
+                is_admin=False,
+            )
+        finally:
+            db.close()
+        ids = {
+            "reservation_id": routed["reservation_id"],
+            "decision_id": routed["decision_id"],
+            "session_id": "accept-http",
+        }
+        assert ids["reservation_id"]
+        for auth, expected in [(None, 401), (ADMIN_TOKEN, 403), (other, 403)]:
+            status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": "reservation-accept", **ids})
+            assert status == expected, refused
+        calls = []
+
+        def configured_transport(*, admin):
+            calls.append(admin)
+            return f"http://{hub[0]}:{hub[1]}", token
+
+        monkeypatch.setattr(fleet_client_policy, "_hub_and_token", configured_transport)
+        accepted = fleet_client_policy.accept_reservation(**ids)
+        assert accepted["state"] == "accepted"
+        assert accepted["reservation_id"] == ids["reservation_id"]
+        assert fleet_client_policy.accept_reservation(**ids) == accepted
+        assert calls == [False, False]
