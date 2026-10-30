@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an opt-in telemetry heartbeat for proven-open local Claude Code and interactive Codex sessions, reusing their last published presence while the owning process lives. Repeatable `--worktrees-of` discovery selects wired worktrees with presence sidecars, newest first, within the shared target cap and work budget.
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
+- Evidence query commands accept leading engine flags, and code graph commands and search aliases preserve literal `--target` arguments after `--` without changing the selected repository.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
 - Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 
