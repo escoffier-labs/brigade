@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sys
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -118,6 +119,37 @@ def verify_outcome_ref(ref: str) -> bool:
         return False
     parts = Path(ref).parts
     return len(parts) == 5 and parts[:3] == (".brigade", "work", "verify-runs") and parts[-1] == "receipt.json"
+
+
+def outcome_ref_requires_support(target: Path, ref: str) -> bool:
+    """Recognize unlogged verification receipts without reclassifying legacy text."""
+    if not verify_outcome_ref(ref):
+        return False
+    path = target / ref
+    # Current writer paths never fall back to generic evidence after corruption.
+    if re.fullmatch(r"\d{8}-\d{6}-work-verify-[0-9a-f]{6}", path.parent.name):
+        return True
+    try:
+        with io.directory(path.parent) as parent:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            with os.fdopen(fd, "rb") as handle:
+                io._regular(handle.fileno())
+                prefix = handle.read(256).lstrip()
+                if prefix.startswith(b"\xef\xbb\xbf"):
+                    prefix = prefix[3:].lstrip()
+                if prefix and not prefix.startswith(b"{"):
+                    return False
+                handle.seek(0)
+                raw = handle.read(io.MAX_STATE_BYTES + 1)
+                if len(raw) > io.MAX_STATE_BYTES:
+                    return True
+        receipt = json.loads(raw)
+        return isinstance(receipt, dict) and (
+            any(key in receipt for key in ("schema_version", "run_id", "commands", "subject_binding"))
+            or receipt.get("status") not in (None, "completed", "passed", "ok", "success")
+        )
+    except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
+        return True
 
 
 def _card_stems(cards_dir: Path) -> dict[str, str]:

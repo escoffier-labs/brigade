@@ -174,8 +174,10 @@ unadjudicated`, tier 2, zero proof count and sources, and an empty diff.
 Repeated captures of one receipt supply one signal. Independent receipts remain
 distinct. Historical or mismatched signals are excluded from current candidates.
 
-Negative rows never supply positive proof or consolidation support, including
-when cited in card metadata or appended through a proposal. Pending current
+Failed verification receipts never supply positive proof or consolidation
+support, including when cited in card metadata or appended through a proposal.
+This check also applies before capture or when the optional review-log append
+fails. Current-writer receipts remain subject to validation after corruption. Pending current
 negative signals block deterministic candidates for that card with review
 evidence. Other cards can still produce deterministic candidates. The existing
 proposal admission refuses translation of the negative review candidate.

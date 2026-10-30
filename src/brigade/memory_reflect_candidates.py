@@ -196,7 +196,7 @@ def _invalid_outcome_ids(target: Path, card: Card, refs: set[str]) -> set[str]:
     Callers bound refs to the newest distinct window and/or current citations.
     Conflicting timestamps cannot all describe the retained original receipt.
     """
-    from .memory_evidence_log import validate_outcome_support, verify_outcome_ref
+    from .memory_evidence_log import outcome_ref_requires_support, validate_outcome_support, verify_outcome_ref
 
     stamps: dict[str, set[str]] = {}
     for row in card.rows:
@@ -204,14 +204,22 @@ def _invalid_outcome_ids(target: Path, card: Card, refs: set[str]) -> set[str]:
         if ref in refs and row["kind"] in {"outcome", "negative-outcome"} and verify_outcome_ref(ref):
             stamps.setdefault(ref, set()).add(row["ts"])
     negative = {_evidence_id(row["evidence_id"]) for row in card.rows if row["kind"] == "negative-outcome"}
-    return (negative & refs) | {
-        ref
-        for ref, values in stamps.items()
-        if len(values) != 1
-        or not validate_outcome_support(
-            target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(values))
-        )
-    }
+    invalid = negative & refs
+    for ref in refs:
+        if not verify_outcome_ref(ref):
+            continue
+        values = stamps.get(ref)
+        if values is None and not outcome_ref_requires_support(target, ref):
+            continue
+        if (values is not None and len(values) != 1) or not validate_outcome_support(
+            target,
+            card_path=card.path,
+            card_text=card.text,
+            ref=ref,
+            timestamp=next(iter(values)) if values else None,
+        ):
+            invalid.add(ref)
+    return invalid
 
 
 def _structured_preview(card: Card) -> bool:

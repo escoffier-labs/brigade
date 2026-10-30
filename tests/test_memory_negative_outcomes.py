@@ -14,7 +14,7 @@ import pytest
 from brigade import memory_reflect, verify_manifest, verify_trial
 from brigade import memory_evidence_log as log
 from brigade.work_cmd import verification as verify_mod
-from tests.test_memory_outcome_evidence import capture
+from tests.test_memory_outcome_evidence import capture, verified_card as verified_card
 from tests.test_memory_reflect import card, command, snapshot
 from tests.test_verify_trial import _init_verify_git_repo, _track_workspace_manifest
 
@@ -332,4 +332,93 @@ def test_forged_negative_pointer_does_not_read_unrelated_file(tmp_path, failed_c
     monkeypatch.setattr(log.io, "read_bytes", guarded_read)
     before = snapshot(tmp_path)
     assert memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"] == []
+    assert snapshot(tmp_path) == before
+
+
+@pytest.fixture(params=["uncaptured", "append-failed", "malformed-text", "malformed-json"])
+def unlogged_failure(tmp_path, failed_card, monkeypatch, request):
+    path, receipt, _ = failed_card
+    if request.param == "append-failed":
+        with monkeypatch.context() as patch:
+
+            def fail_append(*args, **kwargs):
+                raise OSError("optional log unavailable")
+
+            patch.setattr(log, "append_evidence", fail_append)
+            assert capture(tmp_path, receipt) == 0
+    elif request.param.startswith("malformed-"):
+        receipt_path = tmp_path / ".brigade/work/verify-runs" / receipt["run_id"] / "receipt.json"
+        receipt_path.write_text("not receipt JSON" if request.param == "malformed-text" else "{}")
+    assert log.read_evidence(tmp_path)[0] == []
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    return path, receipt, ref
+
+
+def test_unlogged_failed_receipt_citation_is_not_positive_proof(tmp_path, unlogged_failure):
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, _, ref = unlogged_failure
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
+    healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    write_log(tmp_path, path, (healthy, "outcome", "2026-10-21T12:00:00Z"))
+    before = snapshot(tmp_path)
+    candidates = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    assert {c["kind"] for c in candidates} == {"reinforce", "stale-newer-evidence"}
+    for candidate in candidates:
+        assert ref not in candidate["evidence_ids"]
+        assert candidate["proof_count"] == 1
+    assert snapshot(tmp_path) == before
+
+
+def test_unlogged_failed_receipt_is_not_direct_proposal_support(tmp_path, unlogged_failure):
+    from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
+
+    path, _, ref = unlogged_failure
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError, match="outcome evidence drift"):
+        api.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=["memory/cards/cache.md"],
+            anchor_blocks=True,
+            reason="Inspect uncaptured receipt.",
+            ops=[
+                dict(
+                    type="append_evidence",
+                    card_path="memory/cards/cache.md",
+                    block_id=block.block_id,
+                    expected_block_hash=block.sha256,
+                    evidence_ids=[ref],
+                )
+            ],
+        )
+    assert snapshot(tmp_path) == before
+
+
+def test_unlogged_completed_receipt_keeps_valid_direct_support(tmp_path, verified_card):
+    from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
+
+    path, receipt = verified_card
+    assert log.read_evidence(tmp_path)[0] == []
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    before = snapshot(tmp_path)
+    proposal = api.create_payload(
+        target=tmp_path,
+        relation="consolidate",
+        source_paths=["memory/cards/cache.md"],
+        anchor_blocks=True,
+        reason="Inspect eligible completed receipt.",
+        ops=[
+            dict(
+                type="append_evidence",
+                card_path="memory/cards/cache.md",
+                block_id=block.block_id,
+                expected_block_hash=block.sha256,
+                evidence_ids=[ref],
+            )
+        ],
+    )
+    assert proposal["ops"][0]["evidence_ids"] == [ref]
     assert snapshot(tmp_path) == before
