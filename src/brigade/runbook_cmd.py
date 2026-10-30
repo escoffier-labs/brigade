@@ -7,8 +7,10 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -163,23 +165,31 @@ def _run_version_cmd(resolved_path: str, version_cmd: str) -> dict[str, Any]:
         return {"output": str(exc), "exit_code": None, "timed_out": False}
 
 
-def _resolve_pin_path(pin: dict[str, Any], argv0: str | None = None) -> str | None:
+def _resolve_pin_path(pin: dict[str, Any], argv0: str | None = None, cwd: Path | None = None) -> str | None:
+    if argv0 is not None:
+        return _resolve_step_argv0(argv0, cwd or Path.cwd())
     pinned_path = str(pin.get("path") or "").strip()
     if pinned_path:
         path = Path(pinned_path).expanduser()
         if not path.is_absolute():
             return None
-        return str(path)
+        return str(path.resolve())
     command = str(pin.get("command") or "").strip()
-    if argv0:
-        resolved = shutil.which(argv0)
-        if resolved:
-            return resolved
     return shutil.which(command) if command else None
 
 
-def _pin_check(pin: dict[str, Any], *, argv0: str | None = None, include_version: bool = False) -> dict[str, Any]:
-    resolved = _resolve_pin_path(pin, argv0)
+def _pin_check(
+    pin: dict[str, Any],
+    *,
+    argv0: str | None = None,
+    cwd: Path | None = None,
+    include_version: bool = False,
+    allow_mismatch: bool = False,
+) -> dict[str, Any]:
+    resolved = _resolve_pin_path(pin, argv0, cwd)
+    expected_path = str(pin.get("path") or "").strip()
+    if expected_path and Path(expected_path).expanduser().is_absolute():
+        expected_path = str(Path(expected_path).expanduser().resolve())
     expected = str(pin.get("sha256") or "").strip()
     observed = None
     status = "missing"
@@ -190,9 +200,14 @@ def _pin_check(pin: dict[str, Any], *, argv0: str | None = None, include_version
             observed = None
             status = "missing"
         else:
-            status = "ok" if observed == expected else "mismatch"
+            status = (
+                "ok"
+                if observed == expected and (not expected_path or Path(expected_path).is_absolute())
+                else "mismatch"
+            )
     check: dict[str, Any] = {
         "command": str(pin.get("command") or ""),
+        "expected_path": expected_path or None,
         "resolved_path": resolved,
         "expected_sha256": expected,
         "observed_sha256": observed,
@@ -200,6 +215,7 @@ def _pin_check(pin: dict[str, Any], *, argv0: str | None = None, include_version
     }
     if (
         include_version
+        and (status == "ok" or allow_mismatch)
         and resolved is not None
         and isinstance(pin.get("version_cmd"), str)
         and pin["version_cmd"].strip()
@@ -210,10 +226,14 @@ def _pin_check(pin: dict[str, Any], *, argv0: str | None = None, include_version
         check["version_output"] = version["output"]
         check["version_exit_code"] = version["exit_code"]
         check["version_timed_out"] = version["timed_out"]
+        after = _pin_check(pin, argv0=argv0, cwd=cwd)
+        if (after["resolved_path"], after["observed_sha256"]) != (resolved, observed):
+            return {**after, "version_changed_executable": True}
     return check
 
 
 def _step_cwd(target: Path, step: dict[str, Any]) -> Path:
+    target = target.expanduser().resolve()
     cwd = Path(str(step.get("cwd") or target)).expanduser()
     if not cwd.is_absolute():
         cwd = target / cwd
@@ -221,13 +241,92 @@ def _step_cwd(target: Path, step: dict[str, Any]) -> Path:
 
 
 def _resolve_step_argv0(argv0: str, cwd: Path) -> str | None:
+    cwd = cwd.resolve()
     expanded = Path(argv0).expanduser()
-    if expanded != Path(expanded.name):
-        candidate = expanded if expanded.is_absolute() else cwd / expanded
+    explicit = bool(os.path.dirname(argv0)) or expanded.is_absolute()
+    if explicit:
+        candidates = [expanded if expanded.is_absolute() else cwd / expanded]
+    else:
+        directories = [Path(item) if Path(item).is_absolute() else cwd / item for item in os.get_exec_path()]
+        if sys.platform == "win32" and "NoDefaultCurrentDirectoryInExePath" not in os.environ:
+            directories.insert(0, cwd)
+        candidates = [directory / argv0 for directory in directories]
+    if sys.platform == "win32":
+        extensions = [
+            extension.rstrip(".")
+            for extension in (os.environ.get("PATHEXT") or ".COM;.EXE;.BAT;.CMD").split(";")
+            if extension
+        ]
+        direct_match = any(argv0.lower().endswith(extension.lower()) for extension in extensions)
+        candidates = [
+            found
+            for candidate in candidates
+            for found in ([candidate] if direct_match else [])
+            + [Path(str(candidate) + extension) for extension in extensions]
+        ]
+    for candidate in candidates:
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate.resolve())
+    return None
+
+
+def _step_pin_check(
+    payload: dict[str, Any], step: dict[str, Any], *, version: bool = False, override: bool = False
+) -> dict[str, Any] | None:
+    pin = _pin_for_step(payload, step)
+    if pin is None:
         return None
-    return shutil.which(argv0)
+    tokens = _command_tokens(step["run"]) or []
+    cwd = Path(step["cwd"])
+    check = _pin_check(pin, argv0=tokens[0], cwd=cwd, include_version=version, allow_mismatch=override)
+    check.update(step_index=step["index"], step_id=step["id"])
+    check["override"] = check["status"] in {"missing", "mismatch"} and override
+    return check
+
+
+def _runbook_pin_checks(
+    payload: dict[str, Any], *, version_unused: bool = False, override: bool = False
+) -> list[dict[str, Any]]:
+    checks = []
+    used: set[int] = set()
+    for step in payload["steps"]:
+        pin = _pin_for_step(payload, step)
+        if pin is not None:
+            used.add(id(pin))
+            check = _step_pin_check(payload, step)
+            assert check is not None
+            checks.append(check)
+    checks.extend(
+        _pin_check(pin, include_version=version_unused, allow_mismatch=override)
+        for pin in _pin_entries(payload)
+        if id(pin) not in used
+    )
+    return checks
+
+
+def _admit_pin_checks(
+    target: Path, checks: list[dict[str, Any]], *, override: bool, json_output: bool, warn: bool = True
+) -> bool:
+    failures = [check for check in checks if check["status"] in {"missing", "mismatch"}]
+    if failures and not override:
+        if json_output:
+            print(
+                json.dumps(
+                    {"target": str(target), "status": "pin-check-failed", "pin_checks": checks},
+                    indent=2,
+                    sort_keys=True,
+                )
+            )
+        else:
+            detail = ", ".join(f"{check['command']}:{check['status']}" for check in failures)
+            print(f"error: runbook pin check failed: {detail}", file=sys.stderr)
+        return False
+    for check in checks:
+        check["override"] = check["status"] in {"missing", "mismatch"} and override
+    if failures and warn:
+        detail = ", ".join(f"{check['command']}:{check['status']}" for check in failures)
+        print(f"warning: pin mismatch override allowed; proceeding despite {detail}", file=sys.stderr)
+    return True
 
 
 def _existing_pin_for_argv0(pins: list[dict[str, Any]], argv0: str) -> dict[str, Any] | None:
@@ -239,7 +338,7 @@ def _existing_pin_for_argv0(pins: list[dict[str, Any]], argv0: str) -> dict[str,
 
 def _pin_payload_from_runbook(target: Path, payload: dict[str, Any]) -> tuple[list[dict[str, Any]] | None, str | None]:
     pins: list[dict[str, Any]] = []
-    seen: set[str] = set()
+    seen: dict[str, str] = {}
     existing_pins = _pin_entries(payload)
     for index, step in enumerate(payload["steps"], start=1):
         tokens = _command_tokens(str(step.get("run") or ""))
@@ -247,8 +346,6 @@ def _pin_payload_from_runbook(target: Path, payload: dict[str, Any]) -> tuple[li
             return None, f"runbook step {index} command could not be parsed"
         argv0 = tokens[0]
         command = Path(argv0).name
-        if command in seen:
-            continue
         resolved = _resolve_step_argv0(argv0, _step_cwd(target, step))
         if resolved is None:
             return None, f"runbook step {index} argv[0] could not be resolved: {argv0}"
@@ -256,13 +353,20 @@ def _pin_payload_from_runbook(target: Path, payload: dict[str, Any]) -> tuple[li
             sha256 = _sha256_file(Path(resolved))
         except OSError as exc:
             return None, f"runbook step {index} argv[0] could not be hashed: {exc}"
+        if command in seen:
+            if seen[command] != sha256:
+                return (
+                    None,
+                    f"runbook steps resolve command {command!r} to different executables; use distinct command names",
+                )
+            continue
         entry = {"command": command, "path": resolved, "sha256": sha256}
         existing = _existing_pin_for_argv0(existing_pins, argv0)
         if existing is not None and isinstance(existing.get("version_cmd"), str) and existing["version_cmd"].strip():
             entry["version_cmd"] = existing["version_cmd"]
             entry["version"] = str(_run_version_cmd(resolved, existing["version_cmd"])["output"])
         pins.append(entry)
-        seen.add(command)
+        seen[command] = sha256
     return pins, None
 
 
@@ -330,14 +434,14 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
             "index": index,
             "id": str(step.get("id") or f"step-{index}"),
             "run": step["run"],
-            "cwd": str(step.get("cwd") or target),
+            "cwd": str(_step_cwd(target, step)),
             "timeout_seconds": int(step.get("timeout_seconds") or payload.get("timeout_seconds") or 600),
             "policy": _policy_for_step(payload, step),
         }
         pin = _pin_for_step(payload, step)
         if pin is not None:
             tokens = _command_tokens(step["run"]) or []
-            plan_step["pin"] = _pin_check(pin, argv0=tokens[0] if tokens else None)
+            plan_step["pin"] = _pin_check(pin, argv0=tokens[0] if tokens else None, cwd=Path(plan_step["cwd"]))
         steps.append(plan_step)
     policy_failures = [
         {"step": step["id"], "failures": step["policy"]["failures"]} for step in steps if step["policy"]["failures"]
@@ -375,6 +479,76 @@ def _plan_payload(target: Path, runbook: Path) -> tuple[dict[str, Any] | None, s
     return plan, None
 
 
+def _set_cleanup_sigint(handler: Any) -> None:
+    """An interrupt during a disposition update must not replace cancellation."""
+    for _ in range(2):
+        try:
+            signal.signal(signal.SIGINT, handler)
+            return
+        except BaseException:
+            pass
+
+
+def _close_command_streams(process: subprocess.Popen[Any]) -> None:
+    """Bound closure even if a communicate reader still owns a stream lock."""
+    closers = []
+
+    def close(stream: Any) -> None:
+        try:
+            stream.close()
+        except BaseException:
+            pass
+
+    deadline = time.monotonic() + _TIMEOUT_DRAIN_SECONDS
+    for stream in (process.stdout, process.stderr):
+        if stream is not None:
+            try:
+                closer = threading.Thread(target=close, args=(stream,), daemon=True)
+                closer.start()
+                closers.append(closer)
+            except BaseException:
+                pass
+    for closer in closers:
+        try:
+            closer.join(timeout=max(0.0, deadline - time.monotonic()))
+        except BaseException:
+            pass
+    # Each daemon retains its stream until closure completes. A surviving pipe
+    # writer may delay release, but cannot keep the cancellation caller waiting.
+
+
+def _cleanup_interrupted_command(process: subprocess.Popen[Any]) -> None:
+    """Release the owned group without replacing its original exception."""
+    previous_sigint = None
+    if threading.current_thread() is threading.main_thread():
+        for _ in range(2):
+            try:
+                previous_sigint = signal.getsignal(signal.SIGINT)
+                break
+            except BaseException:
+                pass
+    # Ctrl-C has already canceled the command. A second Ctrl-C must not skip
+    # escalation or pipe release while the owner is unwinding.
+    if previous_sigint is not None:
+        _set_cleanup_sigint(signal.SIG_IGN)
+    try:
+        try:
+            brigade_proc.terminate_process_tree(process)
+        except BaseException:
+            try:
+                brigade_proc.terminate_process_tree(process, terminate_grace=0.0, kill_grace=0.0)
+            except BaseException:
+                pass
+        try:
+            process.wait(timeout=_TIMEOUT_DRAIN_SECONDS)
+        except BaseException:
+            pass
+        _close_command_streams(process)
+    finally:
+        if previous_sigint is not None:
+            _set_cleanup_sigint(previous_sigint)
+
+
 def _shell_or_argv_command(
     command: str | list[str],
     *,
@@ -383,9 +557,8 @@ def _shell_or_argv_command(
 ) -> tuple[int, bool, str, str]:
     """Run a contract verifier/rollback command. Returns exit_code, timed_out, stdout, stderr.
 
-    Timeouts go through the shared process-group cleanup path
-    (``brigade.proc.terminate_process_tree``) so descendant processes are
-    reaped exactly as they would be on a normal-exit cancellation.
+    Timeouts and exceptional exits use the shared process-group cleanup path
+    (``brigade.proc.terminate_process_tree``), including descendant processes.
     """
     try:
         process = subprocess.Popen(
@@ -400,15 +573,19 @@ def _shell_or_argv_command(
     except OSError:
         return 127, False, "", "command launch failed"
     try:
-        stdout, stderr = process.communicate(timeout=max(timeout, 0))
-        return process.returncode, False, stdout or "", stderr or ""
-    except subprocess.TimeoutExpired:
-        brigade_proc.terminate_process_tree(process)
         try:
-            stdout, stderr = process.communicate(timeout=_TIMEOUT_DRAIN_SECONDS)
-        except (subprocess.TimeoutExpired, ValueError):
-            stdout, stderr = "", ""
-        return 124, True, stdout or "", stderr or ""
+            stdout, stderr = process.communicate(timeout=max(timeout, 0))
+            return process.returncode, False, stdout or "", stderr or ""
+        except subprocess.TimeoutExpired:
+            brigade_proc.terminate_process_tree(process)
+            try:
+                stdout, stderr = process.communicate(timeout=_TIMEOUT_DRAIN_SECONDS)
+            except (subprocess.TimeoutExpired, ValueError):
+                stdout, stderr = "", ""
+            return 124, True, stdout or "", stderr or ""
+    except BaseException:
+        _cleanup_interrupted_command(process)
+        raise
 
 
 def _resolve_verifier_command(
@@ -576,26 +753,9 @@ def _execute_plan(
                 file=sys.stderr,
             )
         return 1
-    pin_checks = [_pin_check(pin) for pin in _pin_entries(plan_payload)]
-    failed_pin_checks = [check for check in pin_checks if check["status"] in {"missing", "mismatch"}]
-    if failed_pin_checks and not allow_pin_mismatch:
-        if json_output:
-            print(
-                json.dumps(
-                    {"target": str(target), "status": "pin-check-failed", "pin_checks": pin_checks},
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
-        else:
-            failures = ", ".join(f"{check['command']}:{check['status']}" for check in failed_pin_checks)
-            print(f"error: runbook pin check failed: {failures}", file=sys.stderr)
+    pin_checks = _runbook_pin_checks(plan_payload)
+    if not _admit_pin_checks(target, pin_checks, override=allow_pin_mismatch, json_output=json_output):
         return 2
-    for check in pin_checks:
-        check["override"] = check["status"] in {"missing", "mismatch"} and allow_pin_mismatch
-    if failed_pin_checks and allow_pin_mismatch:
-        failures = ", ".join(f"{check['command']}:{check['status']}" for check in failed_pin_checks)
-        print(f"warning: pin mismatch override allowed; proceeding despite {failures}", file=sys.stderr)
     steps = [step for step in plan_payload["steps"] if int(step["index"]) >= start_index]
     if dry_run:
         payload = {**plan_payload, "dry_run": True, "steps": steps}
@@ -607,11 +767,14 @@ def _execute_plan(
                 print(f"- {step['id']}: {step['run']}")
         return 0
     if pin_checks:
-        # Re-check with version capture only when steps will actually execute;
-        # dry-run must not run version_cmd.
-        pin_checks = [_pin_check(pin, include_version=True) for pin in _pin_entries(plan_payload)]
-        for check in pin_checks:
-            check["override"] = check["status"] in {"missing", "mismatch"} and allow_pin_mismatch
+        # Retain version metadata for configured pins without a matching step.
+        # Matched pins are version-probed once, immediately before their step.
+        warned_override = any(check["override"] for check in pin_checks)
+        pin_checks = _runbook_pin_checks(plan_payload, version_unused=True, override=allow_pin_mismatch)
+        if not _admit_pin_checks(
+            target, pin_checks, override=allow_pin_mismatch, json_output=json_output, warn=not warned_override
+        ):
+            return 2
     target = target.expanduser().resolve()
     started = _now()
     run_id, run_dir = _unique_run_dir(
@@ -620,24 +783,37 @@ def _execute_plan(
     results: list[dict[str, Any]] = []
     status = "completed"
     for step in steps:
+        current_pin = _step_pin_check(plan_payload, step, version=True, override=allow_pin_mismatch)
+        if current_pin is not None:
+            pin_checks = [current_pin if check.get("step_index") == step["index"] else check for check in pin_checks]
+            step = {**step, "pin": current_pin}
+            if current_pin["override"]:
+                print(f"warning: pin mismatch override allowed for step {step['id']}", file=sys.stderr)
         stdout_path = run_dir / f"{step['index']:02d}-{step['id']}.stdout.log"
         stderr_path = run_dir / f"{step['index']:02d}-{step['id']}.stderr.log"
-        try:
-            exit_code, timed_out, stdout, stderr = _shell_or_argv_command(
-                step["run"],
-                cwd=step["cwd"],
-                timeout=step["timeout_seconds"],
-            )
-        except OSError:
-            exit_code = 127
-            timed_out = False
+        blocked_pin = (
+            current_pin is not None and current_pin["status"] in {"missing", "mismatch"} and not allow_pin_mismatch
+        )
+        stdout = stderr = ""
+        if blocked_pin:
+            exit_code, timed_out, stderr = 2, False, "pin-check-failed before step execution"
+        else:
+            try:
+                exit_code, timed_out, stdout, stderr = _shell_or_argv_command(
+                    step["run"],
+                    cwd=step["cwd"],
+                    timeout=step["timeout_seconds"],
+                )
+            except OSError:
+                exit_code = 127
+                timed_out = False
         stdout_path.write_text(stdout)
         stderr_path.write_text(stderr)
         row = {
             **step,
             "exit_code": exit_code,
             "timed_out": timed_out,
-            "status": "completed" if exit_code == 0 else "failed",
+            "status": "blocked" if blocked_pin else "completed" if exit_code == 0 else "failed",
             "stdout_log_path": str(stdout_path),
             "stderr_log_path": str(stderr_path),
         }

@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
+- Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
@@ -29,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add an opt-in telemetry heartbeat for proven-open local Claude Code and interactive Codex sessions, reusing their last published presence while the owning process lives. Repeatable `--worktrees-of` discovery selects wired worktrees with presence sidecars, newest first, within the shared target cap and work budget.
 
 - Prevent run archive import/export from modifying their own inputs when paths overlap, and retain existing archives when a forced export fails validation or promotion.
+- Evidence query commands accept leading engine flags, and code graph commands and search aliases preserve literal `--target` arguments after `--` without changing the selected repository.
 - Use linked list and detail panes for roster, policy, and machines, including selection without JavaScript.
 - Classify writing and frontend tasks locally and, with a configured Fleet Hub, route them through effective policy roles without seat fallback. Preserve explicit worker selection and ordinary standalone routing, and retain categorical task evidence through health refusal.
 
@@ -37,6 +39,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
+
+- Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
 
 - Dogfood config round-trips Windows paths while retaining legacy unquoted values.
 - Native component readers accept Brigade Code Graph and Evidence identities alongside legacy names, preserve recorded asset coordinates for rollback, and reject duplicate families or conflicting binary overrides.
@@ -83,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Store sealed Hub messages with retry lookup, post-ack content purge, storage quotas, and optional required sealing (#2045).
 - Pre-push history scans exclude commits verified already published on the actual destination for existing branches as well as new branches, and reject stale or unverifiable destination evidence.
 
+- Add internal Windows handle-relative owner-only storage primitives with protected DACL creation and verification, not yet used by any command. Model-roster LKG and audit replay remain fail-closed pending lock fencing, publication ordering, and native qualification. (Refs #1739)
 - Patrol detects suspected mass environment faults before repairs and reports failure for unforced apply passes, including escalation-only passes (#1975).
 - Grok can opt into Hub messaging to configured aliases while T3 tools remain available independently.
 - Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.

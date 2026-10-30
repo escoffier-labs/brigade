@@ -8,6 +8,7 @@ usage text so the facade never prints `Usage: graphtrail` at users.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -128,6 +129,100 @@ def test_group_help_lists_new_verbs(capsys):
 
 
 # --- --target mapping -------------------------------------------------------
+
+
+@pytest.mark.parametrize("command", (("code", "search"), ("search", "context")))
+@pytest.mark.parametrize("target_form", ("absent", "separate", "equals"))
+@pytest.mark.parametrize("literal_form", ("bare", "equals", "empty"))
+def test_target_tokens_after_separator_are_opaque(monkeypatch, tmp_path, capsys, command, target_form, literal_form):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+    target, literal_target = tmp_path / "target", tmp_path / "literal"
+    target.mkdir()
+    literal_target.mkdir()
+    prefix = {"absent": [], "separate": ["--target", str(target)], "equals": [f"--target={target}"]}[target_form]
+    literal = {"bare": "--target", "equals": f"--target={literal_target}", "empty": "--target="}[literal_form]
+
+    assert cli.main([*command, "--json", *prefix, "--", literal]) == 0
+
+    expected_kwargs = {} if target_form == "absent" else {"cwd": target}
+    assert calls == [
+        {"args": ["/fake/graphtrail", command[1], "--json", "--", literal], "timeout": 30.0, "kwargs": expected_kwargs}
+    ]
+    assert capsys.readouterr().out == '{"ok": true}\n'
+
+
+@pytest.mark.parametrize("command", (("code", "search"), ("search", "context")))
+@pytest.mark.parametrize("target_form", ("separate", "equals"))
+def test_genuine_target_before_separator_keeps_working(monkeypatch, tmp_path, command, target_form):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+    prefix = ["--target", str(tmp_path)] if target_form == "separate" else [f"--target={tmp_path}"]
+
+    assert cli.main([*command, *prefix, "--", "literal-symbol"]) == 0
+
+    assert calls == [
+        {
+            "args": ["/fake/graphtrail", command[1], "--", "literal-symbol"],
+            "timeout": 30.0,
+            "kwargs": {"cwd": tmp_path},
+        }
+    ]
+
+
+@pytest.mark.parametrize("command", (("code", "search"), ("search", "context")))
+def test_literal_target_preserves_engine_error_and_output(monkeypatch, tmp_path, capsys, command):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch)
+
+    def fake_run(args, timeout=30.0, **kwargs):
+        calls.append({"args": list(args), "timeout": timeout, "kwargs": kwargs})
+        return proc.Result(17, "partial-output\n", "engine-error\n")
+
+    monkeypatch.setattr(proc, "run", fake_run)
+
+    assert cli.main([*command, "--target", str(tmp_path), "--", "--target"]) == 17
+
+    assert calls == [
+        {
+            "args": ["/fake/graphtrail", command[1], "--", "--target"],
+            "timeout": 30.0,
+            "kwargs": {"cwd": tmp_path},
+        }
+    ]
+    captured = capsys.readouterr()
+    assert captured.out == "partial-output\n"
+    assert captured.err == "engine-error\n"
+
+
+@pytest.mark.parametrize("command", (("code", "search"), ("search", "context")))
+@pytest.mark.parametrize("tail", ("empty", "symbol", "target"))
+def test_target_cannot_consume_separator_as_value(monkeypatch, tmp_path, capsys, command, tail):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+    arguments = {"empty": [], "symbol": ["literal-symbol"], "target": [f"--target={tmp_path}"]}[tail]
+
+    assert cli.main([*command, "--target", "--", *arguments]) == 2
+
+    assert calls == []
+    assert "--target requires a directory" in capsys.readouterr().err
+
+
+def test_equals_target_accepts_directory_named_separator(monkeypatch, tmp_path):
+    calls: list[dict] = []
+    _patch_graphtrail(monkeypatch, run_calls=calls)
+    (tmp_path / "--").mkdir()
+    monkeypatch.chdir(tmp_path)
+
+    assert cli.main(["code", "search", "--target=--", "--", "literal-symbol"]) == 0
+
+    assert calls == [
+        {
+            "args": ["/fake/graphtrail", "search", "--", "literal-symbol"],
+            "timeout": 30.0,
+            "kwargs": {"cwd": Path("--")},
+        }
+    ]
 
 
 def test_target_maps_to_engine_cwd_and_is_not_forwarded(monkeypatch, tmp_path):
