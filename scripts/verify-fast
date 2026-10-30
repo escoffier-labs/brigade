@@ -1,23 +1,19 @@
 #!/bin/bash
-# Fast local iteration lane: the ./scripts/verify gates, with the pytest phase
-# parallelized via pytest-xdist. The canonical gate stays `./scripts/verify`
-# (serial). Parallel runs flake a handful of timing-sensitive tests under CPU
-# contention; treat new parallel-only failures as suspects, not verdicts -
-# re-run them serially before acting on them.
+# Compatibility entrypoint for the same bounded, optional local full gate.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-PY=${PY:-.venv/bin}
-"$PY/python" scripts/verify_env.py
-"$PY/python" -c "import xdist" 2>/dev/null || {
-    echo "pytest-xdist is not installed. Re-sync: pip install -e \".[dev]\"" >&2
-    exit 1
-}
-"$PY/ruff" check .
-"$PY/ruff" format --check .
-"$PY/mypy"
-"$PY/python" scripts/version_sync.py --check
-"$PY/python" scripts/managed_snapshot.py --check
-"$PY/python" scripts/template_profile_snapshot.py --check
-JOBS=${JOBS:-auto}
-"$PY/pytest" -q -n "$JOBS" --cov="$PWD/src/brigade" --cov-report=term --cov-fail-under=78
+if [ "${JOBS+x}" = x ]; then
+  if [[ ! "$JOBS" =~ ^[0-9]+$ ]] || [[ ! "$JOBS" =~ [1-9] ]]; then
+    echo "verify-fast: JOBS must be a positive integer; unset JOBS for bounded defaults or set BRIGADE_VERIFY_SHARDS" >&2
+    exit 2
+  fi
+  if [ "${BRIGADE_VERIFY_SHARDS+x}" = x ] && [ "$BRIGADE_VERIFY_SHARDS" != "$JOBS" ]; then
+    echo "verify-fast: JOBS conflicts with BRIGADE_VERIFY_SHARDS; unset JOBS and use BRIGADE_VERIFY_SHARDS" >&2
+    exit 2
+  fi
+  echo "verify-fast: JOBS is deprecated; use BRIGADE_VERIFY_SHARDS=$JOBS" >&2
+  export BRIGADE_VERIFY_SHARDS="$JOBS"
+fi
+
+exec ./scripts/verify "$@"
