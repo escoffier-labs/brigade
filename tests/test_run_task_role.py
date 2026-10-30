@@ -383,3 +383,82 @@ def test_relative_instructions_resolve_against_roster_directory(tmp_path, monkey
     text, evidence = task_roles.load_instructions(roster, "writing")
     assert text == "Use plain words."
     assert evidence is not None and evidence["file"] == "rules.md"
+
+
+def test_writing_health_fallback_dispatches_and_leases_its_own_seat(run_task, monkeypatch, tmp_path):
+    import json
+
+    from brigade import agents
+    from tests.run_test_helpers import run_aboyeur_guarded
+    from tests.test_fleet_model_admission import (
+        _mock_exact_runtime_admission,
+        _versioned_seat,
+        _versioned_snapshot,
+    )
+
+    invoke, seen = run_task
+    rules = tmp_path / "rules.md"
+    rules.write_text("Use concrete examples.")
+    with (tmp_path / "roster.toml").open("a") as stream:
+        stream.write(f'\n[task_roles.writing]\ninstructions_file = "{rules}"\n')
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda: {"document": {"seats": {"author": {"fallback": ["coder"]}}}},
+    )
+    assert invoke("Draft a blog post") == 0
+    effective = seen[0][1]
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": "", "admin_token": ""}
+    )
+    monkeypatch.setattr(aboyeur, "run", _REAL_RUN)
+    snapshot = _versioned_snapshot(
+        _versioned_seat("chef", "openai", "model-chef", instance_id="codex"),
+        _versioned_seat("author", "anthropic", "model-author", instance_id="claude"),
+        _versioned_seat("coder", "openai", "model-coder", instance_id="codex"),
+        expires_at="2099-08-30T14:15:00Z",
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    admissions = _mock_exact_runtime_admission(monkeypatch, snapshot)
+    leases = []
+
+    def lease(seat, provider, model):
+        leases.append((seat, provider, model))
+        return fleet_client.ModelLeaseDecision(True, "ok", None, None)
+
+    monkeypatch.setattr(fleet_client, "acquire_model_lease", lease)
+    launches = []
+
+    def launch(cli, prompt, **kwargs):
+        launches.append((cli, prompt, kwargs.get("model")))
+        return agents.AgentResult(text="Written.", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", launch)
+    _install_probe(monkeypatch, PerSeatFakeAdapter(unhealthy=frozenset({"author"})))
+    output_dir = tmp_path / "fallback-run"
+    assert (
+        run_aboyeur_guarded(
+            "Draft a blog post",
+            effective,
+            worker="author",
+            output_dir=output_dir,
+            code_graph_enabled=False,
+            route_enabled=False,
+        )
+        == 0
+    )
+    assert leases == [("coder", "openai", "model-coder")]
+    assert [call["seat"] for call in admissions if call.get("phase") == "target"] == ["coder"]
+    assert len(launches) == 1
+    assert launches[0][0] == "codex"
+    assert launches[0][1].startswith("Use concrete examples.\n\n")
+    assert launches[0][2] == "model-coder"
+    run = json.loads((output_dir / "run.json").read_text())
+    assert run["worker"] == "coder"
+    role = run["seat_routing"][0]["task_role"]
+    assert role["seat"] == "coder"
+    assert role["requested_seat"] == "author"
+    assert role["effective_seat"] == "coder"
+    routing = json.loads((output_dir / "seat-routing.json").read_text())
+    assert routing["decisions"][0]["requested_seat"] == "author"
+    assert routing["decisions"][0]["effective_seat"] == "coder"

@@ -291,15 +291,18 @@ def resolve_orchestrator_health_routing(
                     f"using declared fallback {selected}"
                 )
             else:
-                fallback = roster.agents[selected]
-                requested_agent = roster.agents[requested]
-                effective_agents[requested] = replace(
-                    fallback,
-                    name=requested,
-                    role=requested_agent.role,
-                    purpose=requested_agent.purpose,
-                    fallback=(),
-                )
+                if not direct_worker:
+                    # Planned assignments retain role keys; direct workers use
+                    # the declared fallback identity for admission and leasing.
+                    fallback = roster.agents[selected]
+                    requested_agent = roster.agents[requested]
+                    effective_agents[requested] = replace(
+                        fallback,
+                        name=requested,
+                        role=requested_agent.role,
+                        purpose=requested_agent.purpose,
+                        fallback=(),
+                    )
                 warnings.append(
                     f"warning: seat {requested} is unhealthy [{typed_cause}]; using declared fallback {selected}"
                 )
@@ -893,6 +896,25 @@ def run(
                         ),
                         file=sys.stderr,
                     )
+                    roster = replace(
+                        roster,
+                        seat_routing=tuple(
+                            {
+                                **entry,
+                                "task_role": {
+                                    **role_evidence,
+                                    "seat": effective,
+                                    "requested_seat": worker,
+                                    "effective_seat": effective,
+                                },
+                            }
+                            if isinstance(role_evidence := entry.get("task_role"), dict)
+                            and role_evidence.get("seat") == worker
+                            else entry
+                            for entry in roster.seat_routing
+                        ),
+                    )
+                    worker = effective
                 break
         if routing.receipt is not None:
             routing_receipt = dict(routing.receipt)
