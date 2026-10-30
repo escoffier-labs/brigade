@@ -32,7 +32,7 @@ grokbot = ["mcp>=2.3.0,<3", "pyjwt[crypto]>=2.15.1"]
 research = ["playwright>=1.64.0"]
 
 [project.urls]
-Homepage = "https://brigade.tools"
+Homepage = "https://brigadestack.com"
 Documentation = "https://brigade.tools/docs"
 Compare = "https://brigade.tools/compare/sync-mcp-servers-across-coding-agents"
 Handoffs = "https://brigade.tools/compare/memory-handoffs-across-coding-agents"
