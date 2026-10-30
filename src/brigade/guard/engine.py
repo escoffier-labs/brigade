@@ -304,6 +304,11 @@ _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$"
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
 _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
+# Receivers whose dotted members are code in practice and implausible as host
+# labels. Words that double as device or service names (context, input, ctx,
+# self, window, module, bare process) are deliberately excluded; `process` is
+# accepted only as `process.env`.
+_JS_RECEIVER = r"(?:(?:args|argv|options|opts|params|props|this|globalThis)|process\.env)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:
@@ -1030,6 +1035,26 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     # Complete earlier shell assignment words are opaque to code keywords.
     if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
+    # Two code shapes whose dotted value starts with a well-known JavaScript
+    # receiver (`args.local`, `process.env.HOME`) are code, not hosts. Requiring
+    # the receiver keeps real hosts such as `db01.<tld>` detected in YAML flow
+    # mappings, shell loops and terse runbooks that share the same layout.
+    if re.match(_JS_RECEIVER + r"\.", text[start:end]):
+        # A unary operand forming a whole statement (`delete process.env.HOME;`,
+        # `else delete ...;`); only JavaScript keywords may precede it.
+        if re.fullmatch(
+            r"[ \t]*(?:(?:else|do|yield|await|void|typeof|delete)[ \t]+)*(?:delete|typeof|void|await)[ \t]+", before
+        ) and re.fullmatch(r"\s*;\s*", after):
+            return False
+        # An indented `key: value,` object member ending the line; host-related
+        # keys stay configuration.
+        member = re.fullmatch(r"[ \t]+([A-Za-z_$][\w$]*):[ \t]*", before)
+        if (
+            member
+            and not re.fullmatch(_HOSTNAME_KEY, member.group(1), re.IGNORECASE)
+            and re.fullmatch(r"\s*,\s*", after)
+        ):
+            return False
     if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
         return True
     if before.rstrip().endswith("("):
