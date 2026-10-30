@@ -298,11 +298,13 @@ def _candidate(
     review: list[str] | None = None,
     summary: str,
     outcome_bindings: dict[str, Any] | None = None,
+    unresolved_review: set[str] | None = None,
 ) -> dict[str, Any]:
     cards = sorted(cards, key=lambda c: c.identity.card_id)
     scopes = sorted({str(card.meta.get("scope", "repo")) for card in cards})
     trusts = {label for card in cards for label in _trust_labels(card.meta)}
-    review = sorted(set(review or []))
+    unresolved_review = unresolved_review or set()
+    review = sorted(set(review or []) | unresolved_review)
     proof = set(evidence) - set(contrary) - set(review)
     review_only = bool(
         contrary or review or len(scopes) > 1 or len(trusts) > 1 or any(_structured_preview(c) for c in cards)
@@ -319,7 +321,7 @@ def _candidate(
         "proof_sources": len({sources[ref] for ref in proof}),
         "review_evidence_ids": review,
         "contrary_ids": sorted(set(contrary)),
-        "unresolved_evidence_ids": sorted((set(contrary) | set(review)) - sources.keys()),
+        "unresolved_evidence_ids": sorted(((set(contrary) | set(review)) - sources.keys()) | unresolved_review),
         "tier": 2 if review_only else 0,
         "scope": scopes,
         "diff": "" if review_only else diff,
@@ -383,10 +385,12 @@ def _grouping_text(text: str) -> str:
     return text
 
 
-def _negative_outcome_bindings(target: Path, card: Card, selected: set[str] | None = None) -> dict[str, dict[str, Any]]:
-    """Revalidate pending negative signals within the same bounded receipt window."""
+def _negative_outcome_bindings(
+    target: Path, card: Card, selected: set[str] | None = None
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    """Separate eligible signals from unresolved pending review blockers."""
     if not any(row["kind"] == "negative-outcome" for row in card.rows):
-        return {}
+        return {}, set()
     if selected is None:
         newest = dict.fromkeys(
             row["evidence_id"]
@@ -401,16 +405,22 @@ def _negative_outcome_bindings(target: Path, card: Card, selected: set[str] | No
         if row["kind"] == "negative-outcome" and row["evidence_id"] in selected:
             negative_stamps.setdefault(row["evidence_id"], set()).add(row["ts"])
     bindings: dict[str, dict[str, Any]] = {}
+    unresolved: set[str] = set()
     pending_ids = {row["evidence_id"] for row in pending if row["kind"] == "negative-outcome"}
     for ref, stamps in negative_stamps.items():
-        if len(stamps) != 1 or ref not in pending_ids:
+        if ref not in pending_ids:
+            continue
+        if len(stamps) != 1:
+            unresolved.add(ref)
             continue
         binding = negative_outcome_binding(
             target, card_path=card.path, card_text=card.text, ref=ref, timestamp=next(iter(stamps))
         )
         if binding is not None:
             bindings[ref] = binding
-    return bindings
+        else:
+            unresolved.add(ref)
+    return bindings, unresolved
 
 
 def generate(
@@ -421,6 +431,7 @@ def generate(
     citations: dict[str, list[str]] = {}
     contrary_by_card: dict[str, list[str]] = {}
     review_by_card: dict[str, list[str]] = {}
+    unresolved_by_card: dict[str, set[str]] = {}
     groups: dict[str, list[Card]] = {}
     finding_config = replace(care, enabled_checks=("unconsolidated-evidence",))
     roots = _evidence_roots(target)
@@ -435,9 +446,13 @@ def generate(
             for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         )
         selected = list(newest)[: io.MAX_LIST]
-        bindings = _negative_outcome_bindings(target, card, set(selected))
+        bindings, unresolved = _negative_outcome_bindings(target, card, set(selected))
+        negative_sources = _resolved(target, sorted(bindings), roots)
+        # A receipt can disappear after binding validation. Keep the blocker,
+        # but do not construct eligible evidence without a resolved source.
+        unresolved.update(bindings.keys() - negative_sources.keys())
+        bindings = {ref: binding for ref, binding in bindings.items() if ref in negative_sources}
         negative_ids = sorted(bindings)
-        negative_sources = _resolved(target, negative_ids, roots)
         if negative_ids:
             candidates.append(
                 _candidate(
@@ -473,13 +488,15 @@ def generate(
         review = sorted(
             ({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
             | set(negative_ids)
+            | unresolved
         )
-        blockers = sorted(set(contrary) | set(review))
+        blockers = sorted((set(contrary) | set(review)) - unresolved)
         for start in range(0, len(blockers), io.MAX_LIST):
             sources.update(_resolved(target, blockers[start : start + io.MAX_LIST], roots))
         citations[card.path] = evidence
         contrary_by_card[card.path] = contrary
         review_by_card[card.path] = review
+        unresolved_by_card[card.path] = unresolved
         grouping_text = _grouping_text(card.text)
         if normalize_card_content(grouping_text):
             groups.setdefault(content_fingerprint(grouping_text), []).append(card)
@@ -499,6 +516,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
+                    unresolved_review=unresolved,
                     diff="" if contrary else _diff(card, fields),
                     summary="Review matched evidence newer than the last consolidation or review.",
                 )
@@ -518,6 +536,7 @@ def generate(
                     contrary,
                     sources=sources,
                     review=review,
+                    unresolved_review=unresolved,
                     diff=_diff(card, {"evidence": sorted(set(retained_refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
@@ -531,6 +550,7 @@ def generate(
                     resolved_contrary,
                     contrary,
                     sources=sources,
+                    unresolved_review=unresolved,
                     summary="Opposite-polarity flag only. Human review must decide the relationship.",
                 )
             )
@@ -549,6 +569,7 @@ def generate(
                 contrary,
                 sources=sources,
                 review=sorted({ref for card in group for ref in review_by_card[card.path]}),
+                unresolved_review={ref for card in group for ref in unresolved_by_card[card.path]},
                 summary="would merge exact normalized duplicates: " + ", ".join(sorted(c.path for c in group)),
             )
         )

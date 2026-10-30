@@ -172,14 +172,20 @@ Pending eligible failures produce a `negative-outcome-review` candidate with
 receipt pointers and manifest/artifact bindings, `semantic_contradiction:
 unadjudicated`, tier 2, zero proof count and sources, and an empty diff.
 Repeated captures of one receipt supply one signal. Independent receipts remain
-distinct. Historical or mismatched signals are excluded from current candidates.
+distinct. Historical signals are excluded. A pending row whose receipt or
+linked-card binding no longer validates remains unresolved review evidence. It
+does not establish an eligible failure, and it cannot clear the review blocker.
 
 Failed verification receipts never supply positive proof or consolidation
 support, including when cited in card metadata or appended through a proposal.
 This check also applies before capture or when the optional review-log append
-fails. Current-writer receipts remain subject to validation after corruption. Pending current
-negative signals block deterministic candidates for that card with review
-evidence. Other cards can still produce deterministic candidates. The existing
-proposal admission refuses translation of the negative review candidate.
+fails. Malformed verification receipts remain subject to validation after
+corruption. Ordinary completed command receipts without a card binding retain
+their existing generic citation support. Pending negative rows, including
+unresolved rows, keep same-card candidates at tier 2 with an empty diff and block
+retained proposals at propose, review and apply. Manual consolidation cannot
+advance its cutoff past a pending negative row. Other cards can still produce
+deterministic candidates. Proposal admission refuses translation of the negative
+review candidate.
 A failed check does not establish that a claim is false. This workflow adds no
 semantic adjudication or card mutation operation.

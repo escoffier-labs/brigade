@@ -126,28 +126,34 @@ def outcome_ref_requires_support(target: Path, ref: str) -> bool:
     if not verify_outcome_ref(ref):
         return False
     path = target / ref
-    # Current writer paths never fall back to generic evidence after corruption.
-    if re.fullmatch(r"\d{8}-\d{6}-work-verify-[0-9a-f]{6}", path.parent.name):
-        return True
+    native = bool(re.fullmatch(r"\d{8}-\d{6}-work-verify-[0-9a-f]{6}", path.parent.name))
     try:
         with io.directory(path.parent) as parent:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             with os.fdopen(fd, "rb") as handle:
-                io._regular(handle.fileno())
+                size = io._regular(handle.fileno()).st_size
                 prefix = handle.read(256).lstrip()
                 if prefix.startswith(b"\xef\xbb\xbf"):
                     prefix = prefix[3:].lstrip()
                 if prefix and not prefix.startswith(b"{"):
-                    return False
+                    return native
+                if size > io.MAX_INPUT_BYTES:
+                    return True
                 handle.seek(0)
-                raw = handle.read(io.MAX_STATE_BYTES + 1)
-                if len(raw) > io.MAX_STATE_BYTES:
+                raw = handle.read(io.MAX_INPUT_BYTES + 1)
+                if len(raw) > io.MAX_INPUT_BYTES:
                     return True
         receipt = json.loads(raw)
-        return isinstance(receipt, dict) and (
-            any(key in receipt for key in ("schema_version", "run_id", "commands", "subject_binding"))
-            or receipt.get("status") not in (None, "completed", "passed", "ok", "success")
+        if not isinstance(receipt, dict):
+            return True
+        structured = native or any(
+            key in receipt for key in ("schema_version", "run_id", "commands", "subject_binding")
         )
+        if structured:
+            # Ordinary completed command receipts retain generic citation support.
+            # Failed, corrupt, or card-bound receipts require the strict contract.
+            return receipt.get("status") != "completed" or bool(receipt.get("subject_binding"))
+        return receipt.get("status") not in (None, "completed", "passed", "ok", "success")
     except (OSError, ValueError, UnicodeError, RecursionError, TypeError):
         return True
 

@@ -279,7 +279,8 @@ def test_negative_uses_original_pending_window(tmp_path, failed_card, cutoff):
 
 
 @pytest.mark.parametrize("phase", ["propose", "review", "apply"])
-def test_pending_negative_blocks_retained_positive_candidate(tmp_path, failed_card, phase):
+@pytest.mark.parametrize("drift", [None, "receipt", "linked"])
+def test_pending_negative_blocks_retained_positive_candidate(tmp_path, failed_card, phase, drift):
     from brigade import memory_proposals as api
     from brigade.memory_proposal_v2_reflect import propose_payload
     from tests.test_memory_reflect import evidence, log as write_log
@@ -299,14 +300,25 @@ def test_pending_negative_blocks_retained_positive_candidate(tmp_path, failed_ca
     (tmp_path / log.LOG_PATH).chmod(0o600)
     assert capture(tmp_path, receipt) == 0
     assert any(row["kind"] == "negative-outcome" for row in log.read_evidence(tmp_path)[0])
+
+    def attempt():
+        if phase == "propose":
+            return propose_payload(
+                target=tmp_path, candidate_id=candidate["candidate_id"], reason="Inspect current evidence."
+            )
+        if phase == "review":
+            return api.review_payload(**values, reason="Inspect current evidence.")
+        return api.apply_payload(**values)
+
+    if drift is not None:
+        from tests.test_memory_outcome_evidence import drift_support
+
+        with pytest.raises(api.ProposalError):
+            attempt()
+        drift_support(tmp_path, path, receipt, drift)
     before = snapshot(tmp_path)
     with pytest.raises(api.ProposalError):
-        if phase == "propose":
-            propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Inspect current evidence.")
-        elif phase == "review":
-            api.review_payload(**values, reason="Inspect current evidence.")
-        else:
-            api.apply_payload(**values)
+        attempt()
     assert snapshot(tmp_path) == before
     assert not list(tmp_path.rglob("apply-receipt.json"))
 
@@ -421,4 +433,136 @@ def test_unlogged_completed_receipt_keeps_valid_direct_support(tmp_path, verifie
         ],
     )
     assert proposal["ops"][0]["evidence_ids"] == [ref]
+    assert snapshot(tmp_path) == before
+
+
+def test_ordinary_completed_receipt_keeps_generic_support(tmp_path, failed_card):
+    from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, _, _ = failed_card
+    output = io.StringIO()
+    with redirect_stdout(output):
+        assert (
+            verify_mod.verify_run(
+                target=tmp_path, commands=[[sys.executable, "-c", "pass"]], reuse=False, json_output=True
+            )
+            == 0
+        )
+    receipt = json.loads(output.getvalue())
+    assert receipt["status"] == "completed" and not receipt.get("subject_binding")
+    ref = f".brigade/work/verify-runs/{receipt['run_id']}/receipt.json"
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
+    healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    write_log(tmp_path, path, (healthy, "outcome", "2026-10-21T12:00:00Z"))
+    before = snapshot(tmp_path)
+    candidates = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    assert {c["kind"] for c in candidates} == {"reinforce", "stale-newer-evidence"}
+    for candidate in candidates:
+        assert candidate["proof_count"] == 2
+        assert ref in candidate["evidence_ids"]
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    proposal = api.create_payload(
+        target=tmp_path,
+        relation="consolidate",
+        source_paths=["memory/cards/cache.md"],
+        anchor_blocks=True,
+        reason="Inspect ordinary completed verification.",
+        ops=[
+            dict(
+                type="append_evidence",
+                card_path="memory/cards/cache.md",
+                block_id=block.block_id,
+                expected_block_hash=block.sha256,
+                evidence_ids=[ref],
+            )
+        ],
+    )
+    assert proposal["ops"][0]["evidence_ids"] == [ref]
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("drift", ["receipt", "linked"])
+def test_unresolved_negative_keeps_candidates_review_only(tmp_path, failed_card, drift):
+    from tests.test_memory_outcome_evidence import drift_support
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt, _ = failed_card
+    assert capture(tmp_path, receipt) == 0
+    ref = log.read_evidence(tmp_path)[0][0]["evidence_id"]
+    healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    write_log(tmp_path, path, (healthy, "outcome", "2026-10-19T12:00:00Z"))
+    drift_support(tmp_path, path, receipt, drift)
+    before = snapshot(tmp_path)
+    candidates = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    assert {c["kind"] for c in candidates} == {"reinforce", "stale-newer-evidence"}
+    for candidate in candidates:
+        assert candidate["tier"] == 2 and candidate["diff"] == ""
+        assert ref in candidate["review_evidence_ids"]
+        assert ref in candidate["unresolved_evidence_ids"]
+        assert ref not in candidate["evidence_ids"]
+        assert candidate["proof_count"] == 1
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_manual_cutoff_cannot_hide_pending_negative(tmp_path, failed_card, corrupt):
+    from brigade import memory_proposals as api, memory_proposal_v2_ops as delta
+    from tests.test_memory_outcome_evidence import drift_support
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    path, receipt, _ = failed_card
+    assert capture(tmp_path, receipt) == 0
+    if corrupt:
+        drift_support(tmp_path, path, receipt, "receipt")
+    later = evidence(tmp_path, ".brigade/receipts/later.json")
+    write_log(tmp_path, path, (later, "near-match", "2026-10-21T12:00:00Z"))
+    block = delta.blocks(delta.anchor_text(path.read_text(), "memory/cards/cache.md"))[0]
+    before = snapshot(tmp_path)
+    with pytest.raises(api.ProposalError, match="no valid delta ops remain"):
+        api.create_payload(
+            target=tmp_path,
+            relation="consolidate",
+            source_paths=["memory/cards/cache.md"],
+            anchor_blocks=True,
+            reason="Inspect later consolidation evidence.",
+            ops=[
+                dict(
+                    type="append_evidence",
+                    card_path="memory/cards/cache.md",
+                    block_id=block.block_id,
+                    expected_block_hash=block.sha256,
+                    evidence_ids=[later],
+                    last_consolidated="2026-10-21T12:00:00Z",
+                )
+            ],
+        )
+    assert snapshot(tmp_path) == before
+
+
+def test_negative_receipt_disappears_without_blocking_healthy_cards(tmp_path, failed_card, monkeypatch):
+    from brigade import memory_reflect_candidates as candidates
+    from tests.test_memory_reflect import evidence, log as write_log
+
+    _, receipt, _ = failed_card
+    assert capture(tmp_path, receipt) == 0
+    ref = log.read_evidence(tmp_path)[0][0]["evidence_id"]
+    healthy_card = card(tmp_path, "healthy", body="Keep healthy state.")
+    healthy = evidence(tmp_path, ".brigade/receipts/healthy-support.json")
+    write_log(tmp_path, healthy_card, (healthy, "outcome", "2026-10-21T12:00:00Z"))
+    original = candidates._resolved
+    removed = False
+
+    def disappear(target, refs, roots):
+        nonlocal removed
+        if not removed and ref in refs:
+            (target / ref).unlink()
+            removed = True
+        return original(target, refs, roots)
+
+    monkeypatch.setattr(candidates, "_resolved", disappear)
+    before = snapshot(tmp_path)
+    result = memory_reflect.run_payload(target=tmp_path, dry_run=True)["candidates"]
+    assert removed and result
+    assert all(c["card_ids"] == ["healthy"] and c["tier"] == 0 for c in result)
     assert snapshot(tmp_path) == before
