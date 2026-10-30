@@ -860,3 +860,21 @@ def test_near_matching_event_names_do_not_quarantine_unrelated_work(db, event_ty
     assert ownership._external_current(conn, work_id) is None
     candidate, _ = offer(conn)
     assert register(conn, candidate)["state"] == "active"
+
+
+def test_valid_release_stored_as_blob_cannot_free_scope_for_another_registration(db):
+    conn, _ = db
+    work_id, _ = active(conn)
+    act(conn, work_id, {"action": "release", "generation": 1}, 2)
+    conn.execute(
+        "UPDATE work_events SET event_type=? WHERE work_id=? AND event_type=?",
+        (sqlite3.Binary(b"external-ownership-released"), work_id, "external-ownership-released"),
+    )
+    conn.commit()
+    candidate, _ = offer(conn)
+    before = conn.total_changes
+    with pytest.raises(scope.ScopeAdmissionError) as caught:
+        register(conn, candidate)
+    assert caught.value.code == "path-scope-unavailable"
+    assert conn.total_changes == before
+    assert ownership._external_current(conn, candidate)["state"] == "admitted"
