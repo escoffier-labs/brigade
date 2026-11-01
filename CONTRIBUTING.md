@@ -160,6 +160,10 @@ the same splitter used in CI. Every shard has separate coverage data. The gate
 prints each shard's pytest output, aggregates results, then combines coverage
 and enforces the 78% floor once. A failing shard fails the gate.
 
+In CI, each of the four shards runs its selection across four pytest-xdist
+workers (`-n 4 --dist=worksteal`). The splitter loads as a pytest plugin, so
+every worker selects the same shard.
+
 `BRIGADE_VERIFY_SHARDS` sets the shard count (N). The default is half the CPU
 count, rounded down, with a minimum of one and a maximum of eight.
 `BRIGADE_VERIFY_SLOTS` sets concurrent full gates per Git common directory (K).
