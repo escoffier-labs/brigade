@@ -566,13 +566,13 @@ jobs:
           python -m pip install -e ".[dev,grokbot]"
       - name: Pytest shard
         if: matrix.python != '3.12'
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal
       - name: Pytest shard with coverage
         if: matrix.python == '3.12'
         env:
           COVERAGE_CORE: sysmon
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov="$PWD/src/brigade" --cov-report=
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal --cov="$PWD/src/brigade" --cov-report=
       - name: Assert grokbot MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
