@@ -2419,36 +2419,44 @@ def test_hook_run_process_exits_within_timeout_when_operation_hangs(tmp_path: Pa
     env = os.environ.copy()
     repo_root = Path(__file__).resolve().parents[1]
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(repo_root / "src"), env.get("PYTHONPATH"))))
-    env[runtime._HOOK_TEST_HANG_ENV] = "30"
     env[runtime._HOOK_TIMEOUT_ENV] = "0.25"
-    started = time.monotonic()
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "brigade",
-            "work",
-            "hook-run",
-            "--event",
-            "PreToolUse",
-            "--package",
-            PACKAGE_REF,
-        ],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        cwd=target,
-        env=env,
-        timeout=10,
-        check=False,
-    )
-    elapsed = time.monotonic() - started
+
+    def run_hook(hang_seconds: str) -> tuple[subprocess.CompletedProcess[str], float]:
+        started = time.monotonic()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "work",
+                "hook-run",
+                "--event",
+                "PreToolUse",
+                "--package",
+                PACKAGE_REF,
+            ],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=target,
+            env={**env, runtime._HOOK_TEST_HANG_ENV: hang_seconds},
+            timeout=5,
+            check=False,
+        )
+        return completed, time.monotonic() - started
+
+    # Interpreter startup and teardown vary with runner load; a no-hang run of
+    # the same command measures them so the bound covers only the timeout path.
+    baseline, baseline_elapsed = run_hook("0")
+    assert baseline.returncode == 0
+    log = envelope.log_path(target)
+    logged_before = log.read_text(encoding="utf-8") if log.exists() else ""
+    completed, elapsed = run_hook("30")
 
     assert completed.returncode == 0
-    # Far below the 30 s hang; the margin covers interpreter startup on a busy runner.
-    assert elapsed < 4.0
+    assert elapsed - baseline_elapsed < 1.0
     assert json.loads(completed.stdout) == envelope.degraded_envelope("PreToolUse")
-    assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
+    assert "timed out" in log.read_text(encoding="utf-8")[len(logged_before) :]
     assert "resource_tracker" not in completed.stderr
 
 
