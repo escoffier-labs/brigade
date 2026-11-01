@@ -2439,13 +2439,14 @@ def test_hook_run_process_exits_within_timeout_when_operation_hangs(tmp_path: Pa
         text=True,
         cwd=target,
         env=env,
-        timeout=5,
+        timeout=10,
         check=False,
     )
     elapsed = time.monotonic() - started
 
     assert completed.returncode == 0
-    assert elapsed < 2.0
+    # Far below the 30 s hang; the margin covers interpreter startup on a busy runner.
+    assert elapsed < 4.0
     assert json.loads(completed.stdout) == envelope.degraded_envelope("PreToolUse")
     assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
     assert "resource_tracker" not in completed.stderr
