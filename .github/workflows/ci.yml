@@ -572,7 +572,7 @@ jobs:
         env:
           COVERAGE_CORE: sysmon
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
-        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal --cov="$PWD/src/brigade" --cov-report=
+        run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q -n 4 --dist=worksteal --cov="$PWD/src/brigade" --cov-report= --junitxml=junit.xml -o junit_family=xunit1
       - name: Assert grokbot MCP tests run without skips
         if: matrix.python == '3.12' && matrix.shard == 0
         run: |
@@ -587,6 +587,15 @@ jobs:
             echo "ERROR: grokbot MCP tests were skipped; install the grokbot extra"
             exit 1
           fi
+      - name: Upload test durations
+        # Source for scripts/ci_test_durations.py, which balances the shards.
+        if: ${{ !cancelled() && matrix.python == '3.12' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-${{ matrix.python }}-${{ matrix.shard }}
+          path: junit.xml
+          retention-days: 14
+          if-no-files-found: warn
       - name: Upload coverage data
         if: matrix.python == '3.12'
         uses: actions/upload-artifact@v7

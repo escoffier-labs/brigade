@@ -681,7 +681,10 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     coverage = _workflow_job_section(text, "coverage")
     protected = _workflow_job_section(text, "test")
     assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
-    assert '--cov="$PWD/src/brigade" --cov-report=\n' in shards
+    assert '--cov="$PWD/src/brigade" --cov-report= --junitxml=junit.xml -o junit_family=xunit1\n' in shards
+    # Each 3.12 shard keeps its junit report for scripts/ci_test_durations.py.
+    assert "name: junit-${{ matrix.python }}-${{ matrix.shard }}" in shards
+    assert "if: ${{ !cancelled() && matrix.python == '3.12' }}" in shards
     assert "--cov-report=term" not in shards
     assert "--cov-branch" not in shards
     assert "uses: actions/upload-artifact@v7" in shards

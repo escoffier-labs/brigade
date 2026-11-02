@@ -164,6 +164,18 @@ In CI, each of the four shards runs its selection across four pytest-xdist
 workers (`-n 4 --dist=worksteal`). The splitter loads as a pytest plugin, so
 every worker selects the same shard.
 
+Shards are balanced by file using `scripts/ci_test_durations.json`, which holds
+per-file test seconds: the longest files go first onto the least-loaded shard.
+Tests in files missing from the table fall back to the hash split, so a stale
+table costs balance, never coverage. Each Python 3.12 shard uploads a
+`junit-3.12-<shard>` artifact; refresh the table from a recent green run when
+shard times drift apart:
+
+```bash
+gh run download <run-id> --pattern 'junit-3.12-*' --dir /tmp/junit
+python scripts/ci_test_durations.py /tmp/junit/*/junit.xml
+```
+
 `BRIGADE_VERIFY_SHARDS` sets the shard count (N). The default is half the CPU
 count, rounded down, with a minimum of one and a maximum of eight.
 `BRIGADE_VERIFY_SLOTS` sets concurrent full gates per Git common directory (K).

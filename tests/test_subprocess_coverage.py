@@ -23,6 +23,10 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
     command = command.replace("${{ matrix.shard }}", "0")
     argv = [argument.replace("$PWD", str(ROOT)) for argument in shlex.split(command)]
     argv[0] = sys.executable
+    # The duration report belongs to the real shard, not this nested run in the checkout.
+    junit = argv.index("--junitxml=junit.xml")
+    assert argv[junit + 1 : junit + 3] == ["-o", "junit_family=xunit1"]
+    del argv[junit : junit + 3]
     # One bounded shard exercises every selected fixture; keep CI's source argument.
     argv[argv.index("--shard-count") + 1] = "1"
     fixtures = tmp_path / "fixtures"

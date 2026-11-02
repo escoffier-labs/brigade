@@ -63,6 +63,8 @@ Thumbs.db
 !/scripts/measure_work_store.py
 !/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
+!/scripts/ci_test_durations.py
+!/scripts/ci_test_durations.json
 !/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
 !/scripts/windows_pytest_diagnostics.py
