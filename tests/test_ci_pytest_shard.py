@@ -181,11 +181,12 @@ def test_shard_balances_timed_files_under_xdist(tmp_path):
     tests.mkdir()
     for name in ("test_heavy", "test_light_a", "test_light_b"):
         (tests / f"{name}.py").write_text(
-            "import os, pathlib, pytest\n"
+            "import os, pathlib, pytest, uuid\n"
             "@pytest.mark.parametrize('case', range(5))\n"
             "def test_case(case, request):\n"
             "    ran = pathlib.Path(os.environ['SHARD_PROBE_DIR'])\n"
-            "    (ran / request.node.nodeid.replace('/', '_')).write_text(request.node.nodeid)\n"
+            "    # Node IDs contain ':' and '[', which Windows rejects in file names.\n"
+            "    (ran / uuid.uuid4().hex).write_text(request.node.nodeid)\n"
         )
     durations = tmp_path / "durations.json"
     durations.write_text(
