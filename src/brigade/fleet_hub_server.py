@@ -16,13 +16,26 @@ MAX_HANDLER_THREADS = 32
 MAX_HANDLERS_PER_SOURCE = 8
 
 
+def is_loopback_address(address: str) -> bool:
+    """Whether ``address`` is a numeric loopback address. Hostnames are not."""
+    try:
+        return ipaddress.ip_address(address).is_loopback
+    except (TypeError, ValueError):
+        return False
+
+
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     """Close excess connections without blocking the accept loop.
 
     Source quotas use the TCP peer address, never caller-supplied headers.
-    A reverse proxy therefore shares one source quota across its clients.
-    Counts include connections waiting for their first request bytes and
-    remain reserved through handler execution and socket cleanup.
+    On a loopback bind, a loopback peer is the local HTTPS front (Tailscale
+    Serve or a managed proxy) relaying every client from one address, so it is
+    exempt from the per-source quota and bounded by the global one (D29 in
+    docs/phase-v2-hub-architecture.md). On any other bind, loopback peers are
+    ordinary sources. Long-poll message waiters are capped at MAX_WAITERS
+    (a quarter of the handlers), so the rest stay free for requests that do
+    not wait. Counts include connections waiting for their first request
+    bytes and remain reserved through handler execution and socket cleanup.
 
     An idle database connection keeps per-request closes from becoming the
     final WAL close (checkpoint, sync, and file deletion before a response).
@@ -44,7 +57,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         managed = os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") == "1"
         if managed and not ipaddress.ip_address(server_address[0]).is_loopback:
             raise ValueError("managed upstream requires a numeric loopback bind")
-        self._source_limit = MAX_HANDLER_THREADS if managed else MAX_HANDLERS_PER_SOURCE
+        # Set from the bound address in server_bind; nothing is exempt before it.
+        self._loopback_bind = False
         if managed:
             self.request_queue_size = MAX_HANDLER_THREADS
         self._admission_lock = threading.Lock()
@@ -68,6 +82,11 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             self._close_db_if_idle()
             raise
 
+    def server_bind(self) -> None:
+        super().server_bind()
+        host = self.server_address[0]
+        self._loopback_bind = isinstance(host, str) and is_loopback_address(host)
+
     def server_close(self) -> None:
         with self._admission_lock:
             self._closing = True
@@ -86,12 +105,13 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
 
     def process_request(self, request: socket | tuple[bytes, socket], client_address: Any) -> None:
         source = client_address[0]
+        front = self._loopback_bind and is_loopback_address(source)
         with self._admission_lock:
             source_count = self._source_counts.get(source, 0)
             admitted = (
                 not self._closing
                 and len(self._active_requests) < MAX_HANDLER_THREADS
-                and source_count < self._source_limit
+                and (front or source_count < MAX_HANDLERS_PER_SOURCE)
             )
             if admitted:
                 self._active_requests[request] = source

@@ -433,6 +433,15 @@ loopback. A proxy on a separate container network is unsupported because host
 loopback publication does not make its peer loopback. Do not weaken the Hub
 check to make that topology work.
 
+Connection admission keys on the TCP peer address. With the image's `0.0.0.0`
+bind, the Compose loopback publication delivers every client from the Docker
+bridge gateway, one ordinary source. The whole recipe therefore shares one
+8-connection per-source cap, and the ninth concurrent request is closed
+without a response. A front that shares the Hub's network namespace, with the
+Hub bound to numeric loopback as the smoke check runs it, is exempt from that
+cap and bounded by the 32-handler global cap, of which long-poll message
+waiters hold at most 8.
+
 Before an upgrade, stop writes and use SQLite's online backup API (for example,
 Python `sqlite3.Connection.backup`) to a separate local path, then test a clean
 restore with the candidate image. Upgrade only one instance, verify health,

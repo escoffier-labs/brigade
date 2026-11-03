@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import re
 import secrets
@@ -17,7 +16,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, TypeGuard
 
 from . import fleet_hub_events
-from .fleet_hub_server import MAX_HANDLER_THREADS
+from .fleet_hub_server import MAX_HANDLER_THREADS, is_loopback_address
 
 if TYPE_CHECKING:
     from .fleet_hub_sealed import StoragePolicy
@@ -49,10 +48,7 @@ _LOCAL = threading.local()
 def _source_cap_applies(source_ip: str) -> bool:
     """Loopback peers are a local reverse proxy (such as Tailscale Serve) whose
     clients are indistinguishable, so only the per-caller and global caps apply."""
-    try:
-        return not ipaddress.ip_address(source_ip).is_loopback
-    except ValueError:
-        return True
+    return not is_loopback_address(source_ip)
 
 
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
