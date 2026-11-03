@@ -110,13 +110,19 @@ def test_python_fallback_spans_stay_lazy_per_rule(monkeypatch):
 
 def test_failed_binary_is_not_retried_in_the_same_process(tmp_path, monkeypatch):
     # A hung or broken binary must not stall every large file of a directory scan.
-    calls = tmp_path / "calls"
+    # Patch the process call instead of running a script, so this works on every OS.
     fake = tmp_path / "brigade-guard"
-    fake.write_text(f"#!/bin/sh\necho x >> {calls}\nexit 3\n", encoding="utf-8")
-    fake.chmod(0o755)
+    fake.write_text("", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def failing_run(argv, **_kwargs):
+        calls.append(list(argv))
+        raise native_module.subprocess.CalledProcessError(3, argv)
+
+    monkeypatch.setattr(native_module.subprocess, "run", failing_run)
     monkeypatch.setenv("BRIGADE_GUARD_BIN", str(fake))
     monkeypatch.setenv("BRIGADE_GUARD_BACKEND", "native")
     rules = list(DEFAULT_RULES)
     assert native_spans("plain ascii text", rules) is None
     assert native_spans("more plain ascii text", rules) is None
-    assert calls.read_text(encoding="utf-8").count("x") == 1
+    assert len(calls) == 1
