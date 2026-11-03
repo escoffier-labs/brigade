@@ -274,12 +274,23 @@ jobs:
       - run: go vet ./...
       - run: go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
       - run: govulncheck ./...
-      - run: go build -o bin/miseledger ./cmd/miseledger
+      - name: Build both evidence entry points
+        run: |
+          for name in brigade-evidence miseledger; do
+            go build -o "bin/$name" "./cmd/$name"
+          done
       - run: go build -o bin/sessionfind ./cmd/sessionfind
       - run: scripts/check_release_workflow.sh
-      - run: scripts/smoke_archive.sh
-      - run: scripts/smoke_mcp.sh
-      - run: scripts/smoke_http.sh
+      # Each smoke runs under the canonical name and the legacy name, which
+      # stays supported through v0.32.
+      - name: Smoke both evidence entry points
+        run: |
+          for name in brigade-evidence miseledger; do
+            export EVIDENCE_BIN="$PWD/bin/$name"
+            scripts/smoke_archive.sh
+            scripts/smoke_mcp.sh
+            scripts/smoke_http.sh
+          done
 
   notify-build-and-test:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
@@ -1161,6 +1172,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "miseledger build failed" }
           go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/sessionfind.exe" ./cmd/sessionfind
           if ($LASTEXITCODE -ne 0) { throw "sessionfind build failed" }
+          go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/brigade-evidence.exe" ./cmd/brigade-evidence
+          if ($LASTEXITCODE -ne 0) { throw "brigade-evidence build failed" }
           Pop-Location
       - name: Canonical and legacy evidence executable compatibility
         shell: pwsh

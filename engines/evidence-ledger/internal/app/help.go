@@ -14,9 +14,7 @@ import (
 const (
 	CanonicalProgram = "brigade-evidence"
 	// LegacyProgram is accepted through v0.32 and removed in v0.33.0.
-	LegacyProgram         = "miseledger"
-	legacyRemovalRelease  = "v0.33.0"
-	legacyDeprecationNote = "%s: this command name is deprecated and will be removed in %s; run %s instead\n"
+	LegacyProgram = "miseledger"
 )
 
 // program is the identity behind the version banner, usage text, MCP
@@ -45,8 +43,9 @@ func isServerName(name string) bool {
 }
 
 // Main is the process entry for both executables. It selects the identity
-// from argv[0], prints the legacy deprecation line on stderr when needed and
-// runs the command. Stdout and the MCP stream never carry the notice.
+// from argv[0] and runs the command. The legacy entry point writes nothing
+// extra on stderr: Brigade still runs it until R5 installs the canonical
+// executables, so the deprecation line lands in R5 (docs/phase-engine-rename.md).
 func Main(argv []string, out, errw io.Writer) int {
 	argv0 := ""
 	if len(argv) > 0 {
@@ -54,9 +53,6 @@ func Main(argv []string, out, errw io.Writer) int {
 		argv = argv[1:]
 	}
 	program = IdentityFor(argv0)
-	if program == LegacyProgram {
-		fmt.Fprintf(errw, legacyDeprecationNote, LegacyProgram, legacyRemovalRelease, CanonicalProgram)
-	}
 	return Run(argv, out, errw)
 }
 

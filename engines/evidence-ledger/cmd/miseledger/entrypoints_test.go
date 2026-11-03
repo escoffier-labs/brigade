@@ -35,7 +35,6 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 		bins = append(bins, bin)
 	}
 
-	legacyNotice := app.LegacyProgram + ": this command name is deprecated and will be removed in v0.33.0; run " + app.CanonicalProgram + " instead\n"
 	t.Run("arguments-and-streams", func(t *testing.T) {
 		env, _ := executableHome(t, false)
 		for _, tc := range []struct {
@@ -57,11 +56,14 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				legacy := runExecutable(t, bins[0], env, tc.args...)
 				canonical := runExecutable(t, bins[1], env, tc.args...)
-				// Only the legacy entry point prints the notice, once, first.
-				if !strings.HasPrefix(legacy.err, legacyNotice) || strings.Count(legacy.err, "deprecated") != 1 {
-					t.Fatalf("legacy stderr %q does not start with one deprecation notice", legacy.err)
+				// Until R5, Brigade and existing scripts still run the legacy
+				// name, so neither entry point adds a deprecation line. A stray
+				// stderr line fails PowerShell callers that use
+				// $ErrorActionPreference = 'Stop'.
+				if strings.Contains(legacy.err+canonical.err, "deprecated") {
+					t.Fatalf("entry point printed a deprecation notice: %#v / %#v", legacy, canonical)
 				}
-				if strings.Contains(canonical.err, "deprecated") || strings.Contains(canonical.out+canonical.err, app.LegacyProgram) {
+				if strings.Contains(canonical.out+canonical.err, app.LegacyProgram) {
 					t.Fatalf("canonical entry point named the legacy program: %#v", canonical)
 				}
 				if strings.Contains(legacy.out, app.CanonicalProgram) {
@@ -72,7 +74,7 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 					prog string
 					got  executableResult
 				}{
-					{app.LegacyProgram, executableResult{legacy.code, legacy.out, strings.TrimPrefix(legacy.err, legacyNotice)}},
+					{app.LegacyProgram, legacy},
 					{app.CanonicalProgram, canonical},
 				} {
 					got := executableResult{
@@ -144,7 +146,7 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			}
 			for _, bin := range ordered {
 				result := runExecutable(t, bin, env, "init")
-				if result.code != 0 || strings.TrimPrefix(result.err, legacyNotice) != "" {
+				if result.code != 0 || result.err != "" {
 					t.Fatalf("init: %#v", result)
 				}
 				var payload struct {
@@ -160,7 +162,7 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			}
 			legacy := runExecutable(t, bins[0], env, "status", "--json")
 			canonical := runExecutable(t, bins[1], env, "status", "--json")
-			if legacy.code != 0 || legacy.err != legacyNotice || canonical.err != "" || canonical.out != legacy.out {
+			if legacy.code != 0 || legacy.err != "" || canonical.err != "" || canonical.out != legacy.out {
 				t.Fatalf("shared archive status: %#v / %#v", legacy, canonical)
 			}
 			if _, err := os.Stat(want["db_path"]); err != nil {

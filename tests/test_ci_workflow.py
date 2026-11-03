@@ -335,14 +335,18 @@ def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():
         "go vet ./...",
         "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
         "govulncheck ./...",
-        "go build -o bin/miseledger ./cmd/miseledger",
+        'go build -o "bin/$name" "./cmd/$name"',
         "go build -o bin/sessionfind ./cmd/sessionfind",
         "scripts/check_release_workflow.sh",
+        'export EVIDENCE_BIN="$PWD/bin/$name"',
         "scripts/smoke_archive.sh",
         "scripts/smoke_mcp.sh",
         "scripts/smoke_http.sh",
     ):
         assert command in evidence_ledger
+    # Build and smoke both the canonical and the legacy evidence entry points.
+    loops = re.findall(r"for name in (.+); do", evidence_ledger)
+    assert loops == ["brigade-evidence miseledger"] * 2
 
 
 def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
@@ -1217,7 +1221,7 @@ def test_windows_native_acceptance_json_commands_keep_stderr_separate():
     assert "Invoke-ExternalCommand" in doctor
 
     import_section = text[
-        text.index('Write-Step "miseledger import adapter"') : text.index('Write-Step "miseledger search"')
+        text.index('Write-Step "evidence import adapter"') : text.index('Write-Step "miseledger search"')
     ]
     assert "2>&1" not in import_section
     assert "Invoke-ExternalCommand" in import_section

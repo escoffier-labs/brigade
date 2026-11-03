@@ -1,8 +1,7 @@
 - The evidence engine now takes its identity from the name it was invoked as.
   `brigade-evidence` prints `brigade-evidence 0.6.0`, names itself in usage text
   and reports `brigade-evidence` as its MCP `serverInfo.name`. The legacy entry
-  point keeps its old banner and server name, and prints one stderr line saying
-  that name is deprecated and will be removed in v0.33.0. `doctor --mcp`
+  point keeps its old banner, server name and stderr output. `doctor --mcp`
   accepts either server name.
 - A fresh home now stores evidence in `<data>/brigade/evidence/evidence.db`,
   with config and cache under `brigade/evidence/` in their XDG roots. An

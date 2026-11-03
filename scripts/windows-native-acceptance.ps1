@@ -488,6 +488,11 @@ function Invoke-ExternalCommand {
         $StderrRoot = [System.IO.Path]::GetTempPath()
     }
     $stderrFile = Join-Path $StderrRoot ("brigade-accept-stderr-{0}.txt" -f [guid]::NewGuid().ToString("N"))
+    # PowerShell 5.1 turns each redirected native stderr line into an error
+    # record, and the script-wide 'Stop' makes the first one terminate. The
+    # exit code is the failure contract here, and stderr is only diagnostics,
+    # so a warning or deprecation line must not fail a command that exited 0.
+    $ErrorActionPreference = 'Continue'
     try {
         $stdout = & $Command 2> $stderrFile
         $exitCode = $LASTEXITCODE
@@ -1152,6 +1157,16 @@ try {
     $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
     $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
     $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
+    # The managed bin holds only the legacy evidence name until setup installs
+    # canonical executables. A source install also runs the same-commit
+    # canonical build against the same archive, so both names stay covered.
+    $evidenceExe = $miseledgerExe
+    if ($InstallMode -eq "source") {
+        $evidenceExe = Join-Path $EngineBinDir "brigade-evidence.exe"
+        if (-not (Test-Path -LiteralPath $evidenceExe -PathType Leaf)) {
+            throw "same-commit engine missing: $evidenceExe"
+        }
+    }
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
@@ -1369,15 +1384,28 @@ finally:
             throw "export file missing: $exportPath"
         }
 
-        Write-Step "miseledger import adapter"
+        Write-Step "evidence entry point banners"
+        foreach ($exe in @(@($evidenceExe, $miseledgerExe) | Select-Object -Unique)) {
+            $banner = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+                & $exe version
+            } -FailureMessage "evidence version failed for $exe"
+            $expected = [IO.Path]::GetFileNameWithoutExtension($exe) + " "
+            if (-not ([string]($banner | Select-Object -First 1)).StartsWith($expected, [StringComparison]::Ordinal)) {
+                throw "evidence banner for $exe does not start with '$expected': $banner"
+            }
+        }
+
+        # A source install imports under the canonical name and reads back
+        # under the legacy name, which proves both share one archive.
+        Write-Step "evidence import adapter"
         $importStdout = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
-            & $miseledgerExe import adapter $exportPath --source brigade --json
-        } -FailureMessage "miseledger import failed"
+            & $evidenceExe import adapter $exportPath --source brigade --json
+        } -FailureMessage "evidence import failed"
         $importPayload = ($importStdout | Out-String).Trim() | ConvertFrom-Json
         $inserted = [int]$importPayload.inserted_items
         $alreadyKnown = [int]$importPayload.already_known
         if (($inserted + $alreadyKnown) -lt 1) {
-            throw "miseledger import did not ingest receipts: inserted_items=$inserted already_known=$alreadyKnown"
+            throw "evidence import did not ingest receipts: inserted_items=$inserted already_known=$alreadyKnown"
         }
 
         Write-Step "miseledger imported item ids"
