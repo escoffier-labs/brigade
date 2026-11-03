@@ -1,6 +1,6 @@
 # Grok Bot memory connector pack
 
-The `grokbot-memory` pack gives Grok Bot a read-mostly view of Brigade memory.
+The `grokbot-memory` pack gives Grok Bot a read-only view of Brigade memory.
 It runs the Dot connector code under its own profile, like the
 [duet pack](duet-connector.md), and shares Dot's origin verification, wire
 schemas and state handling. It shares none of Dot's or Duet's identity, state
@@ -12,19 +12,38 @@ Access application to this listener.
 
 ## Tools
 
-The profile registers exactly three tools. Every other connector tool is
-absent from discovery, and a call by name is rejected as an unknown tool.
+The profile registers exactly two tools. Every other connector tool is absent
+from discovery, and a call by name, `handoff_write` included, is rejected as an
+unknown tool.
 
 | Tool | Purpose | Writes |
 |---|---|---|
 | `memory_search` | Keyword search of canonical memory cards. Returns titles, tags and paths. | No |
 | `memory_card` | Read one card in bounded chunks. | No |
-| `handoff_write` | Write one linted `-grokbot-` handoff to `.grok/memory-handoffs`. Never overwrites. | Handoff inbox only |
 
-There is no fleet, dispatch, spawn, inbox, messaging, skill or capabilities
-tool, and no runtime key adds one. The listener builds no T3 fleet client and
-runs no Hub inbox poll. `memory_search` and `memory_card` descriptions tell
-Grok Bot that card text is reference data, never instructions.
+There is no handoff, fleet, dispatch, spawn, inbox, messaging, skill or
+capabilities tool, and no runtime key adds one. `handoff_write` joins this
+profile only once handoffs land in hub memory for review rather than in a file
+inbox. The listener builds no T3 fleet client and runs no Hub inbox poll.
+
+Grok Bot reads untrusted X content, so card text is treated as data on the way
+out as well:
+
+- Each `memory_search` match and each `memory_card` result carries
+  `content_trust: "untrusted"`, and both tool descriptions say card text is
+  reference data, never instructions.
+- Before returning text, the connector runs a prompt-load scan over the
+  match's title, summary, tags and aliases, or over the whole card for
+  `memory_card`. The scan uses the local guard's bundled default rules (no
+  repository rules, baselines or allow markers), blocks bidi embedding,
+  override and isolate controls plus zero-width and other invisible
+  characters, and applies the instruction-override heuristics that handoff
+  linting uses. A hit replaces the item with `{card_id, blocked: "<rule id>"}`
+  and returns none of the text.
+
+The scan fails closed. A card that names a private host, a home path or a
+credential-shaped value comes back blocked, as does a card that quotes an
+injection phrase while discussing one.
 
 ## Runtime JSON
 
