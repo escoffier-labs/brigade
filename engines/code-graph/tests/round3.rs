@@ -80,7 +80,7 @@ fn export_dot_files_scope_aggregates_cross_file_calls() {
 
     let dot = export_graph(&conn, ExportFormat::Dot, ExportScope::Files).unwrap();
 
-    assert!(dot.starts_with("digraph graphtrail {"));
+    assert!(dot.starts_with("digraph code_graph {"));
     assert!(dot.contains("\"app.py\" -> \"lib.py\" [label=\"1\"];"));
     assert!(dot.trim_end().ends_with('}'));
 }

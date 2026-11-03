@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import code_references, component_bins
+from . import code_references, component_bins, engine_paths
 
 SNAPSHOT_NAME = "graphtrail-before.db"
 SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
@@ -40,10 +40,13 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
         binary = _graphtrail_bin()
         if binary is None:
             return _status("unavailable", "code graph delta unavailable: graphtrail binary not found")
-        db_path = target / ".graphtrail" / "graphtrail.db"
+        try:
+            db_path = engine_paths.code_graph_db(target).path
+        except ValueError as exc:
+            return _status("unavailable", f"code graph delta unavailable: {exc}", binary=binary)
         db_existed_before_sync = db_path.is_file()
         sync_stage = "incremental-sync" if db_existed_before_sync else "initial-index"
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=sync_stage)
+        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=sync_stage, cwd=target)
         if sync.get("timed_out"):
             if db_existed_before_sync:
                 snapshot_path = run_dir / SNAPSHOT_NAME
@@ -138,9 +141,9 @@ def capture_after_and_diff(
             return _write_and_compact(run_dir, payload)
 
         binary = str(before.get("binary") or "")
-        db_path = Path(str(before.get("db_path") or target / ".graphtrail" / "graphtrail.db"))
+        db_path = Path(str(before.get("db_path") or engine_paths.code_graph_db(target).path))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage="incremental-sync")
+        sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage="incremental-sync", cwd=target)
         if sync.get("timed_out"):
             payload = _failure_payload(
                 target,
@@ -290,7 +293,14 @@ def _run_graphtrail(
     timeout: float,
     json_output: bool = False,
     stage: str | None = None,
+    cwd: Path | None = None,
 ) -> dict[str, Any]:
+    """Run one engine command. ``cwd`` is the repository it indexes.
+
+    `sync` indexes its working directory when given no root, so callers pass the
+    target they are working on. Without one, the root is derived from where the
+    index lives, which fails for an index placed outside the repository.
+    """
     # `graphtrail sync` rejects --json; only diff-style subcommands accept it.
     argv = [binary, "--db", str(db_path), command, *extra]
     if json_output:
@@ -299,7 +309,7 @@ def _run_graphtrail(
     try:
         completed = subprocess.run(
             argv,
-            cwd=db_path.parent.parent if db_path.parent.name == ".graphtrail" else None,
+            cwd=cwd or engine_paths.code_graph_repo_root(db_path),
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

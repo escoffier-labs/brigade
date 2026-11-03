@@ -7,7 +7,7 @@ use std::io::Cursor;
 use std::io::{Read, Write};
 #[cfg(feature = "codesearch")]
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "codesearch")]
 use std::sync::Mutex;
 #[cfg(feature = "codesearch")]
@@ -56,7 +56,7 @@ fn initialize_echoes_protocol_and_advertises_tools() {
     )
     .unwrap();
     assert_eq!(resp["result"]["protocolVersion"], "2025-06-18");
-    assert_eq!(resp["result"]["serverInfo"]["name"], "graphtrail");
+    assert_eq!(resp["result"]["serverInfo"]["name"], "brigade-code-graph");
 }
 
 #[test]
@@ -264,7 +264,7 @@ fn tools_call_search_returns_json_content() {
 fn tools_call_refresh_absent_or_false_does_not_resync() {
     let dir = synced_repo_with_graph_dir();
     let root = dir.path();
-    let db = root.join(".graphtrail").join("graphtrail.db");
+    let db = canonical_db(root);
     fs::write(root.join("late.py"), "def late_symbol():\n    return 2\n").unwrap();
 
     let absent = handle_request(
@@ -303,7 +303,7 @@ fn tools_call_refresh_absent_or_false_does_not_resync() {
 fn tools_call_refresh_true_resyncs_before_querying() {
     let dir = synced_repo_with_graph_dir();
     let root = dir.path();
-    let db = root.join(".graphtrail").join("graphtrail.db");
+    let db = canonical_db(root);
     fs::write(root.join("late.py"), "def late_symbol():\n    return 2\n").unwrap();
 
     let resp = handle_request(
@@ -332,11 +332,11 @@ fn tools_call_refresh_true_resyncs_before_querying() {
 fn tools_call_refresh_failure_still_answers_with_note() {
     let dir = synced_repo_with_graph_dir();
     let root = dir.path();
-    let db = root.join(".graphtrail").join("graphtrail.db");
+    let db = canonical_db(root);
     // A held sync lock makes the refresh fail fast. (A non-UTF-8 file used to
     // be the trigger, but sync now skips such files instead of failing.)
     fs::write(
-        root.join(".graphtrail").join("graphtrail.db.lock"),
+        canonical_db(root).with_extension("db.lock"),
         format!("{}\n", std::process::id()),
     )
     .unwrap();
@@ -558,6 +558,14 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
     let conn = open_db(&repo_db).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, &repo).unwrap();
+    // A second repository in the canonical layout is found by the same scan.
+    let canonical_repo = root.path().join("repo-b");
+    fs::create_dir(&canonical_repo).unwrap();
+    fs::write(canonical_repo.join("b.py"), "def beta():\n    return 1\n").unwrap();
+    let canonical_repo_db = canonical_db(&canonical_repo);
+    let conn = open_db(&canonical_repo_db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, &canonical_repo).unwrap();
 
     let resp = handle_request(
         &default_db,
@@ -581,6 +589,13 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
             .unwrap()
             .iter()
             .any(|repo| repo["db"] == repo_db.to_string_lossy().as_ref())
+    );
+    assert!(
+        value["repos"].as_array().unwrap().iter().any(|repo| {
+            repo["db"] == canonical_repo_db.to_string_lossy().as_ref()
+                && repo["repo"] == canonical_repo.to_string_lossy().as_ref()
+        }),
+        "{value}"
     );
 }
 
@@ -1032,11 +1047,17 @@ fn synced_repo_with_graph_dir() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::write(root.join("app.py"), "def helper():\n    return 1\n").unwrap();
-    let db = root.join(".graphtrail").join("graphtrail.db");
-    let conn = open_db(&db).unwrap();
+    let conn = open_db(&canonical_db(root)).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
     dir
+}
+
+/// The canonical index location; per-call `repo` selectors resolve to it once it exists.
+fn canonical_db(root: &Path) -> PathBuf {
+    root.join(".brigade")
+        .join("code-graph")
+        .join("code-graph.db")
 }
 
 #[cfg(feature = "codesearch")]
@@ -1174,39 +1195,62 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"unknown-method\"}\n",
         "invalid json\n"
     );
-    for binary in [
-        env!("CARGO_BIN_EXE_graphtrail-mcp"),
-        env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
+    const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
+    let legacy_env_warning = format!(
+        "warning: {LEGACY_DB_ENV} is deprecated and will be removed in v0.33.0; set BRIGADE_CODE_GRAPH_DB instead\n"
+    );
+    // Neither entry point prints a deprecation line until R5; only the legacy variable warns.
+    for (binary, server_name) in [
+        (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
+        (
+            env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
+            "brigade-code-graph",
+        ),
     ] {
-        for (args, env_db) in [
+        for (args, env_var, env_db) in [
             (
                 vec!["--db".to_owned(), db.display().to_string()],
+                "BRIGADE_CODE_GRAPH_DB",
                 Some("absent.db"),
             ),
-            (vec![format!("--db={}", db.display())], Some("absent.db")),
-            (vec![], db.to_str()),
-            (vec![], None),
+            (
+                vec![format!("--db={}", db.display())],
+                LEGACY_DB_ENV,
+                Some("absent.db"),
+            ),
+            (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
+            (vec![], LEGACY_DB_ENV, db.to_str()),
+            // No variable: the working directory's legacy index is used in place.
+            (vec![], "", None),
             // Legacy MCP has no help/version parser: these and a missing --db
             // value are ignored and database selection falls back to the env.
             (
                 vec!["--help".into(), "--version".into(), "--db".into()],
+                LEGACY_DB_ENV,
                 db.to_str(),
             ),
         ] {
             let mut command = Command::new(binary);
             command
-                .args(args)
+                .args(&args)
                 .current_dir(if env_db.is_some() {
                     nondefault_dir.as_path()
                 } else {
                     dir.path()
                 })
-                .env("HOME", dir.path());
+                .env("HOME", dir.path())
+                .env_remove("BRIGADE_CODE_GRAPH_DB")
+                .env_remove(LEGACY_DB_ENV);
             if let Some(path) = env_db {
-                command.env("GRAPHTRAIL_DB", path);
-            } else {
-                command.env_remove("GRAPHTRAIL_DB");
+                command.env(env_var, path);
             }
+            // An explicit --db wins, so the legacy variable is never read and never warns.
+            let explicit = args.first().is_some_and(|arg| arg.starts_with("--db"));
+            let expected_stderr = if env_var == LEGACY_DB_ENV && !explicit {
+                legacy_env_warning.clone()
+            } else {
+                String::new()
+            };
             let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1221,7 +1265,11 @@ fn canonical_and_legacy_mcp_process_contracts() {
                 .unwrap();
             let output = child.wait_with_output().unwrap();
             assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert!(output.stderr.is_empty(), "{output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr),
+                expected_stderr,
+                "{output:?}"
+            );
             let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
                 .unwrap()
                 .lines()
@@ -1229,7 +1277,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
                 .collect();
             assert_eq!(responses.len(), 4, "{responses:?}");
             assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-            assert_eq!(responses[0]["result"]["serverInfo"]["name"], "graphtrail");
+            assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
             assert_eq!(responses[1]["id"], 2);
             assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
             assert!(
@@ -1245,7 +1293,8 @@ fn canonical_and_legacy_mcp_process_contracts() {
         let output = Command::new(binary)
             .current_dir(dir.path())
             .env("HOME", dir.path())
-            .env_remove("GRAPHTRAIL_DB")
+            .env_remove("BRIGADE_CODE_GRAPH_DB")
+            .env_remove(LEGACY_DB_ENV)
             .stdin(Stdio::null())
             .output()
             .unwrap();

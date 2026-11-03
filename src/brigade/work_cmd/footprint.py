@@ -22,7 +22,7 @@ import re
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from .. import component_bins, proc
+from .. import component_bins, engine_paths, proc
 
 PHASE_PREDICTED = "predicted"
 PHASE_REFINED = "refined"
@@ -145,9 +145,12 @@ def predict_footprint(
     seed_symbols = _unique_strings(symbols)
     seed_files = _unique_strings(files)
     binary = component_bins.resolve("graphtrail")
-    db_path = target / ".graphtrail" / "graphtrail.db"
     if binary is None:
         return empty_predicted(reason="graphtrail binary not found")
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError as exc:
+        return empty_predicted(reason=str(exc))
     if not db_path.is_file():
         return empty_predicted(reason="graphtrail index not found")
     if not seed_symbols and not seed_files:

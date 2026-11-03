@@ -351,7 +351,8 @@ waits for R2, R3 and R4. R6 is last.
   - The shared path cases, run in Rust.
   - `cli_read_only.rs` checks the banner for each entry point
     (`graphtrail 0.4.0` for legacy, `brigade-code-graph 0.4.0` for canonical)
-    and that only the legacy entry point writes the stderr notice.
+    and that neither entry point writes a deprecation line yet (see
+    [Entry point identity](#entry-point-identity)).
   - MCP `initialize` returns the name that matches the entry point.
   - A repository with only `.graphtrail/` keeps writing there. A fresh
     repository gets `.brigade/code-graph/` and its ignore entry.

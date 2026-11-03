@@ -2,7 +2,7 @@
 
 Covers the engine verbs beyond sync/context/impact, the standard `--target`
 flag mapping onto the engine's working directory, and the rebranding of engine
-usage text so the facade never prints `Usage: graphtrail` at users.
+usage text so the facade never prints the engine's own program name at users.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ NEW_VERBS = sorted(set(ENGINE_VERBS) - {"sync", "context", "impact"})
 PASSTHROUGH_JSON_VERBS = [verb for verb in NEW_VERBS if verb != "export"]
 
 
-def _patch_graphtrail(monkeypatch, *, run_calls: list | None = None, stderr: str = ""):
+def _patch_engine(monkeypatch, *, run_calls: list | None = None, stderr: str = ""):
     def fake_run(args, timeout=30.0, **kwargs):
         if run_calls is not None:
             run_calls.append({"args": list(args), "timeout": timeout, "kwargs": kwargs})
@@ -41,7 +41,7 @@ def test_engine_verb_table_covers_required_surface():
 @pytest.mark.parametrize("verb", PASSTHROUGH_JSON_VERBS)
 def test_new_verbs_forward_exact_argv(monkeypatch, verb):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", verb, "some-symbol", "--json"])
 
@@ -52,7 +52,7 @@ def test_new_verbs_forward_exact_argv(monkeypatch, verb):
 
 def test_export_without_json_still_forwards_to_engine(monkeypatch):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", "export", "--format", "dot"])
 
@@ -63,7 +63,7 @@ def test_export_without_json_still_forwards_to_engine(monkeypatch):
 
 def test_query_verbs_use_short_timeout(monkeypatch):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     assert cli.main(["code", "callers", "brigade.cli.main"]) == 0
     assert calls[0]["timeout"] == 30.0
@@ -71,7 +71,7 @@ def test_query_verbs_use_short_timeout(monkeypatch):
 
 def test_outline_forwards_file_and_target(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     assert cli.main(["code", "outline", "pkg/one.py", "--json", "--target", str(tmp_path)]) == 0
     assert calls[0]["args"] == ["/fake/graphtrail", "outline", "pkg/one.py", "--json"]
@@ -81,7 +81,7 @@ def test_outline_forwards_file_and_target(monkeypatch, tmp_path):
 
 def test_evaluate_uses_long_timeout_with_env_override(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     assert cli.main(["code", "evaluate", str(tmp_path)]) == 0
     assert calls[0]["timeout"] == 900.0
@@ -94,7 +94,7 @@ def test_evaluate_uses_long_timeout_with_env_override(monkeypatch, tmp_path):
 @pytest.mark.parametrize("value", ("", "zero", "0", "-1", "nan", "inf"))
 def test_evaluate_rejects_invalid_configured_timeout(monkeypatch, tmp_path, capsys, value):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     monkeypatch.setenv("BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS", value)
 
     assert cli.main(["code", "evaluate", str(tmp_path)]) == 2
@@ -113,7 +113,7 @@ def test_command_tree_exposes_new_code_verbs():
 @pytest.mark.parametrize("verb", sorted(ENGINE_VERBS))
 def test_verb_help_is_forwarded_to_engine(monkeypatch, verb):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     assert cli.main(["code", verb, "--help"]) == 0
     assert calls[0]["args"] == ["/fake/graphtrail", verb, "--help"]
@@ -136,7 +136,7 @@ def test_group_help_lists_new_verbs(capsys):
 @pytest.mark.parametrize("literal_form", ("bare", "equals", "empty"))
 def test_target_tokens_after_separator_are_opaque(monkeypatch, tmp_path, capsys, command, target_form, literal_form):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     target, literal_target = tmp_path / "target", tmp_path / "literal"
     target.mkdir()
     literal_target.mkdir()
@@ -156,7 +156,7 @@ def test_target_tokens_after_separator_are_opaque(monkeypatch, tmp_path, capsys,
 @pytest.mark.parametrize("target_form", ("separate", "equals"))
 def test_genuine_target_before_separator_keeps_working(monkeypatch, tmp_path, command, target_form):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     prefix = ["--target", str(tmp_path)] if target_form == "separate" else [f"--target={tmp_path}"]
 
     assert cli.main([*command, *prefix, "--", "literal-symbol"]) == 0
@@ -173,7 +173,7 @@ def test_genuine_target_before_separator_keeps_working(monkeypatch, tmp_path, co
 @pytest.mark.parametrize("command", (("code", "search"), ("search", "context")))
 def test_literal_target_preserves_engine_error_and_output(monkeypatch, tmp_path, capsys, command):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch)
+    _patch_engine(monkeypatch)
 
     def fake_run(args, timeout=30.0, **kwargs):
         calls.append({"args": list(args), "timeout": timeout, "kwargs": kwargs})
@@ -199,7 +199,7 @@ def test_literal_target_preserves_engine_error_and_output(monkeypatch, tmp_path,
 @pytest.mark.parametrize("tail", ("empty", "symbol", "target"))
 def test_target_cannot_consume_separator_as_value(monkeypatch, tmp_path, capsys, command, tail):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     arguments = {"empty": [], "symbol": ["literal-symbol"], "target": [f"--target={tmp_path}"]}[tail]
 
     assert cli.main([*command, "--target", "--", *arguments]) == 2
@@ -210,7 +210,7 @@ def test_target_cannot_consume_separator_as_value(monkeypatch, tmp_path, capsys,
 
 def test_equals_target_accepts_directory_named_separator(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     (tmp_path / "--").mkdir()
     monkeypatch.chdir(tmp_path)
 
@@ -227,7 +227,7 @@ def test_equals_target_accepts_directory_named_separator(monkeypatch, tmp_path):
 
 def test_target_maps_to_engine_cwd_and_is_not_forwarded(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", "callers", "brigade.cli.main", "--target", str(tmp_path)])
 
@@ -238,7 +238,7 @@ def test_target_maps_to_engine_cwd_and_is_not_forwarded(monkeypatch, tmp_path):
 
 def test_target_equals_form_and_leading_position(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", "sync", f"--target={tmp_path}"])
 
@@ -249,7 +249,7 @@ def test_target_equals_form_and_leading_position(monkeypatch, tmp_path):
 
 def test_target_missing_value_reports_branded_usage(monkeypatch, capsys):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", "sync", "--target"])
 
@@ -262,7 +262,7 @@ def test_target_missing_value_reports_branded_usage(monkeypatch, capsys):
 
 def test_target_must_be_a_directory(monkeypatch, tmp_path, capsys):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
     missing = tmp_path / "nope"
 
     rc = cli.main(["code", "callers", "x", "--target", str(missing)])
@@ -274,7 +274,7 @@ def test_target_must_be_a_directory(monkeypatch, tmp_path, capsys):
 
 def test_search_alias_accepts_target_too(monkeypatch, tmp_path):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["search", "impact", "brigade.cli.main", "--target", str(tmp_path)])
 
@@ -288,7 +288,7 @@ def test_search_alias_accepts_target_too(monkeypatch, tmp_path):
 
 def test_engine_usage_lines_are_rebranded_on_stderr(monkeypatch, capsys):
     stderr = "error: unexpected argument '--bogus' found\n\nUsage: graphtrail sync [OPTIONS] [ROOT]\n\nFor more information, try '--help'.\n"
-    _patch_graphtrail(monkeypatch, stderr=stderr)
+    _patch_engine(monkeypatch, stderr=stderr)
 
     cli.main(["code", "sync", "--bogus"])
 
@@ -308,9 +308,34 @@ def test_engine_usage_lines_are_rebranded_on_stdout(monkeypatch, capsys):
     assert capsys.readouterr().out == "Usage: brigade code callers [OPTIONS] <SYMBOL>\n"
 
 
+def test_canonical_engine_usage_lines_are_rebranded(monkeypatch, capsys):
+    stderr = "Usage: brigade-code-graph sync [OPTIONS] [ROOT]\nUsage: brigade-code-graph-mcp\n"
+    _patch_engine(monkeypatch, stderr=stderr)
+
+    cli.main(["code", "sync", "--bogus"])
+
+    # Only the query CLI's usage is rewritten; other program names pass through.
+    assert capsys.readouterr().err == "Usage: brigade code sync [OPTIONS] [ROOT]\nUsage: brigade-code-graph-mcp\n"
+
+
+def test_legacy_entry_point_notice_is_dropped_but_variable_warnings_stay(monkeypatch, capsys):
+    stderr = (
+        "warning: graphtrail is deprecated and will be removed in v0.33.0; use brigade-code-graph\n"
+        "warning: BRIGADE_X is deprecated and will be removed in v0.33.0; set BRIGADE_Y instead\n"
+        "error: boom\n"
+    )
+    _patch_engine(monkeypatch, stderr=stderr)
+
+    cli.main(["code", "sync"])
+
+    assert capsys.readouterr().err == (
+        "warning: BRIGADE_X is deprecated and will be removed in v0.33.0; set BRIGADE_Y instead\nerror: boom\n"
+    )
+
+
 def test_non_usage_engine_output_passes_through_verbatim(monkeypatch, capsys):
     calls: list[dict] = []
-    _patch_graphtrail(monkeypatch, run_calls=calls)
+    _patch_engine(monkeypatch, run_calls=calls)
 
     rc = cli.main(["code", "search", "receipts", "--json"])
 

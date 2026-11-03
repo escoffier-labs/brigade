@@ -1,6 +1,6 @@
-"""Thin GraphTrail command facade.
+"""Thin code graph command facade.
 
-GraphTrail remains the owner of graph storage, discovery, and command output.
+The code graph engine remains the owner of graph storage, discovery, and command output.
 Brigade only resolves its executable and relays an argv list across the process
 boundary.
 """
@@ -32,9 +32,14 @@ _LONG_OPERATION_TIMEOUT_ENVS = {
     "evaluate": "BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS",
 }
 
-# The engine's usage text names its own binary; the branded surface should
-# point users back at the command they actually typed.
-_ENGINE_USAGE_LINE = re.compile(r"(?m)^(\s*)Usage: graphtrail\b")
+# The engine's usage text names its own binary (canonical or legacy entry point);
+# the branded surface should point users back at the command they actually typed.
+_ENGINE_USAGE_LINE = re.compile(r"(?m)^(\s*)Usage: (?:brigade-code-graph|graphtrail)(?![\w-])")
+# From R5 on, a legacy entry point announces its own deprecation on stderr. The user
+# typed `brigade code`, not the engine's name, so the notice is not theirs to act on.
+_ENGINE_DEPRECATION_LINE = re.compile(
+    r"(?m)^warning: \S+ is deprecated and will be removed in v\S+; use brigade-code-graph\n"
+)
 
 
 def _configured_timeout(environment_variable: str, default: float) -> float | None:
@@ -78,11 +83,11 @@ def _extract_target(arguments: Sequence[str]) -> tuple[Path | None, list[str], s
 
 
 def _rebrand(text: str) -> str:
-    return _ENGINE_USAGE_LINE.sub(r"\1Usage: brigade code", text)
+    return _ENGINE_USAGE_LINE.sub(r"\1Usage: brigade code", _ENGINE_DEPRECATION_LINE.sub("", text))
 
 
 def run(verb: str, arguments: Sequence[str]) -> int:
-    """Run one GraphTrail command and relay its output and exit status."""
+    """Run one code graph engine command and relay its output and exit status."""
 
     target, forwarded, target_error = _extract_target(arguments)
     if target_error is not None:

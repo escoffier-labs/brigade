@@ -21,6 +21,80 @@ use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
 };
 
+/// Entry point identity (docs/phase-engine-rename.md, "Entry point identity").
+///
+/// Each binary takes its identity from the basename of `argv[0]`, with `.exe` stripped. A legacy
+/// name selects the legacy identity; any other name, including a renamed copy, selects the
+/// canonical one. Identity sets the program name for clap (version banner, usage and help) and the
+/// MCP `serverInfo.name`. A legacy entry point writes nothing extra on stderr: Brigade still runs
+/// it until R5 installs the canonical executables, so the deprecation line lands in R5
+/// (docs/phase-engine-rename.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Identity {
+    /// Program name for the version banner, usage and help text.
+    pub program: &'static str,
+    /// MCP `serverInfo.name`.
+    pub server_name: &'static str,
+}
+
+pub const CLI_IDENTITY: Identity = Identity {
+    program: "brigade-code-graph",
+    server_name: "brigade-code-graph",
+};
+pub const MCP_IDENTITY: Identity = Identity {
+    program: "brigade-code-graph-mcp",
+    server_name: "brigade-code-graph",
+};
+// Legacy entry points, accepted for the rename window (v0.31, v0.32).
+const LEGACY_CLI_IDENTITY: Identity = Identity {
+    program: "graphtrail",
+    server_name: "graphtrail",
+};
+const LEGACY_MCP_IDENTITY: Identity = Identity {
+    program: "graphtrail-mcp",
+    server_name: "graphtrail",
+};
+
+impl Identity {
+    /// Identity of the query CLI invoked as `argv0`.
+    pub fn cli(argv0: Option<&std::ffi::OsStr>) -> Self {
+        Self::select(argv0, LEGACY_CLI_IDENTITY, CLI_IDENTITY)
+    }
+
+    /// Identity of the MCP server invoked as `argv0`.
+    pub fn mcp(argv0: Option<&std::ffi::OsStr>) -> Self {
+        Self::select(argv0, LEGACY_MCP_IDENTITY, MCP_IDENTITY)
+    }
+
+    fn select(argv0: Option<&std::ffi::OsStr>, legacy: Self, canonical: Self) -> Self {
+        let invoked = argv0
+            .and_then(|argv0| std::path::Path::new(argv0).file_name())
+            .map(|name| name.to_string_lossy().to_ascii_lowercase());
+        let invoked = invoked
+            .as_deref()
+            .map(|name| name.strip_suffix(".exe").unwrap_or(name));
+        if invoked == Some(legacy.program) {
+            legacy
+        } else {
+            canonical
+        }
+    }
+}
+
+/// Parse the process arguments under the identity of the invoked entry point.
+pub fn parse_invoked() -> Cli {
+    use clap::{CommandFactory, FromArgMatches};
+
+    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    let identity = Identity::cli(args.first().map(std::ffi::OsString::as_os_str));
+    let command = Cli::command()
+        .name(identity.program)
+        .bin_name(identity.program)
+        .display_name(identity.program);
+    let matches = command.get_matches_from(args);
+    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
+}
+
 #[derive(Parser)]
 #[command(version, about)]
 pub struct Cli {
@@ -195,7 +269,7 @@ enum Command {
         json: bool,
     },
     /// Diff two indexed graph DBs (before -> after) into added/removed/changed
-    /// nodes and edges. Produce the DBs with `graphtrail --db X sync <root>`.
+    /// nodes and edges. Produce the DBs with `brigade-code-graph --db X sync <root>`.
     Diff {
         #[arg(long, value_name = "PATH")]
         before: PathBuf,
@@ -231,7 +305,7 @@ enum Command {
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { root } => {
-            let db_path = db_path(cli.db, &root);
+            let db_path = db_path(cli.db, &root)?;
             let conn = open_db(&db_path)?;
             init_schema(&conn)?;
             println!("initialized {}", db_path.display());
@@ -239,7 +313,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Command::Sync { root, force } => {
             let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             crate::store::guard_unsafe_root(&canonical_root)?;
-            let db_path = db_path(cli.db, &root);
+            let db_path = db_path(cli.db, &root)?;
             let conn = open_db(&db_path)?;
             init_schema(&conn)?;
             let summary = sync_repo_force(&conn, &root, force)?;
@@ -384,7 +458,7 @@ pub fn run(cli: Cli) -> Result<()> {
             if evidence {
                 crate::adapters::miseledger::emit_deprecation_warning();
             }
-            let db_path = default_query_db_path(cli.db.clone());
+            let db_path = default_query_db_path(cli.db.clone())?;
             let conn = open_read_only(&db_path)?;
             #[cfg(feature = "codesearch")]
             let pack = if blend_code_search {
@@ -614,7 +688,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         }
         Command::Doctor { root, json } => {
-            let db_path = db_path(cli.db, &root);
+            let db_path = db_path(cli.db, &root)?;
             if !db_path.exists() {
                 let report = missing_db_report(&root, &db_path);
                 print_doctor_report(&report, json)?;
@@ -648,7 +722,7 @@ pub fn run(cli: Cli) -> Result<()> {
             graph_weight,
             json,
         } => {
-            let db_path = default_query_db_path(cli.db);
+            let db_path = default_query_db_path(cli.db)?;
             let conn = open_read_only(&db_path)?;
             let repo_root = repo_root_for_codesearch(&db_path);
             let client = crate::adapters::codesearch::CodeSearchClient::from_env_for_repo(
@@ -690,29 +764,13 @@ pub fn run(cli: Cli) -> Result<()> {
     Ok(())
 }
 
-fn default_query_db_path(explicit: Option<PathBuf>) -> PathBuf {
-    explicit.unwrap_or_else(|| PathBuf::from(".graphtrail/graphtrail.db"))
+fn default_query_db_path(explicit: Option<PathBuf>) -> Result<PathBuf> {
+    db_path(explicit, std::path::Path::new(""))
 }
 
 #[cfg(feature = "codesearch")]
 fn repo_root_for_codesearch(db: &std::path::Path) -> Option<PathBuf> {
-    repo_from_graphtrail_db(db).or_else(|| std::env::current_dir().ok())
-}
-
-#[cfg(feature = "codesearch")]
-fn repo_from_graphtrail_db(db: &std::path::Path) -> Option<PathBuf> {
-    let graph_dir = db.parent()?;
-    if graph_dir.file_name()? != ".graphtrail" {
-        return None;
-    }
-    let parent = graph_dir.parent()?;
-    // A relative default like `.graphtrail/graphtrail.db` has an empty parent here;
-    // the repo root in that case is the current directory.
-    if parent.as_os_str().is_empty() {
-        std::env::current_dir().ok()
-    } else {
-        Some(parent.to_path_buf())
-    }
+    crate::store::repo_root_for_db(db).or_else(|| std::env::current_dir().ok())
 }
 
 fn print_json_or_symbols(json: bool, rows: &[SearchRow]) -> Result<()> {
@@ -1072,26 +1130,6 @@ fn render_evidence_links(task: &str, pack: &ContextPack, limit: usize) -> Result
 mod tests {
     use super::*;
     use crate::store::SCHEMA_VERSION;
-
-    #[cfg(feature = "codesearch")]
-    #[test]
-    fn repo_from_graphtrail_db_resolves_relative_default_to_current_dir() {
-        let root = repo_from_graphtrail_db(std::path::Path::new(".graphtrail/graphtrail.db"));
-        assert_eq!(root, std::env::current_dir().ok());
-    }
-
-    #[cfg(feature = "codesearch")]
-    #[test]
-    fn repo_from_graphtrail_db_resolves_absolute_paths_and_rejects_other_dirs() {
-        let root = repo_from_graphtrail_db(std::path::Path::new(
-            "/tmp/example/.graphtrail/graphtrail.db",
-        ));
-        assert_eq!(root, Some(std::path::PathBuf::from("/tmp/example")));
-        assert_eq!(
-            repo_from_graphtrail_db(std::path::Path::new("/tmp/example/other/graphtrail.db")),
-            None
-        );
-    }
 
     fn sample_pack() -> ContextPack {
         ContextPack {

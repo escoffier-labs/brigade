@@ -13,20 +13,27 @@ use anyhow::Result;
 use notify::{RecursiveMode, Watcher};
 
 use crate::extractors::language_for;
+use crate::store::db::INDEX_DIR;
 use crate::store::{db_path, init_schema, open_db, sync_repo};
 
 /// True when a filesystem event path could change what sync would index.
 ///
 /// Directory events pass (a rename can move many source files at once);
-/// everything under `.git/` and `.graphtrail/` is noise, including the sync
-/// lock and the database itself, which would otherwise loop the watcher.
+/// everything under `.git/` and either index directory (`.brigade/code-graph/`
+/// or the legacy `.graphtrail/`) is noise, including the sync lock and the
+/// database itself, which would otherwise loop the watcher.
 pub fn is_relevant_change(root: &Path, path: &Path) -> bool {
     let rel = path.strip_prefix(root).unwrap_or(path);
+    let mut previous: Option<std::borrow::Cow<'_, str>> = None;
     for component in rel.components() {
         let name = component.as_os_str().to_string_lossy();
-        if name == ".git" || name == ".graphtrail" {
+        if name == ".git"
+            || name == crate::store::db::LEGACY_INDEX_DIR
+            || (previous.as_deref() == Some(INDEX_DIR[0]) && name == INDEX_DIR[1])
+        {
             return false;
         }
+        previous = Some(name);
     }
     // Extension says source file; no extension usually says directory.
     match rel.extension() {
@@ -42,7 +49,7 @@ pub fn is_relevant_change(root: &Path, path: &Path) -> bool {
 pub fn watch(explicit_db: Option<PathBuf>, root: &Path, debounce: Duration) -> Result<()> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     crate::store::guard_unsafe_root(&root)?;
-    let db = db_path(explicit_db, &root);
+    let db = db_path(explicit_db, &root)?;
     let conn = open_db(&db)?;
     init_schema(&conn)?;
 
@@ -120,5 +127,10 @@ mod tests {
             Path::new("/repo/.graphtrail/graphtrail.db.lock")
         ));
         assert!(!is_relevant_change(root, Path::new("/repo/.git/index")));
+        assert!(!is_relevant_change(
+            root,
+            Path::new("/repo/.brigade/code-graph/code-graph.db-wal")
+        ));
+        assert!(is_relevant_change(root, Path::new("/repo/.brigade/app.py")));
     }
 }

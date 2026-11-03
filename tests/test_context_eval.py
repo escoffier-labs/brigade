@@ -29,7 +29,7 @@ def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict) -> dict
         "before_snapshot_path": str(snapshot),
     }
 
-    def fake_run(binary, db_path, command, *extra, timeout, json_output=False, stage=None):
+    def fake_run(binary, db_path, command, *extra, timeout, json_output=False, stage=None, cwd=None):
         stdout = json.dumps(diff_payload) if command == "diff" else ""
         return {"argv": [command], "returncode": 0, "stdout": stdout, "stderr": "", "timed_out": False}
 

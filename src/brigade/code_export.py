@@ -14,7 +14,7 @@ from collections import defaultdict
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import context_cmd, proc
+from . import context_cmd, engine_paths, proc
 from .localio import utc_now_iso_z
 
 SCHEMA = "brigade.code-graph-export.v1"
@@ -54,7 +54,10 @@ def export_payload(
     if binary is None:
         return _error_payload(target, "graphtrail is not installed; run `brigade setup`")
 
-    db_path = target / ".graphtrail" / "graphtrail.db"
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError as exc:
+        return _error_payload(target, str(exc))
     if not db_path.is_file():
         return _error_payload(target, "code graph is not indexed; run `brigade code sync`")
 

@@ -1173,8 +1173,58 @@ try {
         Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe
     }
 
-    $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
-    if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
+    # The managed bin holds only the legacy code graph names until setup
+    # installs canonical executables. A source install also runs the
+    # same-commit canonical builds against the same index, so both names stay
+    # covered.
+    $codeGraphExe = $graphtrailExe
+    $codeGraphMcpExe = $graphtrailMcpExe
+    if ($InstallMode -eq "source") {
+        $codeGraphExe = Join-Path $EngineBinDir "brigade-code-graph.exe"
+        $codeGraphMcpExe = Join-Path $EngineBinDir "brigade-code-graph-mcp.exe"
+        foreach ($exe in @($codeGraphExe, $codeGraphMcpExe)) {
+            if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
+                throw "same-commit engine missing: $exe"
+            }
+        }
+    }
+
+    $mcpRequest = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    foreach ($mcpExe in @(@($codeGraphMcpExe, $graphtrailMcpExe) | Select-Object -Unique)) {
+        $mcpName = [IO.Path]::GetFileNameWithoutExtension($mcpExe)
+        # Feed the request from a file so stdin holds exactly one UTF-8 line, with no
+        # BOM and no PowerShell pipe encoding in between.
+        $mcpIn = Join-Path $acceptRoot "$mcpName-initialize.json"
+        $mcpOut = Join-Path $acceptRoot "$mcpName-initialize.out"
+        $mcpErr = Join-Path $acceptRoot "$mcpName-initialize.err"
+        [IO.File]::WriteAllText($mcpIn, $mcpRequest + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        $mcpProc = Start-Process -FilePath $mcpExe -RedirectStandardInput $mcpIn -RedirectStandardOutput $mcpOut `
+            -RedirectStandardError $mcpErr -NoNewWindow -Wait -PassThru
+        if ($mcpProc.ExitCode -ne 0) {
+            $mcpStderr = Get-BoundedStderr -Path $mcpErr
+            throw "$mcpName absolute-path smoke failed (exit $($mcpProc.ExitCode)): $mcpStderr"
+        }
+        $mcpText = ([IO.File]::ReadAllText($mcpOut)).Trim()
+        if ($mcpText -notmatch '"jsonrpc"') {
+            throw "$mcpName absolute-path smoke returned no JSON-RPC response: $mcpText"
+        }
+        # Each entry point reports its own server name.
+        $expectedName = if ($mcpName -eq "graphtrail-mcp") { "graphtrail" } else { "brigade-code-graph" }
+        # Read the initialize reply by id rather than assuming it is the first line.
+        $serverName = $null
+        foreach ($line in ($mcpText -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed.StartsWith("{")) { continue }
+            try { $message = $trimmed | ConvertFrom-Json } catch { continue }
+            if ($message.id -eq 1 -and $null -ne $message.result) {
+                $serverName = $message.result.serverInfo.name
+                break
+            }
+        }
+        if ($serverName -ne $expectedName) {
+            throw "$mcpName serverInfo.name is '$serverName', expected '$expectedName'; output: $mcpText"
+        }
+    }
     & $sessionfindExe --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
     if ($requiredIds -contains "agent-notify") {
@@ -1348,19 +1398,30 @@ finally:
         & brigade memory care import-issues --target $workRepo
         if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
 
-        $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
-        Write-Step "graphtrail sync"
-        & $graphtrailExe --db $dbPath sync $workRepo
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail sync failed" }
+        # No --db: a fresh repository gets the canonical index. A released
+        # engine older than the rename still writes the legacy one.
+        $dbPath = Join-Path $workRepo ".brigade\code-graph\code-graph.db"
+        Write-Step "code graph sync"
+        Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+            & $codeGraphExe sync $workRepo
+        } -FailureMessage "code graph sync failed" | Out-Null
+        if ($InstallMode -ne "source" -and -not (Test-Path $dbPath)) {
+            $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
+        }
         if (-not (Test-Path $dbPath)) {
-            throw "graphtrail database missing at $dbPath"
+            throw "code graph database missing at $dbPath"
         }
 
-        Write-Step "graphtrail callers query"
-        $callersOutput = & $graphtrailExe --db $dbPath callers greet 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail callers greet failed" }
-        if ($callersOutput -notmatch "call_greet") {
-            throw "graphtrail callers greet missing call_greet edge: $callersOutput"
+        # A source install queries the one index under both names.
+        foreach ($callersExe in @(@($codeGraphExe, $graphtrailExe) | Select-Object -Unique)) {
+            $callersName = [IO.Path]::GetFileNameWithoutExtension($callersExe)
+            Write-Step "$callersName callers query"
+            $callersOutput = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
+                & $callersExe --db $dbPath callers greet
+            } -FailureMessage "$callersName callers greet failed" | Out-String
+            if ($callersOutput -notmatch "call_greet") {
+                throw "$callersName callers greet missing call_greet edge: $callersOutput"
+            }
         }
 
         $acceptanceMarker = "brigadewinacceptance$([guid]::NewGuid().ToString('N').Substring(0, 8))"
