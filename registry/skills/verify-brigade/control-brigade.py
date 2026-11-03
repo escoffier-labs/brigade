@@ -89,6 +89,119 @@ FEED_SAMPLE = {
     ],
 }
 
+# Guard parity fixture. Every trigger token is split into fragments so this
+# tracked file never holds a contiguous match for the content-guard job; the
+# drive joins them at run time and writes the result into the temp target.
+# All values are fake: "example-user" and "Example User" are not accounts,
+# 555 is the guard's own example-number prefix, and the 012 area code cannot
+# exist (NANP area codes never start with 0 or 1).
+_GP_LH = "local" + "host"
+_GP_HOME = "/ho" + "me"
+_GP_ROOT = "/ro" + "ot"
+_GP_WIN = "C:\\" + "Users"
+_GP_HOST = "build.inter" + "nal"
+_GP_TAIL = "-67" + "89"
+GUARD_PARITY_FIXTURE_LINES = (
+    "guard parity fixture: synthetic values only",
+    # example-phone-555: (?<!\w) lookbehind, positive
+    "desk 555-010-0199 ext",
+    # example-phone-555: a word character before the token, and one after it
+    "id x555-010-0199 and 555-010-01990",
+    # localhost-bare: (?<![\w.-]) lookbehind, positive
+    "serve on " + _GP_LH + " today",
+    # localhost-bare: word character before, hyphen after
+    "no x" + _GP_LH + " or " + _GP_LH + "-dev",
+    # home-path: (?<![\w.-]) lookbehind, positive
+    "notes at " + _GP_HOME + "/example-user/notes.txt",
+    # home-path: word character before /home, and the tool-dir lookahead
+    "no /srv" + _GP_HOME + "/example-user or " + _GP_HOME + "/.cache/tool",
+    # us-phone: (?<!\w) lookbehind, dashed and parenthesized positives
+    "dial 012-345" + _GP_TAIL + " or (012) 345" + _GP_TAIL,
+    # us-phone: underscore is a word character before the token
+    "ref_012-345" + _GP_TAIL + " stays",
+    # private-hostname: (?<![\w.-]) lookbehind, positive in prose
+    "reach " + _GP_HOST + " for docs",
+    # private-hostname: hyphen before, and a further dotted label after
+    "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
+    # windows-home-path: matched quotes, (?P=windows_quote) bounds a spaced path
+    'open "' + _GP_WIN + '\\Example User\\My Docs\\a b.txt" now',
+    # windows-home-path: unquoted branch of the (?(windows_quote)...) conditional
+    "open " + _GP_WIN + "\\example-user\\notes.txt now",
+    # windows-home-path: mismatched quotes (observed: no finding, see feature doc)
+    'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
+    # windows-home-path: word character before the drive letter
+    "no X" + _GP_WIN + "\\example-user",
+    # root-path: matched quotes, (?P=root_quote) bounds a spaced path
+    "edit '" + _GP_ROOT + "/My Files/a b.txt' now",
+    # root-path: unquoted branch
+    "edit " + _GP_ROOT + "/.config/tool.json now",
+    # root-path: mismatched quotes fall back to the unquoted branch
+    'edit "' + _GP_ROOT + "/My Files/a b.txt' now",
+    # root-path: word character before /root
+    "no /srv" + _GP_ROOT + "/project",
+)
+GUARD_PARITY_FIXTURE = "\n".join(GUARD_PARITY_FIXTURE_LINES) + "\n"
+
+# Every category redacts, so no finding blocks and every match is replaced in
+# the redact output. The 555 rule carries a built-in warn override, so it is
+# set explicitly.
+GUARD_PARITY_POLICY = {
+    "name": "verify-brigade-guard-parity",
+    "defaults": {
+        category: "redact"
+        for category in ("infrastructure", "secret", "pii", "personal", "business", "attribution", "tooling")
+    },
+    "rules": {"example-phone-555": "redact"},
+}
+
+# Golden findings, pasted from `brigade guard scan --json` on main b18e6f51d:
+# (line, column, start, end, rule_id, action). `start`/`end` are 0-based
+# offsets into the fixture with `end` exclusive; `line`/`column` are 1-based.
+# The drive also checks each reported `match` equals fixture[start:end].
+GUARD_PARITY_GOLDEN_FINDINGS = (
+    (2, 6, 49, 61, "example-phone-555", "redact"),
+    (4, 10, 110, 119, "localhost-bare", "redact"),
+    (6, 10, 166, 194, "home-path", "redact"),
+    (8, 6, 247, 259, "us-phone", "redact"),
+    (8, 22, 263, 277, "us-phone", "redact"),
+    (10, 7, 307, 321, "private-hostname", "redact"),
+    (12, 7, 382, 419, "windows-home-path", "redact"),
+    (13, 6, 430, 461, "windows-home-path", "redact"),
+    (16, 7, 539, 561, "root-path", "redact"),
+    (17, 6, 572, 595, "root-path", "redact"),
+    (18, 7, 606, 614, "root-path", "redact"),
+)
+
+# Golden redact output, pasted from `brigade guard redact` on main b18e6f51d.
+# Lines the guard leaves alone reuse the fixture fragments so this file stays
+# clean under content-guard.
+GUARD_PARITY_GOLDEN_REDACTED = (
+    "\n".join(
+        (
+            "guard parity fixture: synthetic values only",
+            "desk <EXAMPLE_PHONE> ext",
+            "id x555-010-0199 and 555-010-01990",
+            "serve on [redacted-service] today",
+            "no x" + _GP_LH + " or " + _GP_LH + "-dev",
+            "notes at <PRIVATE_HOME_PATH>",
+            "no /srv" + _GP_HOME + "/example-user or " + _GP_HOME + "/.cache/tool",
+            "dial <PRIVATE_PHONE> or <PRIVATE_PHONE>",
+            "ref_012-345" + _GP_TAIL + " stays",
+            "reach [redacted-host] for docs",
+            "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
+            'open "<PRIVATE_HOME_PATH>" now',
+            "open <PRIVATE_HOME_PATH> now",
+            'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
+            "no X" + _GP_WIN + "\\example-user",
+            "edit '[redacted-root-path]' now",
+            "edit [redacted-root-path] now",
+            "edit \"[redacted-root-path] Files/a b.txt' now",
+            "no /srv" + _GP_ROOT + "/project",
+        )
+    )
+    + "\n"
+)
+
 
 class HelperError(Exception):
     """The helper cannot proceed; report it instead of driving anything."""
@@ -318,14 +431,26 @@ def run(
     name: str,
     env_extra: dict[str, str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    stdin_text: str | None = None,
 ) -> dict:
-    """Run one command, capture it to the state root, and return the record."""
+    """Run one command, capture it to the state root, and return the record.
+
+    `stdin_text` is fed to the command; without it stdin is inherited, as before.
+    """
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
     started = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, check=False)
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+            input=stdin_text,
+        )
     except FileNotFoundError as exc:
         raise HelperError(f"command not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired:
@@ -893,6 +1018,107 @@ def cmd_handoff_lint(args: argparse.Namespace) -> int:
     )
 
 
+def guard_parity_findings(payload: dict) -> tuple[list[list], list[dict]]:
+    """Normalize `guard scan --json` findings; also return any whose match disagrees with its offsets."""
+    findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+    observed: list[list] = []
+    inconsistent: list[dict] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            inconsistent.append({"finding": finding, "reason": "not an object"})
+            continue
+        row = [finding.get(key) for key in ("line", "column", "start", "end", "rule_id", "action")]
+        observed.append(row)
+        start, end = finding.get("start"), finding.get("end")
+        sliced = GUARD_PARITY_FIXTURE[start:end] if isinstance(start, int) and isinstance(end, int) else None
+        if finding.get("match") != sliced:
+            inconsistent.append({"finding": row, "reason": "match is not fixture[start:end]"})
+    return observed, inconsistent
+
+
+def cmd_guard_parity(args: argparse.Namespace) -> int:
+    """Scan and redact the bundled lookbehind/backreference fixture; compare to the goldens."""
+    root = state_root(args)
+    target = guard_target(Path(args.target), root)
+    work = target / "guard-parity"
+    fixture, policy, in_place = work / "fixture.txt", work / "policy.json", work / "in-place.txt"
+    brigade = brigade_args(args)
+    scan_argv = brigade + ["guard", "scan", "--policy", str(policy), "--json", str(fixture)]
+    redact_argv = brigade + ["guard", "redact", "--policy", str(policy), str(fixture)]
+    stdin_argv = brigade + ["guard", "redact", "--policy", str(policy)]
+    in_place_argv = brigade + ["guard", "redact", "--policy", str(policy), "--in-place", str(in_place)]
+    if args.dry_run:
+        return emit(
+            {
+                "action": "guard-parity",
+                "ok": True,
+                "dry_run": True,
+                "target": str(target),
+                "would_write": [str(fixture), str(policy), str(in_place)],
+                "would_run": [scan_argv, redact_argv, stdin_argv, in_place_argv],
+            }
+        )
+    work.mkdir(exist_ok=True)
+    fixture.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
+    in_place.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
+    policy.write_text(json.dumps(GUARD_PARITY_POLICY, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    scan = run(scan_argv, root=root, name="guard-scan", timeout=args.timeout)
+    redact = run(redact_argv, root=root, name="guard-redact", timeout=args.timeout)
+    stdin = run(stdin_argv, root=root, name="guard-redact-stdin", timeout=args.timeout, stdin_text=GUARD_PARITY_FIXTURE)
+    rewrite = run(in_place_argv, root=root, name="guard-redact-in-place", timeout=args.timeout)
+
+    payload = scan["json"] if isinstance(scan["json"], dict) else {}
+    observed, inconsistent = guard_parity_findings(payload)
+    golden = [list(row) for row in GUARD_PARITY_GOLDEN_FINDINGS]
+    mismatches: list[dict] = []
+    for name, record in (("scan", scan), ("redact", redact), ("redact-stdin", stdin), ("redact-in-place", rewrite)):
+        if record["returncode"] != 0:
+            mismatches.append({"check": f"{name} exit code", "expected": 0, "observed": record["returncode"]})
+    if observed != golden:
+        mismatches.append(
+            {
+                "check": "scan findings",
+                "missing": [row for row in golden if row not in observed],
+                "unexpected": [row for row in observed if row not in golden],
+            }
+        )
+    mismatches += [{"check": "scan match", **item} for item in inconsistent]
+    for name, text in (("redact stdout", redact["stdout"]), ("redact stdin stdout", stdin["stdout"])):
+        if text != GUARD_PARITY_GOLDEN_REDACTED:
+            mismatches.append({"check": name, "expected": GUARD_PARITY_GOLDEN_REDACTED, "observed": text})
+    # stdout is decoded text, so the on-disk rewrite is the byte-for-byte check.
+    written = in_place.read_bytes()
+    if written != GUARD_PARITY_GOLDEN_REDACTED.encode("utf-8"):
+        mismatches.append(
+            {
+                "check": "redact --in-place bytes",
+                "expected": GUARD_PARITY_GOLDEN_REDACTED,
+                "observed": written.decode("utf-8", "replace"),
+            }
+        )
+    ok = not mismatches
+    return emit(
+        {
+            "action": "guard-parity",
+            "ok": ok,
+            "dry_run": False,
+            "target": str(target),
+            "fixture": str(fixture),
+            "policy": str(policy),
+            "rule_ids": sorted({row[4] for row in observed if isinstance(row[4], str)}),
+            "findings": observed,
+            "redacted": redact["stdout"],
+            "mismatches": mismatches,
+            "scan": slim(scan),
+            "redact": slim(redact),
+            "redact_stdin": slim(stdin),
+            "redact_in_place": slim(rewrite),
+        },
+        0 if ok else 3,
+    )
+
+
 def cmd_evidence(args: argparse.Namespace) -> int:
     """Copy captures and receipts somewhere cleanup never looks."""
     root = state_root(args)
@@ -1118,6 +1344,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--content-guard", action="store_true", help="Add the leak and injection scan.")
     p.add_argument("paths", nargs="*", help="Explicit handoff files. Defaults to the pending inbox.")
     p.set_defaults(func=cmd_handoff_lint)
+
+    p = sub.add_parser("guard-parity", help="Scan and redact the guard parity fixture against the goldens.")
+    add_target(p)
+    add_dry_run(p, "Report the commands without writing the fixture.")
+    p.set_defaults(func=cmd_guard_parity)
 
     p = sub.add_parser("evidence", help="Copy captures and receipts to a named evidence dir.")
     p.add_argument("--target", default=None, help="Temp target whose receipts to copy.")
