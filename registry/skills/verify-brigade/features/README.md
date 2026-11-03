@@ -17,8 +17,19 @@ exact helper calls (`Driving it with control-brigade`), and what bites
 | Grok Bot job queue and feed | [run-cloud-grokbot-queue.md](run-cloud-grokbot-queue.md) | `grokbot-feed`, `grokbot-status` |
 | Handoff inbox lint | [handoff-lint.md](handoff-lint.md) | `handoff-lint` |
 | Guard scan and redact parity | [guard-parity.md](guard-parity.md) | `guard-parity` |
+| Run plan preview | [run-dry-run.md](run-dry-run.md) | none yet (paused) |
 
-Checkout-level CLI surfaces (pytest selectors, not helper drives). Names
+Each file opens with a status header: `active`, `paused` (with a reason and
+what unpauses it), or `unreachable` (with what is missing). Paused today:
+`handoff-lint.md`, `run-dry-run.md`, `grokbot-pack-lifecycle.md`, and
+`run-cloud-grokbot-queue.md`; each header says why. Run
+`control-brigade.py audit` to compare the map with the live CLI, and follow
+[MAINTENANCE.md](MAINTENANCE.md) when the CLI surface changes. That page also
+holds the coverage and honesty rules and the list of known gaps.
+
+Stand-in proofs: checkout-level pytest selectors, not helper drives. A
+passing selector here is not a drive of the command (see
+[MAINTENANCE.md](MAINTENANCE.md#honesty-rules)). Names
 confirmed under `tests/` on this checkout; the skill body table is the
 copy agents should cite.
 
