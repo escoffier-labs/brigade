@@ -281,6 +281,32 @@ def test_cursor_never_renames_user_authored_legacy_entries(tmp_path, monkeypatch
     assert "brigade-code-graph" in live
 
 
+def test_cursor_rename_keeps_legacy_key_when_owned_canonical_entry_was_edited(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: tmp_path)
+    assert _cursor_install() == 0
+    cursor = tmp_path / ".cursor"
+    mcp_path = _downgrade_to_legacy_keys(cursor)
+    # Brigade also owns a canonical entry that the user has since edited, so the
+    # rename cannot install its replacement.
+    mcp = json.loads(mcp_path.read_text())
+    state_path = cursor / "brigade" / "install-state.json"
+    state = json.loads(state_path.read_text())
+    original = {"command": "brigade-code-graph-mcp"}
+    mcp["mcpServers"]["brigade-code-graph"] = {"command": "user-edited"}
+    state["mcp"]["brigade-code-graph"] = cursor_user_cmd._digest_value(original)
+    mcp_path.write_text(json.dumps(mcp))
+    state_path.write_text(json.dumps(state))
+    capsys.readouterr()
+
+    assert _cursor_install("--rename-legacy-servers") == 1
+    payload = json.loads(capsys.readouterr().out)
+    live = json.loads(mcp_path.read_text())["mcpServers"]
+    assert LEGACY_GRAPH in live
+    assert live["brigade-code-graph"] == {"command": "user-edited"}
+    assert any(item.get("name") == LEGACY_GRAPH for item in payload["conflicts"])
+    assert LEGACY_GRAPH in json.loads(state_path.read_text())["mcp"]
+
+
 # --------------------------------------------------------------------------- #
 # brigade mcp sync: notice by default, opt-in rename of the catalog key
 # --------------------------------------------------------------------------- #
@@ -331,6 +357,79 @@ def test_mcp_sync_rename_flag_refuses_name_filter(tmp_path, capsys):
     rc = mcp_cmd.sync(target=tmp_path, name=LEGACY_GRAPH, write=True, rename_legacy_servers=True, json_output=True)
     assert rc == 2
     assert "--rename-legacy-servers cannot be combined with --name" in capsys.readouterr().out
+
+
+def test_mcp_sync_rename_keeps_working_legacy_entry_when_canonical_key_is_foreign(tmp_path, capsys):
+    _catalog_with_legacy_graph(tmp_path)
+    assert mcp_cmd.sync(target=tmp_path, harness="claude", write=True, json_output=True) == 0
+    native = tmp_path / ".mcp.json"
+    doc = json.loads(native.read_text())
+    foreign = {"command": "someone-elses-graph"}
+    doc["mcpServers"]["brigade-code-graph"] = foreign
+    native.write_text(json.dumps(doc))
+    before = native.read_text()
+    capsys.readouterr()
+
+    rc = mcp_cmd.sync(target=tmp_path, harness="claude", write=True, rename_legacy_servers=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 1
+    # The legacy integration keeps working, and the catalog key does not move.
+    assert native.read_text() == before
+    assert set(mcp_cmd.load_canonical(tmp_path)[0]) == {LEGACY_GRAPH}
+    conflict = [i for i in payload["items"] if i["server"] == "brigade-code-graph"]
+    assert [i["action"] for i in conflict] == ["conflict"]
+    assert any(f"kept server '{LEGACY_GRAPH}'" in note and "claude" in note for note in payload["notes"])
+
+
+def test_mcp_sync_rename_one_harness_at_a_time_ends_with_canonical_only(tmp_path, capsys):
+    _catalog_with_legacy_graph(tmp_path)
+    for harness_name in ("claude", "cursor"):
+        assert mcp_cmd.sync(target=tmp_path, harness=harness_name, write=True, json_output=True) == 0
+    claude, cursor = tmp_path / ".mcp.json", tmp_path / ".cursor" / "mcp.json"
+    capsys.readouterr()
+
+    assert (
+        mcp_cmd.sync(target=tmp_path, harness="claude", write=True, rename_legacy_servers=True, json_output=True) == 0
+    )
+    capsys.readouterr()
+    assert set(mcp_cmd.load_canonical(tmp_path)[0]) == {"brigade-code-graph"}
+    assert set(json.loads(claude.read_text())["mcpServers"]) == {"brigade-code-graph"}
+
+    # A plain sync points at the leftover instead of silently leaving it.
+    assert mcp_cmd.sync(target=tmp_path, harness="cursor", write=False, json_output=True) == 0
+    notes = json.loads(capsys.readouterr().out)["notes"]
+    assert any(f"cursor still has Brigade's '{LEGACY_GRAPH}' entry" in note for note in notes)
+
+    assert (
+        mcp_cmd.sync(target=tmp_path, harness="cursor", write=True, rename_legacy_servers=True, json_output=True) == 0
+    )
+    capsys.readouterr()
+    assert set(json.loads(cursor.read_text())["mcpServers"]) == {"brigade-code-graph"}
+    assert set(json.loads(claude.read_text())["mcpServers"]) == {"brigade-code-graph"}
+    ownership = json.loads(mcp_cmd.state_path(tmp_path).read_text())["ownership"]
+    assert LEGACY_GRAPH not in ownership["cursor"][".cursor/mcp.json"]
+
+
+def test_mcp_sync_rename_leftover_stays_when_its_harness_has_a_foreign_canonical_key(tmp_path, capsys):
+    _catalog_with_legacy_graph(tmp_path)
+    for harness_name in ("claude", "cursor"):
+        assert mcp_cmd.sync(target=tmp_path, harness=harness_name, write=True, json_output=True) == 0
+    assert (
+        mcp_cmd.sync(target=tmp_path, harness="claude", write=True, rename_legacy_servers=True, json_output=True) == 0
+    )
+    cursor = tmp_path / ".cursor" / "mcp.json"
+    doc = json.loads(cursor.read_text())
+    doc["mcpServers"]["brigade-code-graph"] = {"command": "someone-elses-graph"}
+    cursor.write_text(json.dumps(doc))
+    before = cursor.read_text()
+    capsys.readouterr()
+
+    rc = mcp_cmd.sync(target=tmp_path, harness="cursor", write=True, rename_legacy_servers=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert cursor.read_text() == before
+    assert any(f"kept the cursor entry '{LEGACY_GRAPH}'" in note for note in payload["notes"])
 
 
 @pytest.fixture(autouse=True)

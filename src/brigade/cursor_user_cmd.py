@@ -484,23 +484,6 @@ def _plan_mcp(
             detail,
         )
     items: list[dict[str, Any]] = []
-    if rename_legacy:
-        for canonical, legacy in _ENGINE_SERVER_KEYS:
-            fingerprint = state["mcp"].get(legacy)
-            if fingerprint is None or legacy not in servers:
-                continue
-            item = {"surface": "mcp-config", "path": str(path), "name": legacy}
-            if canonical in servers and canonical not in state["mcp"]:
-                item.update(
-                    status="conflict", action="preserve", detail=f"'{canonical}' already exists and is not Brigade's"
-                )
-            elif _digest_value(servers[legacy]) == fingerprint:
-                item.update(status="renamed", action="remove")
-            else:
-                item.update(
-                    status="conflict", action="preserve", detail="owned legacy server was edited; left in place"
-                )
-            items.append(item)
     for name, desired in _mcp_servers(state, rename_legacy=rename_legacy).items():
         desired_fp = _digest_value(desired)
         live = servers.get(name)
@@ -522,6 +505,34 @@ def _plan_mcp(
                 "desired_fingerprint": desired_fp,
             }
         )
+    if rename_legacy:
+        # A pristine owned legacy entry is removed only when its canonical
+        # replacement installs; any conflict on the canonical key keeps it working.
+        installable = {item["name"] for item in items if item["status"] != "conflict"}
+        renames: list[dict[str, Any]] = []
+        for canonical, legacy in _ENGINE_SERVER_KEYS:
+            fingerprint = state["mcp"].get(legacy)
+            if fingerprint is None or legacy not in servers:
+                continue
+            item = {"surface": "mcp-config", "path": str(path), "name": legacy}
+            if canonical in servers and canonical not in state["mcp"]:
+                item.update(
+                    status="conflict", action="preserve", detail=f"'{canonical}' already exists and is not Brigade's"
+                )
+            elif canonical not in installable:
+                item.update(
+                    status="conflict",
+                    action="preserve",
+                    detail=f"'{canonical}' cannot be installed; owned legacy server left in place",
+                )
+            elif _digest_value(servers[legacy]) == fingerprint:
+                item.update(status="renamed", action="remove")
+            else:
+                item.update(
+                    status="conflict", action="preserve", detail="owned legacy server was edited; left in place"
+                )
+            renames.append(item)
+        items[:0] = renames
     return items, doc, None
 
 

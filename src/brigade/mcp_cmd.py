@@ -210,6 +210,33 @@ def _legacy_server_renames(servers: dict[str, CanonicalServer]) -> dict[str, str
     return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new not in servers}
 
 
+def _legacy_leftovers(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    """Legacy keys whose canonical key is already in the catalog.
+
+    A provider entry Brigade still owns under one of these keys is what a rename left
+    behind in a harness the rename did not cover. Cleanup is derived from the catalog
+    and ownership state, so each harness can be renamed in its own run.
+    """
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if new in servers and old not in servers}
+
+
+def _renamed_servers(servers: dict[str, CanonicalServer], renames: dict[str, str]) -> dict[str, CanonicalServer]:
+    return {renames.get(key, key): replace(server, name=renames.get(key, key)) for key, server in servers.items()}
+
+
+def _blocked_legacy_cleanup(
+    planned: list[tuple[str, list[dict[str, Any]]]], leftovers: dict[str, str]
+) -> dict[str, set[str]]:
+    """Per harness, the legacy keys whose canonical replacement this sync cannot install."""
+    blocked: dict[str, set[str]] = {}
+    for harness_name, items in planned:
+        conflicted = {item["server"] for item in items if item["action"] == "conflict"}
+        names = {old for old, new in leftovers.items() if new in conflicted}
+        if names:
+            blocked[harness_name] = names
+    return blocked
+
+
 def _legacy_server_note(old: str, new: str) -> str:
     return (
         f"note: server '{old}' uses a legacy key; its canonical key is '{new}'. Rename it with "
@@ -1264,33 +1291,84 @@ def build_sync_plan(
             errors=errors,
         )
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
-    prune_names: frozenset[str] = frozenset()
-    if rename_legacy_servers and renames:
-        servers = {
-            renames.get(key, key): replace(server, name=renames.get(key, key)) for key, server in servers.items()
-        }
-        prune_names = frozenset(renames)
-    else:
+    state = copy.deepcopy(_load_state(target))
+    if not rename_legacy_servers:
         renames = {}
         notes.extend(_legacy_server_note(old, new) for old, new in _legacy_server_renames(servers).items())
-    state = copy.deepcopy(_load_state(target))
-    planned = [
-        (
-            h,
-            _plan_for_harness(
-                target,
-                h,
-                servers,
-                state,
-                force=force,
-                prune=prune,
-                adopt=adopt,
-                name_filter=name,
-                prune_names=prune_names,
-            ),
+
+    def _plan_all(
+        catalog_renames: dict[str, str], blocked: dict[str, set[str]]
+    ) -> tuple[dict[str, CanonicalServer], dict[str, str], list[tuple[str, list[dict[str, Any]]]]]:
+        planning = _renamed_servers(servers, catalog_renames)
+        leftovers = _legacy_leftovers(planning) if rename_legacy_servers else {}
+        return (
+            planning,
+            leftovers,
+            [
+                (
+                    h,
+                    _plan_for_harness(
+                        target,
+                        h,
+                        planning,
+                        state,
+                        force=force,
+                        prune=prune,
+                        adopt=adopt,
+                        name_filter=name,
+                        prune_names=frozenset(leftovers) - blocked.get(h, set()),
+                    ),
+                )
+                for h in harnesses
+            ],
         )
-        for h in harnesses
-    ]
+
+    planning_servers, leftovers, planned = _plan_all(renames, {})
+    # A legacy projection is removed, and the catalog key renamed, only where the
+    # canonical replacement installs. A conflict on the canonical key keeps the
+    # working legacy entry and, for a catalog rename, keeps the catalog key too.
+    blocked = _blocked_legacy_cleanup(planned, leftovers)
+    if blocked:
+        held = {old for names in blocked.values() for old in names if old in renames}
+        first_pass = dict(planned)
+        renames = {old: new for old, new in renames.items() if old not in held}
+        planning_servers, leftovers, planned = _plan_all(renames, blocked)
+        for h, items in planned:
+            for old in sorted(blocked.get(h, set())):
+                new = LEGACY_SERVER_KEYS[old]
+                reasons = "; ".join(
+                    item["detail"] or item["status"]
+                    for item in first_pass[h]
+                    if item["server"] == new and item["action"] == "conflict"
+                )
+                if old in held:
+                    # The canonical key is not in the catalog after the hold, so the
+                    # replanned items no longer mention it; carry its conflict forward.
+                    items.extend(
+                        {key: value for key, value in item.items() if key != "_fidelity"}
+                        for item in first_pass[h]
+                        if item["server"] == new and item["action"] == "conflict"
+                    )
+                    notes.append(
+                        f"note: kept server '{old}': its canonical key '{new}' cannot be installed in {h} "
+                        f"({reasons}); the catalog key and the {h} entry were left unchanged"
+                    )
+                else:
+                    notes.append(
+                        f"note: kept the {h} entry '{old}': its canonical key '{new}' cannot be installed "
+                        f"there ({reasons})"
+                    )
+    servers = planning_servers
+    if not rename_legacy_servers:
+        leftover_keys = _legacy_leftovers(servers)
+        notes.extend(
+            f"note: {h} still has Brigade's '{item['server']}' entry; the catalog key is now "
+            f"'{leftover_keys[item['server']]}'. Replace it with "
+            f"`brigade mcp sync --rename-legacy-servers --write --harness {h}`"
+            for h, items in planned
+            for item in items
+            if item["server"] in leftover_keys and item["status"] == "orphan"
+        )
     exposures = _user_stdio_exposures(planned, target)
     gated: set[str] = set()
     gate_error: str | None = None

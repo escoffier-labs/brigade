@@ -53,7 +53,7 @@ def test_code_graph_summary_parses_and_trims(tmp_target, monkeypatch):
     }
 
     def fake_run(args, **kw):
-        assert args[0] == "/x/graphtrail"
+        assert args[0] == "/x/brigade-code-graph"
         assert "context" in args and "--json" in args
         return proc.Result(code=0, stdout=json.dumps(pack), stderr="")
 
