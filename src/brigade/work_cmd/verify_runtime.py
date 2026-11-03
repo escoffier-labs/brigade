@@ -15,6 +15,11 @@ from pathlib import Path
 from typing import Any
 
 from .. import proc
+from ..verify_process import (  # noqa: F401  (re-exported for callers of this module)
+    _ACTIVE_VERIFY_PROCESS,
+    _VerifyProcessSignals,
+    _verify_process_signals,
+)
 from . import verify_reaper
 
 _VERIFY_CANCELED_RC = 130
@@ -46,48 +51,6 @@ class _VerifyCancellation:
 
 
 _ACTIVE_VERIFY_CANCEL: ContextVar[_VerifyCancellation | None] = ContextVar("verify_cancellation", default=None)
-
-
-class _VerifyProcessSignals:
-    """Retain caught cancellation only for an explicitly owned CLI lifetime."""
-
-    def __init__(self) -> None:
-        self.handlers: dict[int, tuple[Any, Any]] = {}
-        self.ignored: set[int] = set()
-        self.finished = False
-
-    def finish(self) -> None:
-        # CPython resets Python handlers to SIG_DFL during finalization, but
-        # preserves SIG_IGN. Do this only after main and its spawn work finish.
-        # Final shutdown callbacks must not spawn children after this boundary.
-        for signum, (_, handler) in self.handlers.items():
-            if signal.getsignal(signum) is handler:
-                signal.signal(signum, signal.SIG_IGN)
-                self.ignored.add(signum)
-        self.finished = True
-
-    def restore(self) -> None:
-        if not self.finished:
-            for signum, (previous, handler) in self.handlers.items():
-                current = signal.getsignal(signum)
-                if current is handler or (signum in self.ignored and current == signal.SIG_IGN):
-                    signal.signal(signum, previous)
-
-
-_ACTIVE_VERIFY_PROCESS: ContextVar[_VerifyProcessSignals | None] = ContextVar("verify_process", default=None)
-
-
-@contextmanager
-def _verify_process_signals():
-    owner = _VerifyProcessSignals()
-    token = _ACTIVE_VERIFY_PROCESS.set(owner)
-    try:
-        yield owner
-    finally:
-        try:
-            owner.restore()
-        finally:
-            _ACTIVE_VERIFY_PROCESS.reset(token)
 
 
 @contextmanager
