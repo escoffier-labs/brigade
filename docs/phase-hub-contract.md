@@ -353,5 +353,6 @@ actions, sealed envelopes, and long polls) pin these as well:
 17. **The waiter cap is per recipient.** The third concurrent long poll for
     one inbox is `429 message_wait_capped`. The hub also caps waiters at 8
     fleet-wide (a quarter of its 32 handler threads) and at 2 per source
-    address, with loopback exempt from the source cap. The drive pins only the
-    per-recipient cap.
+    address, with loopback exempt from the source cap. Connections are capped
+    at 32 handlers, and at 8 per source address except a loopback peer of a
+    loopback bind (#2229). The drive pins only the per-recipient cap.

@@ -8,6 +8,8 @@ services:
     image: localhost/brigade-fleet-hub:0.28.0-e6009f6
     restart: unless-stopped
     init: true
+    # Every client arrives from the bridge gateway, one source capped at 8
+    # concurrent connections. See docs/runbooks/fleet-hub-containers.md.
     ports:
       - "127.0.0.1:3774:3774"
     secrets:

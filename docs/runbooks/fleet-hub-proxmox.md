@@ -193,6 +193,8 @@ tailscale serve status
 
 Tailscale Serve provides the HTTPS MagicDNS origin `https://<HUB_TAILNET_FQDN>` and proxies it to the local service. The startup log should name `127.0.0.1:3774` and `/var/lib/brigade/fleet-hub.db`. Keep the Serve proxy on this same CT; do not forward to the Tailscale interface or another host.
 
+Every request reaches the hub from Tailscale Serve on `127.0.0.1`, so the hub cannot tell clients apart by address. With a loopback bind, the hub treats a loopback peer as that front: the front is exempt from the 8-connection per-source cap and is bounded by the 32-handler global cap instead. Long-poll message waiters hold at most 8 of those handlers, so sends, claims and event reports keep at least 24. Brigade releases without #2229 apply the per-source cap to the front, so the ninth concurrent request from the whole fleet is closed without a response and clients treat the hub as unreachable and spool. Run no untrusted process on this CT: anything that can reach the loopback port shares the front's exemption.
+
 ## 6. Verify health and authenticated status
 
 Health does not require the bearer token:
