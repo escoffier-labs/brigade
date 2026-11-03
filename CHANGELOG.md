@@ -7,7 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Add a read-only `grokbot-memory` connector pack for Grok Bot on the Dot connector code. It registers only `memory_search` and `memory_card`, has its own runtime schema and Hub principal `agent:grokbot-memory`, and runs no inbox poll. Its results carry `content_trust: "untrusted"`, and a prompt-load scan (guard default rules, invisible and bidi characters, instruction-override heuristics) replaces any hit with `{card_id, blocked: <rule id>}`. Dot and Duet `memory_search` matches and `memory_card` results now carry `content_trust: "untrusted"` too. See `docs/grokbot-memory-connector.md`.
 - Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
 - Guard can use an optional local `brigade-guard` PCRE2 JIT binary for large ASCII inputs, with Python regex fallback and unchanged policy decisions.
@@ -24,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Keep reflection duplicate groups intact after reviewed claim anchoring, while preserving literal suffixes in excluded Markdown and original source hashes.
 - Add the bundled `fleet-hub-upgrade` skill: a generic Hub-first upgrade checklist covering the node-to-Hub payload and `SCHEMA_VERSION` pre-flight diff, snapshot-and-switch Hub deploy with rollback, and node verification (#2167).
 
+- Add a read-only `grokbot-memory` connector pack for Grok Bot on the Dot connector code. It registers only `memory_search` and `memory_card`, has its own runtime schema and Hub principal `agent:grokbot-memory`, and runs no inbox poll. Its results carry `content_trust: "untrusted"`, and a prompt-load scan (guard default rules, invisible and bidi characters, instruction-override heuristics) replaces any hit with `{card_id, blocked: <rule id>}`. Dot and Duet `memory_search` matches and `memory_card` results now carry `content_trust: "untrusted"` too. See `docs/grokbot-memory-connector.md`.
 - Refuse memory proposals whose retained source cards point `superseded_by` at a source deleted by a duplicate merge, including during live review and apply validation.
 - Removed Jules cloud provider
 - Count a T3 thread and its precisely linked Claude or Codex presence once in Fleet session lists and machine totals. Publish presence from the session root and stop renewing legacy tool-attributed checkout records. Clear stale provider links after completed lookups while retaining them when lookups are unavailable.
