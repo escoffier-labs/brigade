@@ -157,6 +157,50 @@ def test_guard_parity_refuses_a_target_outside_the_state_root(tmp_path):
     assert list(stranger.iterdir()) == []
 
 
+def test_guard_parity_refuses_a_missing_target(tmp_path):
+    root = tmp_path / "state"
+    (root / "targets").mkdir(parents=True)
+
+    code, payload = control("guard-parity", "--target", str(root / "targets" / "absent"), root=root)
+    assert code == 1, payload
+    assert payload["ok"] is False
+    assert "not an existing directory" in payload["error"], payload
+
+
+def test_guard_parity_refuses_a_symlinked_work_dir(tmp_path):
+    root = tmp_path / "state"
+    target = root / "targets" / "linked"
+    target.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (target / "guard-parity").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks are not available on this platform")
+
+    code, payload = control("guard-parity", "--target", str(target), root=root)
+    assert code == 1, payload
+    assert "refusing to write through" in payload["error"], payload
+    assert list(outside.iterdir()) == [], "the drive wrote through the symlink"
+
+
+def test_guard_parity_refuses_a_symlinked_output_file(tmp_path):
+    root = tmp_path / "state"
+    work = root / "targets" / "linked-file" / "guard-parity"
+    work.mkdir(parents=True)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n", encoding="utf-8")
+    try:
+        (work / "fixture.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not available on this platform")
+
+    code, payload = control("guard-parity", "--target", str(work.parent), root=root)
+    assert code == 1, payload
+    assert "refusing to write through" in payload["error"], payload
+    assert outside.read_text(encoding="utf-8") == "keep\n"
+
+
 def test_guard_parity_feature_is_registered():
     skill_dir = Path(__file__).resolve().parent.parent / "registry" / "skills" / "verify-brigade"
     features = (skill_dir / "features" / "README.md").read_text(encoding="utf-8")

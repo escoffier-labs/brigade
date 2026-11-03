@@ -1036,10 +1036,29 @@ def guard_parity_findings(payload: dict) -> tuple[list[list], list[dict]]:
     return observed, inconsistent
 
 
+def guard_parity_workdir(target: Path) -> Path:
+    """Create `<target>/guard-parity`, refusing any path that could redirect a write.
+
+    `guard_target` already resolved the target itself, so only the work
+    directory and the three files the drive writes are left to check.
+    """
+    work = target / "guard-parity"
+    if work.is_symlink() or (work.exists() and not work.is_dir()):
+        raise HelperError(f"refusing to write through {work}: it is a symlink or not a directory")
+    work.mkdir(exist_ok=True)
+    for name in ("fixture.txt", "policy.json", "in-place.txt"):
+        path = work / name
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise HelperError(f"refusing to write through {path}: it is a symlink or not a regular file")
+    return work
+
+
 def cmd_guard_parity(args: argparse.Namespace) -> int:
     """Scan and redact the bundled lookbehind/backreference fixture; compare to the goldens."""
     root = state_root(args)
     target = guard_target(Path(args.target), root)
+    if not target.is_dir():
+        raise HelperError(f"target {target} is not an existing directory; create one with new-target first")
     work = target / "guard-parity"
     fixture, policy, in_place = work / "fixture.txt", work / "policy.json", work / "in-place.txt"
     brigade = brigade_args(args)
@@ -1058,7 +1077,7 @@ def cmd_guard_parity(args: argparse.Namespace) -> int:
                 "would_run": [scan_argv, redact_argv, stdin_argv, in_place_argv],
             }
         )
-    work.mkdir(exist_ok=True)
+    guard_parity_workdir(target)
     fixture.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
     in_place.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
     policy.write_text(json.dumps(GUARD_PARITY_POLICY, indent=2, sort_keys=True) + "\n", encoding="utf-8")
