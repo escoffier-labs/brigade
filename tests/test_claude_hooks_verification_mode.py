@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from pathlib import Path
 
 import pytest
@@ -38,6 +39,11 @@ def repos(tmp_path: Path, monkeypatch, capsys) -> dict[str, Path]:
     }
 
 
+def _sh(path: Path) -> str:
+    """A path as a bash command would carry it: forward slashes, shell-quoted (Windows paths too)."""
+    return shlex.quote(path.as_posix())
+
+
 def _bash(event: str, start: Path, command: str):
     return runtime.handle_payload(
         event,
@@ -56,18 +62,18 @@ def _denied(result) -> bool:
 
 
 def test_enforced_workspace_cd_into_yolo_repo_is_allowed(repos) -> None:
-    command = f"cd {repos['yolo']} && pytest -q"
+    command = f"cd {_sh(repos['yolo'])} && pytest -q"
     assert not _denied(_bash("PreToolUse", repos["enforced"], command))
     assert _bash("PostToolUseFailure", repos["enforced"], command) is None
 
 
 def test_yolo_repo_cd_into_enforced_repo_is_denied(repos) -> None:
-    result = _bash("PreToolUse", repos["yolo"], f"cd {repos['enforced']} && pytest -q")
+    result = _bash("PreToolUse", repos["yolo"], f"cd {_sh(repos['enforced'])} && pytest -q")
     assert _denied(result)
 
 
 def test_enforced_workspace_cd_into_enforced_repo_is_denied(repos) -> None:
-    assert _denied(_bash("PreToolUse", repos["enforced"], f"cd {repos['other']} && pytest -q"))
+    assert _denied(_bash("PreToolUse", repos["enforced"], f"cd {_sh(repos['other'])} && pytest -q"))
 
 
 def test_plain_check_follows_the_starting_directory(repos) -> None:
@@ -78,9 +84,9 @@ def test_plain_check_follows_the_starting_directory(repos) -> None:
 def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
     for command in (
         "cd $REPO_DIR && pytest -q",
-        f"cd {repos['plain']} && pytest -q",
-        f"(cd {repos['yolo']} && pytest -q)",
-        f"cd {repos['yolo']} || true; pytest -q",
+        f"cd {_sh(repos['plain'])} && pytest -q",
+        f"(cd {_sh(repos['yolo'])} && pytest -q)",
+        f"cd {_sh(repos['yolo'])} || true; pytest -q",
     ):
         # An enforced start stays enforced, and a yolo start is not newly denied.
         assert _denied(_bash("PreToolUse", repos["enforced"], command)), command
@@ -89,17 +95,17 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
 
 def test_a_skippable_cd_does_not_move_the_check(repos) -> None:
     # The cd is skipped when `false` fails, so pytest may run in the enforced start.
-    assert _denied(_bash("PreToolUse", repos["enforced"], f"false && cd {repos['yolo']}; pytest -q"))
+    assert _denied(_bash("PreToolUse", repos["enforced"], f"false && cd {_sh(repos['yolo'])}; pytest -q"))
 
 
 def test_a_preceding_background_job_does_not_detach_the_cd(repos) -> None:
     # `&` backgrounds only `sleep`; the cd and pytest run in the foreground.
-    assert not _denied(_bash("PreToolUse", repos["enforced"], f"sleep 1 & cd {repos['yolo']} && pytest -q"))
-    assert _denied(_bash("PreToolUse", repos["yolo"], f"sleep 1 & cd {repos['enforced']} && pytest -q"))
+    assert not _denied(_bash("PreToolUse", repos["enforced"], f"sleep 1 & cd {_sh(repos['yolo'])} && pytest -q"))
+    assert _denied(_bash("PreToolUse", repos["yolo"], f"sleep 1 & cd {_sh(repos['enforced'])} && pytest -q"))
 
 
 def test_post_failure_follows_the_verification_target(repos) -> None:
-    command = f"cd {repos['enforced']} && pytest -q"
+    command = f"cd {_sh(repos['enforced'])} && pytest -q"
     result = _bash("PostToolUseFailure", repos["yolo"], command)
     assert result is not None and "brigade work verify run" in result["hookSpecificOutput"]["additionalContext"]
 
@@ -129,15 +135,15 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
 )
 def test_verifier_cwds(repos, template: str, expected: list) -> None:
     names = {"yolo": repos["yolo"], "other": repos["other"], "start": repos["enforced"]}
-    command = template.format(yolo=repos["yolo"], other=repos["other"])
+    command = template.format(yolo=_sh(repos["yolo"]), other=_sh(repos["other"]))
     want = [names[item] if item else None for item in expected]
     assert verification_mode.verifier_cwds(command, repos["enforced"]) == want
 
 
 def test_every_verification_in_a_command_must_be_yolo(repos) -> None:
-    mixed = f"cd {repos['yolo']} && pytest -q && cd {repos['enforced']} && ruff check ."
+    mixed = f"cd {_sh(repos['yolo'])} && pytest -q && cd {_sh(repos['enforced'])} && ruff check ."
     assert not verification_mode.verification_in_yolo(mixed, str(repos["yolo"]), repos["yolo"])
-    both = f"cd {repos['enforced']} && cd {repos['yolo']} && pytest -q"
+    both = f"cd {_sh(repos['enforced'])} && cd {_sh(repos['yolo'])} && pytest -q"
     assert verification_mode.verification_in_yolo(both, str(repos["enforced"]), repos["enforced"])
 
 
