@@ -110,6 +110,9 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         "cd {yolo} && env -C {enforced} bash -c 'pytest -q'",
         "cd {yolo} && cd .. && pytest -q",
         "cd {yolo}/.. && pytest -q",
+        "cd {yolo} && eval 'cd {enforced}' && pytest -q",
+        "cd {yolo} && source ./env.sh && pytest -q",
+        "cd yolo && pytest -q",
     ],
 )
 def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, template: str) -> None:
@@ -133,7 +136,7 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
         ("cd {yolo} && pytest -q", ["yolo"]),
         ("cd {yolo}; cd {other} && pytest -q", [None]),
         ("cd {yolo} && pytest -q && cd {other} && ruff check .", [None]),
-        ("cd {yolo} && pytest -q && bash -c 'cd {other} && ruff check .'", ["yolo", "other"]),
+        ("cd {yolo} && pytest -q && ruff check .", ["yolo", "yolo"]),
         ("cd {yolo}/.. && pytest -q", [None]),
         ("cd {yolo} && cd .. && pytest -q", [None]),
         ("bash -c 'cd {yolo} && pytest -q'", ["yolo"]),
@@ -144,7 +147,8 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
         ("false || cd {yolo}; pytest -q", [None]),
         ("true && cd {yolo} && pytest -q", [None]),
         ("true && cd {yolo} && pytest -q; ruff check .", [None]),
-        ("cd {yolo} && bash -c 'pytest -q'", ["yolo"]),
+        ("cd {yolo} && bash -c 'pytest -q'", [None]),
+        ("cd {yolo} && echo hi && pytest -q", [None]),
         ("cd {yolo} && echo $(pytest -q)", [None]),
         ("cd {yolo} || exit 1; pytest -q", [None]),
         ("cd $DIR && pytest -q", [None]),
@@ -161,11 +165,18 @@ def test_verifier_cwds(repos, template: str, expected: list) -> None:
     assert verification_mode.verifier_cwds(command, repos["enforced"]) == want
 
 
+def test_a_dot_slash_cd_into_a_child_yolo_repo_is_allowed(repos, capsys) -> None:
+    # A bare `cd child` may go through CDPATH, but `cd ./child` never does.
+    _wired(repos["enforced"] / "child", "yolo", capsys)
+    assert not _denied(_bash("PreToolUse", repos["enforced"], "cd ./child && pytest -q"))
+    assert _denied(_bash("PreToolUse", repos["enforced"], "cd child && pytest -q"))
+
+
 def test_every_verification_in_a_command_must_be_yolo(repos) -> None:
-    mixed = f"cd {_sh(repos['enforced'])} && pytest -q && bash -c 'cd {_sh(repos['yolo'])} && ruff check .'"
-    assert not verification_mode.verification_in_yolo(mixed, str(repos["yolo"]), repos["yolo"])
-    both = f"cd {_sh(repos['yolo'])} && pytest -q && bash -c 'ruff check .'"
-    assert verification_mode.verification_in_yolo(both, str(repos["enforced"]), repos["enforced"])
+    into_enforced = f"cd {_sh(repos['enforced'])} && pytest -q && ruff check ."
+    assert not verification_mode.verification_in_yolo(into_enforced, str(repos["yolo"]), repos["yolo"])
+    into_yolo = f"cd {_sh(repos['yolo'])} && pytest -q && ruff check ."
+    assert verification_mode.verification_in_yolo(into_yolo, str(repos["enforced"]), repos["enforced"])
 
 
 def test_missing_cwd_falls_back_to_the_handled_root(repos) -> None:

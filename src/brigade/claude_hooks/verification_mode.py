@@ -55,26 +55,36 @@ def _plain_and_chain(command: str, segments: list[list[str]], separators: list[s
     )
 
 
-def _single_leading_cd(segments: list[list[str]]) -> bool:
-    """True when the only directory change is one ``cd`` to a literal path, first in the chain.
+def _cd_then_checks(segments: list[list[str]]) -> bool:
+    """True when the command is one ``cd`` to an absolute literal path, then only checks.
 
-    One leading ``cd`` with no ``..`` component lands where its resolved path says:
-    there is no earlier logical directory for ``..`` to climb from, and no directory
-    stack. ``pushd``, ``popd``, a second ``cd``, or a later one are not modeled.
+    This is an allowlist, not a model of the shell. The ``cd`` comes first, names an
+    absolute or ``./`` path with no ``..`` component (so ``CDPATH`` and the logical
+    directory play no part), and every later command is a verification with no working-directory
+    option. Anything else after the ``cd``, such as ``eval``, ``source``, another ``cd``,
+    a nested shell, or an ordinary command, could change directory unseen.
     """
     rt = _rt()
-    heads = []
-    for segment in segments:
-        stripped = rt._strip_command_prefixes(segment)
-        if stripped:
-            heads.append(stripped)
-    changes = [index for index, head in enumerate(heads) if Path(head[0]).name in {"cd", "pushd", "popd"}]
-    if changes != [0] or Path(heads[0][0]).name != "cd":
+    pairs = [(segment, stripped) for segment in segments if (stripped := rt._strip_command_prefixes(segment))]
+    if not pairs or Path(pairs[0][1][0]).name != "cd":
         return False
-    args = heads[0][1:]
+    args = pairs[0][1][1:]
     if args[:1] == ["--"]:
         args = args[1:]
-    return len(args) == 1 and ".." not in Path(args[0]).parts
+    if len(args) != 1 or ".." in Path(args[0]).parts:
+        return False
+    # Bash looks a bare relative name up in CDPATH, but never an absolute path or one that
+    # starts with `./`, so only those two forms land where the walker resolves them.
+    if not (Path(args[0]).is_absolute() or args[0].startswith("./")):
+        return False
+    for segment, head in pairs[1:]:
+        if Path(head[0]).name in {"cd", "pushd", "popd"} or rt._nested_shell_script(head) is not None:
+            return False
+        if not (rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment))):
+            return False
+        if _overrides_cwd(segment):
+            return False
+    return True
 
 
 def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Path | None]:
@@ -100,7 +110,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             segments[-1].append(token)
     # Judged on token text: `(cd x`, `{ cd x`, `$(cd x` and a backtick cd hide it from a segment-head check.
     changes_directory = any(token.lstrip("({`$") in {"cd", "pushd", "popd"} for token in tokens)
-    if changes_directory and not (_plain_and_chain(command, segments, separators) and _single_leading_cd(segments)):
+    if changes_directory and not (_plain_and_chain(command, segments, separators) and _cd_then_checks(segments)):
         return [None]
     found: list[Path | None] = []
     effective = cwd
