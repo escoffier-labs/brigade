@@ -171,7 +171,9 @@ $C handoff-lint --target "$TARGET" --content-guard
 # guard scan and redact parity (lookbehind and backreference goldens)
 $C guard-parity --target "$TARGET"
 
-# Fleet Hub wire contract over HTTP (starts its own throwaway hub; no target needed)
+# Fleet Hub wire contract over HTTP (starts its own throwaway hubs, one of them on a
+# stepped clock for the expiry cases; no target needed). --write-golden re-records
+# the refusal-text and tombstone golden from the in-repo hub.
 $C hub-contract
 
 # Fleet Hub storage parity: every stored row against the golden (own hub, stepped clock)
@@ -329,8 +331,9 @@ every subcommand resolves and creates first): `new-target`, `init`, `work-verify
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
 `would_remove`, or `would_copy` list; `hub-contract` instead reports
-`would_launch` (the hub argv, or `null` for `--hub-url`) and `would_create` (the
-hub's state directory, or `null`).
+`would_launch` (the hub argv, or `null` for `--hub-url`), `would_create` (the
+hub's state directory, or `null`), and `lifecycle.would_launch` (the clocked
+hub's argv, or `null` with the reason in `lifecycle.skipped`).
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
@@ -343,7 +346,9 @@ that `--dry-run` writes nothing.
 `tests/test_verify_brigade_hub_contract.py` runs `hub-contract` against the
 in-repo hub and asserts zero mismatches, checks the covered routes against
 `docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
-prove each drift is reported.
+prove each drift is reported. `tests/test_verify_brigade_hub_lifecycle.py` runs
+a drifting hub on the drive's clock to prove a tombstone read back as sealed and
+a reworded refusal are both reported, and pins the golden comparator.
 `tests/test_verify_brigade_storage_parity.py` runs `storage-parity` in every
 profile and in a mixed-engine run, requires each to equal its golden, and
 changes one stored value at a time (a timestamp format, a JSON separator, a

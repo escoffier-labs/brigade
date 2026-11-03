@@ -55,13 +55,40 @@ change, and the hub behaviors recorded as observed live in
   a node writing for another node, a message principal without a send grant,
   and a token in the query string.
 - **Gates.** Worklore is off by default, so `/work/*` is a 404.
+- **Refusal sweep (S1b).** 60 more request-validation refusals on the covered
+  routes (`hub_contract_refusals.py`): field limits and formats on `send`,
+  `enqueued_at` parsing and its expiry and future limits, key record
+  validation, sealed envelopes without content or with a stale recipient key,
+  question arguments, principal enrollment arguments, and node, session,
+  claim and event fields. Each case pins its status; the golden pins its text.
+- **Error text (S1b).** Every response at an expected 4xx status, from the
+  core cases, the hot set, the sweep and the lifecycle cases, has its `error`,
+  `code` and `reason` (or its body, when it is not JSON) compared with
+  `hub-contract-golden.json`. The table is captured from the Python hub with
+  `--write-golden`, never copied from the hub's source. The drive's random tag
+  reads as `{tag}` and ISO timestamps as `{timestamp}`.
+- **Lifecycle (S1b).** On a second hub that reads the drive's clock
+  (`hub_contract_lifecycle.py`): messages past the 90-day retention leave
+  `list`, `count`, `sent`, `sent_lookup`, `ack` and `reply`, with the
+  boundary pinned to the second; a plaintext `reply_to` to a purged parent
+  reads null while a sealed reply keeps its parent id; a sealed message
+  acknowledged 8 days ago reads as its tombstone in `sent_lookup`, `sent` and
+  `list`, one acknowledged 6 days ago and one never acknowledged stay sealed,
+  and the 7-day boundary is pinned to the second; a `client_id` resend returns
+  the first id on day 89 and makes a new message once the first has expired;
+  a question times out at its deadline, records a late operator answer (but
+  not one at exactly the deadline), stops counting toward the two-pending
+  limit, and is gone after 90 days. The two
+  tombstones must equal the bytes Python's own purge wrote, kept in the golden.
 
-The drive runs 184 cases over 14 routes and 16 message actions. Per case it
-checks the status code, `Content-Type: application/json`, the required keys
-and their JSON types, exact text for fixed error messages and `code` values,
-and cross-response guarantees: message ids ascend, `next_cursor` is the last
-id on the page, `after` excludes ids at or below it, a retried send returns
-the first id, and a long poll returns the new message well before `wait_ms`.
+The drive runs 301 cases: 244 on the core hub over 14 routes and 16 message
+actions, and 57 lifecycle cases. Per case it checks the status code,
+`Content-Type: application/json`, the required keys and their JSON types,
+exact text for fixed error messages and `code` values, and cross-response
+guarantees: message ids ascend, `next_cursor` is the last id on the page,
+`after` excludes ids at or below it, a retried send returns the first id, and
+a long poll returns the new message well before `wait_ms`. Then 161 refusals
+and 2 tombstones are compared with the golden.
 
 ## How to get to it (user POV)
 
@@ -107,24 +134,48 @@ What the default run does:
    suffixes, then runs every case. The hub also gets
    `BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:contract-operator-<hex>`, which
    the question cases enroll.
-4. Stops the hub (its whole process group on POSIX) and prints one JSON object.
+4. Stops the hub (its whole process group on POSIX).
+5. Starts a second hub under `lifecycle/` in the same state dir with
+   `{python} {launcher} --clock-file {clock_file} -- fleet serve ...`, where
+   `{launcher}` is `hub_clock.py` (the storage parity drive's clock seam).
+   The clock starts at 2026-03-02T00:00:00Z and the drive moves it before
+   each step, out to day 91. Then it stops that hub too.
+6. Compares every refusal and both tombstones with `hub-contract-golden.json`
+   and prints one JSON object.
 
 Proof, from the helper's output:
 
 - helper exit 0, `"ok": true`, `"mismatches": []`
-- `"contract_version": 1`, `"cases_total": 184`, `"cases_failed": 0`
+- `"contract_version": 1`, `"cases_total": 301`, `"cases_failed": 0`
+- `"lifecycle": {"ran": true, "cases_total": 57, ...}`
+- `"golden": {"refusals_checked": 161, "tombstones_checked": 2, "written": false}`
 - `"covered_routes"` lists the 14 routes the inventory marks `covered`
 - `"covered_message_actions"` lists the 16 actions the inventory marks `covered`
 
 A drift is helper exit 3, `"ok": false`, and one `mismatches` entry per
 problem, each naming its `case` and `check` (`status`, `content-type`, `body`
-with a JSON `path`, or `invariant`). A hub that never answers `/health`, a
+with a JSON `path`, `invariant`, `error-text`, or `tombstone`). A hub that never answers `/health`, a
 `--hub-cmd` without `{port}`, or an unsafe `--hub-url` is helper exit 1 with an
 `error`.
 
 Observed on main `31d5c549d`: exit 0, 77 cases, `"mismatches": []`, about one
 second end to end. With the hot-set cases: exit 0, 184 cases,
 `"mismatches": []`. The long polls and a one-second lease add a few seconds.
+With S1b: exit 0, 301 cases, `"mismatches": []`, the same on a second run
+with a new random tag. Through the Rust front (`brigade-hub` from
+`engines/hub`, as the Hub CI job runs it): exit 0, 244 cases, 153 refusals
+matching the golden, lifecycle skipped.
+
+### Re-recording the golden
+
+```bash
+$C hub-contract --write-golden
+```
+
+It runs the in-repo Python hub only (`--hub-cmd`, `--hub-url` and
+`--clock-hub-cmd` are refused with it), and writes the file only when every
+case passed. Review the diff: a changed line is a change in what clients see,
+so it needs the same review as a contract change.
 
 ### Against another hub binary
 
@@ -135,6 +186,16 @@ its own word). The hub also gets the admin token as `BRIGADE_FLEET_TOKEN`.
 
 ```bash
 $C hub-contract --hub-cmd "/path/to/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}"
+```
+
+`--hub-cmd` alone skips the lifecycle cases, because they need a hub that
+reads the drive's clock, and the output says so in `lifecycle.skipped`. Give
+that hub's launch template as `--clock-hub-cmd`, with `{clock_file}` (a file
+holding one decimal epoch-seconds value, rewritten between requests) and
+`{port}`. The same template is what `storage-parity --hub-cmd` takes:
+
+```bash
+$C hub-contract --hub-cmd "..." --clock-hub-cmd "/path/to/brigade-hub --clock-file {clock_file} --host {host} --port {port} --db {db} --token-file {token_file}"
 ```
 
 To drive a hub you started yourself, pass its origin and name the variable
@@ -161,6 +222,20 @@ a second run against the same hub still passes.
   admin-write refusals into successes, `--require-sealed` rejects the
   plaintext sends, and `BRIGADE_WORKLORE_ENABLED=1` makes `/work/items` answer.
   Each one shows up as mismatches that point at the flag.
+- **The lifecycle hub is a second hub.** The core cases need real time (a
+  one-second lease, long polls), so the stepped clock gets its own hub and
+  database. `--hub-url` cannot step a running hub's clock, so it runs the
+  lifecycle cases only with `--clock-hub-cmd`.
+- **The purge batch stays under 32.** Python tombstones at most 32 sealed
+  rows per read (`PURGE_BATCH_SIZE`). The lifecycle sequence keeps two
+  eligible rows, so a hub that projects every eligible row (the Rust plan)
+  passes the same cases. A backlog above 32 is a recorded difference, tested
+  on Rust alone in S8.
+- **Refusals the sweep does not reach.** Quota refusals (1,000 unread
+  messages, 1,000 sends a day, sealed storage), refusals behind non-default
+  flags (`--require-sealed`, storage limits, `--allow-admin-writes`),
+  credential-generation races mid-request, the `events_*` actions, the
+  teammate-role refusal, and database failures (`hub database error: ...`).
 - **Long polls park on threads.** The cap case starts two `wait_ms` polls
   and probes with `wait_ms: 1` until the hub refuses a third, because nothing
   else shows that a poll is waiting. Timing checks are loose on purpose: an
@@ -181,6 +256,11 @@ a second run against the same hub still passes.
   `captures/<stamp>-hub-contract.json`, with any `token` key replaced by
   `[redacted]` and no request headers recorded. `hub.log` stays in the state
   dir, which `cleanup` removes.
+- **The golden is not derived from source.** Text that formats a value inline,
+  such as a node id or an acquired-at time, is recorded as the hub printed
+  it, with only the run's tag and timestamps replaced. The lifecycle names
+  (`lifecycle-a`, `lifecycle-b`, `agent:parity-operator`) are fixed, so their
+  text needs no placeholder.
 - **Coverage is checked three ways.** The drive's routes must equal
   `COVERED_ROUTES` in `hub_contract.py`, and its `POST /messages` actions must
   equal `COVERED_MESSAGE_ACTIONS`. The test compares both to the `covered`
