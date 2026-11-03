@@ -15,6 +15,7 @@ import pytest
 
 from brigade import engine_paths, memory_cmd, memory_proposal_v2, memory_reflect_candidates
 from tests._home import set_home
+from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
 
 LAYOUTS = ("canonical", "legacy", "both")
 BUNDLE_ID = "bundle-one"
@@ -64,6 +65,7 @@ def test_reflection_resolves_the_resolved_bundle(roots, layout):
     assert memory_reflect_candidates.evidence_bundle_path(REF) == (True, expected)
 
 
+@pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_proposal_binds_the_resolved_bundle(tmp_path, roots, layout):
     expected = _seed(roots, layout)
