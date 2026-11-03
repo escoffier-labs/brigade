@@ -2477,3 +2477,110 @@ enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
 aggregate snapshots for 400 days and purges older rows on each accepted POST.
 Opt-in usage aggregates are not available yet. Future opt-in counts will
 undercount usage.
+
+### Tier 0 diagnostic preflight
+
+Evaluate one retained reflection candidate with an optional target-relative JSON
+policy:
+
+```bash
+brigade memory reflect preflight candidate-0123456789abcdef01234567 --policy policy.json --target /tmp/example-workspace --json
+```
+
+A minimal policy enables no candidate classes:
+
+```json
+{
+  "schema": "brigade.memory-tier0-preflight-policy.v1",
+  "enabled_classes": [],
+  "minimum_evidence_ids": 3,
+  "minimum_source_groups": 2,
+  "max_changed_paths": 1,
+  "cooldown_seconds": 86400
+}
+```
+
+Only `schema` is required. Classes can be `reinforce`, `stale-newer-evidence`,
+or `duplicate`, without duplicates. Evidence floors range from 3 to 64 IDs and
+2 to 64 source groups. The changed-path cap ranges from 1 to 8 and cooldown
+from 1 to 31536000 seconds. Unknown or duplicate fields, invalid types and
+booleans used as integers are refused. Policy files are limited to 16 KiB.
+Omitting the policy reports `policy_missing` and creates nothing.
+
+The report always has `diagnostic_only: true` and `eligible: false`. Exit 0
+means the diagnostic completed with holds. Missing evidence, references rejected
+by name or evidence-root checks, and references beyond the binding window keep
+useful checks visible with a `binding_incomplete` hold and null evaluation hash.
+Exit 2 means an invalid required input or file-open error prevented evaluation.
+Unsafe links and special files also refuse. JSON and text show
+ordered gate states and sanitized reason codes without card bodies, summaries,
+diffs, raw policy or exception text. Hashes bind observed policy bytes, retained
+candidate and run inputs, source and evidence bytes, configuration, evidence log
+and the strictly composed delta. Incomplete bindings have a null evaluation hash.
+
+`delta_satisfied` describes an exact metadata delta only. Initial anchoring,
+body changes, deletions and reference rewrites require review. The blast cap
+counts actual changed paths. Current pending negative outcomes remain review
+fences, including negatives outside the newest receipt-validation window and
+cards without a valid cutoff. Three evidence IDs in two filesystem root groups
+satisfy count floors only. They cannot establish independent trusted sources.
+Contrary, review-only, unresolved and invalid current outcome references never
+count as supporting proof. The live recount applies the same classification as
+fresh reflection, so a pending `opposite-polarity`, `near-match` or
+`negative-outcome` row recorded after the candidate was retained leaves proof
+and holds the candidate with `candidate_live_evidence_requires_review`. An
+evidence ID counts only while it is a valid current citation or still has a
+live supporting ledger row. A patch-backed verify receipt's subject file is
+read through the bound snapshot, its hash is checked against those bytes, and
+the final reread and evaluation hash cover it. A mismatch with retained proof
+counters holds the candidate and leaves the floor checks unevaluated.
+
+Promotion remains held by `evidence_authority_unbound`,
+`owner_authority_unbound`, `retrieval_eval_unbound` and
+`cooldown_history_unbound`. No existing source and scan authority, explicit
+promotion-owner grant, candidate-bound retrieval evaluation or complete
+promotion-history contract clears these holds. Selection ownership, card
+trust, generic successful verification and empty ratchet history confer no
+promotion authority. The retrieval eval (`python -m brigade.memory_retrieval_eval`,
+including its `current` BM25, `bm25` and `substring` adapters) scores a checked-in
+fixture corpus and defines no workspace pass threshold, so preflight does not
+run it and `retrieval_eval_unbound` stays a hold.
+
+The report records `policy_sha256` (the SHA-256 of the observed policy bytes,
+null without a policy) and `policy_limits` (the effective classes, floors,
+changed-path cap and cooldown, defaults when no policy is given). When retained
+proof counters match the live recount, `proof_evidence_count` and
+`proof_source_group_count` show the measured values the floors compare against.
+A refused report clears both counts.
+
+Each check has a gate, a state and one reason code. A `<gate>_satisfied` code
+in the `satisfied` state is the only allowed reason. Every other code holds the
+candidate, marks a gate `not_evaluated` or `unverifiable`, or records why the
+evaluation was refused.
+
+| Gate | Reason codes |
+| --- | --- |
+| policy | `policy_satisfied`, `policy_missing`, `class_disabled`, `policy_invalid` |
+| candidate | `candidate_satisfied`, `tier_requires_review`, `candidate_evidence_requires_review`, `candidate_live_evidence_requires_review`, `candidate_proof_mismatch`, `candidate_invalid` |
+| snapshot | `snapshot_satisfied`, `base_drift`, `binding_incomplete`, `input_drift`, `evidence_window_incomplete`, `source_invalid`, `target_invalid` |
+| delta | `delta_satisfied`, `anchoring_requires_review`, `delta_requires_review`, `delta_invalid`, `blast_cap_exceeded` |
+| evidence_floor | `evidence_floor_satisfied`, `evidence_floor_unmet`, `proof_binding_incomplete` |
+| source_group_floor | `source_group_floor_satisfied`, `source_group_floor_unmet`, `proof_binding_incomplete` |
+| host | `host_satisfied`, `path_read_only` |
+| card_trust | `card_trust_satisfied`, `card_trust_unverifiable`, `card_trust_denied` |
+| evidence_authority | `evidence_authority_unbound` |
+| owner_authority | `owner_authority_unbound` |
+| retrieval_eval | `retrieval_eval_unbound` |
+| cooldown_history | `cooldown_history_unbound` |
+
+Preflight writes zero files or directories and changes no modes, including
+canonical cards and derived runs, proposals, receipts, locks, caches and trust
+events. Stdout and stderr are its only product outputs. It never runs reflection
+or applies a proposal. Descriptor reads reject unsafe links and special files.
+Cards are bounded to 256 KiB, the corpus to 1024 cards and 16 MiB, evidence to
+64 selected IDs, 4 MiB per file and 16 MiB combined before evidence hashing or
+composition. The evidence log has a 4 MiB read limit. An oversized or invalid
+log prevents evaluation. A final bounded reread detects input drift. Legacy
+readers retain the existing same-UID operator boundary. This optimistic snapshot
+check does not protect against a hostile same-UID process racing those readers,
+and the report is never a reusable approval token.
