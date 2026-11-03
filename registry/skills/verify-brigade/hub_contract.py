@@ -522,7 +522,10 @@ def _read_bounded(stream: Any, deadline: float) -> bytes:
     while True:
         if time.monotonic() > deadline:
             raise TimeoutError("the response body did not finish within the request deadline")
-        chunk = stream.read(65536)
+        # read1 returns whatever has arrived, so a hub that trickles bytes still
+        # reaches the deadline and size checks after every socket receive.
+        read = getattr(stream, "read1", None) or stream.read
+        chunk = read(65536)
         if not chunk:
             declared = getattr(stream, "headers", None) and stream.headers.get("Content-Length")
             if declared and declared.isdigit() and int(declared) != total:

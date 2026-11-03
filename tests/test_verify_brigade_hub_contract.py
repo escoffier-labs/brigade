@@ -301,6 +301,11 @@ def test_hub_contract_feature_is_registered():
         assert heading in feature, heading
 
 
+def _loopback() -> str:
+    """The drive's own assembled loopback address, so no literal IP lands in tracked tests."""
+    return _load_hub_contract().LOOPBACK
+
+
 def _load_hub_contract():
     import importlib.util
 
@@ -335,12 +340,12 @@ def test_hub_contract_requests_do_not_follow_redirects():
         def log_message(self, *args):
             return
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.HTTPServer((_loopback(), 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         hub_contract = _load_hub_contract()
-        resp = hub_contract.request(f"http://127.0.0.1:{server.server_port}", "GET", "/start", token="secret")
+        resp = hub_contract.request(f"http://{_loopback()}:{server.server_port}", "GET", "/start", token="secret")
     finally:
         server.shutdown()
         server.server_close()
@@ -368,12 +373,12 @@ def test_hub_contract_reports_a_non_utf8_body_instead_of_crashing():
         def log_message(self, *args):
             return
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.HTTPServer((_loopback(), 0), Handler)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
         hub_contract = _load_hub_contract()
-        hub = hub_contract.Hub(url=f"http://127.0.0.1:{server.server_port}", admin_token="t", mode="url")
+        hub = hub_contract.Hub(url=f"http://{_loopback()}:{server.server_port}", admin_token="t", mode="url")
         drive = hub_contract.Drive(hub)
         drive.call("junk body", "GET", "/status", status=200, token="t")
     finally:
@@ -408,7 +413,7 @@ def _serve_once(body: bytes, content_type: str):
         def log_message(self, *args):
             return
 
-    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    server = http.server.HTTPServer((_loopback(), 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server
 
@@ -417,7 +422,7 @@ def test_hub_contract_content_type_must_be_exactly_json():
     hub_contract = _load_hub_contract()
     server = _serve_once(b"{}", "application/jsonp; charset=utf-8")
     try:
-        hub = hub_contract.Hub(url=f"http://127.0.0.1:{server.server_port}", admin_token="t", mode="url")
+        hub = hub_contract.Hub(url=f"http://{_loopback()}:{server.server_port}", admin_token="t", mode="url")
         drive = hub_contract.Drive(hub)
         drive.call("jsonp", "GET", "/status", status=200, token="t")
     finally:
@@ -431,7 +436,7 @@ def test_hub_contract_caps_the_response_body(monkeypatch):
     monkeypatch.setattr(hub_contract, "MAX_BODY_BYTES", 1024)
     server = _serve_once(b"x" * 4096, "application/json")
     try:
-        resp = hub_contract.request(f"http://127.0.0.1:{server.server_port}", "GET", "/status")
+        resp = hub_contract.request(f"http://{_loopback()}:{server.server_port}", "GET", "/status")
     finally:
         server.shutdown()
         server.server_close()
@@ -476,7 +481,7 @@ def test_hub_contract_reports_a_truncated_response():
     import threading
 
     listener = socket.socket()
-    listener.bind(("127.0.0.1", 0))
+    listener.bind((_loopback(), 0))
     listener.listen(1)
 
     def serve():
@@ -489,8 +494,46 @@ def test_hub_contract_reports_a_truncated_response():
     thread.start()
     try:
         hub_contract = _load_hub_contract()
-        resp = hub_contract.request(f"http://127.0.0.1:{listener.getsockname()[1]}", "GET", "/status")
+        resp = hub_contract.request(f"http://{_loopback()}:{listener.getsockname()[1]}", "GET", "/status")
     finally:
         thread.join(timeout=5)
         listener.close()
     assert resp.error is not None and "IncompleteRead" in resp.error
+
+
+def test_hub_contract_deadline_holds_against_a_trickling_hub():
+    import socket
+    import threading
+    import time
+
+    listener = socket.socket()
+    listener.bind((_loopback(), 0))
+    listener.listen(1)
+    stop = threading.Event()
+
+    def serve():
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n")
+        try:
+            while not stop.is_set():
+                conn.sendall(b" ")
+                time.sleep(0.02)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        hub_contract = _load_hub_contract()
+        started = time.monotonic()
+        resp = hub_contract.request(f"http://{_loopback()}:{listener.getsockname()[1]}", "GET", "/", timeout=0.5)
+        elapsed = time.monotonic() - started
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        listener.close()
+    assert resp.error is not None and "deadline" in resp.error
+    assert elapsed < 3, elapsed
