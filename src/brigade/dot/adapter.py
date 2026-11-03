@@ -18,6 +18,7 @@ from .fleet_tools import FleetTools
 from .hub_inbox import HubInbox
 from .hub_tools import HubTools
 from .inbox_tools import InboxTools
+from .memory_push import MemoryPush, digest_query, inbox_query
 from .memory_tools import MemoryTools
 from .process import CommandRunner, bound_result
 from .profile import DOT, DUET_EXCLUDED_TOOLS, INBOX_TRUST_NOTICE as INBOX_TRUST_NOTICE, ConnectorProfile
@@ -26,6 +27,8 @@ from .safe_state import identity
 from .state import BridgeState, Clock, summarize_arguments, utc_now
 
 MAX_UNACKED = 1000
+# Responses that carry memory hits, and how each derives its query from its own content.
+PUSH_QUERIES = {"inbox_list": inbox_query, "fleet_digest": digest_query}
 SEND_WINDOW_SECONDS = 3600
 
 
@@ -92,6 +95,7 @@ class DotTools:
     ) -> None:
         self.runtime, self.state, self.clock, self.profile = runtime, state, clock, profile
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
+        self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push)
 
     def call(self, owner: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
@@ -130,6 +134,10 @@ class DotTools:
                         break
                 else:
                     raise DotError("bridge_unavailable")
+            if name in PUSH_QUERIES and isinstance(result, dict) and "error" not in result:
+                pushed = self.push.hits(PUSH_QUERIES[name](result))
+                if pushed is not None:
+                    result["memory_hits"] = pushed
             # Bound report data before adding the connector-owned trust metadata.
             if name == "fleet_sessions":
                 for entry in result.get("sessions", []):
