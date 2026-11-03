@@ -199,6 +199,13 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     else:
         mode_detail = "enforced: checks route through `brigade work verify run` and the Stop gate wants a receipt"
     checks = [("INFO", "work mode", mode_detail)]
+    settings = _work_settings(target)
+    for key, validate, fallback in (("mode", validate_work_mode, "enforced"), ("rails", validate_safety_rails, "on")):
+        if key in settings:
+            try:
+                validate(settings[key])
+            except ValueError:
+                checks.append(("WARN", f"work.{key}", f"invalid value ignored; using the {fallback} default"))
     if rails_enabled(target):
         if rails_off_requested(target):
             checks.append(("WARN", "safety rails", TRACKED_CONFIG_NOTE))

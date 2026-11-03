@@ -298,6 +298,42 @@ def test_non_string_rails_values_fail_safe(tmp_path: Path, value, capsys) -> Non
     capsys.readouterr()
 
 
+def test_invalid_work_mode_keeps_enforcement_in_hooks(tmp_path: Path) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("work", {})["mode"] = "typo"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    loaded = config.load_config(target)
+    assert loaded is not None and loaded.work_mode == "enforced" and loaded.safety_rails is True
+    assert work_mode.resolve_mode(target) == "enforced"
+    assert any(row[0] == "WARN" and row[1] == "work.mode" for row in work_mode.doctor_checks(target))
+
+
+def test_yolo_sessions_are_never_bypassed_even_with_stale_wiring(tmp_path: Path, capsys) -> None:
+    workspace = tmp_path / "workspace"
+    repo = _wired(workspace / "repos", name="claude")
+    (workspace / ".brigade").mkdir(parents=True)
+    (workspace / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid = "claude"\nlabel = "claude repo"\npath = "repos/claude"\nenabled = true\nexpect_brigade = true\n'
+    )
+    _unreceipted_session(repo)
+    _set_mode(repo, "yolo", capsys)
+    settings_path = repo / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text(encoding="utf-8"))
+    for groups in settings.get("hooks", {}).values():
+        for group in groups:
+            for hook in group.get("hooks", []):
+                hook["timeout"] = int(hook.get("timeout", 10)) + 1
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    payload, _ = adoption.adoption_payload(target=workspace, harnesses=["claude"])
+    assert payload is not None
+    row = payload["rows"][0]
+    assert row["state"] == "stale"
+    assert row["use"]["bypassed_session_count"] == 0
+    assert payload["denominators"]["bypassed_sessions"] == 0
+
+
 def _git_env(home: Path, shim_dir: Path) -> dict[str, str]:
     return {
         **os.environ,

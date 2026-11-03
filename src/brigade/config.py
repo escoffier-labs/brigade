@@ -247,11 +247,20 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
+    # Invalid optional work settings fall back to the enforced, rails-on defaults
+    # instead of failing the whole config: a failed load reads as "not wired" to
+    # hook target discovery, which would drop enforcement. Doctor reports them.
     work = data.get("work", {})
     if not isinstance(work, dict):
-        raise ValueError("work must be an object")
-    work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
-    safety_rails = validate_safety_rails(work.get("rails", "on"))
+        work = {}
+    try:
+        work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
+    except ValueError:
+        work_mode = DEFAULT_WORK_MODE
+    try:
+        safety_rails = validate_safety_rails(work.get("rails", "on"))
+    except ValueError:
+        safety_rails = DEFAULT_SAFETY_RAILS
     return Config(
         version=version,
         selection=sel,

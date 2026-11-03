@@ -274,13 +274,16 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
             issues.append(issue)
         use = _empty_use()
         classified_state = "error"
+    # Verification is off by choice in yolo mode, so sessions without receipts are
+    # never counted as bypassed, whatever the wiring state below reports.
+    if work_mode.is_yolo(target):
+        use = _yolo_use(use)
     if classified_state == "error":
         state = "partial"
     elif any(value == "stale" for value in wiring.values()):
         state = "stale"
     elif classified_state == "yolo":
         state = "yolo"
-        use = _yolo_use(use)
     elif classified_state == "advisory-only":
         state = "advisory-only"
     elif classified_state == "partial":
