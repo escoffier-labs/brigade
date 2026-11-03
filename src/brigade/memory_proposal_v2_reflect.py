@@ -11,10 +11,8 @@ from . import memory_proposal_v2_ops as delta
 from . import memory_reflect
 
 
-@legacy._boundary(2)
-def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str, Any]:
+def translation_payload(*, target: Path, candidate_id: str) -> dict[str, Any]:
     target = legacy._target(target)
-    legacy._reason(reason)
     candidate = memory_reflect.inspect_payload(target=target, command="show", candidate_id=candidate_id)
     run_id = None
     for run in memory_reflect._runs(target)[0]:
@@ -57,16 +55,28 @@ def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str
             ops.extend(dict(type="merge_exact_duplicates", **base, other_card=other["path"]) for other in sources[1:])
     if not ops:
         raise legacy.ProposalError("no valid delta ops remain")
-    # The candidate digest and all source bases were checked before proposing.
-    # Reviewed anchoring and evidence deltas share one exact preview and decision.
-    return v2.create_payload(
-        target=target,
+    return dict(
+        candidate=candidate,
+        run_id=run_id,
         source_paths=names,
         ops=ops,
+        expected_source_sha256={source["path"]: candidate["base_sha256"][source["id"]] for source in sources},
+        strict_ops=candidate["kind"] == "duplicate",
+    )
+
+
+@legacy._boundary(2)
+def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str, Any]:
+    target = legacy._target(target)
+    legacy._reason(reason)
+    packet = translation_payload(target=target, candidate_id=candidate_id)
+    return v2.create_payload(
+        target=target,
+        source_paths=packet["source_paths"],
+        ops=packet["ops"],
         anchor_blocks=True,
         reason=reason,
-        reflect={"run_id": run_id, "candidate_id": candidate_id},
-        expected_source_sha256={source["path"]: candidate["base_sha256"][source["id"]] for source in sources},
-        # A duplicate candidate must merge; a proposal that drops the merge would leave it open.
-        strict_ops=candidate["kind"] == "duplicate",
+        reflect={"run_id": packet["run_id"], "candidate_id": candidate_id},
+        expected_source_sha256=packet["expected_source_sha256"],
+        strict_ops=packet["strict_ops"],
     )
