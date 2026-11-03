@@ -15,7 +15,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from . import mcp_server, memory_bm25, runbook_cmd, toml_compat as tomllib, work_cmd
+from . import memory_bm25, toml_compat as tomllib
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
@@ -265,6 +265,8 @@ def _write_memory_care_runbooks(target: Path) -> int:
     Writes into a sibling temp directory first so pin-resolution failures do
     not leave a partial runbook tree behind.
     """
+    from . import runbook_cmd
+
     template_dir = template_root() / "memory-care" / "runbooks"
     dest_dir = _memory_care_runbooks_dir(target)
     temp_dir = dest_dir.parent / f".{dest_dir.name}.init-tmp"
@@ -1582,6 +1584,8 @@ def import_issues(*, target: Path, json_output: bool = False, dry_run: bool = Fa
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    from . import work_cmd
+
     return work_cmd.import_memory_care(
         target=target, queue=_queue_path(target, config), dry_run=dry_run, json_output=json_output
     )
@@ -1938,7 +1942,7 @@ def serve_mcp(
     inbox: str = "codex",
     json_output: bool = False,
 ) -> int:
-    from . import memory_mcp_core
+    from . import mcp_server, memory_mcp_core
 
     if target is not None and not target.expanduser().is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
