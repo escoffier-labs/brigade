@@ -365,16 +365,16 @@ def test_main_invokes_notify_after_command(monkeypatch):
         lambda argv, exit_code: seen.update(argv=argv, exit_code=exit_code),
     )
 
-    real_build = cli._build_parser
+    real_build = cli._build_parser_for
 
-    def fake_build_parser():
-        parser = real_build()
+    def fake_build_parser(argv):
+        parser = real_build(argv)
         sub = parser._subparsers._group_actions[0]  # the subparsers action
         probe = sub.add_parser("notify-probe")
         probe.set_defaults(func=lambda args: 7)
         return parser
 
-    monkeypatch.setattr(cli, "_build_parser", fake_build_parser)
+    monkeypatch.setattr(cli, "_build_parser_for", fake_build_parser)
     assert cli.main(["notify-probe"]) == 7
     assert seen == {"argv": ["notify-probe"], "exit_code": 7}
 

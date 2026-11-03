@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection, toml_compat as tomllib
+from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection, toml_compat as tomllib
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit
 
@@ -181,7 +181,20 @@ def _repo_local_path(target: Path, value: str) -> bool:
     return True
 
 
-def _without_repo_graphtrail_db_pin(target: Path, args: tuple[str, ...]) -> tuple[str, ...]:
+# Canonical and legacy executable and server names of the code graph engine.
+_CODE_GRAPH_NAMES = frozenset(
+    (*component_manifest.family_names("brigade-code-graph"), *component_manifest.family_names("brigade-code-graph-mcp"))
+)
+
+
+def _is_code_graph_server(server: CanonicalServer) -> bool:
+    command = Path(server.command or "").name.lower()
+    if command.endswith(".exe"):
+        command = command[: -len(".exe")]
+    return server.name.lower() in _CODE_GRAPH_NAMES or command in _CODE_GRAPH_NAMES
+
+
+def _without_repo_code_graph_db_pin(target: Path, args: tuple[str, ...]) -> tuple[str, ...]:
     cleaned: list[str] = []
     index = 0
     while index < len(args):
@@ -256,14 +269,9 @@ def _project_server(
             server, live, location=location, native_keys=_opencode_native_keys(live, record, server)
         )
     projected = adapter.to_provider(server)
-    command_name = Path(server.command or "").name.lower()
-    if (
-        harness != "cursor-user"
-        or server.is_remote
-        or (server.name.lower() != "graphtrail" and "graphtrail" not in command_name)
-    ):
+    if harness != "cursor-user" or server.is_remote or not _is_code_graph_server(server):
         return projected
-    args = _without_repo_graphtrail_db_pin(target, server.args)
+    args = _without_repo_code_graph_db_pin(target, server.args)
     if args == server.args:
         return projected
     if args:

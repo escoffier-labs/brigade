@@ -11,6 +11,15 @@ import sys
 from coverage import CoverageData
 
 ROOT = Path(__file__).resolve().parents[1]
+# CI's shard command measures `--cov=$PWD/src/brigade`, which records every
+# source file, including those never imported. So the replayed shard and
+# `coverage report` analyze all of src/brigade (877 files, about 418k lines in
+# November 2026), not just what the two selected tests touch. The report step
+# is single-threaded CPU work: about 8 s on an idle 24-CPU host, 35 to 46 s with
+# 48 busy loops, and 51 to 52 s with 72. A 45 s bound therefore failed under
+# shard load with no hang (#2203). The bound scales with that measured cost and
+# still fails any step that never exits.
+CI_COVERAGE_STEP_TIMEOUT_SECONDS = 180
 
 
 def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
@@ -40,7 +49,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
         env=environment,
         capture_output=True,
         text=True,
-        timeout=45,
+        timeout=CI_COVERAGE_STEP_TIMEOUT_SECONDS,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     uploaded = tmp_path / "uploaded"
@@ -57,7 +66,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
             env=environment,
             capture_output=True,
             text=True,
-            timeout=45,
+            timeout=CI_COVERAGE_STEP_TIMEOUT_SECONDS,
         )
         assert result.returncode == 0, result.stdout + result.stderr
     data = CoverageData(basename=str(combined))

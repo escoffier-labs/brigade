@@ -1,0 +1,50 @@
+{
+  "schema": "brigade.engine-paths-cases.v1",
+  "description": "Storage resolution cases shared by the Python, Rust and Go tests. See docs/phase-engine-rename.md, Storage locations. Paths are relative to the repository (code_graph) or to the data, config and cache roots (evidence). Cases name layout roles instead of repeating paths.",
+  "code_graph": {
+    "layouts": {
+      "canonical": ".brigade/code-graph/code-graph.db",
+      "legacy": ".graphtrail/graphtrail.db"
+    },
+    "env": {
+      "canonical": "BRIGADE_CODE_GRAPH_DB",
+      "legacy": "GRAPHTRAIL_DB"
+    },
+    "cases": [
+      {"name": "neither", "present": [], "expect": {"source": "new", "layout": "canonical", "legacy_present": false}},
+      {"name": "legacy_only", "present": ["legacy"], "expect": {"source": "legacy", "layout": "legacy", "legacy_present": true}},
+      {"name": "canonical_only", "present": ["canonical"], "expect": {"source": "canonical", "layout": "canonical", "legacy_present": false}},
+      {"name": "both", "present": ["canonical", "legacy"], "expect": {"source": "canonical", "layout": "canonical", "legacy_present": true}},
+      {"name": "explicit_flag", "present": ["legacy"], "explicit": "custom/index.db", "expect": {"source": "explicit", "path": "custom/index.db", "legacy_present": true}},
+      {"name": "canonical_env", "present": [], "env": {"canonical": "env/canonical.db"}, "expect": {"source": "explicit", "path": "env/canonical.db", "legacy_present": false}},
+      {"name": "legacy_env", "present": ["canonical"], "env": {"legacy": "env/legacy.db"}, "expect": {"source": "explicit", "path": "env/legacy.db", "legacy_present": false}},
+      {"name": "flag_beats_env", "present": [], "explicit": "custom/index.db", "env": {"canonical": "env/canonical.db"}, "expect": {"source": "explicit", "path": "custom/index.db", "legacy_present": false}},
+      {"name": "env_same_value", "present": [], "env": {"canonical": "env/same.db", "legacy": "env/same.db"}, "expect": {"source": "explicit", "path": "env/same.db", "legacy_present": false}},
+      {"name": "conflicting_env", "present": [], "env": {"canonical": "env/canonical.db", "legacy": "env/legacy.db"}, "expect": {"error": "conflict"}}
+    ]
+  },
+  "evidence": {
+    "layouts": {
+      "canonical": {"leaf": "brigade/evidence", "db": "evidence.db"},
+      "legacy": {"leaf": "miseledger", "db": "miseledger.db"}
+    },
+    "mac_key": "evidence-bundle-mac.key",
+    "config": "config.toml",
+    "roots": {
+      "data": {"env": "XDG_DATA_HOME", "home_fallback": ".local/share"},
+      "config": {"env": "XDG_CONFIG_HOME", "home_fallback": ".config"},
+      "cache": {"env": "XDG_CACHE_HOME", "home_fallback": ".cache"}
+    },
+    "cases": [
+      {"name": "neither", "present": [], "expect": {"source": "new", "layout": "canonical", "legacy_present": false}},
+      {"name": "legacy_data_only", "present": [["data", "legacy"]], "expect": {"source": "legacy", "layout": "legacy", "legacy_present": true}},
+      {"name": "legacy_config_only", "present": [["config", "legacy"]], "expect": {"source": "legacy", "layout": "legacy", "legacy_present": true}},
+      {"name": "canonical_only", "present": [["data", "canonical"]], "expect": {"source": "canonical", "layout": "canonical", "legacy_present": false}},
+      {"name": "both", "present": [["data", "canonical"], ["data", "legacy"]], "expect": {"source": "canonical", "layout": "canonical", "legacy_present": true}},
+      {"name": "split_layouts", "present": [["config", "canonical"], ["data", "legacy"]], "expect": {"source": "canonical", "layout": "canonical", "legacy_present": true}},
+      {"name": "cache_never_decides", "present": [["cache", "legacy"]], "expect": {"source": "new", "layout": "canonical", "legacy_present": false}},
+      {"name": "xdg_roots_legacy", "xdg": true, "present": [["data", "legacy"]], "expect": {"source": "legacy", "layout": "legacy", "legacy_present": true}},
+      {"name": "xdg_roots_neither", "xdg": true, "present": [], "expect": {"source": "new", "layout": "canonical", "legacy_present": false}}
+    ]
+  }
+}

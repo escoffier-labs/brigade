@@ -28,7 +28,8 @@ RECALL_QUERY_MAX_CHARS = 256
 _GIT_TIMEOUT_SECONDS = 0.5
 GENERIC_WORKSPACE_QUERY = "workspace"
 # Sources whose query text came from a person (a prompt or a --query flag).
-QUERY_TEXT_SOURCES = frozenset({"explicit", "prompt"})
+# "push" is item text a hosted connector searches with; it is logged hashed like a prompt.
+QUERY_TEXT_SOURCES = frozenset({"explicit", "prompt", "push"})
 _TERM_SPLIT = re.compile(r"[-_]+")
 
 

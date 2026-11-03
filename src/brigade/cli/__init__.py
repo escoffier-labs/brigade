@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 import traceback
 
 from .. import __version__
-
-# imported here so tests can monkeypatch cli.prompt_for_selection
-from ..prompt import prompt_for_selection as prompt_for_selection
+from .. import extras as _extras_mod
 
 # Shared parser helpers live in cli._common. COMMAND_GROUPS is re-exported here
 # so it stays on the public surface (tests reference cli.COMMAND_GROUPS).
@@ -19,125 +18,69 @@ from ._common import (
     _TopLevelHelpFormatter,
     _grouped_epilog,
 )
+from ._index import COMMANDS, COMMANDS_BY_NAME, EXTRAS_STUB_HELP
 
-# Migrated command-group modules. Each exposes register(sub) and dispatch(args).
-# They are registered in _build_parser in the same order the inline parser
-# blocks were originally added.
-from .. import extras as _extras_mod
-from . import (
-    init as _init_group,
-    doctor as _doctor_group,
-    bug as _bug_group,
-    version as _version_group,
-    status as _status_group,
-    profiles as _profiles_group,
-    receipts as _receipts_group,
-    daily as _daily_group,
-    care as _care_group,
-    add as _add_group,
-    setup as _setup_group,
-    update as _update_group,
-    stations as _stations_group,
-    code as _code_group,
-    pantry as _pantry_group,
-    evidence as _evidence_group,
-    search as _search_group,
-    tokens as _tokens_group,
-    notifications as _notifications_group,
-    budgets as _budgets_group,
-    untrusted as _untrusted_group,
-    skills as _skills_group,
-    harness as _harness_group,
-    operator as _operator_group,
-    runbook as _runbook_group,
-    dogfood as _dogfood_group,
-    release as _release_group,
-    roadmap as _roadmap_group,
-    repos as _repos_group,
-    handoff as _handoff_group,
-    memory as _memory_group,
-    work as _work_group,
-    friction as _friction_group,
-    workflow as _workflow_group,
-    chat as _chat_group,
-    context as _context_group,
-    projects as _projects_group,
-    learn as _learn_group,
-    outcome as _outcome_group,
-    model as _model_group,
-    research as _research_group,
-    center as _center_group,
-    run as _run_group,
-    run_cloud as _run_cloud_group,
-    route as _route_group,
-    roster as _roster_group,
-    runs as _runs_group,
-    node as _node_group,
-    fleet as _fleet_group,
-    guard as _guard_group,
-    governance as _governance_group,
-    scrub as _scrub_group,
-    security as _security_group,
-    tools as _tools_group,
-    mcp as _mcp_group,
-    projection as _projection_group,
-    handoff_template as _handoff_template_group,
-    ingest as _ingest_group,
-    openclaw_fragments as _openclaw_fragments_group,
-    hermes_fragments as _hermes_fragments_group,
-    reconfigure as _reconfigure_group,
-    completions as _completions_group,
-    extras as _extras_group,
-)
-
-# Extras command name -> group module. Every name must appear in
-# brigade.extras.EXTRAS_COMMANDS; the gate below keys off that list.
-_EXTRAS_MODULES = {
-    "budgets": _budgets_group,
-    "center": _center_group,
-    "chat": _chat_group,
-    "context": _context_group,
-    "dogfood": _dogfood_group,
-    "friction": _friction_group,
-    "workflow": _workflow_group,
-    "hermes-fragments": _hermes_fragments_group,
-    "learn": _learn_group,
-    "notifications": _notifications_group,
-    "openclaw-fragments": _openclaw_fragments_group,
-    "pantry": _pantry_group,
-    "projects": _projects_group,
-    "release": _release_group,
-    "repos": _repos_group,
-    "research": _research_group,
-    "roadmap": _roadmap_group,
-    "runbook": _runbook_group,
-    "untrusted": _untrusted_group,
-}
+# Command families are imported on first use. ``brigade <family> ...`` imports
+# and registers only that family's module; the others get placeholder
+# subparsers built from the static index in ``cli._index``. ``_build_parser()``
+# still returns the full tree for completions, ROADMAP command checks, and
+# tests that walk every subparser.
 
 
-_PASSTHROUGH_LEAVES = {
-    *(("code", verb) for verb in _code_group.ENGINE_VERBS),
-    ("evidence", "crawl"),
-    ("evidence", "search"),
-    ("evidence", "show"),
-    ("evidence", "explain"),
-    ("evidence", "stats"),
-    ("search", "sync"),
-    ("search", "context"),
-    ("search", "impact"),
+def __getattr__(name: str):
+    """Resolve historical eager attributes (``cli._init_group``, ``cli.fleet``) on demand."""
+    if name == "prompt_for_selection":
+        # Stays patchable on the package: ``cli.init`` reads it from here.
+        from ..prompt import prompt_for_selection as value
+    elif name.startswith("_") and name.endswith("_group") and name[1:-6] in _FAMILY_MODULES:
+        value = _family_module(name[1:-6])
+    elif name in _FAMILY_MODULES:
+        value = _family_module(name)
+    else:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    globals()[name] = value
+    return value
+
+
+_FAMILY_MODULES = frozenset(entry.module for entry in COMMANDS)
+
+# Leaves whose trailing engine flags bypass argparse, keyed by family. ``code``
+# verbs come from cli.code.ENGINE_VERBS, read only when argv selects ``code``.
+_PASSTHROUGH_FAMILY_LEAVES = {
+    "evidence": frozenset({"crawl", "search", "show", "explain", "stats"}),
+    "search": frozenset({"sync", "context", "impact"}),
 }
 
 _PLAN_LEAVES = {("evidence", "crawl"), ("search", "sync")}
 
 
-def _register_extras(sub: argparse._SubParsersAction, name: str, extras_enabled: bool) -> None:
-    if extras_enabled:
-        _EXTRAS_MODULES[name].register(sub)
-    else:
-        _extras_group.register_stub(sub, name)
+def _family_module(module: str):
+    return importlib.import_module(f".{module}", __name__)
+
+
+def _selected_command(argv: list[str]) -> str | None:
+    """The top-level command argv selects, or None (help, version, or an invalid choice).
+
+    The top-level parser has only value-less flags (-h, --help, --version), so
+    the first token that is not a flag is the command argparse will select.
+    """
+    for token in argv:
+        if not token.startswith("-"):
+            return token if token in COMMANDS_BY_NAME else None
+    return None
 
 
 def _build_parser() -> argparse.ArgumentParser:
+    """Build the full command tree, importing every command family."""
+    return _assemble_parser(full=True)
+
+
+def _build_parser_for(argv: list[str]) -> argparse.ArgumentParser:
+    """Build the parser with real subparsers only for the family argv selects."""
+    return _assemble_parser(full=False, selected=_selected_command(argv))
+
+
+def _assemble_parser(*, full: bool, selected: str | None = None) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="brigade",
         description=_START_HERE,
@@ -148,75 +91,26 @@ def _build_parser() -> argparse.ArgumentParser:
     sub.required = True
 
     extras_enabled = _extras_mod.enabled()
+    selected_entry = COMMANDS_BY_NAME.get(selected) if selected is not None else None
 
-    _init_group.register(sub)
-    _doctor_group.register(sub)
-    _bug_group.register(sub)
-    _version_group.register(sub)
-    _status_group.register(sub)
-    _profiles_group.register(sub)
-    _receipts_group.register(sub)
-    _daily_group.register(sub)
-    _care_group.register(sub)
-    _add_group.register(sub)
-    _setup_group.register(sub)
-    _update_group.register(sub)
-    _stations_group.register(sub)
-    _code_group.register(sub)
-    _evidence_group.register(sub)
-    _search_group.register(sub)
-    _tokens_group.register(sub)
-    _register_extras(sub, "pantry", extras_enabled)
-    _register_extras(sub, "notifications", extras_enabled)
-    _register_extras(sub, "budgets", extras_enabled)
-    _register_extras(sub, "untrusted", extras_enabled)
+    for entry in COMMANDS:
+        disabled = entry.extras and not extras_enabled
+        if full or entry is selected_entry:
+            if disabled:
+                from . import extras as extras_group
 
-    _skills_group.register(sub)
-    _harness_group.register(sub)
-    _operator_group.register(sub)
-    _register_extras(sub, "runbook", extras_enabled)
-    _register_extras(sub, "dogfood", extras_enabled)
-    _register_extras(sub, "release", extras_enabled)
-    _register_extras(sub, "roadmap", extras_enabled)
-    _register_extras(sub, "repos", extras_enabled)
-    _handoff_group.register(sub)
-
-    _memory_group.register(sub)
-    _work_group.register(sub)
-    _register_extras(sub, "friction", extras_enabled)
-    _register_extras(sub, "workflow", extras_enabled)
-
-    _register_extras(sub, "chat", extras_enabled)
-
-    _register_extras(sub, "context", extras_enabled)
-    _register_extras(sub, "projects", extras_enabled)
-    _register_extras(sub, "learn", extras_enabled)
-    _outcome_group.register(sub)
-    _model_group.register(sub)
-    _register_extras(sub, "research", extras_enabled)
-    _register_extras(sub, "center", extras_enabled)
-    _run_group.register(sub)
-    _run_cloud_group.register(sub)
-    _route_group.register(sub)
-    _roster_group.register(sub)
-
-    _runs_group.register(sub)
-    _node_group.register(sub)
-    _fleet_group.register(sub)
-    _guard_group.register(sub)
-    _governance_group.register(sub)
-    _scrub_group.register(sub)
-    _security_group.register(sub)
-    _tools_group.register(sub)
-    _mcp_group.register(sub)
-    _projection_group.register(sub)
-    _handoff_template_group.register(sub)
-    _ingest_group.register(sub)
-    _register_extras(sub, "openclaw-fragments", extras_enabled)
-    _register_extras(sub, "hermes-fragments", extras_enabled)
-    _reconfigure_group.register(sub)
-    _completions_group.register(sub)
-    _extras_group.register(sub)
+                extras_group.register_stub(sub, entry.name)
+            else:
+                _family_module(entry.module).register(sub)
+        else:
+            # Same name, help line, and aliases as the real registration, so
+            # top-level help and argparse's choice list are unchanged.
+            sub.add_parser(
+                entry.name,
+                help=EXTRAS_STUB_HELP if disabled else entry.help,
+                aliases=entry.aliases,
+                add_help=False,
+            )
 
     parser.epilog = _grouped_epilog(sub, extras_enabled=extras_enabled)
     return parser
@@ -226,7 +120,13 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
     """Keep opaque engine flags out of argparse for known passthrough leaves."""
 
     leaf = tuple(argv[:2])
-    if leaf not in _PASSTHROUGH_LEAVES:
+    if len(leaf) < 2:
+        return argv, None
+    if leaf[0] == "code":
+        verbs = frozenset(_family_module("code").ENGINE_VERBS)
+    else:
+        verbs = _PASSTHROUGH_FAMILY_LEAVES.get(leaf[0], frozenset())
+    if leaf[1] not in verbs:
         return argv, None
     if leaf in _PLAN_LEAVES and len(argv) > 2 and argv[2] == "plan":
         return argv, None
@@ -252,12 +152,12 @@ def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
     # Usage is not a verification run. Resolve --help/-h before any pre-parse
     # atomic-capture policy so the flag list stays discoverable.
-    if _work_group.work_verify_run_help_requested(raw_argv):
-        parser = _build_parser()
+    if raw_argv[:1] == ["work"] and _family_module("work").work_verify_run_help_requested(raw_argv):
+        parser = _build_parser_for(raw_argv)
         parser.parse_args(raw_argv)
         return 0
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
-    parser = _build_parser()
+    parser = _build_parser_for(parse_argv)
     if not parse_argv:
         print(_START_HERE, file=sys.stderr)
     args = parser.parse_args(parse_argv)
@@ -314,7 +214,7 @@ def main(argv=None) -> int:
 
 def process_main() -> None:
     """Own process-only exit. Final shutdown callbacks must not spawn children."""
-    from ..work_cmd.verify_runtime import _verify_process_signals
+    from ..verify_process import _verify_process_signals
 
     with _verify_process_signals() as owner:
         exit_code = main()

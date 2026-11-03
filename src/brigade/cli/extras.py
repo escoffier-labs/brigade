@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from .. import extras as extras_mod
+from ._index import EXTRAS_STUB_HELP
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -53,7 +54,7 @@ def register_stub(sub: argparse._SubParsersAction, name: str, *, invocation: str
     (e.g. "work phases").
     """
     shown = invocation or name
-    p = sub.add_parser(name, help="(extras, disabled) enable with `brigade extras on`", add_help=False)
+    p = sub.add_parser(name, help=EXTRAS_STUB_HELP, add_help=False)
 
     def _swallow_all(args=None, namespace=None, *, _shown=shown):
         ns = namespace or argparse.Namespace()

@@ -54,6 +54,12 @@ def _repo(tmp_path: Path) -> Path:
     _git(repo, "init")
     _git(repo, "config", "user.email", "test@example.invalid")
     _git(repo, "config", "user.name", "Test User")
+    # Git 2.47+ detaches the auto maintenance that `git commit` starts. The
+    # detached child holds `.git/objects/maintenance.lock` and unlinks it after
+    # the commit returns, so on a loaded host it can rewrite the object store
+    # while a test is snapshotting the repo to prove a command is read-only.
+    # Turning it off leaves no background writer in the fixture (#2202).
+    _git(repo, "config", "maintenance.auto", "false")
     (repo / "tracked.txt").write_text("base\n")
     _git(repo, "add", "tracked.txt")
     _git(repo, "commit", "-m", "initial")
