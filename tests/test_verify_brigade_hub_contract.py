@@ -469,3 +469,28 @@ def test_hub_contract_stops_a_child_the_launcher_left_behind(tmp_path):
     assert code == 1, payload
     left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
     assert left.stdout.strip() == "", "the launcher's child kept running after the drive stopped"
+
+
+def test_hub_contract_reports_a_truncated_response():
+    import socket
+    import threading
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve():
+        conn, _ = listener.accept()
+        conn.recv(65536)
+        conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n{"short"')
+        conn.close()
+
+    thread = threading.Thread(target=serve, daemon=True)
+    thread.start()
+    try:
+        hub_contract = _load_hub_contract()
+        resp = hub_contract.request(f"http://127.0.0.1:{listener.getsockname()[1]}", "GET", "/status")
+    finally:
+        thread.join(timeout=5)
+        listener.close()
+    assert resp.error is not None and "IncompleteRead" in resp.error

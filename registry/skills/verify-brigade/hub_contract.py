@@ -19,6 +19,7 @@ The drive assumes the hub runs with its default flags: no
 
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import json
 import os
@@ -523,6 +524,10 @@ def _read_bounded(stream: Any, deadline: float) -> bytes:
             raise TimeoutError("the response body did not finish within the request deadline")
         chunk = stream.read(65536)
         if not chunk:
+            declared = getattr(stream, "headers", None) and stream.headers.get("Content-Length")
+            if declared and declared.isdigit() and int(declared) != total:
+                # A hub that closes early is a broken response, not a short valid one.
+                raise http.client.IncompleteRead(b"".join(chunks), int(declared) - total)
             return b"".join(chunks)
         total += len(chunk)
         if total > MAX_BODY_BYTES:
@@ -574,9 +579,11 @@ def request(
         status, content_type = exc.code, exc.headers.get("Content-Type", "")
         try:
             payload = _read_bounded(exc, deadline)
-        except (OSError, ValueError) as err:
+        except (OSError, ValueError, http.client.HTTPException) as err:
             return Response(status, content_type, b"", None, error=f"{type(err).__name__}: {err}")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    # HTTPException covers a hub that closes before its declared Content-Length (IncompleteRead)
+    # or sends a malformed status line; both are contract mismatches, not crashes.
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
         return Response(None, "", b"", None, error=f"{type(exc).__name__}: {exc}")
     try:
         parsed = json.loads(payload)
