@@ -832,3 +832,48 @@ def test_preflight_reason_vocabulary_is_closed_and_documented(tmp_path):
     section = guide.split("### Tier 0 diagnostic preflight", 1)[1]
     missing = [code for codes in preflight.REASONS.values() for code in codes if f"`{code}`" not in section]
     assert not missing
+
+
+@pytest.mark.parametrize("kind", ["opposite-polarity", "near-match"])
+def test_preflight_live_contrary_or_review_row_leaves_proof(tmp_path, kind):
+    from brigade import memory_proposal_v2 as v2, memory_reflect_candidates as derive
+    from brigade import memory_tier0_preflight as preflight
+
+    path, candidate = prepared(tmp_path)
+    assert (candidate["tier"], candidate["proof_count"]) == (0, 3)
+    log(tmp_path, path, (".brigade/receipts/a.json", kind, "2026-10-21T12:00:00Z"))
+    fresh = next(
+        c
+        for c in memory_reflect.run_payload(target=tmp_path)["candidates"]
+        if c["kind"] == "reinforce" and c["card_ids"] == candidate["card_ids"]
+    )
+    care = derive.configuration(tmp_path)
+    sources, _ = v2._sources(tmp_path, care, list(candidate["card_paths"].values()))
+    ledger = memory_reflect._evidence_log(tmp_path)
+    bound = {ref: "bound" for ref in candidate["evidence_ids"]}
+    proof, groups, consistent, live_review = preflight._proof(tmp_path, candidate, sources, ledger, bound)
+    assert len(proof) == fresh["proof_count"] == 2
+    assert len(set(groups.values())) == fresh["proof_sources"]
+    assert fresh["tier"] != 0
+    assert not consistent and live_review
+
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert "candidate_live_evidence_requires_review" in codes(report)
+    assert not {"candidate_satisfied", "evidence_floor_satisfied", "source_group_floor_satisfied"} & codes(report)
+    assert report["proof_evidence_count"] is None
+    assert report["evaluation_sha256"] is None
+    assert report["eligible"] is False
+    assert tree(tmp_path) == before
+
+
+def test_preflight_live_review_row_outside_proof_still_holds(tmp_path):
+    path, candidate = prepared(tmp_path)
+    other = evidence(tmp_path, "memory/evidence/other.json")
+    log(tmp_path, path, (other, "opposite-polarity", "2026-10-21T12:00:00Z"))
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    assert report["proof_evidence_count"] == 3
+    assert "candidate_live_evidence_requires_review" in codes(report)
+    assert "candidate_satisfied" not in codes(report)
+    assert report["eligible"] is False

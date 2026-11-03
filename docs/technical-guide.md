@@ -2525,8 +2525,11 @@ fences, including negatives outside the newest receipt-validation window and
 cards without a valid cutoff. Three evidence IDs in two filesystem root groups
 satisfy count floors only. They cannot establish independent trusted sources.
 Contrary, review-only, unresolved and invalid current outcome references never
-count as supporting proof. A mismatch with retained proof counters holds the
-candidate and leaves the floor checks unevaluated.
+count as supporting proof. The live recount applies the same classification as
+fresh reflection, so a pending `opposite-polarity` or `near-match` row recorded
+after the candidate was retained leaves proof and holds the candidate with
+`candidate_live_evidence_requires_review`. A mismatch with retained proof
+counters holds the candidate and leaves the floor checks unevaluated.
 
 Promotion remains held by `evidence_authority_unbound`,
 `owner_authority_unbound`, `retrieval_eval_unbound` and
@@ -2554,7 +2557,7 @@ evaluation was refused.
 | Gate | Reason codes |
 | --- | --- |
 | policy | `policy_satisfied`, `policy_missing`, `class_disabled`, `policy_invalid` |
-| candidate | `candidate_satisfied`, `tier_requires_review`, `candidate_evidence_requires_review`, `candidate_proof_mismatch`, `candidate_invalid` |
+| candidate | `candidate_satisfied`, `tier_requires_review`, `candidate_evidence_requires_review`, `candidate_live_evidence_requires_review`, `candidate_proof_mismatch`, `candidate_invalid` |
 | snapshot | `snapshot_satisfied`, `base_drift`, `binding_incomplete`, `input_drift`, `evidence_window_incomplete`, `source_invalid`, `target_invalid` |
 | delta | `delta_satisfied`, `anchoring_requires_review`, `delta_requires_review`, `delta_invalid`, `blast_cap_exceeded` |
 | evidence_floor | `evidence_floor_satisfied`, `evidence_floor_unmet`, `proof_binding_incomplete` |

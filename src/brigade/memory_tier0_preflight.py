@@ -51,6 +51,7 @@ REASONS: dict[str, tuple[str, ...]] = {
         "candidate_satisfied",
         "tier_requires_review",
         "candidate_evidence_requires_review",
+        "candidate_live_evidence_requires_review",
         "candidate_proof_mismatch",
         "candidate_invalid",
     ),
@@ -321,13 +322,19 @@ def _evidence(
 
 def _proof(
     target: Path, candidate: dict[str, Any], sources: list[dict[str, Any]], ledger: Any, bound: dict[str, str]
-) -> tuple[set[str], dict[str, str], bool]:
+) -> tuple[set[str], dict[str, str], bool, bool]:
+    """Recount proof with the live classification fresh reflection applies.
+
+    The last value reports pending contrary or review-only evidence that the
+    retained candidate does not already carry.
+    """
     excluded = {
         derive._evidence_id(ref)
         for key in ("contrary_ids", "review_evidence_ids", "unresolved_evidence_ids")
         for ref in candidate[key]
     }
     refs = {derive._evidence_id(ref) for ref in candidate["evidence_ids"]} - excluded
+    live: set[str] = set()
     for source in sources:
         rows = [row for key in (source["id"], *source["aliases"]) for row in ledger.by_identity.get(key, [])]
         card = derive.Card(
@@ -338,10 +345,13 @@ def _proof(
             rows,
         )
         refs -= derive._invalid_outcome_ids(target, card, refs & bound.keys())
+        _, _, invalid, contrary, near_match = derive.live_evidence(target, *derive.card_window(card))
+        live.update(contrary, near_match)
+        refs -= invalid | live
     groups = derive._resolved(target, sorted(refs & bound.keys()), derive._evidence_roots(target))
     proof = set(groups)
     consistent = candidate["proof_count"] == len(proof) and candidate["proof_sources"] == len(set(groups.values()))
-    return proof, groups, consistent
+    return proof, groups, consistent, bool(live - excluded)
 
 
 def _delta(
@@ -514,7 +524,11 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
             _delta(report, snapshot, care, binding, candidate, policy, sources)
         else:
             _check(report, "delta", "delta_invalid", state="not_evaluated")
-        proof, groups, consistent_proof = _proof(target, candidate, sources, ledger, report["evidence_sha256"])
+        proof, groups, consistent_proof, live_review = _proof(
+            target, candidate, sources, ledger, report["evidence_sha256"]
+        )
+        if live_review:
+            _check(report, "candidate", "candidate_live_evidence_requires_review")
         if consistent_proof:
             report["proof_evidence_count"] = len(proof)
             report["proof_source_group_count"] = len(set(groups.values()))
