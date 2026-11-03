@@ -51,6 +51,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
 
+- Fleet Hub HTTP routes register through a route table (`fleet_hub_routes`): each route module adds its own methods, exact paths and prefixes, an exact path wins over the longest matching prefix, and a second claim on one route is refused. The bearer JSON API moves to `fleet_hub_api_http`. Responses are unchanged.
+
 - Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
 
 - Dogfood config round-trips Windows paths while retaining legacy unquoted values.

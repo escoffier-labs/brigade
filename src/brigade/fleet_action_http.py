@@ -6,12 +6,15 @@ import json
 import secrets
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qsl, urlencode
 
 from . import fleet_action_auth as auth, fleet_action_page as page, fleet_action_sources as sources
 from . import fleet_action_targets as targets, fleet_hub_actions as actions, fleet_hub_enrollment as enrollment
 from .fleet_action_auth import ActionError
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 
 def _html(handler: Any, *args: Any, **kwargs: Any) -> None:
@@ -303,3 +306,11 @@ def route(handler: Any, db_path: Path, signing_key: str) -> None:
             handler._send_json(503, {"error": "action-store-unavailable"})
         else:
             _html(handler, 503, "Action store unavailable.", content_type="text/plain; charset=utf-8")
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    def serve(request: Any, _path: str, _query: str) -> None:
+        route(request, hub.db_path, hub.token)
+
+    routes.add("GET", serve, prefixes=("/deck/actions/",))
+    routes.add("POST", serve, paths=("/actions",), prefixes=("/deck/actions/",))
