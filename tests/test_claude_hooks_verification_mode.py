@@ -113,6 +113,9 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         "cd {yolo} && eval 'cd {enforced}' && pytest -q",
         "cd {yolo} && source ./env.sh && pytest -q",
         "cd yolo && pytest -q",
+        "cd {yolo} && uv run bash -c 'cd {enforced} && pytest -q'",
+        "cd {yolo} && npx sh -c 'pytest -q'",
+        "cd {yolo} && python -c 'import os; os.chdir(\"/\")' && pytest -q",
     ],
 )
 def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, template: str) -> None:
@@ -137,6 +140,7 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
         ("cd {yolo}; cd {other} && pytest -q", [None]),
         ("cd {yolo} && pytest -q && cd {other} && ruff check .", [None]),
         ("cd {yolo} && pytest -q && ruff check .", ["yolo", "yolo"]),
+        ("cd {yolo} && uv run pytest -q", ["yolo"]),
         ("cd {yolo}/.. && pytest -q", [None]),
         ("cd {yolo} && cd .. && pytest -q", [None]),
         ("bash -c 'cd {yolo} && pytest -q'", ["yolo"]),

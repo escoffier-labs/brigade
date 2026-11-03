@@ -55,13 +55,28 @@ def _plain_and_chain(command: str, segments: list[list[str]], separators: list[s
     )
 
 
+# Shells and inline-code flags through which a runner (`uv run`, `npx`, `poetry run`, ...)
+# can carry a script that changes directory. Checks after the allowlisted cd may use neither.
+_SHELLS = {"sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd", "busybox"}
+_INLINE_CODE_FLAGS = {"-c", "-e", "--command", "--eval"}
+
+
+def _carries_script(segment: list[str]) -> bool:
+    """True when ``segment`` could run code the walker cannot see, such as ``uv run bash -c '...'``."""
+    for token in segment[1:]:
+        name = Path(token).name.lower().removesuffix(".exe")
+        if name in _SHELLS or token in _INLINE_CODE_FLAGS or any(char.isspace() for char in token):
+            return True
+    return False
+
+
 def _cd_then_checks(segments: list[list[str]]) -> bool:
     """True when the command is one ``cd`` to an absolute literal path, then only checks.
 
     This is an allowlist, not a model of the shell. The ``cd`` comes first, names an
     absolute or ``./`` path with no ``..`` component (so ``CDPATH`` and the logical
     directory play no part), and every later command is a verification with no working-directory
-    option. Anything else after the ``cd``, such as ``eval``, ``source``, another ``cd``,
+    option and no inline script. Anything else after the ``cd``, such as ``eval``, ``source``, another ``cd``,
     a nested shell, or an ordinary command, could change directory unseen.
     """
     rt = _rt()
@@ -82,7 +97,7 @@ def _cd_then_checks(segments: list[list[str]]) -> bool:
             return False
         if not (rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment))):
             return False
-        if _overrides_cwd(segment):
+        if _overrides_cwd(segment) or _carries_script(head):
             return False
     return True
 
