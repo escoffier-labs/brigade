@@ -3,7 +3,7 @@ status: active
 proof: drive
 surfaces: fleet serve
 drive: hub-contract
-last-drive: 2026-11-03 546c8870c
+last-drive: 2026-11-03 a6ca15f72
 ---
 
 # Fleet Hub wire contract
@@ -24,14 +24,31 @@ change, and the hub behaviors recorded as observed live in
 - **Health.** `GET /health` answers `{"ok": true, "service": "brigade-fleet-hub"}`
   without a token. There is no version endpoint.
 - **Registration.** `POST /nodes` `add` and `revoke`, `GET /nodes`, and
-  `POST /message-principals` `add`, all admin-only.
+  `POST /message-principals` `add` and `grants`, all admin-only.
 - **Heartbeat.** `POST /events` (run events, deduplicated) feeds `GET /status`,
   and `POST /sessions` `upsert` and `end` feed `GET /sessions`. Both reads hide
   terminal rows unless `?all=1`.
-- **Claims.** `POST /claims` `acquire`, `renew`, `inspect`, `release` in holder
-  scope, plus `GET /claims`.
+- **Claims.** `POST /claims` `acquire`, `renew`, `inspect`, `release` in holder,
+  node, and force scope, plus `GET /claims` and `?all=1`. Generations start at
+  1 and advance on every new holder, release, and expiry. A stale `generation`
+  or a retired holder is refused with a `reason`. A node-scoped acquire
+  supersedes only the dead run's lease, and a one-second lease lapses.
 - **Messages.** `POST /messages` `send` (idempotent on `client_id`), `list` with
-  the paging guarantee, `count`, `ack`, `sent`, and `identity`.
+  the paging guarantee, `count`, `ack`, `sent` (by cursor and by ids),
+  `sent_lookup`, `reply`, `identity` (with and without `peers`), and the
+  station reads `who` and `claims`. 16 of the hub's 19 actions are covered;
+  the three `events_*` actions are not.
+- **Keys and sealed mail.** `keys_publish`, `keys_get`, and `manifests_get`,
+  then sealed `send` and `reply` with envelopes stored and returned byte for
+  byte, and every structural refusal: non-canonical text, a duplicate key, bad
+  padding, a short digest, the wrong sender, a stale sender key, non-ASCII, the
+  size limit, and a plaintext reply to a sealed parent.
+- **Questions.** `question_create` (with retry, conflict, and the two-pending
+  limit), `question_status`, `question_desktop`, and an operator reply that
+  answers through the hub's trigger.
+- **Long polls.** `wait_ms` bounds, an empty wait that holds about `wait_ms`,
+  the per-recipient waiter cap, a send waking two parked waiters, and
+  `question_create` waking the operator's waiters.
 - **Owners.** `GET /owners` returns the `brigade.fleet_owners.v1` view.
 - **Auth failures.** Missing, wrong, non-Bearer, revoked, and wrong-kind
   tokens. Also a node token on an admin route, the admin token on a node write,
@@ -39,11 +56,12 @@ change, and the hub behaviors recorded as observed live in
   and a token in the query string.
 - **Gates.** Worklore is off by default, so `/work/*` is a 404.
 
-The drive runs 77 cases over 14 routes. Per case it checks the status code,
-`Content-Type: application/json`, the required keys and their JSON types,
-exact text for fixed error messages and `code` values, and cross-response
-guarantees: message ids ascend, `next_cursor` is the last id on the page,
-`after` excludes ids at or below it, and a retried send returns the first id.
+The drive runs 184 cases over 14 routes and 16 message actions. Per case it
+checks the status code, `Content-Type: application/json`, the required keys
+and their JSON types, exact text for fixed error messages and `code` values,
+and cross-response guarantees: message ids ascend, `next_cursor` is the last
+id on the page, `after` excludes ids at or below it, a retried send returns
+the first id, and a long poll returns the new message well before `wait_ms`.
 
 ## How to get to it (user POV)
 
@@ -86,14 +104,17 @@ What the default run does:
    so the hub cannot read an operator token or config.
 2. Polls `GET /health` until the hub answers (`--startup-timeout`, default 30s).
 3. Enrolls three throwaway nodes and one message principal with random
-   suffixes, then runs every case.
+   suffixes, then runs every case. The hub also gets
+   `BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:contract-operator-<hex>`, which
+   the question cases enroll.
 4. Stops the hub (its whole process group on POSIX) and prints one JSON object.
 
 Proof, from the helper's output:
 
 - helper exit 0, `"ok": true`, `"mismatches": []`
-- `"contract_version": 1`, `"cases_total": 77`, `"cases_failed": 0`
+- `"contract_version": 1`, `"cases_total": 184`, `"cases_failed": 0`
 - `"covered_routes"` lists the 14 routes the inventory marks `covered`
+- `"covered_message_actions"` lists the 16 actions the inventory marks `covered`
 
 A drift is helper exit 3, `"ok": false`, and one `mismatches` entry per
 problem, each naming its `case` and `check` (`status`, `content-type`, `body`
@@ -102,7 +123,8 @@ with a JSON `path`, or `invariant`). A hub that never answers `/health`, a
 `error`.
 
 Observed on main `31d5c549d`: exit 0, 77 cases, `"mismatches": []`, about one
-second end to end.
+second end to end. With the hot-set cases: exit 0, 184 cases,
+`"mismatches": []`. The long polls and a one-second lease add a few seconds.
 
 ### Against another hub binary
 
@@ -121,11 +143,13 @@ drive enrolls nodes and sends messages:
 
 ```bash
 export BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=<throwaway admin token>
-$C hub-contract --hub-url "http://<loopback>:<port>"
+$C hub-contract --hub-url "http://<loopback>:<port>" --operator-recipient agent:<fresh-name>
 ```
 
-Start that hub with its default flags and an empty database. Each run uses
-fresh random node names, so a second run against the same hub still passes.
+Start that hub with its default flags, an empty database, and
+`BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:<fresh-name>`. The drive enrolls that
+principal, so pick a new name for every run. Nodes get fresh random names, so
+a second run against the same hub still passes.
 
 ## Gotchas
 
@@ -137,11 +161,17 @@ fresh random node names, so a second run against the same hub still passes.
   admin-write refusals into successes, `--require-sealed` rejects the
   plaintext sends, and `BRIGADE_WORKLORE_ENABLED=1` makes `/work/items` answer.
   Each one shows up as mismatches that point at the flag.
+- **Long polls park on threads.** The cap case starts two `wait_ms` polls
+  and probes with `wait_ms: 1` until the hub refuses a third, because nothing
+  else shows that a poll is waiting. Timing checks are loose on purpose: an
+  empty poll must hold at least 0.25s of a 0.3s wait, and a woken poll must
+  return within 15s of a 20s wait.
 - **Never point it at a shared hub.** It enrolls nodes, revokes one, and leaves
   messages behind. `--hub-url` refuses anything that is not loopback, and the
   launched hub never sees the operator's `BRIGADE_*` variables or home.
-- **Six hub quirks are pinned as observed**, including two auth-failure
-  envelopes and the admin token on `/messages` getting the events wording.
+- **Seventeen hub quirks are pinned as observed**, including two auth-failure
+  envelopes, the admin token on `/messages` getting the events wording, and a
+  no-op force release that still advances the claim generation.
   The list is in the inventory doc. A hub that fixes one fails the drive until
   the golden and `CONTRACT_VERSION` move with it.
 - **Not everything is compared.** Timestamps, ids, tokens, and key order are
@@ -152,8 +182,9 @@ fresh random node names, so a second run against the same hub still passes.
   `[redacted]` and no request headers recorded. `hub.log` stays in the state
   dir, which `cleanup` removes.
 - **Coverage is checked three ways.** The drive's routes must equal
-  `COVERED_ROUTES` in `hub_contract.py`, and the test compares both to the
-  `covered` rows in the inventory. Adding a case on a new route means updating
-  all three.
+  `COVERED_ROUTES` in `hub_contract.py`, and its `POST /messages` actions must
+  equal `COVERED_MESSAGE_ACTIONS`. The test compares both to the `covered`
+  rows in the inventory's route and action tables. Adding a case on a new
+  route or action means updating all three.
 - **Browser routes are out of scope.** The Command Deck and dashboard pages
   return HTML and no client calls them. The inventory lists them as `not yet`.

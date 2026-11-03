@@ -46,6 +46,15 @@ The drive starts the hub with its default flags. Admin writes are refused
 Each flag changes the answers for some routes. A hub under test must start
 the same way.
 
+One environment variable is set: `BRIGADE_FLEET_OPERATOR_RECIPIENT` names a
+fresh `agent:contract-operator-<hex>` principal, which the drive enrolls and
+grants `node:*`. The Python hub reads it on every `question_create`, so the
+question actions have an operator to route to. A hub that reads it under
+another name answers `403 question_operator_invalid` instead.
+
+No hub mesh identity is installed (`/mesh/identity` is never uploaded), so
+the hub accepts any well-formed `h_` hub id in key records and envelopes.
+
 ## Conventions every route shares
 
 - Authentication is `Authorization: Bearer <token>`. Three kinds of token
@@ -96,7 +105,7 @@ for several of them only part of the request space (see the Status column).
 |---|---|---|---|---|---|
 | POST | /nodes | admin | `{action: "add", node_id, label?}` or `{action: "revoke", node_id}` | add: 200 `{added: true, node, token}`, 409 `{added: false, error}`, revoke: 200 `{revoked: true, node}`, 404 `{revoked: false, error}` | covered (add, revoke, duplicate, unknown, bad action, node-token refusal) |
 | GET | /nodes | admin | none | 200 `{nodes: [{node_id, label, created_at, revoked_at}]}`, node token 403 | covered |
-| POST | /message-principals | admin | `{action: "add", name, ...}`, `get`, `grants`, `revoke` | add: 201 `{principal: {name, principal_id, label, enrollment_id, may_send_to, token}}` | covered (add and node-token refusal only) |
+| POST | /message-principals | admin | `{action: "add", name, ...}`, `get`, `grants`, `revoke` | add: 201 `{principal: {name, principal_id, label, enrollment_id, may_send_to, token}}`, grants: 200 `{principal: {principal_id, may_send_to, ...}}` | covered (add, grants, and node-token refusal; get and revoke not yet) |
 | GET | /preference | bearer | none | 200 `{preference: {...}}` | not yet |
 | PUT | /preference | admin | `{preference: {...}}` or the bare object | 200 `{preference: {...}}`, node token 403 | not yet |
 | GET | /audit | admin | `?after_id=&limit=` | 200 `{audit: [...]}`, no token 401, other token 403, both `{error: "admin token required"}` | not yet |
@@ -114,7 +123,7 @@ for several of them only part of the request space (see the Status column).
 
 | Method | Path | Auth | Request | Response | Status |
 |---|---|---|---|---|---|
-| POST | /claims | node | `{action: acquire\|renew\|release\|inspect, target, node_id, holder?, ttl_seconds?, scope?, generation?, conductor?, lock?, supersede?, harness?, role?, job?, session?}` | acquire 200 `{granted: true, claim}` or 409 `{granted: false, error, owner}`, renew 200 `{renewed: true, claim}`, release 200 `{released: true}`, inspect 200 `{inspected, owned, generation, claim}` | covered (holder scope, node and force scope, leases, and fencing not yet) |
+| POST | /claims | node | `{action: acquire\|renew\|release\|inspect, target, node_id, holder?, ttl_seconds?, scope?, generation?, conductor?, lock?, supersede?, harness?, role?, job?, session?}` | acquire 200 `{granted: true, claim}` or 409 `{granted: false, error, owner}`, renew 200 `{renewed: true, claim}`, release 200 `{released: true}`, inspect 200 `{inspected, owned, generation, claim}` | covered (holder, node, and force scopes, run-lease supersession, generations and stale refusals, retired holders, lease expiry, and field bounds) |
 | GET | /claims | bearer | `?all=1` adds expired claims | 200 `{claims: [{...claim, expired}]}` | covered |
 | GET | /owners | bearer | none | 200 `brigade.fleet_owners.v1` view | covered |
 
@@ -122,7 +131,36 @@ for several of them only part of the request space (see the Status column).
 
 | Method | Path | Auth | Request | Response | Status |
 |---|---|---|---|---|---|
-| POST | /messages | node or principal | `{action, ...}`: `send`, `list`, `count`, `ack`, `sent`, `identity`, `reply`, `sent_lookup`, `who`, `claims`, `keys_publish`, `keys_get`, `manifests_get`, `question_create`, `question_status`, `question_desktop`, `events_list`, `events_subscribe`, `events_unsubscribe` | send 201 `{message}`, list and sent 200 `{messages, next_cursor}`, count 200 `{unread_count}`, ack 200 `{message}` or 404, identity 200 `{principal}`, admin token 403 | covered (send, list, count, ack, sent, identity, the other actions, sealed envelopes, and `wait_ms` long polls not yet) |
+| POST | /messages | node or principal | `{action, ...}`: `send`, `list`, `count`, `ack`, `sent`, `identity`, `reply`, `sent_lookup`, `who`, `claims`, `keys_publish`, `keys_get`, `manifests_get`, `question_create`, `question_status`, `question_desktop`, `events_list`, `events_subscribe`, `events_unsubscribe` | send 201 `{message}`, list and sent 200 `{messages, next_cursor}`, count 200 `{unread_count}`, ack 200 `{message}` or 404, identity 200 `{principal}`, admin token 403 | covered (16 of 19 actions, see the action table, plus sealed envelopes and `wait_ms` long polls; `events_*` not yet) |
+
+### Message actions
+
+`POST /messages` dispatches on the body's `action`. The v2 route table assigns
+each action to a family, so the drive tracks coverage per action as well:
+`COVERED_MESSAGE_ACTIONS` in `hub_contract.py` must match the `covered` rows
+here. The action table lists 19 actions, and the drive covers 16.
+
+| Action | Family | Request | Response | Status |
+|---|---|---|---|---|
+| `send` | messages | plaintext `{to, subject, body, ref?, priority?, client_id?, enqueued_at?, reply_to?}` or `{envelope}` | 201 `{message}`, sealed messages add `envelope`, `envelope_bytes`, `content_state` | covered (plaintext, sealed, `reply_to`, idempotent retry, conflicts, every sealed refusal below) |
+| `list` | messages | `{after, unacked, wait_ms?}` | 200 `{messages, next_cursor}`, `wait_ms` over the cap 429 `message_wait_capped` | covered (paging, long poll timeout, wake, waiter cap) |
+| `count` | messages | none | 200 `{unread_count}` | covered |
+| `ack` | messages | `{id}` | 200 `{message}`, 404 `{error}` | covered |
+| `sent` | messages | `{after}` or `{ids}` | 200 `{messages, next_cursor}` | covered |
+| `sent_lookup` | messages | `{client_id}` only | 200 `{message}`, 404 `{error, code: "not_found"}` | covered |
+| `reply` | messages | `{id, body, ...}` or `{id, envelope}` | 201 `{message}`, 404 `{error}` | covered (plaintext, sealed, retry, refusals) |
+| `identity` | messages | none, or `{peers}` for an agent | 200 `{principal}` or `brigade.message_authorization.v1` | covered |
+| `who` | messages | `{all?, limit?, cursor?, filter?}` | 200 `{nodes, principals, sessions, total, truncated, oversized, next_cursor}` | covered (first page, bad arguments) |
+| `claims` | messages | `{all?, limit?, cursor?}` | 200 `{claims, total, truncated, oversized, next_cursor}` | covered (node and ungranted principal) |
+| `keys_publish` | messages | `{record}` | 201 `{key}`, 409 `principal_key_exists`, 403 `principal_key_mismatch` | covered (first key; rotation with `prev_kid` not yet) |
+| `keys_get` | messages | `{kid}` | 200 `{key}`, 404 `{error: "key not found"}` | covered |
+| `manifests_get` | messages | none | 200 `{statements}` | covered (empty directory only) |
+| `question_create` | messages | `{question, timeout_secs?, request_id}` | 201 question, 200 on retry, 409 `question_request_conflict`, 429 `question_station_busy` | covered |
+| `question_status` | messages | `{question_id}` | 200 question, 403 `question_not_owned` | covered |
+| `question_desktop` | messages | `{question_id, answer}` | 200 question | covered |
+| `events_list` | cold JSON | event cursor | events page | not yet |
+| `events_subscribe` | cold JSON | subscription | subscription | not yet |
+| `events_unsubscribe` | cold JSON | subscription id | result | not yet |
 
 ### Fleet routing, cloud, models, policy
 
@@ -272,3 +310,48 @@ for whoever owns the hub. This PR changes no hub code.
    than refused with a 403.
 6. **Token in the query is plain text.** The refusal body is
    `Dashboard request refused.` as `text/plain`, even on JSON API paths.
+
+The hot-set cases (claim scopes and fencing, the message and question
+actions, sealed envelopes, and long polls) pin these as well:
+
+7. **A no-op force release still advances the generation.** Releasing a free
+   target with `scope: "force"` answers `200 {"released": false}`, yet the
+   target's generation goes up by one. The drive pins the jump (4 to 6 across
+   one real and one no-op force release). Fences only need to be monotonic, so
+   this is safe, but it may not be intended.
+8. **A lapsed lease costs a generation.** Acquiring a target whose lease
+   expired first retires the old holder (one advance), then grants (another),
+   so the generation jumps from 1 to 3.
+9. **`generation` is absent for a target never claimed.** `inspect` on an
+   unseen target has no `generation` key; once a target has history, a free
+   target reports it.
+10. **A same-holder acquire retry may carry the pre-acquire generation.** The
+    live holder retrying with `generation` one below the current one is
+    granted, not refused as stale.
+11. **Some refusals are 200.** A retired holder's `release` is
+    `200 {"released": false, "reason": "stale-holder"}`, and a no-op force
+    release is `200 {"released": false}`.
+12. **`owner` varies on claim 409s.** A stale-holder acquire refusal carries
+    `owner: {}`, a held target carries the claim, and renewing a lapsed lease
+    carries `owner: null`. Deployed clients treat a 409 without an object
+    `owner` as non-terminal.
+13. **404 envelopes differ by action.** `sent_lookup` answers
+    `{"error": "message not found", "code": "not_found"}`, while `ack`,
+    `reply`, and `keys_get` (`key not found`) carry no `code`.
+14. **The bad-action error lists 9 of 19 actions.** It says "action must be
+    send, list, sent, count, ack, reply, who, claims, or identity", although
+    the keys, question, `sent_lookup`, and `events_*` actions are accepted.
+15. **Question ids that point at messages are strings.** `message_id`,
+    `answer_id`, and the other message references in a question result are
+    decimal strings, where message ids everywhere else are integers.
+16. **Some sealed refusals carry no `code`.** An envelope sent with plaintext
+    fields and a reply whose `reply_to` and signed `in_reply_to` disagree are
+    plain `400 {"error"}`. Every other sealed refusal has a `code`
+    (`envelope_malformed`, `message_too_large`, `message_sender_mismatch`,
+    `sender_key_stale`, `message_sealing_required`). A key record whose id does
+    not match its public keys is also a plain 400.
+17. **The waiter cap is per recipient.** The third concurrent long poll for
+    one inbox is `429 message_wait_capped`. The hub also caps waiters at 8
+    fleet-wide (a quarter of its 32 handler threads) and at 2 per source
+    address, with loopback exempt from the source cap. The drive pins only the
+    per-recipient cap.
