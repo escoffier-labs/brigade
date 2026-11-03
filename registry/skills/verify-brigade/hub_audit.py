@@ -151,7 +151,7 @@ def _reroute(database: Any, uri: bool, configured: str, route: str) -> Any:
     text = os.fsdecode(database)
     if uri and text.startswith("file:"):
         parts = urllib.parse.urlsplit(text)
-        if parts.netloc not in ("", "localhost") or os.path.realpath(urllib.parse.unquote(parts.path)) != configured:
+        if parts.netloc or os.path.realpath(urllib.parse.unquote(parts.path)) != configured:
             return database
         return Path(route).as_uri() + (f"?{parts.query}" if parts.query else "")
     if text and text != ":memory:" and os.path.realpath(text) == configured:
