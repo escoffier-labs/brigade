@@ -215,6 +215,44 @@ def test_hub_contract_reports_a_drifting_hub(tmp_path):
     assert failed == DRIFTED_CASES
 
 
+# The in-repo hub behind a proxy that nulls every node's `keys` in `who` replies.
+# The drive must record a mismatch for that case and still run the rest.
+NULL_KEYS_HUB = (
+    DRIFTING_HUB.split("        path = self.path.partition", 1)[0]
+    + """\
+        if self.path == "/messages" and status == 200 and data and json.loads(data).get("action") == "who":
+            reply = json.loads(body)
+            for node in reply.get("nodes") or []:
+                if isinstance(node, dict):
+                    node["keys"] = None
+            body = json.dumps(reply).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = forward
+
+
+ThreadingHTTPServer((host, int(port)), Proxy).serve_forever()
+"""
+)
+
+
+def test_hub_contract_reports_null_who_keys_without_crashing(tmp_path):
+    root = tmp_path / "state"
+    script = tmp_path / "null_keys_hub.py"
+    script.write_text(NULL_KEYS_HUB, encoding="utf-8")
+    template = " ".join([shlex.quote(sys.executable), shlex.quote(str(script)), "{host} {port} {db} {token_file}"])
+
+    code, payload = control("hub-contract", "--hub-cmd", template, root=root)
+    assert code == 3, payload
+    failed = {case["case"] for case in payload["cases"] if not case["ok"]}
+    assert "messages who" in failed, payload["mismatches"]
+    assert payload["cases_total"] == len(payload["cases"]) >= 180
+
+
 # A stand-in that answers every request `200 [1]`: healthy enough to start,
 # wrong everywhere else. The drive must report every case, not crash.
 JUNK_HUB = """\

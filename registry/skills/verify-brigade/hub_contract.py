@@ -1890,7 +1890,7 @@ def drive_message_actions(d: Drive, x: Ctx) -> None:
         "who lists the active nodes and the agent principal",
         {"nodes": sorted(nodes), "principals": sorted(principals)},
     )
-    kids = [key.get("kid") for key in _obj(nodes.get(x.node_a)).get("keys", []) if isinstance(key, dict)]
+    kids = [key.get("kid") for key in _items(nodes.get(x.node_a), "keys")]
     d.invariant("messages who", kids == [x.kid_a], "a node with a published key lists its active key", kids)
     d.call(
         "messages who with an unknown argument",
