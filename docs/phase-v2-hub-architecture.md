@@ -1408,6 +1408,17 @@ caught: bytes that go from A to B and back to A, a trust change on identical
 bytes, and a retire followed by a revival. An offline client whose edit conflicts turns
 it into a proposal for review and never overwrites.
 
+Revisions are only unique within one `log_epoch`. After a restore, `AUTOINCREMENT`
+can issue a revision number again that a client saw before the restore, so a
+numeric compare-and-set alone could let an edit based on the old revision 11
+overwrite a different, post-restore revision 11. Every write whose body names a
+base revision (`put`, `retire`, `import`, and `propose` or `decide` when the
+proposal names base revisions) therefore also carries `base_epoch`, the
+`log_epoch` under which the client read that revision. The hub checks
+`base_epoch` before the revision: a different epoch is refused with `409` and
+`code: "memory_epoch_changed"`, plus the current `log_epoch`, and nothing is
+applied. A create (`base_revision` of `null`) carries no epoch.
+
 Scope is part of identity, so there is no scope move. Moving a card is a
 retire in one scope and a create in the other, each authorized against its own
 scope, and linked by `supersede_card` when it goes through a proposal. A write
@@ -1637,7 +1648,10 @@ proposals and never flushes them, so a compliant client with a correct clock
 never reaches the window. A client whose clock runs days slow can reach the
 hub's window before its own 28-day cut, so a client that receives
 `memory_client_event_expired` turns that spool entry into a local proposal the
-same way and never resends it under a fresh id on its own. `status` returns
+same way and never resends it under a fresh id on its own. A spooled write
+whose `base_epoch` differs from the hub's current `log_epoch`, or that the hub
+refuses with `memory_epoch_changed`, also becomes a local proposal for review
+and is never resent with the new epoch substituted. `status` returns
 the hub clock, and the client warns when its own clock differs by more than a
 minute. The window and the retention can be
 raised, and the window never drops below the spool age plus a day, nor the
@@ -1661,8 +1675,8 @@ One route, `POST /memory`, with an `action` field, the same style as
 |---|---|---|---|
 | `search` | read | `query` (at most 256 characters after normalization), `limit` (1 to 20, default 10), `mode` (`auto`, `lexical`, `hybrid`), `query_source` (`prompt`, `cwd`, `explicit`), optional `scopes`, `sources` and `min_seq` | `200 {matches, retrieval: {mode, degraded, stale}, indexed_seq}` |
 | `card` | read | `card_id`, optional `scope`, `revision` and `offset` | `200 {card: {scope, card_id, revision, content_hash, text, next_offset, trust, seq}}`, text in 30,000-character chunks as Dot's `memory_card` returns it. Without `scope`, an id readable in two scopes answers `409 memory_card_ambiguous` with the scopes |
-| `put` | write on the scope | `scope`, `card_id`, `base_revision`, `text`, `origin`, `client_event_id` | `201 {event: {seq, revision, content_hash, trust}, log_epoch}` |
-| `retire` | write on the scope | `scope`, `card_id`, `base_revision`, `reason`, `client_event_id` | `200 {event, log_epoch}` |
+| `put` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch` (required when `base_revision` is set), `text`, `origin`, `client_event_id` | `201 {event: {seq, revision, content_hash, trust}, log_epoch}` |
+| `retire` | write on the scope | `scope`, `card_id`, `base_revision`, `base_epoch`, `reason`, `client_event_id` | `200 {event, log_epoch}` |
 | `import` | import | as `put`, one card per call | `201 {event, log_epoch}`, trust `imported` |
 | `log` | read | `after_seq`, `limit` (1 to 500) | `200 {events, next_seq, log_epoch}`, ascending `seq`, `next_seq` equal to the last `seq` on the page, `after_seq` exclusive, card text omitted |
 | `handoff` | handoff | `text`, `kind`, `client_event_id` | `201 {handoff_id, log_epoch}` |
@@ -1675,7 +1689,8 @@ One route, `POST /memory`, with an `action` field, the same style as
 
 Error codes: `memory_query_invalid`, `memory_card_not_found` (404),
 `memory_card_ambiguous` (409), `memory_base_mismatch` (409, with
-`current_revision` and `current_hash`), `memory_client_event_conflict` (409),
+`current_revision` and `current_hash`), `memory_epoch_changed` (409, with the
+current `log_epoch`), `memory_client_event_conflict` (409),
 `memory_client_event_expired` (409), `memory_client_event_invalid` (400),
 `memory_card_too_large` (413), `memory_content_blocked` (422),
 `memory_proposal_invalid` (422), `memory_lease_expired` (409),
@@ -1753,7 +1768,9 @@ and tested when it is built:
    a retry inside the window always finds its record.
 7. `log_epoch` does not change on compaction. It changes only when the file is
    restored from a backup or replaced, and a client that sees a new value
-   resets its watermark and pulls again.
+   resets its watermark and pulls again. Resetting the watermark is not enough
+   for writes: a revision-dependent write from the old epoch is refused with
+   `memory_epoch_changed` (see compare-and-set above).
 
 ### Index structures
 
@@ -3273,7 +3290,7 @@ next number.
 
 | ID | Slice | Depends on | Acceptance | Parallel with |
 |---|---|---|---|---|
-| S13a | Memory store and routes: log, revisions, blobs, compare-and-set on revision, idempotency with the id window, grants, scopes, trust rules, the authority protocol with its arbiter turns and residence bounds, `log_epoch`, the 404 and 503 rules, a scan hook that reports unavailable, and the `memory` drive profile | S4a, S5. Verify: S6a | Drive cases pass. Same id in two scopes, a trust change on identical bytes, a stale update after retire and revival, bytes A then B then A, and a write into a scope the caller cannot write all behave as specified. An admin `put` stores `agent-unreviewed`, and an import without the grant gets 403. Every acceptance item in [Authority across the two files](#authority-across-the-two-files) and [Idempotency](#idempotency) passes. The power-cut test passes on the memory file and across the authority protocol | S6, S7, S8 |
+| S13a | Memory store and routes: log, revisions, blobs, compare-and-set on revision, idempotency with the id window, grants, scopes, trust rules, the authority protocol with its arbiter turns and residence bounds, `log_epoch`, the 404 and 503 rules, a scan hook that reports unavailable, and the `memory` drive profile | S4a, S5. Verify: S6a | Drive cases pass. Same id in two scopes, a trust change on identical bytes, a stale update after retire and revival, bytes A then B then A, a write into a scope the caller cannot write, and a `put` based on a revision read before a restore that the post-restore file has reissued (refused with `memory_epoch_changed`, and the client spool turns it into a proposal) all behave as specified. An admin `put` stores `agent-unreviewed`, and an import without the grant gets 403. Every acceptance item in [Authority across the two files](#authority-across-the-two-files) and [Idempotency](#idempotency) passes. The power-cut test passes on the memory file and across the authority protocol | S6, S7, S8 |
 | S13b | Lexical index and scorer: segmented snapshots, `indexed_seq` and `min_seq`, per-scope statistics, the scorer and tokenizer goldens, R0 | S13a | R0 passes on the public fixture. Every scorer golden passes. Writes during a rebuild, an index failure after commit, and restart replay behave as specified. Rebuild time and peak resident memory at 20,000 synthetic cards are recorded | S6, S7, S8, S18 |
 | S14 | Python client: the planned `memory hub status`, `push`, `pull` and `import`, search fusion and fallback, the replica, the spool, the hub recall log, and Dot and Duet memory tools routed through it | S13b | With the hub stopped, search answers locally and labels it. The sentinel prompt appears nowhere on the hub or the client. A conflicting offline edit becomes a proposal. A 404 from a hub where the workspace holds a replica watermark spools instead of dropping. A changed `log_epoch` resets the watermark. First `sync` prints the card count and needs `--yes`. `off` mode output is byte-identical to today | S15, S19a |
 | S15 | Embedder interface, the `local` and `remote` HTTP backends with the remote-endpoint contract (bearer token from a secret file, the endpoint allowlist, the 250 ms query and 30 s document deadlines, the batching rules, the model digest check and the scan gate on outgoing text), the query breaker with its background probe, embed jobs and `memory embed-worker` for pull mode, vectors, lineage, segmented dense index, and the two retrieval modes of D30 with their status fields, the mode switch and the planned `memory reindex` | S13b, S18 | BM25 mode: with `retrieval = "lexical"` the hub starts no embed scheduler, makes no embedding call and loads no matrix, status reports mode `lexical`, effective `lexical`, state `ok` and no warning, and the private gold set's prompt hit@5 for BM25 mode is reported in aggregate, as #2201 reported 0.42 to 0.69. Hybrid with the endpoint stopped: answers carry `lexical-fallback` with a reason, and status reports `degraded`. A switch from hybrid to BM25 answers the first query after the restart in BM25 mode and keeps every vector. A switch back reuses matching vectors, backfills only the rest, reports `switching` with coverage, answers in BM25 mode until coverage is complete and then in hybrid, and no query fails during either switch. `memory reindex` run twice queues nothing the second time, and `--drop` removes only the named embedder's rows. Remote contract, against a test endpoint: a request without the token is refused, a response with a different model digest is refused and stores nothing, an endpoint outside the allowlist is refused, a fifth concurrent query is answered in fallback at once, no document request starts while a query is in flight, a query timeout during the hub's own document request does not open the breaker, and after a simulated 6.4 s cold load the background probe closes the breaker with no user query waiting past 250 ms. A version with scan state `pending` and a query that matches a blocking guard rule send no text, and with the scanner unavailable no query goes to a non-loopback endpoint. An embedder change backfills only missing rows and leaves the old matrix intact. Retiring a card removes exactly its lineage rows, and a vector shared with a card in another scope stays until its last reference goes. A failed embedding keeps the card findable by BM25. A hung embedding server costs one query the 300 ms budget, after which the breaker answers in BM25 mode for 30 s. Peak resident memory during a rebuild is recorded at 1,024 and 4,096 dimensions | S14, S19a |
