@@ -61,6 +61,7 @@ optional. Replace placeholders with the deployment's configured values.
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
 | `notify_command` | string array | Optional notification argv. The first item is an absolute executable path. |
 | `messaging_enabled` | boolean | Optional gate for `message_send`. When omitted, `message_send` follows `dispatch_enabled`. |
+| `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits`. |
 | `owner_authorization` | object | Owner's recorded automation authorization. |
 | `owner_authorization.version` | string | Nonempty printable ASCII authorization version, at most 64 characters. |
 | `owner_authorization.text` | string | Nonempty authorization text, at most 4096 UTF-8 bytes. |
@@ -153,6 +154,29 @@ acknowledgments, replies, and handoff writes, retain their own validation rules.
 BM25 relevance score: a non-negative float rounded to 4 decimals, where higher ranks first. It used to
 be a small integer. Scores compare only within one result list, never across workspaces or queries.
 Equal scores are ordered by card path.
+
+### Memory hits in `inbox_list` and `fleet_digest`
+
+`inbox_list` and `fleet_digest` responses may carry an optional `memory_hits`
+object, so an agent sees relevant cards without being told to search:
+
+```json
+{"content_trust": "untrusted",
+ "hits": [{"path": "memory/cards/<name>.md", "card": "<wrapped title and tags>"}],
+ "next": "Read a card with memory_card(name=<path basename without .md>)."}
+```
+
+- The query comes from the item shown: the first listed message's subject and
+  body for `inbox_list`, and the pending inbox subjects plus the next work item
+  title for `fleet_digest`. It is normalized and bounded to 256 characters.
+- At most 3 hits. Each carries the card path and its title and tags, wrapped
+  with `wrap_untrusted` as `memory` content. Card bodies are never included.
+  Paths that are not a flat `memory/cards/<name>.md` are dropped.
+- Recall runs in a killable child with the text on stdin. The search log records
+  only an HMAC of the query with `query_source: push`, never the text.
+- The field is omitted when push is off, there is no `memory/cards` directory,
+  nothing matches, or recall fails. Responses stay inside the existing 64 KiB bound.
+- Set `"memory_push": false` in the runtime JSON to turn it off for this connector.
 
 ## Security model
 

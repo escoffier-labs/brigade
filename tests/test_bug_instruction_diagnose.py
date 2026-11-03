@@ -237,7 +237,7 @@ def test_local_report_has_instruction_title_no_collection_or_submission(tmp_path
     (tmp_path / ".git").mkdir()
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     parser = cli._build_parser()
-    monkeypatch.setattr(cli, "_build_parser", lambda: parser)
+    monkeypatch.setattr(cli, "_build_parser_for", lambda argv: parser)
 
     def forbidden(*args, **kwargs):
         pytest.fail("ambient report collection or submission")

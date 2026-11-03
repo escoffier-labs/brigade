@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
 - Guard can use an optional local `brigade-guard` PCRE2 JIT binary for large ASCII inputs, with Python regex fallback and unchanged policy decisions.
 
