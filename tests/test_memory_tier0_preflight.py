@@ -8,7 +8,11 @@ from brigade import cli, memory_reflect
 from brigade import memory_proposal_v2_reflect as reflect_proposal
 from tests.test_memory_negative_outcomes import failed_card as failed_card
 from tests.test_memory_outcome_evidence import verified_card as verified_card
+from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
 from tests.test_memory_reflect import card, evidence, log
+
+# Reflection and preflight both require descriptor-relative no-follow reads, as in the sibling modules.
+pytestmark = pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
 
 
 def prepared(target, *, anchored=True):
@@ -653,3 +657,178 @@ def test_preflight_unsafe_input_never_composes(tmp_path, monkeypatch, location, 
     report = evaluate(tmp_path, candidate)
     assert report["status"] == "refused"
     assert report["evaluation_sha256"] is None
+
+
+def test_preflight_records_policy_digest_and_limits(tmp_path):
+    from brigade import memory_proposal_io as io
+
+    _, candidate = prepared(tmp_path)
+    absent = evaluate(tmp_path, candidate)
+    assert absent["policy_sha256"] is None
+    assert absent["policy_limits"]["enabled_classes"] == []
+    name = policy(tmp_path, minimum_evidence_ids=4, cooldown_seconds=60)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert report["policy_sha256"] == io.sha256((tmp_path / name).read_bytes())
+    assert report["policy_limits"] == dict(
+        enabled_classes=["reinforce"],
+        minimum_evidence_ids=4,
+        minimum_source_groups=2,
+        max_changed_paths=1,
+        cooldown_seconds=60,
+    )
+    assert "evidence_floor_unmet" in codes(report)
+    assert (report["proof_evidence_count"], report["proof_source_group_count"]) == (3, 2)
+    policy(tmp_path, minimum_evidence_ids=3, cooldown_seconds=60)
+    edited = evaluate(tmp_path, candidate, policy_path=name)
+    assert edited["policy_sha256"] != report["policy_sha256"]
+    assert edited["evaluation_sha256"] != report["evaluation_sha256"]
+    assert "evidence_floor_satisfied" in codes(edited)
+    invalid = tmp_path / name
+    invalid.write_text("{}")
+    refused = evaluate(tmp_path, candidate, policy_path=name)
+    assert (refused["policy_sha256"], refused["policy_limits"]) == (None, None)
+
+
+def test_preflight_satisfied_gates_are_the_only_allowed_reasons(tmp_path):
+    from brigade import memory_tier0_preflight as preflight
+
+    _, candidate = prepared(tmp_path)
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    satisfied = {c["code"] for c in report["checks"] if c["state"] == "satisfied"}
+    assert satisfied == {
+        "policy_satisfied",
+        "candidate_satisfied",
+        "snapshot_satisfied",
+        "delta_satisfied",
+        "evidence_floor_satisfied",
+        "source_group_floor_satisfied",
+        "host_satisfied",
+    }
+    assert "card_trust_unverifiable" in codes(report)
+    assert [c["gate"] for c in report["checks"] if c["state"] != "satisfied"] == [
+        "card_trust",
+        *preflight.AUTHORITY,
+    ]
+    assert report["status"] == "held" and report["eligible"] is False
+    assert tree(tmp_path) == before
+
+
+def test_preflight_authority_holds_explain_the_missing_contract(tmp_path, capsys):
+    from brigade import memory_tier0_preflight as preflight
+
+    _, candidate = prepared(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    holds = {c["gate"]: c for c in report["checks"] if c["gate"] in preflight.AUTHORITY}
+    assert set(holds) == set(preflight.AUTHORITY)
+    assert all(c["state"] == "unverifiable" and c["code"] == gate + "_unbound" for gate, c in holds.items())
+    explanations = [c["explanation"] for c in holds.values()]
+    assert len(set(explanations)) == len(explanations)
+    assert all(text.endswith("Promotion remains held.") for text in explanations)
+    assert "pass threshold" in holds["retrieval_eval"]["explanation"]
+
+
+@pytest.mark.parametrize("change", [dict(tier=1), dict(kind="weaken")])
+def test_preflight_non_tier0_candidate_requires_review(tmp_path, change):
+    _, candidate = prepared(tmp_path)
+    candidate = retained_change(tmp_path, candidate, **change)
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert "tier_requires_review" in codes(report)
+    assert "candidate_satisfied" not in codes(report)
+    assert report["eligible"] is False
+    assert tree(tmp_path) == before
+
+
+def test_preflight_contrary_evidence_requires_review(tmp_path):
+    _, candidate = prepared(tmp_path)
+    contrary = evidence(tmp_path, "memory/evidence/contrary.json")
+    candidate = retained_change(tmp_path, candidate, contrary_ids=[contrary])
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    assert "candidate_evidence_requires_review" in codes(report)
+    assert "candidate_satisfied" not in codes(report)
+    assert report["eligible"] is False
+
+
+def test_preflight_base_drift_skips_delta_evaluation(tmp_path):
+    path, candidate = prepared(tmp_path)
+    path.write_text(path.read_text() + "Edited after reflection.\n")
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert report["status"] == "held"
+    states = {c["code"]: c["state"] for c in report["checks"]}
+    assert states["base_drift"] == "held"
+    assert states["delta_invalid"] == "not_evaluated"
+    assert report["delta_sha256"] is None and report["evaluation_sha256"] is None
+    assert tree(tmp_path) == before
+
+
+def test_preflight_duplicate_merge_exceeds_blast_cap(tmp_path):
+    left = card(tmp_path, "left", body="Keep the cache warm. ^c-123abc")
+    log(tmp_path, left, (evidence(tmp_path, ".brigade/receipts/duplicate.json"), "outcome", "2026-10-20T12:00:00Z"))
+    card(tmp_path, "right", body="Keep the cache warm. ^c-456def")
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "duplicate")
+    (tmp_path / "policy.json").write_text(
+        json.dumps(dict(schema="brigade.memory-tier0-preflight-policy.v1", enabled_classes=["duplicate"]))
+    )
+    report = evaluate(tmp_path, candidate, policy_path="policy.json")
+    assert report["changed_path_count"] == 2
+    assert {"policy_satisfied", "blast_cap_exceeded"} <= codes(report)
+    assert "delta_satisfied" not in codes(report)
+
+
+def test_preflight_inconsistent_proof_leaves_floors_unevaluated(tmp_path):
+    _, candidate = prepared(tmp_path)
+    candidate = retained_change(tmp_path, candidate, proof_count=0)
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    floors = [c for c in report["checks"] if c["gate"] in ("evidence_floor", "source_group_floor")]
+    assert [(c["code"], c["state"]) for c in floors] == [("proof_binding_incomplete", "not_evaluated")] * 2
+    assert (report["proof_evidence_count"], report["proof_source_group_count"]) == (None, None)
+
+
+def test_preflight_ineligible_card_trust_refuses(tmp_path):
+    path, candidate = prepared(tmp_path)
+    path.write_text(path.read_text().replace("scope: repo\n", "scope: repo\ntrust: quarantined\n"))
+    name = policy(tmp_path)
+    before = tree(tmp_path)
+    report = evaluate(tmp_path, candidate, policy_path=name)
+    assert report["status"] == "refused"
+    assert "card_trust_denied" in codes(report)
+    assert not any(c["state"] == "satisfied" for c in report["checks"])
+    assert report["evaluation_sha256"] is None
+    assert tree(tmp_path) == before
+
+
+def test_preflight_reason_vocabulary_is_closed_and_documented(tmp_path):
+    from pathlib import Path
+
+    from brigade import memory_tier0_preflight as preflight
+
+    _, candidate = prepared(tmp_path)
+    reports = [
+        evaluate(tmp_path, candidate),
+        evaluate(tmp_path, candidate, policy_path=policy(tmp_path)),
+        evaluate(tmp_path, dict(candidate_id="candidate-" + "0" * 24)),
+    ]
+    for report in reports:
+        for check in report["checks"]:
+            assert check["code"] in preflight.REASONS[check["gate"]]
+            assert (check["state"] == "satisfied") is (check["code"] == check["gate"] + "_satisfied")
+    assert set(preflight.REASONS) == {
+        "policy",
+        "candidate",
+        "snapshot",
+        "delta",
+        "evidence_floor",
+        "source_group_floor",
+        "host",
+        "card_trust",
+        *preflight.AUTHORITY,
+    }
+    guide = (Path(__file__).resolve().parents[1] / "docs/technical-guide.md").read_text()
+    section = guide.split("### Tier 0 diagnostic preflight", 1)[1]
+    missing = [code for codes in preflight.REASONS.values() for code in codes if f"`{code}`" not in section]
+    assert not missing

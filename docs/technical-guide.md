@@ -2534,7 +2534,37 @@ Promotion remains held by `evidence_authority_unbound`,
 promotion-owner grant, candidate-bound retrieval evaluation or complete
 promotion-history contract clears these holds. Selection ownership, card
 trust, generic successful verification and empty ratchet history confer no
-promotion authority.
+promotion authority. The retrieval eval (`python -m brigade.memory_retrieval_eval`,
+including its `current` BM25, `bm25` and `substring` adapters) scores a checked-in
+fixture corpus and defines no workspace pass threshold, so preflight does not
+run it and `retrieval_eval_unbound` stays a hold.
+
+The report records `policy_sha256` (the SHA-256 of the observed policy bytes,
+null without a policy) and `policy_limits` (the effective classes, floors,
+changed-path cap and cooldown, defaults when no policy is given). When retained
+proof counters match the live recount, `proof_evidence_count` and
+`proof_source_group_count` show the measured values the floors compare against.
+A refused report clears both counts.
+
+Each check has a gate, a state and one reason code. A `<gate>_satisfied` code
+in the `satisfied` state is the only allowed reason. Every other code holds the
+candidate, marks a gate `not_evaluated` or `unverifiable`, or records why the
+evaluation was refused.
+
+| Gate | Reason codes |
+| --- | --- |
+| policy | `policy_satisfied`, `policy_missing`, `class_disabled`, `policy_invalid` |
+| candidate | `candidate_satisfied`, `tier_requires_review`, `candidate_evidence_requires_review`, `candidate_proof_mismatch`, `candidate_invalid` |
+| snapshot | `snapshot_satisfied`, `base_drift`, `binding_incomplete`, `input_drift`, `evidence_window_incomplete`, `source_invalid`, `target_invalid` |
+| delta | `delta_satisfied`, `anchoring_requires_review`, `delta_requires_review`, `delta_invalid`, `blast_cap_exceeded` |
+| evidence_floor | `evidence_floor_satisfied`, `evidence_floor_unmet`, `proof_binding_incomplete` |
+| source_group_floor | `source_group_floor_satisfied`, `source_group_floor_unmet`, `proof_binding_incomplete` |
+| host | `host_satisfied`, `path_read_only` |
+| card_trust | `card_trust_satisfied`, `card_trust_unverifiable`, `card_trust_denied` |
+| evidence_authority | `evidence_authority_unbound` |
+| owner_authority | `owner_authority_unbound` |
+| retrieval_eval | `retrieval_eval_unbound` |
+| cooldown_history | `cooldown_history_unbound` |
 
 Preflight writes zero files or directories and changes no modes, including
 canonical cards and derived runs, proposals, receipts, locks, caches and trust

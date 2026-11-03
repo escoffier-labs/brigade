@@ -26,6 +26,56 @@ DEFAULTS: dict[str, Any] = dict(
     cooldown_seconds=86400,
 )
 AUTHORITY = ("evidence_authority", "owner_authority", "retrieval_eval", "cooldown_history")
+# Each authority gate names the contract that does not exist yet, so a hold is actionable.
+AUTHORITY_EXPLANATIONS = {
+    "evidence_authority": (
+        "No source-trust or scan-clean attestation binds the cited evidence. Promotion remains held."
+    ),
+    "owner_authority": (
+        "No grant makes Brigade the promotion owner for these cards; the configured selection owner is not one."
+        " Promotion remains held."
+    ),
+    "retrieval_eval": (
+        "The retrieval eval is a fixture harness with no workspace pass threshold bound to this delta."
+        " Promotion remains held."
+    ),
+    "cooldown_history": (
+        "No per-card promotion history exists to prove the cooldown has elapsed. Promotion remains held."
+    ),
+}
+# The complete reason vocabulary per gate. A `<gate>_satisfied` code is the only allowed reason;
+# every other code is a hold, an unevaluated gate or a refusal.
+REASONS: dict[str, tuple[str, ...]] = {
+    "policy": ("policy_satisfied", "policy_missing", "class_disabled", "policy_invalid"),
+    "candidate": (
+        "candidate_satisfied",
+        "tier_requires_review",
+        "candidate_evidence_requires_review",
+        "candidate_proof_mismatch",
+        "candidate_invalid",
+    ),
+    "snapshot": (
+        "snapshot_satisfied",
+        "base_drift",
+        "binding_incomplete",
+        "input_drift",
+        "evidence_window_incomplete",
+        "source_invalid",
+        "target_invalid",
+    ),
+    "delta": (
+        "delta_satisfied",
+        "anchoring_requires_review",
+        "delta_requires_review",
+        "delta_invalid",
+        "blast_cap_exceeded",
+    ),
+    "evidence_floor": ("evidence_floor_satisfied", "evidence_floor_unmet", "proof_binding_incomplete"),
+    "source_group_floor": ("source_group_floor_satisfied", "source_group_floor_unmet", "proof_binding_incomplete"),
+    "host": ("host_satisfied", "path_read_only"),
+    "card_trust": ("card_trust_satisfied", "card_trust_unverifiable", "card_trust_denied"),
+    **{gate: (gate + "_unbound",) for gate in AUTHORITY},
+}
 
 
 class Refusal(ValueError):
@@ -85,9 +135,7 @@ def _check(report: dict[str, Any], gate: str, code: str | None = None, *, state:
             state="satisfied" if code == gate + "_satisfied" else state,
             code=code,
             explanation=(
-                "No authority contract binds this candidate and exact delta. Promotion remains held."
-                if gate in AUTHORITY
-                else code.replace("_", " ").capitalize() + "."
+                AUTHORITY_EXPLANATIONS[gate] if gate in AUTHORITY else code.replace("_", " ").capitalize() + "."
             ),
         )
     )
@@ -372,6 +420,7 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         candidate_id=None,
         run_id=None,
         policy_sha256=None,
+        policy_limits=None,
         candidate_sha256=None,
         source_sha256={},
         evidence_sha256={},
@@ -380,6 +429,8 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         evidence_log_sha256="incomplete",
         delta_sha256=None,
         changed_path_count=0,
+        proof_evidence_count=None,
+        proof_source_group_count=None,
         evaluation_sha256=None,
         checks=[],
     )
@@ -390,6 +441,7 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         target = target.absolute()
         snapshot = Snapshot(target)
         policy, report["policy_sha256"] = _policy(snapshot, policy_path)
+        report["policy_limits"] = {key: value for key, value in policy.items() if key != "schema"}
         stage = "candidate_invalid"
         if not isinstance(candidate_id, str) or not re.fullmatch(r"candidate-[0-9a-f]{24}", candidate_id):
             raise Refusal("candidate_invalid")
@@ -463,6 +515,9 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         else:
             _check(report, "delta", "delta_invalid", state="not_evaluated")
         proof, groups, consistent_proof = _proof(target, candidate, sources, ledger, report["evidence_sha256"])
+        if consistent_proof:
+            report["proof_evidence_count"] = len(proof)
+            report["proof_source_group_count"] = len(set(groups.values()))
         if not consistent_proof:
             _check(report, "candidate", "candidate_proof_mismatch")
         elif not any(check["gate"] == "candidate" for check in report["checks"]):
@@ -516,6 +571,7 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         code = str(exc) if isinstance(exc, Refusal) else stage
         report["status"] = "refused"
         report["evaluation_sha256"] = None
+        report["proof_evidence_count"] = report["proof_source_group_count"] = None
         for check in report["checks"]:
             if check["state"] == "satisfied":
                 check["state"] = "not_evaluated"
