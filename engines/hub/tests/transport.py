@@ -64,13 +64,37 @@ def front(upstream=None, extra=()):
                         child.wait()
 
 
-def request(port, path, method="GET", body=None, headers=None):
-    conn = http.client.HTTPConnection(HOST, port, timeout=3)
+DRAIN_SECONDS = 25
+SLOW_ENROLL = b"POST /enroll HTTP/1.1\r\nHost: fake\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Bearer %s\r\nContent-Length: 6\r\n\r\ncode="
+
+
+def request(port, path, method="GET", body=None, headers=None, timeout=3):
+    conn = http.client.HTTPConnection(HOST, port, timeout=timeout)
     try:
         conn.request(method, path, body, headers or {})
         response = conn.getresponse()
         return response.status, response.getheaders(), response.read()
     finally:
+        conn.close()
+
+
+@contextlib.contextmanager
+def _accepted(conn, data, keep):
+    with conn:
+        yield (conn, data) if keep else conn
+
+
+def accept_request(listener, prefix, keep=False):
+    """Accept the front's request, skipping stray local probes of the port.
+
+    Some hosts probe newly opened loopback ports, so a stub upstream must not
+    treat the first accepted connection as the front's.
+    """
+    while True:
+        conn, _ = listener.accept()
+        data = conn.recv(4096)
+        if data.startswith(prefix):
+            return _accepted(conn, data, keep)
         conn.close()
 
 
@@ -96,9 +120,7 @@ class Transport(unittest.TestCase):
                 listener.listen()
 
                 def healthy():
-                    conn, _ = listener.accept()
-                    with conn:
-                        conn.recv(4096)
+                    with accept_request(listener, b"GET /health ") as conn:
                         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
 
                 worker = threading.Thread(target=healthy)
@@ -115,9 +137,7 @@ class Transport(unittest.TestCase):
             attempts = []
 
             def upstream():
-                conn, _ = listener.accept()
-                with conn:
-                    data = b""
+                with accept_request(listener, b"POST /nodes ", keep=True) as (conn, data):
                     while b"\r\n\r\n" not in data:
                         data += conn.recv(4096)
                     head, body = data.split(b"\r\n\r\n", 1)
@@ -127,11 +147,10 @@ class Transport(unittest.TestCase):
                     attempts.append(head)
                 listener.settimeout(1)
                 try:
-                    conn, _ = listener.accept()
+                    with accept_request(listener, b"POST /nodes "):
+                        attempts.append(b"unexpected retry")
                 except TimeoutError:
                     return
-                attempts.append(b"unexpected retry")
-                conn.close()
 
             worker = threading.Thread(target=upstream)
             worker.start()
@@ -169,15 +188,48 @@ class Transport(unittest.TestCase):
                 self.assertTrue((reply := sock.recv(4096)).startswith(b"HTTP/1.0 400 Bad Request"), repr(reply))
 
     def test_proxy_overload_returns_own_503(self):
+        # The upstream accepts nothing, so each complete request holds its slot
+        # while it waits for response headers.
+        with socket.socket() as listener, contextlib.ExitStack() as stack:
+            listener.bind((HOST, 0))
+            listener.listen(64)
+            with front(listener.getsockname()[1]) as (_, port):
+                for _ in range(24):
+                    sock = stack.enter_context(socket.create_connection((HOST, port), timeout=3))
+                    sock.sendall(b"GET /nodes HTTP/1.1\r\nHost: fake\r\nAuthorization: Bearer fake-admin-token\r\n\r\n")
+                time.sleep(0.3)
+                response = request(port, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})
+                self.assertEqual(response[0], 503)
+                self.assertIn(("retry-after", "1"), response[1])
+                self.assertIn(b"proxy-inflight-full", response[2])
+                listener.close()
+
+    def test_slow_bodies_with_fake_credentials_leave_proxy_capacity(self):
+        # Unvalidated Authorization values are distinct admission keys. Their
+        # unfinished bodies must not hold the shared proxied slots.
         with front() as (_, port), contextlib.ExitStack() as stack:
-            for _ in range(24):
+            for i in range(32):
                 sock = stack.enter_context(socket.create_connection((HOST, port), timeout=3))
-                sock.sendall(b"POST /enroll HTTP/1.1\r\nHost: fake\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/x-www-form-urlencoded\r\nAuthorization: Bearer fake-admin-token\r\nContent-Length: 6\r\n\r\ncode=")
-            time.sleep(0.2)
-            response = request(port, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})
-            self.assertEqual(response[0], 503)
-            self.assertIn(("retry-after", "1"), response[1])
-            self.assertIn(b"proxy-inflight-full", response[2])
+                sock.sendall(SLOW_ENROLL % f"fake-{i}".encode())
+            time.sleep(0.3)
+            self.assertEqual(request(port, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})[0], 200)
+
+    def test_query_wait_ms_does_not_shorten_response_timeout(self):
+        # Python reads wait_ms from the JSON body only.
+        with socket.socket() as listener:
+            listener.bind((HOST, 0))
+            listener.listen()
+
+            def upstream():
+                with accept_request(listener, b"GET /messages?wait_ms=0 ") as conn:
+                    time.sleep(6)
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
+
+            worker = threading.Thread(target=upstream)
+            worker.start()
+            with front(listener.getsockname()[1]) as (_, port):
+                self.assertEqual(request(port, "/messages?wait_ms=0", timeout=10)[0], 200)
+            worker.join(3)
 
     def test_cookies_and_spoofed_headers(self):
         with socket.socket() as listener:
@@ -186,9 +238,8 @@ class Transport(unittest.TestCase):
             seen = []
 
             def upstream():
-                conn, _ = listener.accept()
-                with conn:
-                    seen.append(conn.recv(4096).lower())
+                with accept_request(listener, b"GET /deck ", keep=True) as (conn, data):
+                    seen.append(data.lower())
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\n{}")
 
             worker = threading.Thread(target=upstream)
@@ -209,10 +260,9 @@ class Transport(unittest.TestCase):
             seen = []
 
             def upstream():
-                for _ in range(2):
-                    conn, _ = listener.accept()
-                    with conn:
-                        seen.append(conn.recv(4096).lower())
+                for path in (b"/deck", b"/nodes"):
+                    with accept_request(listener, b"GET " + path + b" ", keep=True) as (conn, data):
+                        seen.append(data.lower())
                         conn.sendall(b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 2\r\n\r\n{}")
 
             worker = threading.Thread(target=upstream)
@@ -232,9 +282,7 @@ class Transport(unittest.TestCase):
             stop = threading.Event()
 
             def upstream():
-                conn, _ = listener.accept()
-                with conn:
-                    conn.recv(4096)
+                with accept_request(listener, b"GET /nodes ") as conn:
                     conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n")
                     stop.wait(35)
 
@@ -261,6 +309,47 @@ class Transport(unittest.TestCase):
             self.assertEqual(len(children), 1)
             os.kill(int(children[0]), signal.SIGKILL)
             self.assertNotEqual(child.wait(3), 0)
+
+    def test_sigterm_closes_idle_keepalive_connection(self):
+        with front() as (child, port):
+            conn = http.client.HTTPConnection(HOST, port, timeout=3)
+            try:
+                conn.request("GET", "/health")
+                response = conn.getresponse()
+                response.read()
+                self.assertEqual(response.status, 200)
+                child.send_signal(signal.SIGTERM)
+                self.assertEqual(child.wait(5), 0)
+            finally:
+                conn.close()
+
+    def test_sigterm_drain_is_bounded(self):
+        with socket.socket() as listener:
+            listener.bind((HOST, 0))
+            listener.listen()
+            stop = threading.Event()
+
+            def upstream():
+                with accept_request(listener, b"GET /nodes ") as conn, contextlib.suppress(OSError):
+                    conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\n\r\nx")
+                    while not stop.wait(2):
+                        conn.sendall(b"x")
+
+            worker = threading.Thread(target=upstream)
+            worker.start()
+            try:
+                with front(listener.getsockname()[1]) as (child, port):
+                    conn = http.client.HTTPConnection(HOST, port, timeout=3)
+                    try:
+                        conn.request("GET", "/nodes")
+                        self.assertEqual(conn.getresponse().status, 200)
+                        child.send_signal(signal.SIGTERM)
+                        self.assertEqual(child.wait(DRAIN_SECONDS + 5), 0)
+                    finally:
+                        conn.close()
+            finally:
+                stop.set()
+                worker.join(5)
 
     def test_low_descriptor_limit_refuses_startup(self):
         def low_limit():

@@ -279,3 +279,23 @@ def test_managed_upstream_refuses_non_loopback(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
     with pytest.raises(ValueError, match="numeric loopback"):
         fleet_hub.make_server(str(IPv4Address(0)), 0, tmp_path / "hub.db", "fake-token")
+
+
+def test_managed_deferred_bind_skips_port_announcement(tmp_path, monkeypatch, capsys):
+    from ipaddress import IPv4Address
+
+    from brigade.fleet_hub_server import BoundedThreadingHTTPServer
+
+    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+    db = tmp_path / "hub.db"
+    sqlite3.connect(db).close()
+    server = BoundedThreadingHTTPServer(
+        (str(IPv4Address(2130706433)), 0), BaseRequestHandler, bind_and_activate=False, db_path=db
+    )
+    try:
+        assert "BRIGADE_UPSTREAM_PORT=" not in capsys.readouterr().out
+        server.server_bind()
+        server.server_activate()
+        assert server.server_port > 0
+    finally:
+        server.server_close()

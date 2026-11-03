@@ -61,7 +61,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
             super().__init__(server_address, RequestHandlerClass, bind_and_activate)
-            if managed:
+            # A deferred bind has no port yet. That caller announces it after binding.
+            if managed and bind_and_activate:
                 print(f"BRIGADE_UPSTREAM_PORT={self.server_port}", flush=True, file=sys.stdout)
         except BaseException:
             self._close_db_if_idle()

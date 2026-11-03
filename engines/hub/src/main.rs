@@ -1,7 +1,7 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 use axum::{
     Router,
-    body::{Body, HttpBody},
+    body::Body,
     extract::State,
     http::{Request, Response, StatusCode},
     routing::any,
@@ -18,17 +18,20 @@ use std::{
     collections::{HashMap, hash_map::RandomState},
     hash::BuildHasher,
     net::{IpAddr, Ipv4Addr, SocketAddr},
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicU8, Ordering},
-    },
+    sync::{Arc, Mutex},
     time::Duration,
 };
 use tokio::{
     net::TcpSocket,
     process::{Child, Command},
-    sync::{OwnedSemaphorePermit, Semaphore},
+    sync::{OwnedSemaphorePermit, Semaphore, watch},
 };
+
+const BODY_LIMIT: usize = 8 * 1024 * 1024;
+/// Bytes of request bodies the front may buffer at once (S3c's budget).
+const BODY_BUDGET: usize = 64 * 1024 * 1024;
+/// Shutdown drain. A container stop grace period must exceed this.
+const DRAIN: Duration = Duration::from_secs(25);
 
 #[derive(Parser, Debug)]
 #[command(
@@ -173,7 +176,22 @@ struct App {
     trust_identity: bool,
     trust_proto: bool,
     inflight: Arc<Semaphore>,
+    bodies: Arc<Semaphore>,
     hashes: RandomState,
+}
+impl App {
+    fn new(upstream: String, client: HttpClient, trust_identity: bool, trust_proto: bool) -> Self {
+        App {
+            upstream,
+            client,
+            credentials: Arc::default(),
+            trust_identity,
+            trust_proto,
+            inflight: Arc::new(Semaphore::new(24)),
+            bodies: Arc::new(Semaphore::new(BODY_BUDGET)),
+            hashes: RandomState::new(),
+        }
+    }
 }
 fn json(status: StatusCode, value: serde_json::Value) -> Response<Body> {
     Response::builder()
@@ -217,7 +235,7 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
         headers.remove(name);
     }
 }
-async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body> {
+async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if req
         .uri()
         .path_and_query()
@@ -281,6 +299,55 @@ async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body
             serde_json::json!({"ready":ready}),
         );
     }
+    if req.headers().contains_key("transfer-encoding")
+        || req.headers().get_all("content-length").iter().count() > 1
+    {
+        return json(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"error":"bad Content-Length or Transfer-Encoding"}),
+        );
+    }
+    let length = req
+        .headers()
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    if length > BODY_LIMIT as u64 {
+        return body_too_large();
+    }
+    // Buffer the whole body before admission. A slow upload then holds only
+    // its connection and its share of the byte budget, never a proxied slot,
+    // so unvalidated Authorization values cannot occupy Python's threads.
+    let (parts, body) = req.into_parts();
+    let _budget = if length == 0 {
+        None
+    } else {
+        let wanted = app.bodies.clone().acquire_many_owned(length as u32);
+        match tokio::time::timeout(Duration::from_secs(1), wanted).await {
+            Ok(Ok(permit)) => Some(permit),
+            _ => return busy("body-budget-full"),
+        }
+    };
+    let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
+    let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
+        Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) if e.is::<http_body_util::LengthLimitError>() => return body_too_large(),
+        Ok(Err(_)) => {
+            return json(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"error":"incomplete request body"}),
+            );
+        }
+        Err(_) => {
+            return json(
+                StatusCode::REQUEST_TIMEOUT,
+                serde_json::json!({"error":"request body timeout"}),
+            );
+        }
+    };
+    let bodyless = body.is_empty();
+    let mut req = Request::from_parts(parts, Body::from(body));
     let (key, cap) = if let Some(value) = req.headers().get("authorization") {
         (
             format!("credential:{}", app.hashes.hash_one(value.as_bytes())),
@@ -300,14 +367,6 @@ async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body
     let Ok(inflight) = app.inflight.clone().try_acquire_owned() else {
         return busy("proxy-inflight-full");
     };
-    if req.headers().contains_key("transfer-encoding")
-        || req.headers().get_all("content-length").iter().count() > 1
-    {
-        return json(
-            StatusCode::BAD_REQUEST,
-            serde_json::json!({"error":"bad Content-Length or Transfer-Encoding"}),
-        );
-    }
     let browser = req.uri().path() == "/"
         || ["/deck", "/view/", "/enroll", "/dashboard/"]
             .iter()
@@ -343,67 +402,18 @@ async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body
             );
         }
     }
-    if req
-        .headers()
-        .get("content-length")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.parse::<u64>().ok())
-        .is_some_and(|n| n > 8 * 1024 * 1024)
-    {
-        return body_too_large();
-    }
-    let header_timeout = req
-        .uri()
-        .query()
-        .and_then(|q| {
-            url::form_urlencoded::parse(q.as_bytes())
-                .find(|(k, _)| k == "wait_ms")
-                .and_then(|(_, v)| v.parse::<u64>().ok())
-        })
-        .map(|ms| Duration::from_millis(ms.min(20_000) + 5_000))
-        .unwrap_or(Duration::from_secs(30));
-    let retry = req.method() == "GET" && req.body().is_end_stream();
+    // Python reads wait_ms from the JSON body only, and its bounded wait plus
+    // processing fits this deadline. The body is already buffered, so the
+    // deadline covers only Python's handling.
+    let header_timeout = Duration::from_secs(30);
+    let retry = req.method() == "GET" && bodyless;
     let retry_head = (
         req.method().clone(),
         req.uri().clone(),
         req.headers().clone(),
     );
-    let body_failure = Arc::new(AtomicU8::new(0));
-    let failure = body_failure.clone();
-    let (parts, body) = req.into_parts();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    let stream = futures_util::stream::unfold(
-        (body.into_data_stream(), 0usize),
-        move |(mut stream, total)| {
-            let failure = failure.clone();
-            async move {
-                match tokio::time::timeout_at(deadline, stream.next()).await {
-                    Ok(Some(Ok(bytes))) if total + bytes.len() <= 8 * 1024 * 1024 => {
-                        let n = total + bytes.len();
-                        Some((Ok(bytes), (stream, n)))
-                    }
-                    Ok(None) => None,
-                    other => {
-                        failure.store(
-                            if matches!(other, Ok(Some(Ok(_)))) {
-                                1
-                            } else {
-                                2
-                            },
-                            Ordering::Relaxed,
-                        );
-                        Some((
-                            Err(std::io::Error::other("request body limit or timeout")),
-                            (stream, usize::MAX / 2),
-                        ))
-                    }
-                }
-            }
-        },
-    );
-    let request = Request::from_parts(parts, Body::from_stream(stream));
     let total_deadline = tokio::time::Instant::now() + Duration::from_secs(120);
-    let mut result = tokio::time::timeout(header_timeout, app.client.request(request)).await;
+    let mut result = tokio::time::timeout(header_timeout, app.client.request(req)).await;
     if retry && matches!(&result, Ok(Err(e)) if e.is_connect()) {
         let mut request = Request::builder()
             .method(retry_head.0)
@@ -467,7 +477,6 @@ async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body
             );
             Response::from_parts(parts, Body::from_stream(stream))
         }
-        _ if body_failure.load(Ordering::Relaxed) == 1 => body_too_large(),
         Err(_) => upstream_error(
             StatusCode::GATEWAY_TIMEOUT,
             "upstream-header-timeout",
@@ -596,18 +605,16 @@ async fn run(config: Config) -> Result<(), String> {
         "listening on {}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    let app = Router::new().fallback(any(handle)).with_state(App {
+    let app = Router::new().fallback(any(handle)).with_state(App::new(
         upstream,
         client,
-        credentials: Arc::default(),
-        trust_identity: config.trust_tailscale_identity,
-        trust_proto: config.trust_forwarded_proto,
-        inflight: Arc::new(Semaphore::new(24)),
-        hashes: RandomState::new(),
-    });
+        config.trust_tailscale_identity,
+        config.trust_forwarded_proto,
+    ));
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
+    let (stop, stopping) = watch::channel(false);
     let mut signal = Box::pin(async {
         let mut term =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
@@ -634,15 +641,16 @@ async fn run(config: Config) -> Result<(), String> {
                 let mut app = app.clone();
                 app = app.layer(axum::Extension(peer));
                 let service = TowerToHyperService::new(app);
-                tasks.spawn(async move { serve(stream, peer, service, global, source).await; });
+                let stopping = stopping.clone();
+                tasks.spawn(async move { serve(stream, service, stopping, global, source).await; });
             }
         }
     }
+    // Idle keep-alive connections close now. In-flight requests finish
+    // within the drain deadline.
+    let _ = stop.send(true);
     let drain = async { while tasks.join_next().await.is_some() {} };
-    if tokio::time::timeout(Duration::from_secs(125), drain)
-        .await
-        .is_err()
-    {
+    if tokio::time::timeout(DRAIN, drain).await.is_err() {
         tasks.abort_all();
     }
 
@@ -654,17 +662,23 @@ async fn run(config: Config) -> Result<(), String> {
 }
 async fn serve(
     stream: tokio::net::TcpStream,
-    _peer: SocketAddr,
     service: TowerToHyperService<Router>,
+    mut stopping: watch::Receiver<bool>,
     _global: OwnedSemaphorePermit,
     _source: Slot,
 ) {
-    let _ = hyper::server::conn::http1::Builder::new()
+    let mut builder = hyper::server::conn::http1::Builder::new();
+    builder
         .timer(TokioTimer::new())
         .header_read_timeout(Duration::from_secs(10))
-        .max_headers(100)
-        .serve_connection(TokioIo::new(stream), service)
-        .await;
+        .max_headers(100);
+    let mut conn = std::pin::pin!(builder.serve_connection(TokioIo::new(stream), service));
+    tokio::select! {
+        _ = conn.as_mut() => return,
+        _ = stopping.wait_for(|stop| *stop) => {}
+    }
+    conn.as_mut().graceful_shutdown();
+    let _ = conn.await;
 }
 #[tokio::main]
 async fn main() {
@@ -726,15 +740,12 @@ mod tests {
     }
     #[tokio::test]
     async fn native_health_and_upstream_down() {
-        let app = App {
-            upstream: format!("http://{}:1", Ipv4Addr::LOCALHOST),
-            client: Client::builder(TokioExecutor::new()).build_http(),
-            credentials: Arc::default(),
-            trust_identity: false,
-            trust_proto: false,
-            inflight: Arc::new(Semaphore::new(24)),
-            hashes: RandomState::new(),
-        };
+        let app = App::new(
+            format!("http://{}:1", Ipv4Addr::LOCALHOST),
+            Client::builder(TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
         let health = handle(
             State(app.clone()),
             Request::builder()
@@ -756,15 +767,12 @@ mod tests {
     }
     #[tokio::test]
     async fn admission_returns_retry_after() {
-        let app = App {
-            upstream: format!("http://{}:1", Ipv4Addr::LOCALHOST),
-            client: Client::builder(TokioExecutor::new()).build_http(),
-            credentials: Arc::default(),
-            trust_identity: false,
-            trust_proto: false,
-            inflight: Arc::new(Semaphore::new(24)),
-            hashes: RandomState::new(),
-        };
+        let app = App::new(
+            format!("http://{}:1", Ipv4Addr::LOCALHOST),
+            Client::builder(TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
         let key = format!(
             "credential:{}",
             app.hashes.hash_one(b"Bearer fake".as_slice())
@@ -851,15 +859,12 @@ mod tests {
             assert!(!request.contains("tailscale-user-login"));
             socket.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 9\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nexact err").await.unwrap();
         });
-        let app = App {
+        let app = App::new(
             upstream,
-            client: Client::builder(TokioExecutor::new()).build_http(),
-            credentials: Arc::default(),
-            trust_identity: false,
-            trust_proto: false,
-            inflight: Arc::new(Semaphore::new(24)),
-            hashes: RandomState::new(),
-        };
+            Client::builder(TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
         let response = handle(
             State(app.clone()),
             Request::builder()
