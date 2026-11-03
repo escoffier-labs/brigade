@@ -14,7 +14,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from typing import Any, Callable, List, Optional, Tuple
 
-from . import component_bins, managed_snapshot, proc
+from . import component_bins, engine_paths, managed_snapshot, proc
 from .doctor import OK, WARN, FAIL, MANUAL
 from .station import CheckResult, DoctorContext
 
@@ -425,9 +425,12 @@ def _graphtrail_doctor(ctx: DoctorContext) -> List[CheckResult]:
                 "not installed; run `brigade setup` (direct Cargo install is one-release compatibility only)",
             )
         ]
-    db = ctx.target / ".graphtrail" / "graphtrail.db"
+    try:
+        db = engine_paths.code_graph_db(ctx.target).path
+    except ValueError as exc:
+        return [(WARN, name, str(exc))]
     if not db.is_file():
-        return [(WARN, name, "installed; run `graphtrail sync` to build .graphtrail/graphtrail.db")]
+        return [(WARN, name, f"installed; run `graphtrail sync` to build {db}")]
     r = proc.run([binary, "doctor", "--json"], timeout=30.0)
     if r.code != 0:
         return [(WARN, name, f"doctor exit {r.code}; graph may need re-sync")]

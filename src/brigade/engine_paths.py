@@ -111,6 +111,20 @@ def code_graph_db(
     return ResolvedLocation(canonical, "new", False)
 
 
+def code_graph_repo_root(db: Path) -> Path | None:
+    """Repository root for an index path in either layout, or ``None`` for any other location.
+
+    Mirrors ``repo_root_for_db`` in engines/code-graph/src/store/db.rs. The engine's
+    ``sync`` indexes its working directory, so callers run it from this root.
+    """
+    graph_dir = db.parent
+    if graph_dir.name == LEGACY_CODE_GRAPH_DB.parent.name:
+        return graph_dir.parent
+    if graph_dir.name == CODE_GRAPH_DB.parent.name and graph_dir.parent.name == CODE_GRAPH_DB.parent.parent.name:
+        return graph_dir.parent.parent
+    return None
+
+
 def _root(environment: Mapping[str, str], variable: str, *fallback: str) -> Path:
     # Same roots and fallbacks as engines/evidence-ledger/internal/app/paths.go.
     value = environment.get(variable)

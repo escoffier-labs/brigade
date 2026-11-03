@@ -12,7 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from . import component_bins, proc
+from . import component_bins, engine_paths, proc
 from . import station_health as health
 
 
@@ -42,13 +42,18 @@ def status_payload(target: Path) -> dict[str, Any]:
     graphtrail_bin = component_bins.resolve("graphtrail")
     api_bin = proc.which("code-search-api")
     mcp_bin = proc.which("code-search-mcp")
-    db = target / ".graphtrail" / "graphtrail.db"
+    try:
+        db = engine_paths.code_graph_db(target).path
+        db_error = None
+    except ValueError as exc:
+        db, db_error = engine_paths.code_graph_db_paths(target)[0], str(exc)
+    db_present = db_error is None and db.is_file()
 
     tools: dict[str, Any] = {
         "graphtrail": {
             "installed": graphtrail_bin is not None,
             "binary": graphtrail_bin,
-            "db_present": db.is_file(),
+            "db_present": db_present,
             "db_path": str(db),
         },
         "code-search-api": {
@@ -83,7 +88,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         tools=tools,
         pipeline=[
             "graphtrail sync",
-            ".graphtrail/graphtrail.db",
+            str(engine_paths.CODE_GRAPH_DB),
             "graphtrail context / receipt code_graph_delta",
             "optional code-search-api serve + code-search-api/mcp bridge",
         ],
@@ -97,9 +102,9 @@ def status_payload(target: Path) -> dict[str, Any]:
     graph_summary = "graphtrail not installed"
     graph_doctor: dict[str, Any] | None = None
     if graphtrail_bin:
-        if not db.is_file():
+        if not db_present:
             graph_health = "unwired"
-            graph_summary = "graphtrail installed; run `graphtrail sync` to build .graphtrail/graphtrail.db"
+            graph_summary = db_error or f"graphtrail installed; run `graphtrail sync` to build {db}"
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
         else:
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)

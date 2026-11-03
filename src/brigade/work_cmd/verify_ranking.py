@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from .. import component_bins, proc
+from .. import component_bins, engine_paths, proc
 from . import helpers
 
 DEFAULT_AFFECTED_DEPTH = 3
@@ -85,9 +85,12 @@ def rank_verification_candidates(
     target = target.expanduser().resolve()
     changed = collect_changed_files(target, files)
     binary = component_bins.resolve("graphtrail")
-    db_path = target / ".graphtrail" / "graphtrail.db"
     if binary is None:
         return degraded_ranking(reason="graphtrail binary not found", changed_files=changed)
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError as exc:
+        return degraded_ranking(reason=str(exc), changed_files=changed)
     if not db_path.is_file():
         return degraded_ranking(reason="graphtrail index not found", changed_files=changed)
     if not changed:

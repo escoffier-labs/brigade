@@ -65,6 +65,14 @@ def test_code_graph_db_ignores_empty_overrides(tmp_path):
     assert resolved.source == "new"
 
 
+def test_code_graph_repo_root_accepts_both_layouts_only(tmp_path):
+    canonical, legacy = engine_paths.code_graph_db_paths(tmp_path)
+    assert engine_paths.code_graph_repo_root(canonical) == tmp_path
+    assert engine_paths.code_graph_repo_root(legacy) == tmp_path
+    assert engine_paths.code_graph_repo_root(tmp_path / "elsewhere" / "graph.db") is None
+    assert engine_paths.code_graph_repo_root(tmp_path / "code-graph" / "code-graph.db") is None
+
+
 def _evidence_env(tmp_path: Path, xdg: bool) -> tuple[dict[str, str], dict[str, Path]]:
     home = tmp_path / "home"
     env = {"HOME": str(home)}

@@ -2,3 +2,4 @@
 - New repositories get their code graph index at `.brigade/code-graph/code-graph.db`, with a matching `.gitignore` entry. A repository indexed by an older release keeps using its existing index in place, with no reindex and no copy. When both exist, the new location wins.
 - The engine reads `BRIGADE_CODE_GRAPH_DB` and `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` first. The older variable names still work with a stderr warning, and setting old and new names to different values is refused.
 - `brigade code export --format dot` names the graph `code_graph`.
+- Brigade features that read the code graph index (context packs, run briefs, work footprints and partitions, verify ranking, `brigade code export`, the unseen-dependents hook, search and operator status, and `brigade doctor`) resolve it with the same rule as the engine, so they find an index in either location and honor `BRIGADE_CODE_GRAPH_DB`. Conflicting database variables are reported instead of guessed.

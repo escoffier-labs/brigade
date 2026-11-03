@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .. import context_eval, graphtrail_delta, localio
+from .. import context_eval, engine_paths, graphtrail_delta, localio
 
 MAX_SEEN_FILES = 2048
 MAX_CHECKS = 32
@@ -163,7 +163,10 @@ def _content_matches_index(target: Path, db: Path, stopped: threading.Event) -> 
 def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     from . import runtime
 
-    db = target / ".graphtrail" / "graphtrail.db"
+    try:
+        db = engine_paths.code_graph_db(target).path
+    except ValueError:
+        return None, "graph_unavailable"
     if not db.is_file():
         return None, "no_index"
     binary = graphtrail_delta._graphtrail_bin()

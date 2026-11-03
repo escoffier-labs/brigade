@@ -8,7 +8,7 @@ from io import StringIO
 from pathlib import Path
 from typing import Any
 
-from .. import center_cmd, doctor as core_doctor, handoff_cmd, security_cmd, skills_cmd, tools_cmd
+from .. import center_cmd, doctor as core_doctor, engine_paths, handoff_cmd, security_cmd, skills_cmd, tools_cmd
 from ..install import install_selection
 from ..selection import KNOWN_HARNESSES, WRITER_INBOXES, Selection, resolve_owner
 from ..work_cmd.scanner_platform import (
@@ -1156,18 +1156,22 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
     from .. import context_cmd, evidence_brief
 
     graph_bin = context_cmd._graphtrail_bin()
-    graph_db = target / ".graphtrail" / "graphtrail.db"
-    if graph_bin and graph_db.is_file():
+    try:
+        graph_db: Path | None = engine_paths.code_graph_db(target).path
+        graph_db_error = None
+    except ValueError as exc:
+        graph_db, graph_db_error = None, str(exc)
+    if graph_bin and graph_db is not None and graph_db.is_file():
         graph = {
             "ok": True,
             "status": "ok",
-            "detail": "graphtrail on PATH and .graphtrail/graphtrail.db present",
+            "detail": f"graphtrail on PATH and {graph_db} present",
         }
     elif graph_bin:
         graph = {
             "ok": False,
             "status": "missing-db",
-            "detail": "graphtrail on PATH; run `graphtrail sync` to build .graphtrail/graphtrail.db",
+            "detail": graph_db_error or f"graphtrail on PATH; run `graphtrail sync` to build {graph_db}",
         }
     else:
         graph = {
