@@ -293,10 +293,8 @@ def _evidence(
     total = 0
     # Check the aggregate before hashing any evidence or invoking composition.
     for ref in selected[: io.MAX_LIST]:
-        bundle = memory_cmd._miseledger_evidence_id(ref)
-        if bundle:
-            path = memory_cmd._miseledger_evidence_path(bundle)
-        else:
+        is_bundle, path = derive.evidence_bundle_path(ref)
+        if not is_bundle:
             try:
                 _safe_name(ref)
             except ValueError:

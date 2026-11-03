@@ -165,6 +165,14 @@ def _evidence_id(ref: str) -> str:
     return f"miseledger:{bundle}" if bundle is not None else Path(cleaned).as_posix()
 
 
+def evidence_bundle_path(ref: str) -> tuple[bool, Path | None]:
+    """Return whether ref names an evidence bundle, and its cache path when the ID is valid."""
+    bundle = memory_cmd._miseledger_evidence_id(ref)
+    if bundle is None:
+        return False, None
+    return True, memory_cmd._miseledger_evidence_path(bundle)
+
+
 def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str, str]:
     result: dict[str, str] = {}
     if len(refs) > io.MAX_LIST:
@@ -173,9 +181,8 @@ def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str
         if not ref or len(ref) > 1024 or any(ord(c) < 32 for c in ref):
             continue
         try:
-            bundle = memory_cmd._miseledger_evidence_id(ref)
-            if bundle is not None:
-                path = memory_cmd._miseledger_evidence_path(bundle)
+            is_bundle, path = evidence_bundle_path(ref)
+            if is_bundle:
                 source = "evidence-bundle"
             else:
                 rel = io.relative(ref)
