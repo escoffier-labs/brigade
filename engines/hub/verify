@@ -5,4 +5,5 @@ cargo fmt --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked
 cargo build --locked
+python3 tests/transport.py
 cargo +1.85.0 check --locked

@@ -2,9 +2,9 @@ name: Hub
 on:
   push:
     branches: [main]
-    paths: ['engines/hub/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'registry/skills/verify-brigade/hub_contract*', '.github/workflows/hub.yml']
   pull_request:
-    paths: ['engines/hub/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'registry/skills/verify-brigade/hub_contract*', '.github/workflows/hub.yml']
 permissions:
   contents: read
 jobs:
@@ -34,3 +34,10 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Proxy transport integration
+        run: python tests/transport.py
+      - name: Frozen wire contract through managed front
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
