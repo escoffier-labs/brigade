@@ -248,7 +248,9 @@ def test_guard_with_an_unknown_base_is_an_operational_error(git_repo, capsys):
     assert "error:" in capsys.readouterr().err
 
 
-def test_cli_check_assemble_and_exit_codes(tmp_path, capsys):
+def test_cli_check_assemble_and_exit_codes(tmp_path, capsys, monkeypatch):
+    # Under GitHub Actions problems are printed as stdout annotations instead.
+    monkeypatch.delenv("GITHUB_ACTIONS", raising=False)
     _repo(tmp_path)
     assert cf.main(["--root", str(tmp_path), "check"]) == 0
     _write(tmp_path, "1.md", "- Good.\n")
