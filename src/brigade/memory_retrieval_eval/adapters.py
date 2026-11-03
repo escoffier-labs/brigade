@@ -50,11 +50,10 @@ def bm25_adapter(cards: Sequence[CardDoc]) -> AdapterFn:
     index = memory_bm25.Bm25Index.build([card.searchable_text for card in cards])
 
     def search(query: str, limit: int) -> list[tuple[str, float]]:
-        scored = [
-            (cards[doc].card_id, round(score, memory_bm25.SCORE_DIGITS)) for doc, score in index.scores(query).items()
-        ]
-        scored.sort(key=lambda item: (-item[1], item[0]))
-        return scored[:limit]
+        # Ties break by card path, as in ``search_cards_payload``; ids come after sorting.
+        scored = [(round(score, memory_bm25.SCORE_DIGITS), cards[doc]) for doc, score in index.scores(query).items()]
+        scored.sort(key=lambda item: (-item[0], item[1].path))
+        return [(card.card_id, score) for score, card in scored[:limit]]
 
     return search
 
@@ -68,15 +67,16 @@ def substring_adapter(cards: Sequence[CardDoc]) -> AdapterFn:
 
     def search(query: str, limit: int) -> list[tuple[str, float]]:
         terms = [term for term in query.lower().split() if term]
-        scored: list[tuple[str, float]] = []
+        scored: list[tuple[float, CardDoc]] = []
         for card in cards:
             heading = f"{card.title} {' '.join(card.tags)} {card.summary}".lower()
             body = card.body.lower()
             score = sum(3 if term in heading else 1 if term in body else 0 for term in terms)
             if score > 0:
-                scored.append((card.card_id, float(score)))
-        scored.sort(key=lambda item: (-item[1], item[0]))
-        return scored[:limit]
+                scored.append((float(score), card))
+        # Ties break by card path, as the pre-#2196 production scorer did.
+        scored.sort(key=lambda item: (-item[0], item[1].path))
+        return [(card.card_id, score) for score, card in scored[:limit]]
 
     return search
 

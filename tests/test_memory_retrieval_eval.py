@@ -11,8 +11,8 @@ from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
 
 from brigade.memory_retrieval_eval import DEFAULT_FIXTURE_ROOT, run_eval
 from brigade.memory_retrieval_eval import __main__ as eval_main
-from brigade.memory_retrieval_eval.adapters import grep_adapter, tokenize
-from brigade.memory_retrieval_eval.corpus import load_cards, load_queries, validate_gold
+from brigade.memory_retrieval_eval.adapters import bm25_adapter, grep_adapter, substring_adapter, tokenize
+from brigade.memory_retrieval_eval.corpus import CardDoc, load_cards, load_queries, validate_gold
 from brigade.memory_retrieval_eval.metrics import (
     ceiling_for_queries,
     first_gold_rank,
@@ -114,6 +114,19 @@ def test_grep_adapter_is_token_substring_floor():
     assert ranked
     assert ranked[0][0] == "restic-backup-schedule"
     assert tokenize("Auth-Token expires!") == ["auth", "token", "expires"]
+
+
+@pytest.mark.parametrize("make_adapter", [bm25_adapter, substring_adapter])
+def test_eval_adapters_break_ties_by_path_like_production(make_adapter):
+    # Identical cards whose ids sort opposite to their paths: production orders
+    # equal scores by path, so the eval adapters must too.
+    def card(card_id: str, path: str) -> CardDoc:
+        return CardDoc(card_id=card_id, path=path, title="Rotate keys", tags=(), summary="", body="rotate keys")
+
+    cards = [card("zz-card", "memory/cards/a.md"), card("aa-card", "memory/cards/b.md")]
+    ranked = make_adapter(cards)("rotate keys", limit=2)
+    assert [card_id for card_id, _ in ranked] == ["zz-card", "aa-card"]
+    assert ranked[0][1] == ranked[1][1]
 
 
 def test_run_eval_offline_current_and_grep_reproducible():
