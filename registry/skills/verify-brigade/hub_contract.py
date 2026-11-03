@@ -2931,6 +2931,9 @@ def run_contract(hub: Hub) -> dict:
     drive_message_actions(d, ctx)
     drive_long_poll(d, ctx)
     drive_questions(d, ctx, hub.operator or new_operator())
+    import hub_contract_refusals  # a sibling that imports this module, so it loads late
+
+    hub_contract_refusals.drive_refusals(d, ctx)
 
     for label, seen, listed in (
         ("COVERED_ROUTES", d.routes, COVERED_ROUTES),
@@ -2954,6 +2957,7 @@ def run_contract(hub: Hub) -> dict:
         "exchanges": scrub(d.exchanges, secrets_),
         "covered_routes": sorted(d.routes),
         "covered_message_actions": sorted(d.actions),
+        "tag": tag,
     }
 
 

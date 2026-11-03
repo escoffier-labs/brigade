@@ -2,7 +2,7 @@
  "parity_version": 1,
  "profiles": {
   "defaults": {
-   "digest": "d37754c841f0e601f5e7e8c8371a14e3640cc8a6fd1b321d4b842f105af53aba",
+   "digest": "3ebecf29af166c2b227eba0db3d21d7f6c51cb45f3328456a3aabef79d435c07",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -1602,10 +1602,10 @@
     },
     "run_preference": {
      "columns": [
-      "chef",
       "id",
       "impl",
       "notes",
+      "orchestrator",
       "research",
       "review",
       "scout",
@@ -1770,7 +1770,7 @@
    }
   },
   "migrated-v22": {
-   "digest": "09d8d92a7a45cdc490c80f3e8c7328e90e695ad393b7283556f4a2e3a5e21a2b",
+   "digest": "224f55ce89b5266f95e6b8dcd21d582749c850310666bb83787a14f01275598d",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -3370,10 +3370,10 @@
     },
     "run_preference": {
      "columns": [
-      "chef",
       "id",
       "impl",
       "notes",
+      "orchestrator",
       "research",
       "review",
       "scout",
@@ -3538,7 +3538,7 @@
    }
   },
   "migrated-v34": {
-   "digest": "09d8d92a7a45cdc490c80f3e8c7328e90e695ad393b7283556f4a2e3a5e21a2b",
+   "digest": "224f55ce89b5266f95e6b8dcd21d582749c850310666bb83787a14f01275598d",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -5138,10 +5138,10 @@
     },
     "run_preference": {
      "columns": [
-      "chef",
       "id",
       "impl",
       "notes",
+      "orchestrator",
       "research",
       "review",
       "scout",
@@ -5306,7 +5306,7 @@
    }
   },
   "outbox": {
-   "digest": "5c512f425935c7b5c8323d094c9c54f74dbadc12f0020ee8051a3505f6cefd70",
+   "digest": "0c8177ff3cdca6a99dd8c526f5e5d8ec7565ef5a3a382d31299f3b272844dfe9",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -6961,10 +6961,10 @@
     },
     "run_preference": {
      "columns": [
-      "chef",
       "id",
       "impl",
       "notes",
+      "orchestrator",
       "research",
       "review",
       "scout",

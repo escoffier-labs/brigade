@@ -943,3 +943,23 @@ Opt-in usage aggregates are not available yet. Future opt-in counts will
 undercount usage.
 Small-cell suppression is defense in depth for screenshots and shared views, not
 protection against an enrolled viewer on the operator's own Hub who can compare snapshots.
+
+### Orchestrator role compatibility and Hub schema 48
+
+Deploy the Hub before updating clients. Schema 48 renames the stored
+`run_preference.chef` column to `orchestrator`, preserving old rows. Both role
+spellings are accepted for one release; an explicit `orchestrator` wins when
+both occur. New caches and policy revisions write `orchestrator`. The frozen
+v1 `/preference` response retains `chef`, including after policy activation,
+so old preference clients continue to resolve the same seat. Historical policy
+revisions and their digests are unchanged. Role aliases resolve at every policy
+layer; seat identifiers are never automatically renamed.
+
+Before upgrading, stop Hub writers and take a consistent SQLite backup,
+including any WAL contents, using SQLite's backup API. Rollback requires
+stopping the Hub and restoring that pre-upgrade backup before starting the
+older binary. Schema 47 code refuses schema 48; changing `user_version` alone
+is unsafe and does not restore the renamed column. Writes made after the
+backup need separate reconciliation before rollback. After release, an
+operator may rename the live legacy seat and its policy references with an
+admin-token policy save. This release does not change the live policy.

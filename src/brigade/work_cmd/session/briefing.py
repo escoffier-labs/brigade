@@ -342,13 +342,15 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "drafts": (handoff_drafts_full.get("drafts") or [])[:limit],
     }
     del handoff_drafts_full
-    from ... import brief_sections
+    from ... import brief_sections, work_mode
 
+    work = work_mode.summary(target)
     return {
         "target": str(target),
         "session_close": {
-            "items": list(brief_sections.session_close_items()),
+            "items": list(brief_sections.session_close_items(mode=work["mode"])),
         },
+        "work_mode": work,
         "git": git,
         "active_session": active,
         "latest_session": latest_session,
@@ -666,8 +668,10 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     print(f"work brief: {target}")
     from ... import brief_sections
 
-    for line in brief_sections.render_brief_session_close_lines():
+    for line in brief_sections.render_brief_session_close_lines(mode=payload["work_mode"]["mode"]):
         print(line)
+    if payload["work_mode"]["rails"] == "off":
+        print("safety_rails: off (pre-push content guard and secret scanning are skipped)")
     update = payload.get("update")
     if isinstance(update, dict):
         print(f'update_available: {update.get("latest")} (installed {update.get("installed")}); run "brigade update"')

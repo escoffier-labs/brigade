@@ -171,7 +171,9 @@ $C handoff-lint --target "$TARGET" --content-guard
 # guard scan and redact parity (lookbehind and backreference goldens)
 $C guard-parity --target "$TARGET"
 
-# Fleet Hub wire contract over HTTP (starts its own throwaway hub; no target needed)
+# Fleet Hub wire contract over HTTP (starts its own throwaway hubs, one of them on a
+# stepped clock for the expiry cases; no target needed). --write-golden re-records
+# the refusal-text and tombstone golden from the in-repo hub.
 $C hub-contract
 
 # Read-only production profile: audit it on a throwaway hub (the only profile allowed against production)
@@ -332,10 +334,11 @@ every subcommand resolves and creates first): `new-target`, `init`, `work-verify
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
 `would_remove`, or `would_copy` list; `hub-contract` with the default `contract`
-profile instead reports `would_launch` (the hub argv, or `null` for `--hub-url`)
-and `would_create` (the hub's state directory, or `null`), and with
-`--profile prod-readonly` it reports the allowed `operations` and the
-`excluded` ones.
+profile instead reports `would_launch` (the hub argv, or `null` for `--hub-url`),
+`would_create` (the hub's state directory, or `null`), and `lifecycle.would_launch`
+(the clocked hub's argv, or `null` with the reason in `lifecycle.skipped`). With
+`--profile prod-readonly` it reports the allowed `operations` and the `excluded`
+ones.
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
@@ -348,7 +351,9 @@ that `--dry-run` writes nothing.
 `tests/test_verify_brigade_hub_contract.py` runs `hub-contract` against the
 in-repo hub and asserts zero mismatches, checks the covered routes against
 `docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
-prove each drift is reported.
+prove each drift is reported. `tests/test_verify_brigade_hub_lifecycle.py` runs
+a drifting hub on the drive's clock to prove a tombstone read back as sealed and
+a reworded refusal are both reported, and pins the golden comparator.
 `tests/test_verify_brigade_hub_readonly.py` runs the `prod-readonly` audit on the
 in-repo hub, proves each mutation kind fails it, and proves an unlisted case
 stops the run before any request.

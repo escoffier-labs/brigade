@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .. import localio
+from .. import localio, work_mode
 from ..config import load_config
 from .package import (
     HOOK_SCRIPT_NAME,
@@ -457,6 +457,10 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
         "sidecar": sidecar,
         "error": error,
     }
+    # Yolo keeps every managed event: a session started here can write into an enforced
+    # child repository, and the runtime skips Stop and failure checks per target (#2233).
+    if layout.scope == "project" and work_mode.is_yolo(layout.root):
+        result["work_mode"] = work_mode.MODE_YOLO
     if layout.scope == "user":
         result["scope"] = layout.scope
         if pin is not None:

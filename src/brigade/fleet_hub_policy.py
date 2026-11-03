@@ -502,7 +502,7 @@ def preview_policy(
             }
         )
     try:
-        proposed = fleet_policy.parse_document(document)
+        proposed = fleet_policy.canonical_role_document(document)
     except FleetPolicyError as exc:
         errors.append({"code": "invalid_document", "detail": str(exc)})
         return {
@@ -554,6 +554,7 @@ def _write_revision(
                 f"policy_revision_conflict: expected {expected_version}, current {current['revision']}"
             )
         document, extra = build(current)
+        document = fleet_policy.canonical_role_document(document)
         revision = current["revision"] + 1
         digest = fleet_policy.document_digest(document)
         now = fleet_hub._utc_now()

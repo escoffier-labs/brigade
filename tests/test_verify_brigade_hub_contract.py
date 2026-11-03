@@ -151,8 +151,19 @@ def test_hub_contract_holds_on_the_in_repo_hub(tmp_path):
     assert payload["mismatches"] == []
     assert payload["contract_version"] == 1
     assert payload["cases_failed"] == 0
-    assert payload["cases_total"] == len(payload["cases"]) >= 180
+    assert payload["cases_total"] == len(payload["cases"]) >= 290
     assert all(case["ok"] for case in payload["cases"])
+
+    # S1b: the lifecycle cases ran on their own clocked hub, and every refusal and
+    # tombstone matched the checked-in golden.
+    lifecycle = payload["lifecycle"]
+    assert lifecycle["ran"] is True and lifecycle["skipped"] is None
+    assert lifecycle["cases_total"] >= 50
+    assert "hub_clock.py" in " ".join(lifecycle["argv"]) and "--clock-file" in lifecycle["argv"]
+    assert Path(lifecycle["state_dir"]).parent == Path(payload["hub"]["state_dir"])
+    assert payload["golden"]["written"] is False
+    assert payload["golden"]["refusals_checked"] >= 150
+    assert payload["golden"]["tombstones_checked"] == 2
 
     # The drive, the module constants, and the inventory name the same routes and actions.
     assert payload["covered_routes"] == covered_in_inventory()
@@ -192,6 +203,9 @@ def test_hub_contract_reports_a_drifting_hub(tmp_path):
     assert code == 3, payload
     assert payload["ok"] is False
     assert payload["hub"]["mode"] == "launched"
+    # A --hub-cmd without --clock-hub-cmd skips the lifecycle cases and says so.
+    assert payload["lifecycle"]["ran"] is False
+    assert "--clock-hub-cmd" in payload["lifecycle"]["skipped"]
     reported = {item["case"] for item in payload["mismatches"]}
     assert reported == DRIFTED_CASES, payload["mismatches"]
     by_case = {item["case"]: item for item in payload["mismatches"]}
@@ -312,6 +326,8 @@ def test_hub_contract_dry_run_starts_nothing(tmp_path):
     assert payload["mode"] == "launched"
     assert "serve" in payload["would_launch"]
     assert "<port>" in payload["would_launch"]
+    assert "--clock-file" in payload["lifecycle"]["would_launch"]
+    assert payload["lifecycle"]["skipped"] is None
     assert payload["covered_routes"] == covered_in_inventory()
     assert sorted(payload["covered_message_actions"]) == covered_actions_in_inventory()
     assert list((root / "targets").iterdir()) == []

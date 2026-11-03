@@ -18,7 +18,7 @@ from queue import Empty
 from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator
 
-from .. import localio
+from .. import localio, work_mode
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
@@ -2379,7 +2379,7 @@ def _handle_event(
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        if not is_raw_verification(command):
+        if not is_raw_verification(command) or work_mode.is_yolo(target):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
@@ -2490,7 +2490,8 @@ def _handle_event(
         raw_tool_input = payload.get("tool_input")
         tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
-        if payload.get("tool_name") == "Bash" and (is_raw_verification(command) or _is_routed_verify(command)):
+        verifier = is_raw_verification(command) or _is_routed_verify(command)
+        if payload.get("tool_name") == "Bash" and verifier and not work_mode.is_yolo(target):
             from .. import outcome_cmd
 
             capture_id = outcome_cmd.resolve_capture_artifact_id(
@@ -2524,7 +2525,7 @@ def _handle_event(
             stop_state = _normalize_state(
                 stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
-            if not stop_state.get("write_observed"):
+            if not stop_state.get("write_observed") or work_mode.is_yolo(stop_target):
                 continue
             fingerprint = stop_state.get("session_fingerprint")
             if not isinstance(fingerprint, str):

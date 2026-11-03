@@ -834,7 +834,7 @@ def _command(args: Any, helper: Any, root: Path) -> int:
             raise hc.ContractError(
                 f"--startup-timeout must be a positive, finite number of seconds, not {args.startup_timeout}"
             )
-        work = helper.hub_contract_workdir(args, root, dry_run=False)
+        work = helper.load_sibling("hub_contract_cli").workdir(args, helper, root, dry_run=False)
         hub, result = audit(
             brigade=helper.brigade_args(args),
             state_dir=work,

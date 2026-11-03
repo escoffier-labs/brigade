@@ -350,16 +350,17 @@ def _write_surface_evidence(target: Path, selection: Selection, *, projection_on
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _merged_config(target: Path, selection: Selection) -> Config:
+def _merged_config(target: Path, selection: Selection, *, work_mode: str | None = None) -> Config:
     try:
         existing = load_config(target)
     except (ValueError, AttributeError, TypeError) as exc:
         # An unreadable config is replaced, as a first install would.
         print(f"warning: replacing unreadable .brigade/config.json ({exc})", file=sys.stderr)
         existing = None
-    if existing is None:
-        return Config(version=1, selection=selection)
-    return dataclasses.replace(existing, version=1, selection=selection)
+    merged = Config(version=1, selection=selection) if existing is None else existing
+    merged = dataclasses.replace(merged, version=1, selection=selection)
+    # None keeps a recorded mode; `brigade init --yolo` passes "yolo" (#2233).
+    return merged if work_mode is None else dataclasses.replace(merged, work_mode=work_mode)
 
 
 def install_selection(
@@ -372,6 +373,7 @@ def install_selection(
     update_gitignore: bool = True,
     wire_skills: bool = True,
     projection_only: bool = False,
+    work_mode: str | None = None,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
@@ -436,7 +438,7 @@ def install_selection(
 
     # Persist config.json. Keep settings an operator already recorded (verify
     # retention, run-lock wait, recall target, ...); only the selection changes.
-    write_config(target, _merged_config(target, selection))
+    write_config(target, _merged_config(target, selection, work_mode=work_mode))
     _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so
@@ -520,12 +522,23 @@ def install_selection(
             f"brigade: wired built-in skills ({', '.join(skills)}) into {', '.join(harnesses)} "
             "so your agent USES Brigade, not just installs it."
         )
-        print("Agent: each work session, follow the `brigade-work` skill -")
-        print("  1. `brigade work brief --target .`                                  (see pending work)")
-        print('  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)')
-        print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
-        print("  4. write a Memory Handoff at the end.")
-        print('  If `brigade outcome rank` ever says "ranking: none", work is not flowing through Brigade.')
+        from .work_mode import resolve_mode
+
+        if resolve_mode(target) == "yolo":
+            print("Agent: yolo work mode - verification is not enforced here -")
+            print("  1. `brigade work brief --target .`                                  (see pending work)")
+            print("  2. run checks directly; `brigade work verify run` still records a receipt when you want one")
+            print("  3. write a Memory Handoff when the work produced durable knowledge (optional).")
+            print("  `brigade work mode set enforced` restores the verification loop.")
+        else:
+            print("Agent: each work session, follow the `brigade-work` skill -")
+            print("  1. `brigade work brief --target .`                                  (see pending work)")
+            print(
+                '  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)'
+            )
+            print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
+            print("  4. write a Memory Handoff at the end.")
+            print('  If `brigade outcome rank` ever says "ranking: none", work is not flowing through Brigade.')
     if "hermes" in selection.harnesses:
         print(
             "brigade: the hermes adapter is validated against a real Hermes install "

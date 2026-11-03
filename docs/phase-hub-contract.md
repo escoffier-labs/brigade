@@ -356,3 +356,46 @@ actions, sealed envelopes, and long polls) pin these as well:
     address, with loopback exempt from the source cap. Connections are capped
     at 32 handlers, and at 8 per source address except a loopback peer of a
     loopback bind (#2229). The drive pins only the per-recipient cap.
+
+The S1b cases (v2 slice S1b: expiry, the sealed-content lifecycle, the
+`client_id` window, and the refusal sweep) pin these. The lifecycle cases run
+on a hub whose clock the drive steps, so each boundary is exact:
+
+18. **The two lifecycle boundaries fall on opposite sides.** A message created
+    exactly 90 days ago is still listed and counted, and is gone one second
+    later. A sealed message acknowledged exactly 7 days ago already reads as
+    its tombstone, and one second earlier it is still sealed.
+19. **Retention runs from `enqueued_at`.** A client stamp becomes the
+    message's `created_at`, so a send stamped exactly 90 days ago is accepted
+    and expires one second later, and a stamp up to 5 minutes ahead is
+    accepted. One second past either limit is a 400, and only the future one
+    carries a `code` (`message_timestamp_future`).
+20. **The `client_id` window is the message's retention.** While the first
+    message exists (day 89), a resend returns its id and a different payload
+    is `409 message_client_id_conflict` carrying that id. After it expires,
+    the same `client_id` makes a new message with a new id.
+21. **A purged parent detaches only plaintext replies.** A plaintext reply's
+    `reply_to` reads null once its parent expires. A sealed reply keeps the
+    parent's id, because the hub shows `COALESCE(sealed_reply_to, reply_to)`
+    and clears only `reply_to`.
+22. **Expired mail has three 404 envelopes.** After expiry, `sent_lookup`
+    answers `{"error": "message not found", "code": "not_found"}`, while
+    `ack` and a plaintext `reply` answer the same text with no `code`.
+23. **A question times out at its deadline, inclusive.** One second before,
+    it is pending; at the deadline `question_status` reports `timeout`. A
+    `question_desktop` answer after that is a 200 that changes nothing, an
+    operator answer one second later is recorded in `late_answer_message_id`,
+    and the timed-out question no longer counts toward the two-pending limit.
+    After 90 days the row is deleted, so `question_status` answers
+    `403 question_not_owned`. An operator answer at exactly the deadline,
+    after a read has already timed the question out, matches neither branch
+    of the hub's reply trigger: the question stays `timeout` with no answer
+    and no `late_answer_message_id`.
+24. **Some refusals have unexpected shapes.** A claim target over the byte
+    limit is a 409 whose `error` is an object
+    (`{"code": "invalid-field", "field": "target", "limit": 1024, ...}`) with
+    `reason: "claim-target-too-long"`. A single event object, not an array,
+    is read as a one-event batch and refused for its missing `node_id`. A
+    missing and a malformed `node_id` on `/nodes` share one message. An
+    envelope without `ct` and `recipients` is refused by the parser as
+    `envelope_malformed`, before the hub's own complete-content check.

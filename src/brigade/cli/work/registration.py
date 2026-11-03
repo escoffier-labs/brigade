@@ -96,6 +96,28 @@ def register(sub: argparse._SubParsersAction) -> None:
         )
         if action == "status":
             parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_mode = work_sub.add_parser(
+        "mode", help="Show or set the work-loop mode: enforced (default) or yolo (no verification enforcement)."
+    )
+    mode_sub = p_work_mode.add_subparsers(dest="mode_command", metavar="<mode-command>")
+    mode_sub.required = True
+    p_mode_show = mode_sub.add_parser("show", help="Print the work mode and safety-rails state.")
+    p_mode_set = mode_sub.add_parser("set", help="Persist the work mode and reconcile managed Claude hooks.")
+    p_mode_set.add_argument("mode", choices=("enforced", "yolo"))
+    p_work_rails = work_sub.add_parser(
+        "rails", help="Show or switch safety rails (content guard and pre-push scanning); independent of the mode."
+    )
+    rails_sub = p_work_rails.add_subparsers(dest="rails_command", metavar="<rails-command>")
+    rails_sub.required = True
+    rails_parsers = [
+        rails_sub.add_parser("show", help="Print the safety-rails state."),
+        rails_sub.add_parser("on", help="Turn safety rails back on (the default)."),
+        rails_sub.add_parser("off", help="Skip the pre-push content guard and secret scanning for this target."),
+        rails_sub.add_parser("check", help="Exit 0 when rails are on, 3 when off (used by hooks/pre-push)."),
+    ]
+    for parser in (p_mode_show, p_mode_set, *rails_parsers):
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Brigade-wired repo or workspace.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_hook_run = work_sub.add_parser("hook-run", help="Run one managed Claude hook event.")
     p_work_hook_run.add_argument(
         "--event",

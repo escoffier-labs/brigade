@@ -45,10 +45,10 @@ class DogfoodConfig:
 
 def _dogfood_roster(timeout_seconds: float, agent_cli: str = DEFAULT_AGENT_CLI) -> Roster:
     return Roster(
-        orchestrator="chef",
+        orchestrator="orchestrator",
         agents={
-            "chef": Agent(
-                "chef",
+            "orchestrator": Agent(
+                "orchestrator",
                 agent_cli,
                 "Plan one small read-only review task and synthesize a concise final answer.",
                 timeout_seconds=timeout_seconds,

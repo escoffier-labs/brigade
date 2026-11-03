@@ -84,7 +84,8 @@ def test_dogfood_runs_default_codex_workflow(tmp_path, monkeypatch, capsys):
     assert seen["read_only"] is True
     assert seen["sandbox_read_only"] is None
     assert seen["sandbox"] is None
-    assert roster.orchestrator == "chef"
+    assert roster.orchestrator == "orchestrator"
+    assert roster.orchestrator in roster.agents
     assert roster.max_workers == 1
     assert roster.allow_models == ("codex",)
     assert {agent.cli for agent in roster.agents.values()} == {"codex"}

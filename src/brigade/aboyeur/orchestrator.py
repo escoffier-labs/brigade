@@ -1565,7 +1565,7 @@ def run(
     )
     try:
         # Worker-only: the orchestrator's own attempt keeps its local capacity and
-        # is never delegated, so a chef can never recurse into a T3 delegate.
+        # is never delegated, so a orchestrator can never recurse into a T3 delegate.
         remote_transport = _worker_remote_transport(
             cwd=cwd,
             run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
