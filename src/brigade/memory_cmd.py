@@ -464,7 +464,9 @@ def _evidence_refs(meta: dict[str, Any]) -> list[str]:
 
 
 def _miseledger_evidence_id(ref: str) -> str | None:
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
     if ref.startswith("miseledger://evidence/"):
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
         return ref.removeprefix("miseledger://evidence/").strip()
     if ref.startswith("miseledger:"):
         return ref.removeprefix("miseledger:").strip()

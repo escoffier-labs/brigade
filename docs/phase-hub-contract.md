@@ -1,0 +1,274 @@
+# Fleet Hub wire contract
+
+The Fleet Hub is the HTTP service `brigade fleet serve` runs
+(`src/brigade/fleet_hub.py`, `src/brigade/fleet_hub_http.py`, and the
+`fleet_hub_*` helper modules). A Rust rewrite (axum, tokio, rusqlite) has to
+replace it without any client noticing. This page records the HTTP and JSON
+contract the Python hub serves today, and marks which routes the
+`verify-brigade` contract drive checks.
+
+The drive is `control-brigade.py hub-contract`
+(`registry/skills/verify-brigade/hub_contract.py`). It talks to a hub over
+HTTP only, so the same checks run against any hub binary. How to run it is in
+[`registry/skills/verify-brigade/features/hub-contract.md`](../registry/skills/verify-brigade/features/hub-contract.md).
+
+## Contract version
+
+`contract_version` is **1**. It is `CONTRACT_VERSION` in `hub_contract.py`,
+and every drive result reports it.
+
+A breaking change is any hub change that makes a drive case fail against a hub
+that passed it before:
+
+- a different status code for the same request
+- a required response key removed, renamed, or given a different JSON type
+- a different `code` value, or different text for an error message the drive
+  pins exactly
+- a broken paging guarantee: message ids not ascending, `next_cursor` not equal
+  to the last id on the page, or `after` not excluding ids at or below it
+- a route moved, or an auth requirement tightened or loosened
+
+Adding response keys, adding routes, and changing timestamps, generated ids,
+tokens, or key order are not breaking. The drive never compares those. A
+breaking change bumps `CONTRACT_VERSION` and updates the inventory below in the
+same PR.
+
+The Python hub has **no version endpoint**. `GET /health` reports liveness and
+the service name only, and `GET /version` is a 404. A client cannot ask a hub
+which contract it speaks. The drive records that as observed and does not
+require a version route.
+
+## Assumptions
+
+The drive starts the hub with its default flags. Admin writes are refused
+(no `--allow-admin-writes`), plaintext messages are accepted (no
+`--require-sealed`), and Worklore is off (`BRIGADE_WORKLORE_ENABLED` unset).
+Each flag changes the answers for some routes. A hub under test must start
+the same way.
+
+## Conventions every route shares
+
+- Authentication is `Authorization: Bearer <token>`. Three kinds of token
+  exist: the admin token (startup secret), a node token (from
+  `POST /nodes` `add`), and a message-principal token (from
+  `POST /message-principals` `add`, valid on `POST /messages` only).
+- A missing, unknown, or non-Bearer credential is `401 {"error": "unauthorized"}`.
+  A revoked node token is `401 {"error": "unauthorized: node token revoked"}`.
+  The `/policy` routes use a different envelope:
+  `401 {"error": {"code": "auth-failed", "message": "unauthorized"}}`.
+- A `token` query parameter is refused on every GET and POST with
+  `401` and a `text/plain` body (`Dashboard request refused.`), before routing.
+- An unknown path is `404 {"error": "not found"}` for GET, POST, PUT, PATCH,
+  and DELETE.
+- JSON responses carry `Content-Type: application/json`,
+  `Cache-Control: no-store`, and `Referrer-Policy: no-referrer`.
+- A body that is not JSON is `400 {"error": "body is not valid JSON"}`.
+
+## Route inventory
+
+Auth column: `none`, `admin`, `node` (node token), `principal` (message
+principal token), `bearer` (admin or node), `browser` (admin bearer, dashboard
+session cookie, or trusted Tailscale identity). Status column: `covered` means
+the drive checks the route, with the scope noted, and `not yet` means a later
+slice. The tables list 98 method and path pairs: 54 JSON API routes, 37 browser
+routes, and 7 static assets. The drive covers 14, all JSON API routes, and
+for several of them only part of the request space (see the Status column).
+
+### Health and identity
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| GET | /health | none | none | 200 `{ok: true, service: "brigade-fleet-hub"}` | covered |
+| GET | /mesh/identity | none | none | 200 hub identity document, or 404 `{error: "identity not found"}` | not yet |
+| POST | /mesh/identity | admin | identity upload | 200 upload result | not yet |
+| POST | /mesh/statements | admin | signed statement | 200 upload result | not yet |
+| GET | /favicon.svg | none | none | static asset, `public, max-age=86400` | not yet |
+| GET | /favicon.ico | none | none | static asset | not yet |
+| GET | /favicon-32x32.png | none | none | static asset | not yet |
+| GET | /apple-touch-icon.png | none | none | static asset | not yet |
+| GET | /icon-192.png | none | none | static asset | not yet |
+| GET | /icon-512.png | none | none | static asset | not yet |
+| GET | /site.webmanifest | none | none | static asset | not yet |
+
+### Registration and control plane
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| POST | /nodes | admin | `{action: "add", node_id, label?}` or `{action: "revoke", node_id}` | add: 200 `{added: true, node, token}`, 409 `{added: false, error}`, revoke: 200 `{revoked: true, node}`, 404 `{revoked: false, error}` | covered (add, revoke, duplicate, unknown, bad action, node-token refusal) |
+| GET | /nodes | admin | none | 200 `{nodes: [{node_id, label, created_at, revoked_at}]}`, node token 403 | covered |
+| POST | /message-principals | admin | `{action: "add", name, ...}`, `get`, `grants`, `revoke` | add: 201 `{principal: {name, principal_id, label, enrollment_id, may_send_to, token}}` | covered (add and node-token refusal only) |
+| GET | /preference | bearer | none | 200 `{preference: {...}}` | not yet |
+| PUT | /preference | admin | `{preference: {...}}` or the bare object | 200 `{preference: {...}}`, node token 403 | not yet |
+| GET | /audit | admin | `?after_id=&limit=` | 200 `{audit: [...]}`, no token 401, other token 403, both `{error: "admin token required"}` | not yet |
+
+### Heartbeat: run events and sessions
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| POST | /events | node | one event or an array (max 1000): `node_id, run_id, state, ts, sequence, digest`, optional `repo, seat, harness, capability_fingerprint, repo_identity, exit_status, context` | 200 `{accepted, duplicate}`, foreign node_id 403, bad field 400, admin token 403 | covered |
+| GET | /status | bearer | `?all=1` adds terminal runs | 200 `{claim_fencing: {retired_holder_horizon_seconds, retired_holder_rows}, runs: [...]}` | covered |
+| POST | /sessions | node | `{action: "upsert", harness, session_id, repo_identity, identity_scope, repo_label, checkout_path, branch, dirty_paths, dirty_truncated, ttl_seconds, cloud_context?, provider_link?}` or `{action: "end", harness, session_id, repo_identity}` | 200 `{session: {...}}`, `node_id` on a node write 400 | covered |
+| GET | /sessions | bearer | `?all=1` adds ended and expired sessions | 200 `{sessions: [...]}` | covered |
+
+### Claims and ownership
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| POST | /claims | node | `{action: acquire\|renew\|release\|inspect, target, node_id, holder?, ttl_seconds?, scope?, generation?, conductor?, lock?, supersede?, harness?, role?, job?, session?}` | acquire 200 `{granted: true, claim}` or 409 `{granted: false, error, owner}`, renew 200 `{renewed: true, claim}`, release 200 `{released: true}`, inspect 200 `{inspected, owned, generation, claim}` | covered (holder scope, node and force scope, leases, and fencing not yet) |
+| GET | /claims | bearer | `?all=1` adds expired claims | 200 `{claims: [{...claim, expired}]}` | covered |
+| GET | /owners | bearer | none | 200 `brigade.fleet_owners.v1` view | covered |
+
+### Messages
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| POST | /messages | node or principal | `{action, ...}`: `send`, `list`, `count`, `ack`, `sent`, `identity`, `reply`, `sent_lookup`, `who`, `claims`, `keys_publish`, `keys_get`, `manifests_get`, `question_create`, `question_status`, `question_desktop`, `events_list`, `events_subscribe`, `events_unsubscribe` | send 201 `{message}`, list and sent 200 `{messages, next_cursor}`, count 200 `{unread_count}`, ack 200 `{message}` or 404, identity 200 `{principal}`, admin token 403 | covered (send, list, count, ack, sent, identity, the other actions, sealed envelopes, and `wait_ms` long polls not yet) |
+
+### Fleet routing, cloud, models, policy
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| GET | /cloud | bearer | `?view=capabilities`, `?all=1` | 200 cloud snapshot, or `{schema: "brigade.fleet_cloud.v1"}` for capabilities | not yet |
+| POST | /cloud | node (admin for `policy`) | `{action: admit\|bind\|renew\|release\|policy, ...}` | lease decision | not yet |
+| GET | /models | bearer | none | 200 projected model roster | not yet |
+| POST | /models | node | lease `acquire`/`release`, roster `set`/`set-default`/`retire`, `admit` | lease or roster result | not yet |
+| GET | /policy | bearer | `?history=1&limit=` | 200 policy document, bad limit 400 `{error: {code: "invalid-request", message}}` | covered (401 envelope only) |
+| GET | /policy/status | bearer | none | 200 policy status | not yet |
+| GET | /policy/inventory | bearer | none | 200 model inventory | not yet |
+| POST | /policy | admin (`preview`, `save`, `rollback`) or node (`resolve`, `prepare`, `acknowledge`, `route`, `work-next`, `reservation-renew`, `reservation-release`, `telemetry-observe`, `delegation-create`, `delegation-show`), `refresh`, `quota-ingest`, `inventory-ingest` either | `{action, ...}` | action result, errors `{error: {code, message}}` | not yet |
+| POST | /grokbot | node or actor (admin: `list`, `status`, `report-metadata`, `enroll-actor`) | `{action: enqueue\|list\|status\|whoami\|cancel\|expire\|report-metadata\|claim\|start\|renew\|complete\|fail\|ack-cancel\|enroll-actor, ...}` | queue result | not yet |
+
+### Reports and CI
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| POST | /skills/report | node | skills inventory | 200 stored, admin 403 | not yet |
+| POST | /mcp/report | node | MCP server inventory | 200 stored, admin 403 | not yet |
+| POST | /projects/board | node | project board snapshot | 200 stored, admin 403 | not yet |
+| POST | /stats | stats collector node | stats batch | 200 stored | not yet |
+| GET | /ci | bearer | none | 200 CI view | not yet |
+| GET | /ci/work | bearer | none | 200 CI work view | not yet |
+| POST | /ci | node | CI observations | 200 stored | not yet |
+| POST | /ci/refresh | admin | none | 200 refresh result | not yet |
+| POST | /actions | bearer | action API payload | action result | not yet |
+
+### Worklore (off by default)
+
+Every `/work` route answers `404 {"error": "not found"}` while Worklore is off,
+whatever the token. The drive pins that default on `GET /work/items`.
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| GET | /work/items | bearer | query filters | Worklore off: 404 `{error: "not found"}`, on: item list | covered (off-by-default gate only) |
+| POST | /work/items | node | work item | item | not yet |
+| GET | /work/items/{id} | bearer | none | item | not yet |
+| PATCH | /work/items/{id} | node | item patch | item | not yet |
+| GET | /work/items/{id}/prepared-handoff | bearer | none | handoff | not yet |
+| GET | /work/items/{id}/ownership | bearer | none | ownership | not yet |
+| POST | /work/items/{id}/ownership | node | ownership action | ownership | not yet |
+| GET | /work/items/{id}/events | bearer | none | events | not yet |
+| POST | /work/items/{id}/transitions | node | transition | item | not yet |
+| POST | /work/items/{id}/attempts | node | attempt | attempt | not yet |
+| POST | /work/items/{id}/links | node | link | link | not yet |
+| DELETE | /work/items/{id}/links/{link} | node | none | result | not yet |
+| GET | /work/campaigns | bearer | query filters | campaigns | not yet |
+| POST | /work/campaigns | node | campaign | campaign | not yet |
+| GET | /work/campaigns/{key} | bearer | none | campaign | not yet |
+| GET | /work/events | bearer | query filters | events | not yet |
+| GET | /work/queue/burn | bearer | query filters | burn queue | not yet |
+| POST | /work/imports | node | import batch | import result | not yet |
+
+### Browser surfaces (HTML)
+
+These serve the Command Deck and the dashboard. They answer HTML or form
+redirects, not JSON, and no Brigade client calls them. A Rust hub can keep
+proxying them to the Python renderer or port them later. The contract drive
+leaves them alone.
+
+| Method | Path | Auth | Request | Response | Status |
+|---|---|---|---|---|---|
+| GET | / | browser | none | Command Deck HTML | not yet |
+| GET | /deck | browser | none | Command Deck HTML | not yet |
+| GET | /deck/repos | browser | none | HTML | not yet |
+| GET | /deck/alerts | browser | none | HTML | not yet |
+| GET | /deck/capacity | browser | none | HTML | not yet |
+| GET | /deck/capacity/cloud | browser | none | HTML | not yet |
+| GET | /deck/capacity/github | browser | none | HTML | not yet |
+| GET | /deck/activity | browser | none | HTML | not yet |
+| GET | /deck/projects | browser | none | HTML | not yet |
+| GET | /deck/pulls | browser | none | HTML | not yet |
+| GET | /deck/reporting | browser | none | HTML | not yet |
+| GET | /deck/roster | browser | none | HTML | not yet |
+| POST | /deck/roster | browser | form | 303 or HTML | not yet |
+| GET | /deck/policy | browser | none | HTML | not yet |
+| POST | /deck/policy | browser | form | 303 or HTML | not yet |
+| GET | /deck/observed/{...} | browser | none | HTML | not yet |
+| GET | /deck/work | browser | none | HTML | not yet |
+| GET | /deck/stats | browser | none | HTML | not yet |
+| GET | /deck/owners | browser | none | HTML | not yet |
+| GET | /deck/skills | browser | none | HTML | not yet |
+| GET | /deck/skills/plan | browser | none | HTML | not yet |
+| POST | /deck/skills | browser | form | 303 or HTML | not yet |
+| GET | /deck/pr-rules | browser | none | HTML | not yet |
+| POST | /deck/pr-rules | browser | form | 303 or HTML | not yet |
+| GET | /deck/mcp | browser | none | HTML | not yet |
+| GET | /deck/ci | browser | none | HTML | not yet |
+| GET | /deck/actions/enable | browser | none | HTML | not yet |
+| GET | /deck/actions/compose | browser | none | HTML | not yet |
+| POST | /deck/actions/submit | browser | form | HTML | not yet |
+| GET | /deck/actions/aa_{id} | browser | none | HTML | not yet |
+| GET | /view/machines | browser | none | dashboard HTML | not yet |
+| GET | /view/repos | browser | none | dashboard HTML | not yet |
+| GET | /enroll | enrollment code | `?code=` | HTML | not yet |
+| POST | /enroll | enrollment code, same origin | form | sets the dashboard cookie | not yet |
+| GET | /dashboard/sessions | admin | `?all=&after=` | JSON session page | not yet |
+| POST | /dashboard/sessions | admin | JSON | JSON | not yet |
+| POST | /dashboard/enrollment | admin | JSON | enrollment code | not yet |
+
+## Clients that call the covered routes
+
+Found with `brigade code callers` after `brigade code sync`, then traced by
+hand where the Dot connector dispatches tools by name.
+
+| Client | Function | Route |
+|---|---|---|
+| `brigade fleet status` | `fleet_client.fetch_status` | GET /status |
+| `brigade fleet claims` | `fleet_client.fetch_claims` | GET /claims |
+| `brigade fleet sessions`, the work brief | `fleet_client.fetch_sessions` | GET /sessions |
+| `brigade fleet owners show` | `fleet_client_policy.show_owners` | GET /owners |
+| `brigade fleet nodes add/revoke/list` | `fleet_client.add_node`, `revoke_node`, `fetch_nodes` | POST /nodes, GET /nodes |
+| run event reporting and spool flush | `fleet_client._post_events` | POST /events |
+| `repo_claim` and the claim helpers | `fleet_client._post_claim_blocking` | POST /claims |
+| session publish and end (heartbeat) | `fleet_client._post_session` | POST /sessions |
+| `brigade fleet msg send/list/ack/count/sent/identity`, `fleet_mcp`, `fleet_inbox_delivery`, `AskUser` | `fleet_client_messages.send`, `list_messages`, `ack`, `unread_count` | POST /messages |
+| `brigade fleet msg principals` | `fleet_client_messages._principal_admin_request` | POST /message-principals |
+| Dot/Duet `fleet_digest` | `DotHubTools.fleet_digest` runs `brigade fleet status --json`, `brigade fleet claims --json`, and reads the inbox | GET /status, GET /claims, POST /messages `list` |
+| Dot/Duet `inbox_list`, `message_send` | `dot.inbox_tools` through `HubInbox._call` and `hub_messages.call_message` | POST /messages `list`, `send` |
+| Dot/Duet `memory_search` | `dot.memory_tools.memory_search` runs `brigade memory search` locally | no hub route |
+| Dot/Duet `fleet_work_next` (inside `fleet_digest`) | `brigade fleet work next` through `worklore_client` | `/work/*`, off by default |
+
+## Hub behaviors recorded as observed
+
+The drive pins these as the Python hub answers today. They are flagged here
+for whoever owns the hub. This PR changes no hub code.
+
+1. **No version endpoint.** Nothing over HTTP reports the hub version or the
+   contract version, and `GET /version` is a 404.
+2. **Two auth-failure envelopes.** `/policy`, `/policy/status`, and
+   `/policy/inventory` answer `{"error": {"code": "auth-failed", "message":
+   "unauthorized"}}`, and every other route answers `{"error": "unauthorized"}`.
+   `GET /audit` also differs: a wrong token is 403, where other routes say 401.
+3. **Admin token on `/messages` gets the events wording.** The 403 text says
+   "the admin token may not post events or claims", which names the wrong
+   route family.
+4. **Some message errors carry no `code`.** Sending to an unknown recipient is
+   `400 {"error": "recipient is not an active hub principal"}` with no `code`,
+   and acking a message the caller did not receive is
+   `404 {"error": "message not found"}` with no `code`. The client falls back on
+   the status code for both. A rejected send without a grant does carry
+   `code: "message_recipient_not_permitted"`.
+5. **A message-principal token is a 401 outside `/messages`.** It is not
+   recognized at all on node routes such as `/status` or `/events`, rather
+   than refused with a 403.
+6. **Token in the query is plain text.** The refusal body is
+   `Dashboard request refused.` as `text/plain`, even on JSON API paths.

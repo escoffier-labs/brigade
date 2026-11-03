@@ -22,7 +22,7 @@ from tests.test_verify_brigade_skill import SKILL_DIR, control, sandbox
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="git is required by the shared helper fixtures")
 
 FEATURES = SKILL_DIR / "features"
-ACTIVE = {"init-and-doctor.md", "work-verify-receipts.md", "guard-parity.md"}
+ACTIVE = {"init-and-doctor.md", "work-verify-receipts.md", "guard-parity.md", "hub-contract.md"}
 PAUSED = {"handoff-lint.md", "run-dry-run.md", "grokbot-pack-lifecycle.md", "run-cloud-grokbot-queue.md"}
 
 # Stand-in CLI: the real one, plus a top-level `zz-fake-surface` in the

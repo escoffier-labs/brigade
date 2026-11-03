@@ -664,6 +664,7 @@ def _print_next(payload: dict[str, Any]) -> None:
 
 
 def _cursor_path(target: Path) -> Path:
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
     return target / ".brigade" / "work" / "miseledger-export-cursor.json"
 
 

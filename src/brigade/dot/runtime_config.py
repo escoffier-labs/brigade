@@ -18,6 +18,8 @@ from .safe_state import private_directory, private_file, require_local_platform
 RUNTIME_SCHEMA = "brigade.dot.runtime.v1"
 DUET_RUNTIME_SCHEMA = "brigade.duet.runtime.v1"
 DUET_PRINCIPAL = "agent:duet"
+GROKBOT_MEMORY_RUNTIME_SCHEMA = "brigade.grokbot-memory.runtime.v1"
+GROKBOT_MEMORY_PRINCIPAL = "agent:grokbot-memory"
 MAX_SKILLS_DENY = 256
 MAX_RUNTIME_BYTES = 65_536
 
@@ -218,6 +220,8 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
     """Parse one runtime document. The expected schema comes from the pack, never the document."""
     if schema == DUET_RUNTIME_SCHEMA:
         return _parse_duet_runtime(payload)
+    if schema == GROKBOT_MEMORY_RUNTIME_SCHEMA:
+        return _parse_grokbot_memory_runtime(payload)
     if schema != RUNTIME_SCHEMA:
         raise _invalid()
     root = _object(
@@ -295,19 +299,11 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
     )
 
 
-def _parse_duet_runtime(payload: object) -> Runtime:
-    """Duet has no dispatch, fleet client, owner authorization or event webhooks to configure."""
-    root = _object(
-        payload,
-        {"schema", "auth", "paths", "hub", "messaging_enabled", "digest_pr_repo"},
-        optional={"notify_command", "skills_deny"},
-    )
-    if root["schema"] != DUET_RUNTIME_SCHEMA:
-        raise _invalid()
-    auth = _parse_auth(root["auth"])
-    paths_data = _object(root["paths"], {"state_dir", "workspace", "bin"})
+def _parse_hosted_paths(value: object) -> PathsConfig:
+    """Hosted profiles have no T3 fleet client or fleet config."""
+    paths_data = _object(value, {"state_dir", "workspace", "bin"})
     bin_data = _object(paths_data["bin"], {"brigade", "git", "gh"}, optional={"octopool"})
-    paths = PathsConfig(
+    return PathsConfig(
         state_dir=_absolute_path(paths_data["state_dir"]),
         workspace=_absolute_path(paths_data["workspace"]),
         fleet_config=None,
@@ -319,6 +315,19 @@ def _parse_duet_runtime(payload: object) -> Runtime:
             octopool=str(_absolute_path(bin_data["octopool"])) if "octopool" in bin_data else None,
         ),
     )
+
+
+def _parse_duet_runtime(payload: object) -> Runtime:
+    """Duet has no dispatch, fleet client, owner authorization or event webhooks to configure."""
+    root = _object(
+        payload,
+        {"schema", "auth", "paths", "hub", "messaging_enabled", "digest_pr_repo"},
+        optional={"notify_command", "skills_deny"},
+    )
+    if root["schema"] != DUET_RUNTIME_SCHEMA:
+        raise _invalid()
+    auth = _parse_auth(root["auth"])
+    paths = _parse_hosted_paths(root["paths"])
     hub = _parse_hub(root["hub"])
     # Duet never shares another agent's Hub principal, inbox or acknowledgement state.
     if hub.principal != DUET_PRINCIPAL:
@@ -345,6 +354,35 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         messaging_enabled=_boolean(root["messaging_enabled"]),
         skills_deny=skills_deny,
         schema=DUET_RUNTIME_SCHEMA,
+    )
+
+
+def _parse_grokbot_memory_runtime(payload: object) -> Runtime:
+    """The Grok Bot memory profile reads cards and writes handoffs. Nothing here enables more.
+
+    There is no messaging, dispatch, digest, skill or event key. The hub section names a
+    dedicated principal so the listener proves its own identity and stays isolated from Dot.
+    """
+    root = _object(payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command"})
+    if root["schema"] != GROKBOT_MEMORY_RUNTIME_SCHEMA:
+        raise _invalid()
+    auth = _parse_auth(root["auth"])
+    paths = _parse_hosted_paths(root["paths"])
+    hub = _parse_hub(root["hub"])
+    if hub.principal != GROKBOT_MEMORY_PRINCIPAL:
+        raise _invalid()
+    return Runtime(
+        auth=auth,
+        paths=paths,
+        hub=hub,
+        dispatch_enabled=False,
+        events_enabled=False,
+        digest_pr_repo="",
+        callback_hosts=(),
+        notify_command=_parse_notify(root),
+        owner_authorization=None,
+        messaging_enabled=False,
+        schema=GROKBOT_MEMORY_RUNTIME_SCHEMA,
     )
 
 
