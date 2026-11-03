@@ -1856,29 +1856,28 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
+def search_card_fields(target: Path, config: MemoryCareConfig | None = None) -> list[dict[str, Any]]:
+    """Searchable fields for every card under a resolved ``target``."""
+    if config is None:
+        config = load_config(target) or MemoryCareConfig()
+    return [fields for path in _iter_cards(target, config) if (fields := _card_search_fields(path, target))]
+
+
+def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:
+    """One search result, in the shape every card search caller returns."""
+    keys = ("card_id", "card_aliases", "title", "tags", "summary")
+    return {"path": fields["rel"], **{key: fields[key] for key in keys}, "score": score}
+
+
 def search_cards_payload(
     target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
 ) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    if config is None:
-        config = load_config(target) or MemoryCareConfig()
     # BM25 over one field per card, rebuilt per call (no cache, no index file).
     # Scores are floats rounded to 4 decimals; ties break by path.
-    cards = [fields for path in _iter_cards(target, config) if (fields := _card_search_fields(path, target))]
-    matches: list[dict[str, Any]] = []
-    for index, score in memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query):
-        fields = cards[index]
-        matches.append(
-            {
-                "path": fields["rel"],
-                "card_id": fields["card_id"],
-                "card_aliases": fields["card_aliases"],
-                "title": fields["title"],
-                "tags": fields["tags"],
-                "summary": fields["summary"],
-                "score": score,
-            }
-        )
+    cards = search_card_fields(target, config)
+    ranked = memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query)
+    matches = [card_search_match(cards[index], score) for index, score in ranked]
     matches.sort(key=lambda item: (-item["score"], item["path"]))
     return {
         "target": str(target),

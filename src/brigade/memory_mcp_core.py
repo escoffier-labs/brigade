@@ -9,13 +9,12 @@ the shape mcp_server.ToolCaller expects.
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
 
-from . import memory_cmd, memory_scope
+from . import memory_bm25, memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
@@ -329,15 +328,22 @@ class MemoryTools:
 
     def _search_cards(self, arguments: dict[str, Any]) -> ToolResult:
         query = str(arguments.get("query") or "")
-        ranked: list[tuple[int, dict[str, Any]]] = []
+        # BM25 scores depend on corpus statistics, so every store's eligible
+        # cards are ranked together; per-store scores are not comparable.
+        eligible: list[tuple[int, MemoryStore, dict[str, Any]]] = []
         for rank, store in enumerate(self.resolution().stores):
-            # Uncapped so outside-the-store matches dropped here cannot crowd out real ones.
-            payload = memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize, config=store.config)
-            for match in payload["matches"]:
-                match = {**match, "path": _posix(match["path"])}
-                if not _inside(store.root / match["path"], store.root):
-                    continue
-                ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
+            root = store.root.expanduser().resolve()
+            for fields in memory_cmd.search_card_fields(root, store.config):
+                # Outside-the-store cards are dropped before ranking, so they
+                # neither crowd out real matches nor shift the statistics.
+                if _inside(store.root / _posix(fields["rel"]), store.root):
+                    eligible.append((rank, store, fields))
+        texts = [memory_bm25.card_text(fields) for _, _, fields in eligible]
+        ranked: list[tuple[int, dict[str, Any]]] = []
+        for index, score in memory_bm25.rank(texts, query):
+            rank, store, fields = eligible[index]
+            match = {**memory_cmd.card_search_match(fields, score), "path": _posix(fields["rel"])}
+            ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
         ranked.sort(key=lambda item: (-item[1]["score"], item[0], item[1]["path"]))
         return [match for _, match in ranked[:SEARCH_LIMIT]], False
 
