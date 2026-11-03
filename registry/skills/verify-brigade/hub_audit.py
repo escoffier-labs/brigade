@@ -52,13 +52,17 @@ from typing import Any
 
 # Pragmas that change only the connection that ran them, never the file.
 LOCAL_PRAGMAS = frozenset({"busy_timeout", "query_only", "foreign_keys", "cache_size", "temp_store", "trusted_schema"})
+# Pragmas that can write to the database file or take its locks with no argument at all, so the
+# "has a value" test below would miss them: a checkpoint copies WAL pages back, `optimize` may run
+# ANALYZE, and `incremental_vacuum` frees pages.
+WRITING_PRAGMAS = frozenset({"wal_checkpoint", "optimize", "incremental_vacuum"})
 # Read paths a mutation can be added to, by the operation name the drive uses.
 MUTATION_POINTS = {
     "GET /owners": ("brigade.fleet_owners", "load_view"),
     "GET /status": ("brigade.fleet_hub", "latest_status"),
     "POST /messages count": ("brigade.fleet_hub_messages", "unread_count"),
 }
-MUTATION_KINDS = ("write", "noop", "begin", "begin-semicolon", "begin-comment", "helper")
+MUTATION_KINDS = ("write", "noop", "begin", "begin-semicolon", "begin-comment", "pragma-checkpoint", "helper")
 # The SQL each `begin*` mutation runs: plain, with a trailing semicolon, and behind a comment.
 BEGIN_FORMS = {
     "begin": "BEGIN IMMEDIATE",
@@ -132,7 +136,13 @@ class Recorder:
 def _authorizer(recorder: Recorder):
     def check(action: int, arg1: str | None, arg2: str | None, db: str | None, trigger: str | None) -> int:
         name = WRITE_CODES.get(action)
-        if name is None and action == PRAGMA_CODE and arg2 is not None and (arg1 or "").lower() not in LOCAL_PRAGMAS:
+        pragma = (arg1 or "").lower()
+        if (
+            name is None
+            and action == PRAGMA_CODE
+            and pragma not in LOCAL_PRAGMAS
+            and (arg2 is not None or pragma in WRITING_PRAGMAS)
+        ):
             name = "pragma"
         if name is not None:
             recorder.emit("write", action=name, target=arg1, detail=arg2, db=db, trigger=trigger)
@@ -245,6 +255,8 @@ def mutate(spec: str, db_path: str, recorder: Recorder) -> None:
             elif kind == "noop":
                 conn.execute("UPDATE nodes SET label=label WHERE 0")
                 conn.commit()
+            elif kind == "pragma-checkpoint":
+                conn.execute("PRAGMA wal_checkpoint")
             else:
                 conn.isolation_level = None
                 conn.execute(BEGIN_FORMS[kind])

@@ -151,6 +151,12 @@ def test_prod_readonly_audit_passes_through_the_rust_front(tmp_path):
             {"kind": "begin", "mode": "exclusive"},
             [],
         ),
+        (
+            "GET /status:pragma-checkpoint",
+            ["a listed operation wrote, or took the write lock"],
+            {"kind": "write", "action": "pragma", "target": "wal_checkpoint"},
+            [],
+        ),
     ],
 )
 def test_prod_readonly_audit_fails_when_a_listed_operation_writes(tmp_path, mutation, problems, finding, changed):
