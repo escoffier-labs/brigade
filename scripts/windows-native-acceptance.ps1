@@ -981,6 +981,64 @@ function Assert-AgentNotifyVersionMetadata {
     }
 }
 
+function Invoke-NativeCaptured {
+    # PowerShell 5.1 with $ErrorActionPreference Stop turns redirected native
+    # stderr into NativeCommandError, so legacy entry points that print a
+    # deprecation line run through System.Diagnostics.Process instead.
+    param(
+        [string]$Exe,
+        [string[]]$Arguments = @(),
+        [string]$StdinText = $null
+    )
+    $info = New-Object System.Diagnostics.ProcessStartInfo
+    $info.FileName = $Exe
+    $info.Arguments = (@($Arguments) | ForEach-Object { '"' + $_ + '"' }) -join " "
+    $info.UseShellExecute = $false
+    $info.CreateNoWindow = $true
+    $info.RedirectStandardOutput = $true
+    $info.RedirectStandardError = $true
+    $info.RedirectStandardInput = $true
+    $process = [System.Diagnostics.Process]::Start($info)
+    try {
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if ($null -ne $StdinText) {
+            $process.StandardInput.WriteLine($StdinText)
+        }
+        $process.StandardInput.Close()
+        if (-not $process.WaitForExit(120000)) {
+            $process.Kill()
+            throw "$Exe timed out after 120s"
+        }
+        $process.WaitForExit()
+        return [pscustomobject]@{
+            ExitCode = $process.ExitCode
+            Stdout = $stdoutTask.Result
+            Stderr = $stderrTask.Result.Trim()
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
+function Assert-LegacyDeprecationOnly {
+    # A legacy code graph entry point may write exactly one deprecation line
+    # naming brigade-code-graph; same-commit builds must write it.
+    param(
+        [string]$Stderr,
+        [string]$Step,
+        [bool]$Required
+    )
+    $lines = @($Stderr -split "`r?`n" | Where-Object { $_.Trim() })
+    if ($lines.Count -gt 1 -or ($lines.Count -eq 1 -and $lines[0] -notmatch 'deprecated.*brigade-code-graph')) {
+        throw "$Step wrote unexpected stderr: $Stderr"
+    }
+    if ($Required -and $lines.Count -ne 1) {
+        throw "$Step did not print the deprecation line"
+    }
+}
+
 function Get-ManagedExecutablePath {
     param(
         $Report,
@@ -1158,8 +1216,38 @@ try {
         Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe
     }
 
-    $mcpResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & $graphtrailMcpExe
-    if ($LASTEXITCODE -ne 0 -or $mcpResponse -notmatch '"jsonrpc"') { throw "graphtrail-mcp absolute-path smoke failed" }
+    # The engines take their identity from argv[0], so renamed copies of the
+    # managed binaries are the canonical entry points. The legacy names are
+    # still covered below with stderr captured.
+    $canonicalBin = Join-Path $acceptRoot "canonical-bin"
+    New-Item -ItemType Directory -Force -Path $canonicalBin | Out-Null
+    $codeGraphExe = Join-Path $canonicalBin "brigade-code-graph.exe"
+    $codeGraphMcpExe = Join-Path $canonicalBin "brigade-code-graph-mcp.exe"
+    Copy-Item -LiteralPath $graphtrailExe -Destination $codeGraphExe -Force
+    Copy-Item -LiteralPath $graphtrailMcpExe -Destination $codeGraphMcpExe -Force
+    $identityRequired = $InstallMode -eq "source"
+
+    $mcpRequest = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    foreach ($entry in @(@{ exe = $codeGraphMcpExe; legacy = $false }, @{ exe = $graphtrailMcpExe; legacy = $true })) {
+        $mcpName = [System.IO.Path]::GetFileNameWithoutExtension($entry.exe)
+        $mcp = Invoke-NativeCaptured -Exe $entry.exe -StdinText $mcpRequest
+        if ($mcp.ExitCode -ne 0 -or $mcp.Stdout -notmatch '"jsonrpc"') {
+            throw "$mcpName absolute-path smoke failed (exit $($mcp.ExitCode)): $($mcp.Stderr)"
+        }
+        if ($entry.legacy) {
+            Assert-LegacyDeprecationOnly -Stderr $mcp.Stderr -Step "$mcpName initialize" -Required $identityRequired
+        }
+        elseif ($mcp.Stderr) {
+            throw "$mcpName initialize wrote stderr: $($mcp.Stderr)"
+        }
+        if ($identityRequired) {
+            $serverName = (($mcp.Stdout.Trim() -split "`r?`n")[0] | ConvertFrom-Json).result.serverInfo.name
+            $expectedName = if ($entry.legacy) { "graphtrail" } else { "brigade-code-graph" }
+            if ($serverName -ne $expectedName) {
+                throw "$mcpName serverInfo.name is '$serverName', expected '$expectedName'"
+            }
+        }
+    }
     & $sessionfindExe --help | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sessionfind absolute-path smoke failed" }
     if ($requiredIds -contains "agent-notify") {
@@ -1333,19 +1421,35 @@ finally:
         & brigade memory care import-issues --target $workRepo
         if ($LASTEXITCODE -ne 0) { throw "memory care import-issues failed" }
 
-        $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
-        Write-Step "graphtrail sync"
-        & $graphtrailExe --db $dbPath sync $workRepo
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail sync failed" }
+        # No --db: a fresh repository gets the canonical index. A released
+        # engine older than the rename still writes the legacy one.
+        $dbPath = Join-Path $workRepo ".brigade\code-graph\code-graph.db"
+        Write-Step "code graph sync"
+        & $codeGraphExe sync $workRepo
+        if ($LASTEXITCODE -ne 0) { throw "code graph sync failed" }
+        if (-not $identityRequired -and -not (Test-Path $dbPath)) {
+            $dbPath = Join-Path $workRepo ".graphtrail\graphtrail.db"
+        }
         if (-not (Test-Path $dbPath)) {
-            throw "graphtrail database missing at $dbPath"
+            throw "code graph database missing at $dbPath"
         }
 
-        Write-Step "graphtrail callers query"
-        $callersOutput = & $graphtrailExe --db $dbPath callers greet 2>&1 | Out-String
-        if ($LASTEXITCODE -ne 0) { throw "graphtrail callers greet failed" }
-        if ($callersOutput -notmatch "call_greet") {
-            throw "graphtrail callers greet missing call_greet edge: $callersOutput"
+        foreach ($callersExe in @($codeGraphExe, $graphtrailExe)) {
+            $callersName = [System.IO.Path]::GetFileNameWithoutExtension($callersExe)
+            Write-Step "$callersName callers query"
+            $callers = Invoke-NativeCaptured -Exe $callersExe -Arguments @("--db", $dbPath, "callers", "greet")
+            if ($callers.ExitCode -ne 0) {
+                throw "$callersName callers greet failed (exit $($callers.ExitCode)): $($callers.Stderr)"
+            }
+            if ($callers.Stdout -notmatch "call_greet") {
+                throw "$callersName callers greet missing call_greet edge: $($callers.Stdout)"
+            }
+            if ($callersExe -eq $graphtrailExe) {
+                Assert-LegacyDeprecationOnly -Stderr $callers.Stderr -Step "$callersName callers" -Required $identityRequired
+            }
+            elseif ($callers.Stderr) {
+                throw "$callersName callers greet wrote stderr: $($callers.Stderr)"
+            }
         }
 
         $acceptanceMarker = "brigadewinacceptance$([guid]::NewGuid().ToString('N').Substring(0, 8))"
