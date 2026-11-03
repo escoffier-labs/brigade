@@ -469,6 +469,7 @@ def _graphtrail_source(run_dir: Path) -> Mapping[str, Any] | None | object:
     except ValueError:
         meta = None
     if isinstance(meta, dict):
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
         for key in ("code_graph_delta", "graphtrail_delta"):
             value = meta.get(key)
             if isinstance(value, Mapping):
@@ -479,6 +480,7 @@ def _graphtrail_source(run_dir: Path) -> Mapping[str, Any] | None | object:
         return None
     ground_truth = worker_results.get("ground_truth") if isinstance(worker_results, dict) else None
     if isinstance(ground_truth, Mapping):
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
         for key in ("code_graph_delta", "graphtrail_delta"):
             value = ground_truth.get(key)
             if isinstance(value, Mapping):
