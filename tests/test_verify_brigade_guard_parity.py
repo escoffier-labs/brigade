@@ -102,6 +102,37 @@ def test_guard_parity_reports_a_drifted_engine(tmp_path):
     assert "[redacted-hostname]" in by_check["redact stdout"]["observed"]
 
 
+# A stand-in `brigade` that outlives the helper's per-call timeout.
+SLEEPING_BRIGADE = """\
+import time
+time.sleep(30)
+"""
+
+
+def test_guard_parity_reports_a_timed_out_engine(tmp_path):
+    root = tmp_path / "state"
+    target = root / "targets" / "timeout"
+    target.mkdir(parents=True)
+    fake = tmp_path / "sleeping_brigade.py"
+    fake.write_text(SLEEPING_BRIGADE, encoding="utf-8")
+
+    code, payload = control(
+        "--timeout",
+        "1",
+        "guard-parity",
+        "--target",
+        str(target),
+        root=root,
+        brigade=shlex.join([sys.executable, str(fake)]),
+    )
+    assert code == 3, payload
+    assert payload["ok"] is False
+    assert payload["scan"]["timed_out"] is True
+    checks = {item["check"] for item in payload["mismatches"]}
+    assert "scan exit code" in checks, checks
+    assert "scan findings" in checks, checks
+
+
 def test_guard_parity_dry_run_writes_nothing(tmp_path):
     root = tmp_path / "state"
     target = root / "targets" / "dry-run"

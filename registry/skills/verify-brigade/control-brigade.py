@@ -1068,7 +1068,8 @@ def cmd_guard_parity(args: argparse.Namespace) -> int:
     stdin = run(stdin_argv, root=root, name="guard-redact-stdin", timeout=args.timeout, stdin_text=GUARD_PARITY_FIXTURE)
     rewrite = run(in_place_argv, root=root, name="guard-redact-in-place", timeout=args.timeout)
 
-    payload = scan["json"] if isinstance(scan["json"], dict) else {}
+    # A timed-out record carries no "json" key; its exit code is reported below.
+    payload = scan.get("json") if isinstance(scan.get("json"), dict) else {}
     observed, inconsistent = guard_parity_findings(payload)
     golden = [list(row) for row in GUARD_PARITY_GOLDEN_FINDINGS]
     mismatches: list[dict] = []
@@ -1088,8 +1089,10 @@ def cmd_guard_parity(args: argparse.Namespace) -> int:
         if text != GUARD_PARITY_GOLDEN_REDACTED:
             mismatches.append({"check": name, "expected": GUARD_PARITY_GOLDEN_REDACTED, "observed": text})
     # stdout is decoded text, so the on-disk rewrite is the byte-for-byte check.
+    # `--in-place` writes with Path.write_text, which emits the platform newline
+    # (CRLF on Windows), so the expected bytes follow os.linesep.
     written = in_place.read_bytes()
-    if written != GUARD_PARITY_GOLDEN_REDACTED.encode("utf-8"):
+    if written != GUARD_PARITY_GOLDEN_REDACTED.replace("\n", os.linesep).encode("utf-8"):
         mismatches.append(
             {
                 "check": "redact --in-place bytes",
