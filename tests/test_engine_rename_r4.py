@@ -19,6 +19,7 @@ from brigade import (
     doctor,
     engine_paths,
     install,
+    mcp_adapters,
     mcp_cmd,
 )
 from brigade.operator_cmd import lifecycle
@@ -262,10 +263,19 @@ def test_cursor_rename_flag_renames_pristine_owned_keys_only(tmp_path, monkeypat
     payload = json.loads(capsys.readouterr().out)
     live = json.loads(mcp_path.read_text())["mcpServers"]
     assert "brigade-code-graph" in live and LEGACY_GRAPH not in live
-    # The edited legacy entry stays where it is, and nothing shadows it.
+    # The edited legacy entry stays where it is, and nothing shadows it: the
+    # canonical key for that engine is not created alongside it.
     assert live[LEGACY_EVIDENCE] == {"command": "user-edited"}
-    assert any(item.get("name") == LEGACY_EVIDENCE for item in payload["conflicts"])
+    assert "brigade-evidence" not in live
+    assert [item["name"] for item in payload["conflicts"]] == [LEGACY_EVIDENCE]
     assert payload["notices"] == []
+    # The plugin's server list, the live config and ownership name the same keys.
+    cursor = tmp_path / ".cursor"
+    plugin_servers = json.loads((cursor / "brigade" / "mcp.json").read_text())["servers"]
+    assert set(plugin_servers) == {"brigade", "brigade-code-graph", LEGACY_EVIDENCE}
+    owned = json.loads((cursor / "brigade" / "install-state.json").read_text())["mcp"]
+    assert {"brigade-code-graph", LEGACY_EVIDENCE} <= set(owned)
+    assert not {LEGACY_GRAPH, "brigade-evidence"} & set(owned)
 
 
 def test_cursor_never_renames_user_authored_legacy_entries(tmp_path, monkeypatch, capsys):
@@ -430,6 +440,147 @@ def test_mcp_sync_rename_leftover_stays_when_its_harness_has_a_foreign_canonical
     assert rc == 1
     assert cursor.read_text() == before
     assert any(f"kept the cursor entry '{LEGACY_GRAPH}'" in note for note in payload["notes"])
+
+
+def test_mcp_sync_notes_a_catalog_with_both_keys_and_rename_exits_1(tmp_path, capsys):
+    _catalog_with_legacy_graph(tmp_path)
+    assert (
+        mcp_cmd.add(target=tmp_path, name="brigade-code-graph", command="brigade-code-graph-mcp", json_output=True) == 0
+    )
+    capsys.readouterr()
+
+    assert mcp_cmd.sync(target=tmp_path, harness="claude", write=False, json_output=True) == 0
+    notes = json.loads(capsys.readouterr().out)["notes"]
+    assert any(f"both '{LEGACY_GRAPH}' and its canonical key" in note for note in notes)
+
+    rc = mcp_cmd.sync(target=tmp_path, harness="claude", write=True, rename_legacy_servers=True, json_output=True)
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 1
+    assert payload["rename_collisions"] == [LEGACY_GRAPH]
+    assert set(mcp_cmd.load_canonical(tmp_path)[0]) == {LEGACY_GRAPH, "brigade-code-graph"}
+
+
+_GRAPH_URL = "https://graph.example.test/mcp"
+
+
+def _adopted_remote_graph(target, harness, native_text):
+    """Seed a remote legacy graph entry with native settings, then adopt it."""
+    assert mcp_cmd.init(target=target, json_output=True) == 0
+    adapter = mcp_cmd.ADAPTERS[harness]
+    path = target / adapter.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(native_text)
+    server, _ = mcp_adapters.server_from_dict(LEGACY_GRAPH, {"transport": "http", "url": _GRAPH_URL})
+    mcp_cmd._write_canonical(target, {LEGACY_GRAPH: server})
+    assert mcp_cmd.sync(target=target, harness=harness, adopt=True, write=True, json_output=True) == 0
+    return adapter, path
+
+
+def test_mcp_sync_rename_keeps_adopted_codex_native_auth(tmp_path, capsys):
+    adapter, path = _adopted_remote_graph(
+        tmp_path,
+        "codex",
+        f'[mcp_servers.{LEGACY_GRAPH}]\nurl = "{_GRAPH_URL}"\nbearer_token_env_var = "FAKE_TOKEN"\n',
+    )
+    assert adapter.read_file(path.read_text())[LEGACY_GRAPH]["bearer_token_env_var"] == "FAKE_TOKEN"
+    capsys.readouterr()
+
+    rc = mcp_cmd.sync(target=tmp_path, harness="codex", write=True, rename_legacy_servers=True, json_output=True)
+    assert rc == 0
+    live = adapter.read_file(path.read_text())
+    assert set(live) == {"brigade-code-graph"}
+    assert live["brigade-code-graph"]["url"] == _GRAPH_URL
+    assert live["brigade-code-graph"]["bearer_token_env_var"] == "FAKE_TOKEN"
+    record = json.loads(mcp_cmd.state_path(tmp_path).read_text())["ownership"]["codex"][adapter.path]
+    assert set(record) == {"brigade-code-graph"}
+    assert record["brigade-code-graph"]["native_auth_keys"] == {"bearer_token_env_var": True}
+    assert "FAKE_TOKEN" not in mcp_cmd.state_path(tmp_path).read_text()
+
+    # The renamed entry is owned and current: a later plain sync keeps the auth.
+    capsys.readouterr()
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["files_written"] == []
+    assert adapter.read_file(path.read_text())["brigade-code-graph"]["bearer_token_env_var"] == "FAKE_TOKEN"
+
+
+def test_mcp_sync_rename_keeps_adopted_opencode_native_headers(tmp_path, capsys):
+    native = {
+        "mcp": {
+            LEGACY_GRAPH: {
+                "type": "remote",
+                "url": _GRAPH_URL,
+                "headers": {"Authorization": "Bearer {env:FAKE_TOKEN}"},
+            }
+        }
+    }
+    adapter, path = _adopted_remote_graph(tmp_path, "opencode", json.dumps(native))
+    capsys.readouterr()
+
+    rc = mcp_cmd.sync(target=tmp_path, harness="opencode", write=True, rename_legacy_servers=True, json_output=True)
+    assert rc == 0
+    live = adapter.read_file(path.read_text())
+    assert set(live) == {"brigade-code-graph"}
+    assert live["brigade-code-graph"]["headers"] == {"Authorization": "Bearer {env:FAKE_TOKEN}"}
+
+
+# --------------------------------------------------------------------------- #
+# legacy config key: the file load_config reads, and the ignored case
+# --------------------------------------------------------------------------- #
+
+
+def _write_workspace_config(path, **keys):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude", "includes": [], **keys}
+    path.write_text(json.dumps(payload))
+
+
+def test_legacy_config_key_found_in_the_legacy_workspace_config(tmp_path):
+    legacy_dir = config.LEGACY_WORKSPACE_DIRNAMES[0]
+    _write_workspace_config(tmp_path / legacy_dir / "config.json", **{config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY: 7})
+    assert not config.config_path(tmp_path).exists()
+    loaded = config.load_config(tmp_path)
+    assert loaded is not None and loaded.code_graph_delta_timeout_seconds == 7.0
+    assert config.legacy_config_keys(tmp_path) == [
+        (config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, False)
+    ]
+
+
+@pytest.mark.parametrize("with_canonical", [False, True])
+def test_doctor_legacy_config_key_message_matches_what_load_config_reads(tmp_path, monkeypatch, with_canonical):
+    keys = {config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY: 12}
+    if with_canonical:
+        keys[config.CODE_GRAPH_DELTA_TIMEOUT_KEY] = 30
+    _write_workspace_config(config.config_path(tmp_path), **keys)
+    monkeypatch.setattr("brigade.registry.all_stations", lambda: [])
+    monkeypatch.setattr("brigade.component_report.doctor_checks", lambda: [])
+
+    rows = {
+        name: (status, detail) for status, name, detail, _scope in doctor._gather_checks(doctor.build_context(tmp_path))
+    }
+    status, detail = rows["legacy config key"]
+    assert status == doctor.INFO
+    if with_canonical:
+        assert "is ignored because" in detail and "until v0.33.0" not in detail
+    else:
+        assert "is read while" in detail and "is absent" in detail
+
+
+# --------------------------------------------------------------------------- #
+# hints name the executable that resolved
+# --------------------------------------------------------------------------- #
+
+
+def test_evidence_doctor_timeout_hint_names_the_resolved_executable(monkeypatch):
+    from pathlib import Path
+
+    from brigade import managed
+    from brigade.station import DoctorContext
+
+    tool = managed.resolve("brigade-evidence")
+    monkeypatch.setattr(managed.component_bins, "resolve", lambda name, **kw: "/x/brigade-evidence")
+    monkeypatch.setattr(managed.proc, "run", lambda args, **kw: managed.proc.Result(code=124, stdout="", stderr=""))
+    results = tool.doctor(DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[]))
+    assert any("run `brigade-evidence doctor` manually" in detail for _status, _name, detail in results)
 
 
 @pytest.fixture(autouse=True)

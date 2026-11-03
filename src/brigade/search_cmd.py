@@ -111,7 +111,9 @@ def status_payload(target: Path) -> dict[str, Any]:
     if graphtrail_bin:
         if not db_present:
             graph_health = "unwired"
-            graph_summary = db_error or f"graphtrail installed; run `graphtrail sync` to build {db}"
+            graph_summary = (
+                db_error or f"{Path(graphtrail_bin).name} installed; run `{graphtrail_bin} sync` to build {db}"
+            )
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)
         else:
             graph_doctor = health.run_json([graphtrail_bin, "doctor", "--json"], timeout=30.0)

@@ -114,7 +114,8 @@ def test_cursor_user_install_merges_all_surfaces_and_is_idempotent(tmp_path, mon
     mcp = json.loads((cursor / "mcp.json").read_text())
     assert mcp["settings"] == {"keep": True}
     assert mcp["mcpServers"]["foreign"] == {"command": "keep-server"}
-    assert {"brigade", "brigade-code-graph", "brigade-evidence"} <= set(mcp["mcpServers"])
+    # Exact set: a fresh install writes canonical engine keys and no legacy ones.
+    assert set(mcp["mcpServers"]) == {"foreign", "brigade", "brigade-code-graph", "brigade-evidence"}
     assert (cursor / "brigade" / "mcp.json").is_file()
     assert not (tmp_path / ".brigade").exists()
     assert not (cursor / "memory-handoffs").exists()

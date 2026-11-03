@@ -210,6 +210,18 @@ def _legacy_server_renames(servers: dict[str, CanonicalServer]) -> dict[str, str
     return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new not in servers}
 
 
+def _legacy_key_collisions(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    """Legacy keys whose canonical key is also a catalog entry, so neither can be renamed."""
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new in servers}
+
+
+def _legacy_collision_note(old: str, new: str) -> str:
+    return (
+        f"note: the catalog has both '{old}' and its canonical key '{new}', so '{old}' cannot be renamed. "
+        f"Remove one of them from {CANONICAL_REL}, then sync again"
+    )
+
+
 def _legacy_leftovers(servers: dict[str, CanonicalServer]) -> dict[str, str]:
     """Legacy keys whose canonical key is already in the catalog.
 
@@ -619,15 +631,17 @@ def _plan_from_inputs(
     items: list[dict[str, Any]] = []
     rel = adapter.path
     assessments: dict[str, dict[str, Any]] = {}
+    sources = _rename_sources(prune_names, desired, live, owned)
 
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue
-        context = {"scope": scope, "live": live.get(name, {}), "native_keys": {}}
+        source = sources.get(name, name)
+        context = {"scope": scope, "live": live.get(source, {}), "native_keys": {}}
         try:
             location = _opencode_location(harness, text, name)
             context["location"] = location
-            native_record = _native_record(harness, live.get(name, {}), owned.get(name), server)
+            native_record = _native_record(harness, live.get(source, {}), owned.get(source), server)
             context["native_keys"] = native_record.get(
                 "native_auth_keys", native_record.get("opencode_native_keys", {})
             )
@@ -635,7 +649,7 @@ def _plan_from_inputs(
                 target,
                 harness,
                 server,
-                ProjectionContext(live.get(name, {}), owned.get(name), location),
+                ProjectionContext(live.get(source, {}), owned.get(source), location),
             )
             assessments[name] = mcp_fidelity.evaluate(server, harness, projected=provider_dict, **context)
             blocking = sorted({f["reason"] for f in assessments[name]["fields"] if f["blocking"]})
@@ -679,6 +693,8 @@ def _plan_from_inputs(
         record = owned.get(name)
         if name not in live:
             items.append(_item(harness, rel, name, "missing", "create", canon_fp, desired_fp))
+            if source != name:
+                items[-1]["_source"] = source
             continue
         live_fp = localio.stable_hash(live[name])
         if record is None:
@@ -762,6 +778,24 @@ def _plan_from_inputs(
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
+
+
+def _rename_sources(
+    prune_names: frozenset[str], desired: dict[str, Any], live: dict[str, Any], owned: dict[str, Any]
+) -> dict[str, str]:
+    """Map a canonical key to the owned legacy entry it replaces in this harness.
+
+    The canonical entry inherits that entry's provider-native settings and ownership
+    provenance (not its layout location), so a rename keeps adopted native auth (for
+    example a Codex ``bearer_token_env_var``). Only Codex and OpenCode adapters
+    keep such settings; the others project the catalog entry as written.
+    """
+    sources: dict[str, str] = {}
+    for old in prune_names:
+        new = LEGACY_SERVER_KEYS.get(old)
+        if new in desired and new not in live and new not in owned and old in live and old in owned:
+            sources[new] = old
+    return sources
 
 
 def _item(harness, file, server, status, action, canon_fp, proj_fp, *, detail="", reconciled=False) -> dict[str, Any]:
@@ -1198,6 +1232,9 @@ class McpSyncPlan:
     destination_files: list[str]
     errors: list[str] = field(default_factory=list)
     native_write_paths: list[Path] = field(default_factory=list)
+    # Legacy keys a requested rename could not move because the catalog also has
+    # the canonical key; sync exits 1 for them, as it does for other conflicts.
+    rename_collisions: list[str] = field(default_factory=list)
     fidelity: dict[str, Any] = field(default_factory=lambda: mcp_fidelity.build_report([], []))
 
 
@@ -1292,6 +1329,8 @@ def build_sync_plan(
         )
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
     state = copy.deepcopy(_load_state(target))
+    collisions = _legacy_key_collisions(servers)
+    notes.extend(_legacy_collision_note(old, new) for old, new in collisions.items())
     if not rename_legacy_servers:
         renames = {}
         notes.extend(_legacy_server_note(old, new) for old, new in _legacy_server_renames(servers).items())
@@ -1417,6 +1456,9 @@ def build_sync_plan(
         existing = path.read_text() if path.is_file() else None
         live = adapter.read_file(existing)
         owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
+        # Records as planned: a renamed entry reads its legacy source's record even
+        # after this loop pops the legacy key from owner_map.
+        planned_owned = state.get("ownership", {}).get(h, {}).get(adapter.path, {})
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
         changed = False
@@ -1426,20 +1468,23 @@ def build_sync_plan(
             if action in ("create", "update"):
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
+                source = item.get("_source")
+                source_live = live.get(source or server_name, {})
+                source_record = planned_owned.get(source) if source else owner_map.get(server_name)
                 to_write[server_name] = _project_server(
                     target,
                     h,
                     servers[server_name],
                     ProjectionContext(
-                        live.get(server_name, {}),
-                        owner_map.get(server_name),
+                        source_live,
+                        source_record,
                         _opencode_location(h, existing, server_name),
                     ),
                 )
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
-                    **_native_record(h, live.get(server_name, {}), owner_map.get(server_name), servers[server_name]),
+                    **_native_record(h, source_live, source_record, servers[server_name]),
                 }
                 changed = True
             elif action == "remove":
@@ -1548,6 +1593,7 @@ def build_sync_plan(
         errors=plan_errors,
         native_write_paths=native_write_paths,
         fidelity=_fidelity_report(all_items, servers, harnesses, name_filter=name),
+        rename_collisions=sorted(collisions) if rename_legacy_servers else [],
     )
 
 
@@ -1772,7 +1818,9 @@ def sync(
     if write and verify_runtime and payload.get("verification"):
         lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
     lines += planned.notes
-    rc = 1 if counts["conflict"] else 0
+    if planned.rename_collisions:
+        payload["rename_collisions"] = planned.rename_collisions
+    rc = 1 if counts["conflict"] or planned.rename_collisions else 0
     if verify_rc != 0:
         rc = verify_rc
     if planned.gate_error:

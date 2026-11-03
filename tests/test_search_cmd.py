@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from brigade import search_cmd
 
@@ -104,3 +105,24 @@ def test_search_names_code_search_api_mcp_as_maintained_owner(monkeypatch, tmp_p
     assert compat["owner"] == "code-search-api/mcp"
     assert compat["compatibility_key"] == "code-search-mcp"
     assert "github.com/escoffier-labs/code-search-mcp" not in str(payload)
+
+
+def test_search_status_with_only_the_canonical_executable_names_it(monkeypatch, tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    exe = bindir / search_cmd.CODE_GRAPH_TOOL
+    exe.write_text("#!/bin/sh\nexit 0\n")
+    exe.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bindir}{os.pathsep}{os.environ.get('PATH', '')}")
+    # The legacy name resolves nowhere; only the canonical executable is on PATH.
+    monkeypatch.setattr(search_cmd.proc, "which", lambda cmd: None)
+    monkeypatch.setattr(search_cmd.proc, "run", lambda args, **kw: search_cmd.proc.Result(0, "{}", ""))
+
+    payload = search_cmd.status_payload(tmp_path)
+
+    row = payload["tools"][search_cmd.CODE_GRAPH_TOOL]
+    assert row["installed"] is True and row["binary"] == str(exe)
+    assert payload["health"] == "unwired"
+    assert f"run `{exe} sync`" in payload["summary"]
+    assert f"`{search_cmd.LEGACY_CODE_GRAPH_TOOL} sync`" not in payload["summary"]
+    assert f"{exe} sync" in payload["next_commands"]

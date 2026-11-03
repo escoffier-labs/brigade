@@ -367,7 +367,7 @@ def test_code_graph_delta_timeout_canonical_key_wins_and_writer_drops_legacy_key
     path = _write_raw_config(tmp_path, **{config.CODE_GRAPH_DELTA_TIMEOUT_KEY: 30, legacy: 5})
     loaded = load_config(tmp_path)
     assert loaded is not None and loaded.code_graph_delta_timeout_seconds == 30.0
-    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY)]
+    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, True)]
 
     write_config(tmp_path, loaded)
     written = json.loads(path.read_text())

@@ -485,14 +485,20 @@ waits for R2, R3 and R4. R6 is last.
     key and not the legacy one, a later `--rename-legacy-servers` run prunes the
     pristine legacy entry Brigade owns in each harness it covers. Each harness
     can therefore be renamed in its own `--harness` run. A plain sync points at
-    such leftovers with a note. The catalog entry's command is not rewritten: the catalog is the
+    such leftovers with a note. A renamed entry inherits the legacy entry's
+    provider-native settings and ownership provenance, so adopted Codex or
+    OpenCode auth survives the rename. The other adapters keep no native
+    settings. A catalog that holds both the legacy and the canonical key gets
+    a note on every sync, and a requested rename exits 1 for it. The catalog entry's command is not rewritten: the catalog is the
     operator's text, and before R5 the canonical executables are not installed.
   - The Cursor user installer writes canonical keys for new entries and keeps
     the legacy keys it already owns, with commands resolved canonical name
     first. Its pre-setup fallback stays the bare legacy name until R5. It
     prints the rename notice on stdout, never stderr. With
-    `--rename-legacy-servers` it removes the owned legacy entry only when the
-    canonical entry installs, and reports a conflict otherwise.
+    `--rename-legacy-servers` it chooses the key per engine. It moves a
+    pristine owned legacy entry to the canonical key when that key installs.
+    An edited legacy entry, or a canonical key held by a foreign entry, keeps
+    the legacy key as the desired key and reports a conflict.
   - Station ids in `managed.py`, both engine `station.json` files and the
     snapshot are canonical. The snapshot records for the two engines are
     copied from the in-tree `station.json` files with `kind: in-tree`

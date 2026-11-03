@@ -1075,8 +1075,14 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
         checks.append(_operator_check(status, name, detail))
     checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
     checks.extend(
-        _scoped_check(INFO, "legacy config key", f"{key} is read until v0.33.0; rewrite it as {replacement}")
-        for key, replacement in config.legacy_config_keys(ctx.target)
+        _scoped_check(
+            INFO,
+            "legacy config key",
+            f"{key} is ignored because {replacement} is also set; remove {key}"
+            if ignored
+            else f"{key} is read while {replacement} is absent, until v0.33.0; rewrite it as {replacement}",
+        )
+        for key, replacement, ignored in config.legacy_config_keys(ctx.target)
     )
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():

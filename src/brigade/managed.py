@@ -12,6 +12,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any, Callable, List, Optional, Tuple
 
 from . import component_bins, component_manifest, engine_paths, managed_snapshot, proc
@@ -484,7 +485,8 @@ def _miseledger_doctor(ctx: DoctorContext) -> List[CheckResult]:
             (
                 WARN,
                 name,
-                "doctor check timed out after 120s (large archive, not an error); run `miseledger doctor` manually",
+                "doctor check timed out after 120s (large archive, not an error); "
+                f"run `{Path(binary).name} doctor` manually",
             )
         ]
     data = r.json()

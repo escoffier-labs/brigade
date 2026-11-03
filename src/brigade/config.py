@@ -99,18 +99,21 @@ def resolve_code_graph_delta_timeout(target: Path, cli_override: float | None = 
     return DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
 
 
-def legacy_config_keys(target: Path) -> list[tuple[str, str]]:
-    """Return ``(legacy, canonical)`` for renamed keys the target config still uses.
+def legacy_config_keys(target: Path) -> list[tuple[str, str, bool]]:
+    """Return ``(legacy, canonical, ignored)`` for renamed keys the target config still uses.
 
+    ``ignored`` is true when the canonical key is also present, so ``load_config``
+    never reads the legacy value. The file is the one ``load_config`` reads.
     Doctor reports them; loading never prints (the stderr notices land in R5).
     """
-    path = config_path(target)
+    path = _existing_config_path(target)
     try:
-        data = json.loads(path.read_text()) if path.is_file() else None
+        data = json.loads(path.read_text()) if path is not None else None
     except (OSError, ValueError):
         return []
     if isinstance(data, dict) and LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
-        return [(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY)]
+        ignored = CODE_GRAPH_DELTA_TIMEOUT_KEY in data
+        return [(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY, ignored)]
     return []
 
 
@@ -230,16 +233,22 @@ def write_config(target: Path, cfg: Config) -> None:
         raise
 
 
-def load_config(target: Path) -> Optional[Config]:
+def _existing_config_path(target: Path) -> Optional[Path]:
+    """The config file ``load_config`` reads: canonical first, then legacy workspace dirs."""
     path = config_path(target)
-    if not path.is_file():
-        for legacy in LEGACY_WORKSPACE_DIRNAMES:
-            legacy_path = target / legacy / "config.json"
-            if legacy_path.is_file():
-                path = legacy_path
-                break
-        else:
-            return None
+    if path.is_file():
+        return path
+    for legacy in LEGACY_WORKSPACE_DIRNAMES:
+        legacy_path = target / legacy / "config.json"
+        if legacy_path.is_file():
+            return legacy_path
+    return None
+
+
+def load_config(target: Path) -> Optional[Config]:
+    path = _existing_config_path(target)
+    if path is None:
+        return None
     data = json.loads(path.read_text())
     version = data.get("version")
     if version not in SUPPORTED_VERSIONS:

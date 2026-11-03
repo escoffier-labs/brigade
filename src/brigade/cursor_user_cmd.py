@@ -75,16 +75,43 @@ def _coowned_json_text(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
 
 
-def _engine_server_keys(state: dict[str, Any], *, rename_legacy: bool = False) -> dict[str, str]:
-    """Map each canonical engine key to the key Brigade writes for it."""
+def _legacy_rename_blocker(canonical: str, legacy: str, owned: dict[str, Any], live: dict[str, Any]) -> str | None:
+    """Why an owned legacy key cannot move to its canonical key, or None when it can."""
+    if legacy in live and _digest_value(live[legacy]) != owned[legacy]:
+        return "owned legacy server was edited; left in place"
+    if canonical in live and canonical not in owned:
+        return f"'{canonical}' already exists and is not Brigade's"
+    return None
+
+
+def _engine_server_keys(
+    state: dict[str, Any], *, rename_legacy: bool = False, live: dict[str, Any] | None = None
+) -> dict[str, str]:
+    """Map each canonical engine key to the key Brigade writes for it.
+
+    The choice is per engine. An owned legacy key moves to the canonical key only
+    when renaming and the legacy entry is pristine with the canonical key free of
+    foreign entries; otherwise it stays the desired key.
+    """
     owned = state.get("mcp", {})
+    live = live or {}
     return {
-        canonical: legacy if legacy in owned and not rename_legacy else canonical
+        canonical: legacy
+        if legacy in owned and (not rename_legacy or _legacy_rename_blocker(canonical, legacy, owned, live))
+        else canonical
         for canonical, legacy in _ENGINE_SERVER_KEYS
     }
 
 
-def _mcp_servers(state: dict[str, Any] | None = None, *, rename_legacy: bool = False) -> dict[str, dict[str, Any]]:
+def _live_mcp_servers(root: Path) -> dict[str, Any]:
+    doc, _ = _read_json_object(root / "mcp.json")
+    servers = doc.get("mcpServers") if doc is not None else None
+    return servers if isinstance(servers, dict) else {}
+
+
+def _mcp_servers(
+    state: dict[str, Any] | None = None, *, rename_legacy: bool = False, live: dict[str, Any] | None = None
+) -> dict[str, dict[str, Any]]:
     # Engine servers resolve to the managed absolute path from `brigade setup`,
     # canonical executable first, so the generated config does not depend on
     # Cursor's spawn-time PATH. The bare legacy name is kept only as a pre-setup
@@ -93,7 +120,9 @@ def _mcp_servers(state: dict[str, Any] | None = None, *, rename_legacy: bool = F
         resolved = component_bins.resolve_argv([name])[0]
         return str(Path(resolved).expanduser().resolve()) if resolved != name else fallback
 
-    keys = _engine_server_keys(_load_state(_cursor_root()) if state is None else state, rename_legacy=rename_legacy)
+    keys = _engine_server_keys(
+        _load_state(_cursor_root()) if state is None else state, rename_legacy=rename_legacy, live=live
+    )
     return {
         "brigade": {
             "command": "brigade",
@@ -484,14 +513,35 @@ def _plan_mcp(
             detail,
         )
     items: list[dict[str, Any]] = []
-    for name, desired in _mcp_servers(state, rename_legacy=rename_legacy).items():
+    owned = state["mcp"]
+    kept: dict[str, str] = {}
+    if rename_legacy:
+        for canonical, legacy in _ENGINE_SERVER_KEYS:
+            if legacy in owned and legacy in servers:
+                blocker = _legacy_rename_blocker(canonical, legacy, owned, servers)
+                if blocker:
+                    kept[legacy] = blocker
+    for name, desired in _mcp_servers(state, rename_legacy=rename_legacy, live=servers).items():
+        if name in kept:
+            # The rename is refused, so the legacy entry is preserved as it is.
+            items.append(
+                {
+                    "surface": "mcp-config",
+                    "path": str(path),
+                    "name": name,
+                    "status": "conflict",
+                    "action": "preserve",
+                    "detail": kept[name],
+                }
+            )
+            continue
         desired_fp = _digest_value(desired)
         live = servers.get(name)
         if live == desired:
             status, action = "current", "none"
         elif name not in servers:
             status, action = "missing", "create"
-        elif state["mcp"].get(name) == _digest_value(live):
+        elif owned.get(name) == _digest_value(live):
             status, action = "changed", "update"
         else:
             status, action = "conflict", "skip"
@@ -507,29 +557,20 @@ def _plan_mcp(
         )
     if rename_legacy:
         # A pristine owned legacy entry is removed only when its canonical
-        # replacement installs; any conflict on the canonical key keeps it working.
+        # replacement installs; a conflict on the canonical key keeps it working.
         installable = {item["name"] for item in items if item["status"] != "conflict"}
         renames: list[dict[str, Any]] = []
         for canonical, legacy in _ENGINE_SERVER_KEYS:
-            fingerprint = state["mcp"].get(legacy)
-            if fingerprint is None or legacy not in servers:
+            if legacy not in owned or legacy not in servers or legacy in kept:
                 continue
             item = {"surface": "mcp-config", "path": str(path), "name": legacy}
-            if canonical in servers and canonical not in state["mcp"]:
-                item.update(
-                    status="conflict", action="preserve", detail=f"'{canonical}' already exists and is not Brigade's"
-                )
-            elif canonical not in installable:
+            if canonical in installable:
+                item.update(status="renamed", action="remove")
+            else:
                 item.update(
                     status="conflict",
                     action="preserve",
                     detail=f"'{canonical}' cannot be installed; owned legacy server left in place",
-                )
-            elif _digest_value(servers[legacy]) == fingerprint:
-                item.update(status="renamed", action="remove")
-            else:
-                item.update(
-                    status="conflict", action="preserve", detail="owned legacy server was edited; left in place"
                 )
             renames.append(item)
         items[:0] = renames
@@ -560,7 +601,7 @@ def _emit(payload: dict[str, Any], *, json_output: bool, rc: int) -> int:
 def install(*, write: bool = False, json_output: bool = False, rename_legacy_servers: bool = False) -> int:
     root = _cursor_root()
     state = _load_state(root)
-    desired_servers = _mcp_servers(state, rename_legacy=rename_legacy_servers)
+    desired_servers = _mcp_servers(state, rename_legacy=rename_legacy_servers, live=_live_mcp_servers(root))
     desired_files = _desired_files(root, desired_servers)
     items = [
         _file_item(root, path, text, executable, surface, state)
