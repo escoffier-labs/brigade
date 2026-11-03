@@ -350,3 +350,33 @@ def test_hub_contract_keys_skip_malformed_identifiers():
     hub_contract = _load_hub_contract()
     items = [{"run_id": []}, {"run_id": {"x": 1}}, {"run_id": None}, {"run_id": "run-1", "state": "ok"}]
     assert hub_contract._keyed(items, "run_id") == {"run-1": {"run_id": "run-1", "state": "ok"}}
+
+
+def test_hub_contract_reports_a_non_utf8_body_instead_of_crashing():
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(b"\xff\xfe not json")
+
+        def log_message(self, *args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        hub_contract = _load_hub_contract()
+        hub = hub_contract.Hub(url=f"http://127.0.0.1:{server.server_port}", admin_token="t", mode="url")
+        drive = hub_contract.Drive(hub)
+        drive.call("junk body", "GET", "/status", status=200, token="t")
+    finally:
+        server.shutdown()
+        server.server_close()
+    (mismatch,) = [m for m in drive.mismatches if m.get("check") == "body"]
+    assert mismatch["case"] == "junk body"
+    assert "�" in mismatch["observed"]

@@ -560,7 +560,12 @@ class Drive:
                 )
             if resp.json is None:
                 problems.append(
-                    {"check": "body", "path": "$", "expected": "a JSON body", "observed": resp.body[:200].decode()}
+                    {
+                        "check": "body",
+                        "path": "$",
+                        "expected": "a JSON body",
+                        "observed": resp.body[:200].decode("utf-8", "replace"),
+                    }
                 )
             elif resp.status == status:
                 problems += [{"check": "body", **item} for item in match(shape, resp.json)]
