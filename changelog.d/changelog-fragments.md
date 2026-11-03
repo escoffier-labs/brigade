@@ -1,0 +1,1 @@
+- Pull requests record changelog entries as `changelog.d/<pr-number-or-slug>.md` fragments instead of editing `CHANGELOG.md`, so sibling PRs no longer conflict on the shared `Unreleased` hunk. `scripts/changelog_fragments.py` checks fragments, guards against `CHANGELOG.md` edits outside a release commit, and assembles fragments into `Unreleased` during the release cut.

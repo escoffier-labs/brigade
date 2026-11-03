@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fleet_hub, fleet_project_board as board
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 
 def post_snapshot(handler: Any, db_path: Path, query: str) -> None:
@@ -37,3 +40,9 @@ def post_snapshot(handler: Any, db_path: Path, query: str) -> None:
             conn.close()
     except (sqlite3.Error, fleet_hub.FleetHubError):
         handler._send_json(503, {"error": "project board store unavailable"})
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add(
+        "POST", lambda request, _path, query: post_snapshot(request, hub.db_path, query), paths=("/projects/board",)
+    )

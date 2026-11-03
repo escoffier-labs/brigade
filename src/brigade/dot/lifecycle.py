@@ -504,6 +504,12 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
         and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
         and runtime.auth.audience != dot_runtime.auth.audience
         and runtime.auth.resource != dot_runtime.auth.resource
+        and (
+            not runtime.dispatch_enabled
+            or runtime.paths.fleet_config is None
+            or dot_runtime.paths.fleet_config is None
+            or not _same_location(runtime.paths.fleet_config, dot_runtime.paths.fleet_config)
+        )
     )
 
 
@@ -555,7 +561,7 @@ def canary(target: Path, *, pack_id: str = c.PACK_ID) -> dict[str, Any]:
             names = _registered_names(config, tools)
         finally:
             state.close()
-        if names != profile.tools:
+        if names != tools.profile.tools:
             return {**result, "reason": "inventory-mismatch"}
     except Exception:
         return {**result, "reason": "inventory-mismatch"}

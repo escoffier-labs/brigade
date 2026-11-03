@@ -2,6 +2,16 @@
 
 Pre-flight before tagging a release.
 
+## 0. Assemble the changelog fragments
+
+Pull requests record changelog entries as `changelog.d/*.md` fragments and never edit `CHANGELOG.md`. On the release branch, fold them into `## [Unreleased]` and delete them, then roll `Unreleased` under the new `## [X.Y.Z] - YYYY-MM-DD` heading in the same commit as the version bump:
+
+```bash
+python3 scripts/changelog_fragments.py assemble
+```
+
+The `changelog-fragments` CI job treats a diff that adds a version heading as the release commit, the only kind allowed to edit `CHANGELOG.md`, and requires it to leave no fragment behind. If a fragment lands on `main` after the branch was cut, run `assemble` again on the updated branch. Format and rules: [`changelog.d/README.md`](changelog.d/README.md).
+
 ## 1. Version bump
 
 Set the version in `pyproject.toml`, then synchronize every stamped location:
