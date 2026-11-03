@@ -451,6 +451,44 @@ def test_release_docs_warnings_for_user_facing_changes(tmp_path, monkeypatch, ca
     assert any("ROADMAP.md" in warning for warning in payload["warnings"])
 
 
+def test_release_docs_warnings_accept_a_changelog_fragment_as_the_changelog_edit(tmp_path, monkeypatch, capsys):
+    _init_repo(tmp_path)
+    _seed_ready_evidence(tmp_path)
+    _patch_clean_health(monkeypatch)
+    _patch_content_guard(monkeypatch)
+    code = tmp_path / "src" / "brigade"
+    code.mkdir(parents=True)
+    (code / "cli.py").write_text("print('initial')\n")
+    subprocess.run(["git", "add", "src/brigade/cli.py"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "commit", "-m", "add cli"], cwd=tmp_path, check=True, stdout=subprocess.DEVNULL)
+    (code / "cli.py").write_text("print('changed')\n")
+    (tmp_path / "changelog.d").mkdir()
+    (tmp_path / "changelog.d" / "1.md").write_text("- Change the CLI greeting.\n")
+
+    assert release_cmd.plan(target=tmp_path, base_ref=None, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert any("README.md" in warning for warning in payload["warnings"])
+    assert not any("CHANGELOG.md" in warning for warning in payload["warnings"])
+    assert release_cmd._candidate_docs_touch(["changelog.d/1.md"])["CHANGELOG.md"] is True
+    assert release_cmd._candidate_docs_touch(["src/x.py"])["CHANGELOG.md"] is False
+
+
+def test_release_candidate_notes_include_unassembled_changelog_fragments(tmp_path):
+    (tmp_path / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n\n- Assembled entry.\n\n## [0.1.0]\n- Old.\n"
+    )
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    (fragments / "README.md").write_text("- Documentation bullet, not an entry.\n")
+    (fragments / "2.md").write_text("- Fragment entry two.\n")
+    (fragments / "1.md").write_text("- Fragment entry one.\n  wrapped continuation.\n")
+
+    items, redactions = release_cmd.candidate._changelog_unreleased_with_redactions(tmp_path)
+
+    assert items == ["Assembled entry.", "Fragment entry one.", "Fragment entry two."]
+    assert redactions["count"] == 0
+
+
 def test_release_cli(tmp_path, monkeypatch):
     seen = []
 

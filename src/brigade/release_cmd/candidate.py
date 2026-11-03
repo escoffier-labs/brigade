@@ -92,15 +92,29 @@ def _changelog_entry_redaction_reasons(item: str) -> set[str]:
     return reasons
 
 
+def _changelog_fragment_bullets(path: Path) -> list[str]:
+    """Bullets from unassembled ``changelog.d/*.md`` fragments, README.md excluded."""
+    directory = path / "changelog.d"
+    if not directory.is_dir():
+        return []
+    bullets: list[str] = []
+    for fragment in sorted(directory.glob("*.md")):
+        if fragment.name == "README.md" or not fragment.is_file():
+            continue
+        try:
+            bullets.extend(
+                line.strip() for line in fragment.read_text(encoding="utf-8").splitlines() if line.startswith("- ")
+            )
+        except (OSError, UnicodeDecodeError):
+            continue
+    return bullets
+
+
 def _changelog_unreleased_with_redactions(path: Path) -> tuple[list[str], dict[str, Any]]:
     changelog = path / "CHANGELOG.md"
-    if not changelog.is_file():
-        return [], {"count": 0, "reasons": {}}
-    lines = changelog.read_text(encoding="utf-8").splitlines()
+    lines = changelog.read_text(encoding="utf-8").splitlines() if changelog.is_file() else []
     capture = False
-    items: list[str] = []
-    redaction_count = 0
-    reason_counts: dict[str, int] = {}
+    bullets: list[str] = []
     for line in lines:
         if line.startswith("## [Unreleased]"):
             capture = True
@@ -108,15 +122,21 @@ def _changelog_unreleased_with_redactions(path: Path) -> tuple[list[str], dict[s
         if capture and line.startswith("## "):
             break
         if capture and line.strip().startswith("- "):
-            item = line.strip()[2:]
-            reasons = _changelog_entry_redaction_reasons(item)
-            sanitized = _release_report_safe_text(item, limit=500)
-            if len(items) < 20:
-                items.append(sanitized)
-            if reasons:
-                redaction_count += 1
-                for reason in sorted(reasons):
-                    reason_counts[reason] = reason_counts.get(reason, 0) + 1
+            bullets.append(line.strip())
+    bullets.extend(_changelog_fragment_bullets(path))
+    items: list[str] = []
+    redaction_count = 0
+    reason_counts: dict[str, int] = {}
+    for bullet in bullets:
+        item = bullet[2:]
+        reasons = _changelog_entry_redaction_reasons(item)
+        sanitized = _release_report_safe_text(item, limit=500)
+        if len(items) < 20:
+            items.append(sanitized)
+        if reasons:
+            redaction_count += 1
+            for reason in sorted(reasons):
+                reason_counts[reason] = reason_counts.get(reason, 0) + 1
     return items, {"count": redaction_count, "reasons": dict(sorted(reason_counts.items()))}
 
 

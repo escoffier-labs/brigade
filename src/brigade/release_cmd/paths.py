@@ -357,7 +357,9 @@ def _docs_warnings(target: Path, base_ref: str | None) -> list[str]:
     if not user_facing:
         return []
     warnings: list[str] = []
+    # A changelog fragment is the changelog edit for a pull request (#2231).
+    changelog_fragment = any(path.startswith("changelog.d/") for path in changed)
     for required in ("README.md", "CHANGELOG.md", "ROADMAP.md"):
-        if required not in changed:
+        if required not in changed and not (required == "CHANGELOG.md" and changelog_fragment):
             warnings.append(f"user-facing changes detected but {required} was not changed")
     return warnings
