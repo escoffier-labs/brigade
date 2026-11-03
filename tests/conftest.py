@@ -6,6 +6,7 @@ from time import monotonic
 
 import pytest
 
+from tests._coverage_sidecar_guard import pytest_runtestloop  # noqa: F401  (hook: quarantine bad coverage sidecars)
 from tests._home import set_home
 from tests.support import PRIVATE_DIRECTORY_MODE
 

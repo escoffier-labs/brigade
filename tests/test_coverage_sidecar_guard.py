@@ -1,0 +1,151 @@
+"""The coverage sidecar guard must run before pytest-cov combines, and only quarantine bad files."""
+
+import os
+from pathlib import Path
+import sqlite3
+import subprocess
+import sys
+import textwrap
+
+import pytest
+
+from tests._coverage_env import isolated_coverage_env
+from tests._coverage_sidecar_guard import QUARANTINE_PREFIX, quarantine_unreadable_sidecars
+
+# The crash needs a file the owner cannot write: root ignores the mode, and
+# Windows has no os.geteuid, so evaluate it only on POSIX.
+requires_unprivileged_posix = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs a non-root POSIX user so SQLite honors the read-only mode that reproduces the crash",
+)
+
+ROOT = Path(__file__).resolve().parents[1]
+INNER_TIMEOUT_SECONDS = 120
+
+
+def _coverage_db(path: Path) -> None:
+    connection = sqlite3.connect(path)
+    connection.execute("create table coverage_schema (version integer)")
+    connection.execute("insert into coverage_schema values (7)")
+    connection.commit()
+    connection.close()
+
+
+def test_quarantine_moves_empty_and_schemaless_sidecars_and_keeps_valid_ones(tmp_path, capsys):
+    data_file = tmp_path / ".coverage.3.12.3"
+    valid = tmp_path / ".coverage.3.12.3.host.pid1.aaaa"
+    empty = tmp_path / ".coverage.3.12.3.host.pid2.bbbb"
+    schemaless = tmp_path / ".coverage.3.12.3.host.pid3.cccc"
+    garbage = tmp_path / ".coverage.3.12.3.host.pid4.dddd"
+    unrelated = tmp_path / ".coverage.other.host.pid5.eeee"
+    _coverage_db(valid)
+    empty.write_bytes(b"")
+    connection = sqlite3.connect(schemaless)
+    connection.execute("create table other (x)")
+    connection.commit()
+    connection.close()
+    garbage.write_bytes(b"not sqlite" * 50)
+    unrelated.write_bytes(b"")
+
+    moved = quarantine_unreadable_sidecars(data_file)
+
+    assert sorted(moved) == sorted([empty, schemaless, garbage])
+    assert valid.exists()
+    assert unrelated.exists()
+    for path in (empty, schemaless, garbage):
+        assert not path.exists()
+        assert (tmp_path / (QUARANTINE_PREFIX + path.name)).exists()
+    output = capsys.readouterr().out
+    assert output.count("coverage sidecar guard:") == 3
+    assert f"{empty} (size=0 bytes, mtime=" in output
+
+
+def test_quarantined_names_no_longer_match_the_combine_glob(tmp_path):
+    data_file = tmp_path / ".coverage"
+    (tmp_path / ".coverage.x").write_bytes(b"")
+    quarantine_unreadable_sidecars(data_file)
+    assert [path.name for path in tmp_path.glob(".coverage.*")] == []
+
+
+def test_quarantine_does_nothing_without_sidecars(tmp_path, capsys):
+    assert quarantine_unreadable_sidecars(tmp_path / ".coverage") == []
+    assert capsys.readouterr().out == ""
+
+
+INNER_TEST = textwrap.dedent(
+    """
+    import os
+    import sqlite3
+    from pathlib import Path
+
+
+    def test_leaves_a_schemaless_read_only_sidecar():
+        sidecar = Path(os.environ["COVERAGE_FILE"] + ".bogus")
+        connection = sqlite3.connect(sidecar)
+        connection.execute("create table other (x)")
+        connection.commit()
+        connection.close()
+        sidecar.chmod(0o444)
+    """
+)
+
+
+# Load the hook the way tests/conftest.py does. A `-p` plugin registers before the
+# pytest-cov entry point and would be the inner wrapper regardless of `trylast`, so
+# only a conftest import exercises the ordering this guard depends on.
+INNER_CONFTEST = "from tests._coverage_sidecar_guard import pytest_runtestloop  # noqa: F401\n"
+
+
+def _inner_session(tmp_path: Path, *, guard: bool) -> subprocess.CompletedProcess[str]:
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / "test_sidecar.py").write_text(INNER_TEST)
+    if guard:
+        (inner / "conftest.py").write_text(INNER_CONFTEST)
+    environment = isolated_coverage_env(
+        tmp_path / ".coverage",
+        PYTHONPATH=os.pathsep.join(filter(None, [str(ROOT), os.environ.get("PYTHONPATH", "")])),
+    )
+    return subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-n",
+            "2",
+            f"--cov={inner}",
+            "--cov-report=",
+            "-q",
+            "test_sidecar.py",
+        ],
+        cwd=inner,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=INNER_TIMEOUT_SECONDS,
+    )
+
+
+@requires_unprivileged_posix
+def test_unreadable_sidecar_aborts_the_combine_without_the_guard(tmp_path):
+    result = _inner_session(tmp_path, guard=False)
+    assert result.returncode == 3, result.stdout + result.stderr
+    assert "attempt to write a readonly database" in result.stdout + result.stderr
+
+
+@requires_unprivileged_posix
+def test_guard_keeps_the_session_alive_and_names_the_file(tmp_path):
+    result = _inner_session(tmp_path, guard=True)
+    output = result.stdout + result.stderr
+    assert result.returncode == 0, output
+    assert f"coverage sidecar guard: set aside unreadable data file {tmp_path / '.coverage.bogus'}" in output
+    assert (tmp_path / (QUARANTINE_PREFIX + ".coverage.bogus")).exists()
+    assert "INTERNALERROR" not in output
+
+
+def test_repo_conftest_registers_the_guard_hook():
+    from tests import _coverage_sidecar_guard, conftest
+
+    assert conftest.pytest_runtestloop is _coverage_sidecar_guard.pytest_runtestloop
