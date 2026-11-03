@@ -432,6 +432,7 @@
   "tests/test_claude_hooks_unseen_dependents.py": 40,
   "tests/test_code_export.py": 17,
   "tests/test_code_graph_brief.py": 9,
+  "tests/test_code_graph_index_readers.py": 2,
   "tests/test_code_verbs_and_target.py": 41,
   "tests/test_commit_linkage.py": 5,
   "tests/test_component_bins.py": 46,
