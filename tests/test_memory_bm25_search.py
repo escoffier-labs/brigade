@@ -249,3 +249,11 @@ def test_user_prompt_submit_without_recall_match_injects_nothing(wired_with_hub)
     assert runtime.handle_payload("UserPromptSubmit", _prompt_payload(target, f"{SENTINEL} nothing here")) is None
     assert _tree_files_containing(target, SENTINEL) == []
     assert _tree_files_containing(hub, SENTINEL) == []
+
+
+def test_vocabulary_build_scores_match_a_full_build():
+    texts = ["restic backup nightly", "restic", "backup offsite copy", "unrelated words only"]
+    full = memory_bm25.Bm25Index.build(texts)
+    partial = memory_bm25.Bm25Index.build(texts, vocabulary={"restic", "backup"})
+    assert partial.scores("restic backup") == full.scores("restic backup")
+    assert set(partial.postings) == {"restic", "backup"}
