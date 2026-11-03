@@ -256,3 +256,26 @@ def test_schema_read_failure_releases_database(tmp_path, monkeypatch):
             sqlite3.Connection.execute(conn, "SELECT 1")
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("enabled,limit", [(False, 8), (True, 32)])
+def test_managed_loopback_opt_in(tmp_path, monkeypatch, enabled, limit, capsys):
+    from ipaddress import IPv4Address
+
+    monkeypatch.delenv("BRIGADE_HUB_MANAGED_LOOPBACK", raising=False)
+    if enabled:
+        monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+    server = fleet_hub.make_server(str(IPv4Address(2130706433)), 0, tmp_path / "hub.db", "fake-token")
+    try:
+        assert server._source_limit == limit
+        assert ("BRIGADE_UPSTREAM_PORT=" in capsys.readouterr().out) == enabled
+    finally:
+        server.server_close()
+
+
+def test_managed_upstream_refuses_non_loopback(tmp_path, monkeypatch):
+    from ipaddress import IPv4Address
+
+    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+    with pytest.raises(ValueError, match="numeric loopback"):
+        fleet_hub.make_server(str(IPv4Address(0)), 0, tmp_path / "hub.db", "fake-token")
