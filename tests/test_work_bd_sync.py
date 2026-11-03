@@ -294,18 +294,25 @@ def fake_bd(tmp_path, *, version="1.3.2", export=None):
     log = tmp_path / "bd-argv.log"
     script = tmp_path / "bin" / "bd"
     script.parent.mkdir()
-    script.write_text(
+    # Windows cannot run a shebang script, so it gets a .cmd wrapper around the same body.
+    body = script.with_name("bd-impl.py") if os.name == "nt" else script
+    body.write_text(
         f"#!{sys.executable}\n"
         "import json, sys\n"
-        f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        f"open({str(log)!r}, 'a', encoding='utf-8').write(json.dumps(sys.argv[1:]) + '\\n')\n"
         "if sys.argv[1:] == ['version', '--json']:\n"
         f"    print(json.dumps({{'version': {version!r}, 'schema_version': 1}}))\n"
         "elif sys.argv[1:] == ['export']:\n"
-        f"    sys.stdout.write(open({str(export or fixture('1.3.2'))!r}).read())\n"
+        f"    sys.stdout.buffer.write(open({str(export or fixture('1.3.2'))!r}, 'rb').read())\n"
         "else:\n"
-        "    sys.exit(9)\n"
+        "    sys.exit(9)\n",
+        encoding="utf-8",
     )
-    script.chmod(0o755)
+    if os.name == "nt":
+        script = script.with_name("bd.cmd")
+        script.write_text(f'@echo off\r\n"{sys.executable}" "%~dp0bd-impl.py" %*\r\n', encoding="utf-8")
+    else:
+        script.chmod(0o755)
     return script, log
 
 
@@ -348,7 +355,7 @@ def test_no_mutating_bd_command_can_reach_a_subprocess(tmp_path, capsys, monkeyp
     real_run = subprocess.run
 
     def guarded_run(argv, *args, **kwargs):
-        if Path(str(argv[0])).name == "bd":
+        if Path(str(argv[0])).stem == "bd":
             seen.append(list(argv[1:]))
             if set(argv[1:]) & set(MUTATING) or "-o" in argv or "--output" in argv:
                 raise AssertionError(f"mutating bd command reached subprocess: {argv}")
