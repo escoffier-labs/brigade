@@ -21,8 +21,16 @@ from .inbox_tools import InboxTools
 from .memory_push import MemoryPush, digest_query, inbox_query
 from .memory_tools import MemoryTools
 from .process import CommandRunner, bound_result
-from .profile import DOT, DUET_EXCLUDED_TOOLS, INBOX_TRUST_NOTICE as INBOX_TRUST_NOTICE, ConnectorProfile
+from .profile import (
+    DOT,
+    DUET_EXCLUDED_TOOLS,
+    DUET_DISPATCH_TOOLS,
+    INBOX_TRUST_NOTICE as INBOX_TRUST_NOTICE,
+    ConnectorProfile,
+    runtime_profile,
+)
 from .runtime_config import Runtime
+from .duet_dispatch import DuetFleetTools
 from .safe_state import identity
 from .state import BridgeState, Clock, summarize_arguments, utc_now
 
@@ -93,7 +101,12 @@ class DotTools:
         clock: Clock = utc_now,
         profile: ConnectorProfile = DOT,
     ) -> None:
-        self.runtime, self.state, self.clock, self.profile = runtime, state, clock, profile
+        self.runtime, self.state, self.clock, self.profile = (
+            runtime,
+            state,
+            clock,
+            runtime_profile(profile, runtime.dispatch_enabled),
+        )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
         self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push)
 
@@ -297,10 +310,22 @@ class DotTools:
             operating_instructions=self.profile.operating_instructions,
             messaging_enabled=self.runtime.messaging_enabled is True,
             tools=sorted(self.profile.tools),
-            absent_tools=sorted(DUET_EXCLUDED_TOOLS),
-            dispatch=(
-                "None. Tools that start or steer work on operator machines are not part of this connector "
-                "and no runtime setting adds them. Do the work on your own compute."
+            absent_tools=sorted(DUET_EXCLUDED_TOOLS - self.profile.tools),
+            dispatch=dict(
+                enabled=self.runtime.dispatch_enabled,
+                tools=sorted(self.profile.tools & DUET_DISPATCH_TOOLS),
+                limits=(
+                    dict(
+                        repositories=sorted(self.runtime.dispatch_limits.repositories)
+                        if self.runtime.dispatch_limits.repositories is not None
+                        else None,
+                        max_open=self.runtime.dispatch_limits.max_open,
+                        daily_limit=self.runtime.dispatch_limits.daily_limit,
+                        prompt_max_bytes=self.runtime.dispatch_limits.prompt_max_bytes,
+                    )
+                    if self.runtime.dispatch_limits is not None
+                    else None
+                ),
             ),
             fleet_hub=dict(
                 read_only=True,
@@ -335,11 +360,14 @@ class DotTools:
 
 def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotTools, BridgeState, HubInbox]:
     require(runtime.schema == profile.runtime_schema, "invalid_config")
+    profile = runtime_profile(profile, runtime.dispatch_enabled)
     state = BridgeState(runtime.paths.state_dir)
     try:
         commands = CommandRunner()
         # Profiles without fleet dispatch never construct the T3 fleet client.
         fleet = FleetTools(runtime, state, commands=commands) if profile.fleet_dispatch else None
+        if profile.pack_id == "duet" and runtime.dispatch_enabled:
+            fleet = DuetFleetTools(runtime, state, commands=commands)
         hub_inbox = HubInbox(
             state,
             runtime.hub,

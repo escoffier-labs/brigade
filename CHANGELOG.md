@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
+
 - Answer a Dot-family `tools/call` with out-of-range or unsupported arguments (for example `inbox_list` with `limit` above 50) with a JSON-RPC `-32602` error that names the argument, instead of an opaque `request_denied`, and record the allowlisted argument summary in the call log.
 - Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
