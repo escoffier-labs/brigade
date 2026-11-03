@@ -350,6 +350,17 @@ def outbox_pending(db: Path) -> int | None:
 # ----------------------------------------------------------- the sequence
 
 
+@dataclass(frozen=True)
+class PagingRequest:
+    """One paging request the sequence sent: who sent it, what it asked, and when the hub's clock read."""
+
+    caller: str
+    action: str
+    all: bool
+    filter: str
+    at: Decimal
+
+
 @dataclass
 class Ctx:
     """What the sequence learned, for the relation checks and later phases."""
@@ -361,6 +372,7 @@ class Ctx:
     sent_envelopes: dict[str, str] = field(default_factory=dict)
     reply_parents: dict[str, int] = field(default_factory=dict)
     kids: dict[str, str] = field(default_factory=dict)
+    paging: list[PagingRequest] = field(default_factory=list)
     sink: Sink | None = None
     delivered: int = 0
 
@@ -374,9 +386,30 @@ class Seq:
         self.steps: list[dict] = []
         self.failures: list[dict] = []
 
-    def call(self, step: str, method: str, path: str, *, status: int, body: Any = None, token: str = "") -> dict:
+    def call(
+        self,
+        step: str,
+        method: str,
+        path: str,
+        *,
+        status: int,
+        body: Any = None,
+        token: str = "",
+        pager: str = "",
+    ) -> dict:
+        """Send one request. `pager` names the caller of a paging request, which is recorded for the binding check."""
         assert self.hub is not None
         self.clock.tick()
+        if pager:
+            self.ctx.paging.append(
+                PagingRequest(
+                    caller=pager,
+                    action=body["action"],
+                    all=body.get("all", False),
+                    filter=body.get("filter", ""),
+                    at=Decimal(T0) + self.clock.offset,
+                )
+            )
         resp = hc.request(self.hub.url, method, path, body=body, token=token or None)
         self.steps.append({"step": step, "status": resp.status})
         if resp.status != status:
@@ -641,8 +674,9 @@ def phase_one(s: Seq) -> None:
         body={"action": "question_status", "question_id": question},
         token=s.tok(NODE_A),
     )
-    s.call("station who page", "POST", "/messages", status=200, body={"action": "who", "limit": 1}, token=b)
-    s.call("station claims page", "POST", "/messages", status=200, body={"action": "claims", "limit": 1}, token=b)
+    for action in ("who", "claims"):
+        body = {"action": action, "limit": 1}
+        s.call(f"station {action} page", "POST", "/messages", status=200, body=body, token=b, pager=NODE_B)
 
 
 def phase_two(s: Seq) -> None:
@@ -1009,6 +1043,60 @@ def _encodings(value: Any) -> dict[str, str]:
     }
 
 
+def paging_bindings(tables: dict[str, dict], rules: dict, requests: list[PagingRequest]) -> list[dict]:
+    """Recompute each paging snapshot's `query_hash` from the request that created it.
+
+    The hash is derived, not random, so it is checked here and only then
+    mapped to a placeholder like every other `query-binding` value. A cursor
+    the hub issues is honoured only when the stored hash equals the caller's
+    binding, so a hub that binds differently would reject every cursor the
+    other engine issued. The binding is the wire contract, restated here
+    because the drive never imports `brigade.*`:
+
+        sha256(json.dumps([action, all, filter.casefold(), credential, role]))
+
+    with Python's default `json.dumps` separators. `action`, `all` and
+    `filter` are what the request sent (`all` defaults to false, `filter` to
+    the empty string). `credential` is the caller's stored token digest and
+    `role` the caller's role, both read from the dumped tables the way the
+    hub classifies an identity: an `agent:` name takes the role and
+    `token_hash` of its `fleet_message_principals` row; any other name is a
+    node, role `node`, with its `nodes.token_sha256`. The hub requires the
+    identity to be active when it answers; this check does not, because a
+    caller the sequence revokes later still has its row, and the request
+    already succeeded. A snapshot is matched to its request by caller and by
+    `last_access`, which equals the clock's reading when the page was served.
+    """
+    norm = Normalizer(rules)
+    norm.collect(tables)
+    principals = {row["principal_id"]: row for row in tables.get("fleet_message_principals", {}).get("rows", [])}
+    nodes = {row["node_id"]: row for row in tables.get("nodes", {}).get("rows", [])}
+    failures: list[dict] = []
+    for row in tables.get("fleet_read_snapshots", {}).get("rows", []):
+        label = {"column": "query_hash", "snapshot": norm.text(row["snapshot_id"]), "caller": row["caller"]}
+        served = Decimal(repr(row["last_access"]))
+        request = next((r for r in requests if r.caller == row["caller"] and r.at == served), None)
+        if request is None:
+            failures.append({**label, "reason": "no scripted paging request by this caller created the snapshot"})
+            continue
+        caller = row["caller"]
+        if caller.startswith("agent:"):
+            known = principals.get(caller)
+            credential, role = (known["token_hash"], known["role"]) if known else (None, None)
+        else:
+            known = nodes.get(caller)
+            credential, role = (known["token_sha256"], "node") if known else (None, None)
+        if credential is None:
+            failures.append({**label, "action": request.action, "reason": "the caller has no enrolled identity"})
+            continue
+        query = [request.action, request.all, request.filter.casefold(), credential, role]
+        if row["query_hash"] != hashlib.sha256(json.dumps(query).encode()).hexdigest():
+            failures.append(
+                {**label, "action": request.action, "role": role, "reason": "query_hash is not the request's binding"}
+            )
+    return failures
+
+
 def relations(tables: dict[str, dict], rules: dict, ctx: Ctx | None, final_offset: Decimal | None) -> list[dict]:
     """Checks on the rows alone, independent of any golden."""
     failures: list[dict] = []
@@ -1027,6 +1115,8 @@ def relations(tables: dict[str, dict], rules: dict, ctx: Ctx | None, final_offse
                 continue
             if stored.get(who) != hashlib.sha256(token.encode("utf-8")).hexdigest():
                 fail("token-digest", "nodes" if ctx.kinds.get(who) == "node" else "fleet_message_principals", who)
+        for detail in paging_bindings(tables, rules, ctx.paging):
+            fail("query-binding", "fleet_read_snapshots", detail)
     messages = {row["id"]: row for row in rows("fleet_messages")}
     for row in messages.values():
         text = row.get("envelope")

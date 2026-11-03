@@ -1,5 +1,5 @@
 {
- "comment": "Storage parity rules: columns holding random values (mapped to first-seen order per id space) and JSON text columns with the encoding Python writes. A rule may be an object with a space and a match pattern, so only values the hub generated are mapped. Every other column compares exactly. Owners are traversed first, so each placeholder is numbered in the table that defines it. Read by storage_parity.py; the Rust comparator reads the same file.",
+ "comment": "Storage parity rules: columns holding random values (mapped to first-seen order per id space) and JSON text columns with the encoding Python writes. A rule may be an object with a space and a match pattern, so only values the hub generated are mapped. Every other column compares exactly. Owners are traversed first, so each placeholder is numbered in the table that defines it. The query-binding column is derived, not random: storage_parity.paging_bindings recomputes it before the placeholder is applied, and a Rust comparator must do the same. Read by storage_parity.py; the Rust comparator reads the same file.",
  "owners": [
   "nodes",
   "fleet_message_principals",

@@ -49,6 +49,18 @@ def defaults_run(tmp_path_factory):
     return payload
 
 
+@pytest.fixture(scope="module")
+def sequence_run(sp, tmp_path_factory):
+    """One in-process run of the sequence, for the checks that need what the sequence recorded."""
+    state = tmp_path_factory.mktemp("parity-sequence")
+    return sp.run_sequence(
+        profile="defaults",
+        engines=[sp.Engine("a", sp.DEFAULT_HUB_CMD)] * len(sp.PHASES),
+        brigade=[sys.executable, "-m", "brigade"],
+        state_dir=state,
+    )
+
+
 def _assert_clean(payload: dict, profile: str) -> None:
     assert payload["ok"] is True, payload
     assert payload["profile"] == profile
@@ -233,6 +245,84 @@ def test_storage_parity_catches_each_mutation(name, sp, defaults_run, tmp_path):
     assert (table, column) in {(item["table"], item.get("column")) for item in differences}, differences
     if relation is not None:
         assert relation in {item["check"] for item in sp.relations(raw, rules, None, None)}
+
+
+# ----------------------------------------------------------- paging binding
+
+
+def _binding_failures(sp, raw: dict, ctx) -> list[dict]:
+    return [f for f in sp.relations(raw, sp.load_rules(), ctx, None) if f["check"] == "query-binding"]
+
+
+def test_storage_parity_recomputes_each_paging_binding(sp, sequence_run):
+    """Every stored snapshot hash equals the binding of the request that created it."""
+    assert sequence_run.relation_failures == []
+    assert [(r.caller, r.action, r.all, r.filter) for r in sequence_run.ctx.paging] == [
+        ("parity-b", "who", False, ""),
+        ("parity-b", "claims", False, ""),
+    ]
+    snapshots = sequence_run.raw["fleet_read_snapshots"]["rows"]
+    assert len(snapshots) == len(sequence_run.ctx.paging)
+    assert _binding_failures(sp, sequence_run.raw, sequence_run.ctx) == []
+
+
+def _swap_hashes(conn: sqlite3.Connection) -> None:
+    first, second = [r[0] for r in conn.execute("SELECT query_hash FROM fleet_read_snapshots ORDER BY rowid")]
+    conn.execute("UPDATE fleet_read_snapshots SET query_hash=? WHERE query_hash=?", ("0" * 64, first))
+    conn.execute("UPDATE fleet_read_snapshots SET query_hash=? WHERE query_hash=?", (first, second))
+    conn.execute("UPDATE fleet_read_snapshots SET query_hash=? WHERE query_hash=?", (second, "0" * 64))
+
+
+PAGING_MUTATIONS = {
+    "two arbitrary hashes": (
+        lambda conn: [
+            conn.execute("UPDATE fleet_read_snapshots SET query_hash=? WHERE rowid=?", (digit * 64, rowid))
+            for rowid, digit in ((1, "a"), (2, "b"))
+        ],
+        ["<snapshot#1>", "<snapshot#2>"],
+    ),
+    "hashes swapped between the snapshots": (_swap_hashes, ["<snapshot#1>", "<snapshot#2>"]),
+    "one hash replaced": (
+        lambda conn: conn.execute("UPDATE fleet_read_snapshots SET query_hash=? WHERE rowid=2", ("c" * 64,)),
+        ["<snapshot#2>"],
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PAGING_MUTATIONS))
+def test_storage_parity_catches_a_wrong_paging_binding(name, sp, sequence_run, tmp_path):
+    """A random-looking hash passes the golden, because the comparison maps hashes to placeholders.
+
+    The binding check is what catches it, naming the snapshot by its normalized id.
+    """
+    change, expected = PAGING_MUTATIONS[name]
+    db = tmp_path / "hub.db"
+    shutil.copyfile(sequence_run.db, db)
+    conn = sqlite3.connect(db)
+    try:
+        change(conn)
+        conn.commit()
+    finally:
+        conn.close()
+    raw = sp.dump(db)
+    rules, golden = sp.load_rules(), sp.load_golden()["profiles"]["defaults"]["tables"]
+    assert sp.compare(golden, sp.normalize(raw, rules)) == []
+    failures = _binding_failures(sp, raw, sequence_run.ctx)
+    assert sorted(f["detail"]["snapshot"] for f in failures) == expected, failures
+    assert {f["table"] for f in failures} == {"fleet_read_snapshots"}
+    assert {f["detail"]["column"] for f in failures} == {"query_hash"}
+
+
+def test_storage_parity_names_a_snapshot_no_request_made(sp, sequence_run):
+    """A snapshot the sequence never asked for, or a caller with no identity, is a named failure too."""
+    raw = json.loads(json.dumps(sequence_run.raw))
+    raw["fleet_read_snapshots"]["rows"][0]["caller"] = "parity-missing"
+    reasons = {f["detail"]["snapshot"]: f["detail"]["reason"] for f in _binding_failures(sp, raw, sequence_run.ctx)}
+    assert reasons == {"<snapshot#1>": "no scripted paging request by this caller created the snapshot"}
+    forged = [r.__class__(**{**r.__dict__, "caller": "parity-missing"}) for r in sequence_run.ctx.paging]
+    ctx = sp.Ctx(admin="", paging=forged)
+    reasons = {f["detail"]["snapshot"]: f["detail"]["reason"] for f in _binding_failures(sp, raw, ctx)}
+    assert reasons["<snapshot#1>"] == "the caller has no enrolled identity"
 
 
 # ----------------------------------------------------------- normalizer units

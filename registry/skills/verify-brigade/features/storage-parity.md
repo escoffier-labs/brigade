@@ -67,6 +67,22 @@ standard `sqlite3` module. The design behind it is the S2 row and the
   from the other side. No retained message is past retention. Each JSON column
   is re-encoded with the encoder Python uses for it (compact, canonical, or
   `json.dumps` defaults).
+- **Paging bindings, recomputed.** `fleet_read_snapshots.query_hash` is
+  derived, not random, so the golden's placeholder would hide a hub that binds
+  paging differently and then rejects the other engine's cursors. Before the
+  placeholder is applied, the drive recomputes every stored hash as
+  `sha256(json.dumps([action, all, filter.casefold(), credential, role]))`
+  (Python's default separators). The drive records, for each paging request it
+  sends, the caller, the action, `all` (default false), `filter` (default
+  empty) and the clock reading, and matches a snapshot to its request by
+  caller and `last_access`. `credential` is the caller's stored digest and
+  `role` is read from the dumped tables the way the hub classifies an
+  identity: an `agent:` name takes the `role` and `token_hash` of its
+  `fleet_message_principals` row, any other name is a node, role `node`, with
+  its `nodes.token_sha256`. Revocation is not checked, because the request
+  already succeeded while the caller was active. A wrong hash, or a snapshot no
+  recorded request made, is a `query-binding` entry in `relation_failures`
+  with `column: query_hash` and the snapshot's normalized id.
 - **Profiles.** `defaults` runs the hub with its default flags, as the contract
   doc requires of a hub under test. `outbox` sets
   `BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS` to the loopback address and allows
