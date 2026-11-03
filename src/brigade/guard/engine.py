@@ -5,6 +5,7 @@ import re
 from typing import NamedTuple
 
 from .detectors.opf import run_opf
+from .native import rule_spans
 from .policy import Policy
 from .types import Finding, GuardResult, Rule, ScanOptions, TextEdit
 
@@ -53,15 +54,14 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     root_spans: list[tuple[int, int]] = []
     js_fields: set[int] | None = None
 
-    for rule in active_policy.all_rules():
+    rules = list(active_policy.all_rules())
+    for rule, spans in zip(rules, rule_spans(text, rules), strict=True):
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
-        regex = re.compile(rule.pattern, rule.flags)
-        for match in regex.finditer(text):
-            start, end = match.span()
+        for start, end in spans:
             if start == end:
                 continue
             if rule.id == "email" and active_policy.allows_agent_coauthor_email(
-                match.group(0), _line_at(text, start, end)
+                text[start:end], _line_at(text, start, end)
             ):
                 continue
             if rule.id == "private-hostname" and not any(
@@ -105,7 +105,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             allowed_by = _allowed_by(rule.id, rule.category, line, allow_by_line, file_allows)
             # A known-public literal exact-matches the whole finding text. This
             # reaches history scans of old diffs where no inline marker exists.
-            if allowed_by is None and match.group(0) in allow_values:
+            if allowed_by is None and text[start:end] in allow_values:
                 allowed_by = "allow-value"
             # A known-public literal may also be LONGER than the matched span
             # (e.g. one public path that a broad home-path rule matches only a
@@ -117,7 +117,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 line_end = line_starts[line] if line < len(line_starts) else len(text)
                 line_text = text[line_start:line_end]
                 allowed_by = _allowed_by_superstring_value(
-                    allow_values, match.group(0), line_text, line_start, start, end
+                    allow_values, text[start:end], line_text, line_start, start, end
                 )
             action = "allow" if allowed_by else active_policy.action_for(rule)
             findings.append(
@@ -125,7 +125,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     rule_id=rule.id,
                     category=rule.category,
                     action=action,
-                    match=match.group(0),
+                    match=text[start:end],
                     replacement=rule.replacement,
                     line=line,
                     column=start - line_starts[line - 1] + 1,
