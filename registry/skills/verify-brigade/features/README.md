@@ -16,6 +16,7 @@ exact helper calls (`Driving it with control-brigade`), and what bites
 | Grok Bot connector packs | [grokbot-pack-lifecycle.md](grokbot-pack-lifecycle.md) | `grokbot-pack-setup/-doctor/-canary/-remove` |
 | Grok Bot job queue and feed | [run-cloud-grokbot-queue.md](run-cloud-grokbot-queue.md) | `grokbot-feed`, `grokbot-status` |
 | Handoff inbox lint | [handoff-lint.md](handoff-lint.md) | `handoff-lint` |
+| Guard scan and redact parity | [guard-parity.md](guard-parity.md) | `guard-parity` |
 
 Checkout-level CLI surfaces (pytest selectors, not helper drives). Names
 confirmed under `tests/` on this checkout; the skill body table is the
@@ -27,14 +28,15 @@ copy agents should cite.
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
 | fleet | `brigade fleet` | `tests/test_fleet_*.py` (58 files; start with `tests/test_fleet_claims.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`) |
 | grokbot listener | `brigade run cloud grokbot` | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
-| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
+| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py`, `tests/test_verify_brigade_guard_parity.py` |
 
 Helper drives still missing a feature file, and worth adding when a change
 lands there: `brigade memory`, `brigade security`, `brigade outcome`,
 `brigade evidence`, `brigade code`, `brigade skills`, `brigade daily`.
-`brigade scrub` / `guard` and `brigade fleet` now have checkout test
-selectors above; add a helper feature file with the same four H2s rather
-than stretching an existing one.
+`brigade guard scan` / `redact` have the parity drive above; `brigade scrub`,
+the other `guard` verbs, and `brigade fleet` have checkout test selectors
+only. Add a helper feature file with the same four H2s rather than stretching
+an existing one.
 
 Setup shared by every file:
 

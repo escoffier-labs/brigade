@@ -1,6 +1,6 @@
 ---
 name: verify-brigade
-description: "Prove a Brigade change works by driving the real `brigade` CLI against a throwaway temp target, then capture receipts as evidence. Use when you changed anything under src/brigade/ and need proof beyond pytest - init/doctor wiring, work-verify receipts, Grok Bot connector packs, feed manifests, handoff lint. Also use before claiming a CLI behavior in a PR body, handoff, or job report."
+description: "Prove a Brigade change works by driving the real `brigade` CLI against a throwaway temp target, then capture receipts as evidence. Use when you changed anything under src/brigade/ and need proof beyond pytest - init/doctor wiring, work-verify receipts, Grok Bot connector packs, feed manifests, handoff lint, guard scan/redact parity. Also use before claiming a CLI behavior in a PR body, handoff, or job report."
 ---
 
 # Verify Brigade
@@ -161,6 +161,9 @@ $C grokbot-status --target "$TARGET"
 
 # handoff inbox lint
 $C handoff-lint --target "$TARGET" --content-guard
+
+# guard scan and redact parity (lookbehind and backreference goldens)
+$C guard-parity --target "$TARGET"
 ```
 
 Read the exit code, not the prose:
@@ -281,7 +284,7 @@ present under `tests/` on this checkout.
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
 | fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files) |
 | grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
-| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
+| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py`, `tests/test_verify_brigade_guard_parity.py` |
 
 Doctor and status for the checkout itself: `tests/test_doctor.py`,
 `tests/test_status.py`.
@@ -298,7 +301,7 @@ registry/skills/verify-brigade/control-brigade.py --help
 Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 `grokbot-pack-setup`, `grokbot-pack-doctor`, `grokbot-pack-canary`,
 `grokbot-pack-remove`, `grokbot-feed`, `grokbot-status`, `handoff-lint`,
-`evidence`, `cleanup`.
+`guard-parity`, `evidence`, `cleanup`.
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
@@ -307,7 +310,7 @@ not `$TMPDIR` itself), `--timeout <s>` per call.
 
 Every subcommand that writes accepts `--dry-run`, which reports the command it
 skipped and mutates nothing: `new-target`, `init`, `work-verify`,
-`grokbot-feed --sample`, `evidence`, `cleanup`, and
+`grokbot-feed --sample`, `guard-parity`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
 `would_remove`, or `would_copy` list.
@@ -317,6 +320,9 @@ skipped and mutates nothing: `new-target`, `init`, `work-verify`,
 refusals (including a symlink planted at the default state root), the
 unwritable-root JSON envelope, and the `0600`/`0700` permissions, so CI fails
 if this helper stops working or stops guarding.
+`tests/test_verify_brigade_guard_parity.py` runs `guard-parity` against the
+real CLI and asserts the goldens hold, that a drifted engine is reported, and
+that `--dry-run` writes nothing.
 
 ## Reporting the proof
 
