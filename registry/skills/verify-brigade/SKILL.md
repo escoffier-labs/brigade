@@ -173,6 +173,9 @@ $C guard-parity --target "$TARGET"
 
 # Fleet Hub wire contract over HTTP (starts its own throwaway hub; no target needed)
 $C hub-contract
+
+# Fleet Hub storage parity: every stored row against the golden (own hub, stepped clock)
+$C storage-parity
 ```
 
 Read the exit code, not the prose:
@@ -293,7 +296,7 @@ on this checkout.
 |---|---|---|
 | run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (34 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
-| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files), `tests/test_verify_brigade_hub_contract.py` |
+| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files), `tests/test_verify_brigade_hub_contract.py`, `tests/test_verify_brigade_storage_parity.py` |
 | grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
 | guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py`, `tests/test_verify_brigade_guard_parity.py` |
 
@@ -312,7 +315,7 @@ registry/skills/verify-brigade/control-brigade.py --help
 Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 `grokbot-pack-setup`, `grokbot-pack-doctor`, `grokbot-pack-canary`,
 `grokbot-pack-remove`, `grokbot-feed`, `grokbot-status`, `handoff-lint`,
-`guard-parity`, `hub-contract`, `audit`, `evidence`, `cleanup`.
+`guard-parity`, `hub-contract`, `storage-parity`, `audit`, `evidence`, `cleanup`.
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
@@ -322,7 +325,7 @@ not `$TMPDIR` itself), `--timeout <s>` per call.
 Every subcommand that writes accepts `--dry-run`, which reports the command it
 skipped and touches nothing outside the helper's own private state root (which
 every subcommand resolves and creates first): `new-target`, `init`, `work-verify`,
-`grokbot-feed --sample`, `guard-parity`, `hub-contract`, `evidence`, `cleanup`, and
+`grokbot-feed --sample`, `guard-parity`, `hub-contract`, `storage-parity`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
 `would_remove`, or `would_copy` list; `hub-contract` instead reports
@@ -341,6 +344,11 @@ that `--dry-run` writes nothing.
 in-repo hub and asserts zero mismatches, checks the covered routes against
 `docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
 prove each drift is reported.
+`tests/test_verify_brigade_storage_parity.py` runs `storage-parity` in every
+profile and in a mixed-engine run, requires each to equal its golden, and
+changes one stored value at a time (a timestamp format, a JSON separator, a
+generation, an expiry, a digest, an id link, a tombstone) to prove each is
+caught.
 
 `tests/test_verify_brigade_audit.py` runs `audit` against the shipped map and
 against broken copies of it, so CI fails when the map drifts from the CLI.

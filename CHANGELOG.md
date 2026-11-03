@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add `brigade work import bd` to mirror a Beads (`bd`) project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. It runs only `bd version --json` and `bd export`, pins the bd 1.3.x export schema, and fails closed on anything else. Add `brigade work export bd-outcomes` to write closeout receipts and PR links per bd issue id as JSONL. The `--from-bd-jsonl` inbox import now uses the same version pin (#2209).
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
+- Add the verify-brigade `storage-parity` drive for the Fleet Hub: one scripted sequence on a stepped clock, every table dumped and compared exactly with a checked-in golden (timestamp shape and offset, id mapping, recomputed digests, sealed tombstones past the 7-day lifetime), with defaults, events-outbox, migrated-fixture and mixed-engine runs.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
