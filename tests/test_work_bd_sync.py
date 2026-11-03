@@ -148,6 +148,52 @@ def test_bd_status_and_dependency_changes_follow_unclaimed_tasks(tmp_path, capsy
     assert payload["status_changed"][0]["to"] == "pending"
 
 
+def with_row(items, bd_id, **changes):
+    return [{**row, **changes} if row["id"] == bd_id else row for row in items]
+
+
+def test_brigade_completion_survives_a_bd_close_and_reopen(tmp_path, capsys):
+    assert sync(tmp_path, capsys, fixture("1.3.2"))[0] == 0
+    bd_id = by_title("1.3.2")["Implement the parser"]
+    task_id = mirror(tmp_path)[bd_id]["id"]
+    # Brigade finishes the task itself; the mirror never applied that status.
+    assert cli.main(["work", "task", "done", task_id, "--target", str(tmp_path)]) == 0
+    capsys.readouterr()
+    closed = with_row(rows("1.3.2"), bd_id, status="closed")
+    assert sync(tmp_path, capsys, write_rows(tmp_path / "closed.jsonl", closed))[0] == 0
+    assert mirror(tmp_path)[bd_id]["status"] == "done"
+    # bd catching up with the local status must not hand ownership to the mirror.
+    rc, payload = sync(tmp_path, capsys, fixture("1.3.2"))
+    assert rc == 0
+    assert mirror(tmp_path)[bd_id]["status"] == "done"
+    assert payload["kept_brigade_state"][0]["brigade_status"] == "done"
+    assert task_id not in {item["id"] for item in ready(tmp_path, capsys)["ready"]}
+
+
+def test_deferred_content_is_applied_once_a_closed_issue_reopens(tmp_path, capsys):
+    bd_id = by_title("1.3.2")["Implement the parser"]
+    closed = with_row(rows("1.3.2"), bd_id, status="closed")
+    assert sync(tmp_path, capsys, write_rows(tmp_path / "closed.jsonl", closed))[0] == 0
+    assert mirror(tmp_path)[bd_id]["status"] == "done"
+    original = mirror(tmp_path)[bd_id]["text"]
+    stale_digest = mirror(tmp_path)[bd_id]["metadata"]["bd"]["content_digest"]
+    # Content edited while the issue stays closed is held, and not recorded as applied.
+    edited = with_row(rows("1.3.2"), bd_id, status="closed", title="Implement the parser, v2", priority=0)
+    rc, payload = sync(tmp_path, capsys, write_rows(tmp_path / "edited.jsonl", edited))
+    assert rc == 0
+    assert payload["kept_brigade_state"][0]["field"] == "content"
+    assert mirror(tmp_path)[bd_id]["text"] == original
+    assert mirror(tmp_path)[bd_id]["metadata"]["bd"]["content_digest"] == stale_digest
+    # Reopening makes the task editable, so the held content lands in the same sync.
+    reopened = with_row(rows("1.3.2"), bd_id, status="open", title="Implement the parser, v2", priority=0)
+    rc, payload = sync(tmp_path, capsys, write_rows(tmp_path / "reopened.jsonl", reopened))
+    assert rc == 0
+    task = mirror(tmp_path)[bd_id]
+    assert task["status"] == "pending"
+    assert "Implement the parser, v2" in task["text"]
+    assert task["metadata"]["bd"]["content_digest"] != stale_digest
+
+
 def test_manual_edges_survive_bd_removal(tmp_path, capsys):
     assert sync(tmp_path, capsys, fixture("1.3.2"))[0] == 0
     ids = by_title("1.3.2")

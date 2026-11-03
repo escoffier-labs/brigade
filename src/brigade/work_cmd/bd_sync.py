@@ -213,7 +213,8 @@ def _apply_mirror(
     }
     touched: set[str] = set()
 
-    def stamp(task: dict[str, Any], spec: dict[str, Any], bd_id: str) -> None:
+    def stamp(task: dict[str, Any], spec: dict[str, Any], bd_id: str, *, content_applied: bool = False) -> None:
+        """Record what bd said. The content digest moves only when that content was applied."""
         bd_meta = _bd_meta(task)
         bd_meta.update(
             {
@@ -223,10 +224,11 @@ def _apply_mirror(
                 "input_digest": input_digest,
                 "status": spec["bd_status"],
                 "issue_type": spec["issue_type"],
-                "content_digest": spec["content_digest"],
                 "synced_at": now,
             }
         )
+        if content_applied:
+            bd_meta["content_digest"] = spec["content_digest"]
         task["updated_at"] = now
         touched.add(bd_id)
 
@@ -245,7 +247,7 @@ def _apply_mirror(
             task["status"] = mapped
             if mapped == "done":
                 task["completed_at"] = now
-            stamp(task, spec, bd_id)
+            stamp(task, spec, bd_id, content_applied=True)
             _bd_meta(task).update({"applied_status": mapped, "edges": []})
             ledger_payload["tasks"].append(task)
             mirrors[bd_id] = task
@@ -253,15 +255,6 @@ def _apply_mirror(
             continue
         bd_meta = _bd_meta(task)
         current = str(task.get("status") or "pending")
-        if bd_meta.get("content_digest") != spec["content_digest"]:
-            if current in _HELD_STATUSES:
-                summary["kept_brigade_state"].append(
-                    {"bd_id": bd_id, "task_id": task["id"], "field": "content", "brigade_status": current}
-                )
-            else:
-                task.update(spec["content"])
-                summary["updated"].append({"bd_id": bd_id, "task_id": task["id"]})
-                stamp(task, spec, bd_id)
         if current != mapped:
             # Only move a status the mirror set itself; Brigade-side progress wins.
             if current == bd_meta.get("applied_status") and claiming.claim_record(task) is None:
@@ -271,6 +264,7 @@ def _apply_mirror(
                 bd_meta["applied_status"] = mapped
                 summary["status_changed"].append({"bd_id": bd_id, "task_id": task["id"], "from": current, "to": mapped})
                 stamp(task, spec, bd_id)
+                current = mapped
             else:
                 summary["kept_brigade_state"].append(
                     {
@@ -281,9 +275,22 @@ def _apply_mirror(
                         "bd_status": spec["bd_status"],
                     }
                 )
-        elif bd_meta.get("applied_status") != mapped:
-            bd_meta["applied_status"] = mapped
+        elif bd_meta.get("status") != spec["bd_status"]:
+            # bd caught up with a status the mirror did not apply. Record what bd
+            # said, but leave applied_status alone: matching statuses do not
+            # transfer ownership of Brigade-side progress to the mirror.
             stamp(task, spec, bd_id)
+        # Content goes after the status move, so a reopen that makes the task
+        # editable also receives the content held back while it was terminal.
+        if bd_meta.get("content_digest") != spec["content_digest"]:
+            if current in _HELD_STATUSES:
+                summary["kept_brigade_state"].append(
+                    {"bd_id": bd_id, "task_id": task["id"], "field": "content", "brigade_status": current}
+                )
+            else:
+                task.update(spec["content"])
+                summary["updated"].append({"bd_id": bd_id, "task_id": task["id"]})
+                stamp(task, spec, bd_id, content_applied=True)
 
     def task_edge(edge: dict[str, str]) -> tuple[str, str, str]:
         return (edge["type"], str(mirrors[edge["source"]]["id"]), str(mirrors[edge["target"]]["id"]))
