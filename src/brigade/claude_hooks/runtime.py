@@ -746,8 +746,8 @@ def _run_brief(target: Path) -> str:
     return text
 
 
-def _run_recall(target: Path, payload: dict[str, Any]) -> str:
-    """Bounded memory recall for SessionStart; empty string on any failure."""
+def _run_recall(target: Path, payload: dict[str, Any], *, prompt: str | None = None) -> str:
+    """Bounded memory recall (prompt-driven on UserPromptSubmit); empty string on any failure."""
     from .. import memory_hooks
 
     raw_cwd = payload.get("cwd")
@@ -760,7 +760,7 @@ def _run_recall(target: Path, payload: dict[str, Any]) -> str:
     else:
         cwd = None
     try:
-        return memory_hooks.recall_text_for_hook(wired_target=target, cwd=cwd)
+        return memory_hooks.recall_text_for_hook(wired_target=target, cwd=cwd, prompt=prompt)
     except Exception:  # noqa: BLE001 - recall must never block session start
         return ""
 
@@ -2205,7 +2205,7 @@ def _handle_pre_compact(payload: dict[str, Any], *, pin: Path | None = None) -> 
 
 
 def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
-    """Heartbeat Hub presence, then restore the brief once after compaction."""
+    """Heartbeat Hub presence, recall cards for the prompt, and restore the brief once after compaction."""
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
@@ -2219,28 +2219,43 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
     if target is None:
         return None
     heartbeat.on_event("UserPromptSubmit", target, session_id)
-    if not marker:
+    claim = None
+    if marker:
+        try:
+            claim = compaction_marker.try_claim(session_id, target)
+        except OSError as exc:
+            raise HookDegraded(f"compaction marker claim failed: {exc}") from exc
+    if claim is not None:
+        # The post-compaction restore owns this prompt's hook budget. Prompt
+        # recall is optional, so it is skipped here rather than risk the brief
+        # (up to BRIEF_TIMEOUT_SECONDS) missing the outer hook deadline.
+        try:
+            brief_text = _run_brief(target)
+            result = _additional_context(
+                "UserPromptSubmit",
+                brief_text,
+                target=target,
+                session_id=session_id,
+                task_epoch=task_epoch,
+                records=_restore_brief_records(brief_text),
+            )
+            return _attach_claim(result, claim)
+        except Exception:
+            compaction_marker.release_claim(claim)
+            raise
+    prompt = payload.get("prompt")
+    recall_text = _run_recall(target, payload, prompt=prompt) if isinstance(prompt, str) and prompt.strip() else ""
+    recall_records = _brief_records(recall_text) if recall_text.strip() else []
+    if not recall_records:
         return None
-    try:
-        claim = compaction_marker.try_claim(session_id, target)
-    except OSError as exc:
-        raise HookDegraded(f"compaction marker claim failed: {exc}") from exc
-    if claim is None:
-        return None
-    try:
-        brief_text = _run_brief(target)
-        result = _additional_context(
-            "UserPromptSubmit",
-            brief_text,
-            target=target,
-            session_id=session_id,
-            task_epoch=task_epoch,
-            records=_restore_brief_records(brief_text),
-        )
-        return _attach_claim(result, claim)
-    except Exception:
-        compaction_marker.release_claim(claim)
-        raise
+    return _additional_context(
+        "UserPromptSubmit",
+        recall_text,
+        target=target,
+        session_id=session_id,
+        task_epoch=task_epoch,
+        records=recall_records,
+    )
 
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:

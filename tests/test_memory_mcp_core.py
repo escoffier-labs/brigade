@@ -110,6 +110,23 @@ def test_search_ranks_repo_first_on_ties(stores):
     assert matches[0]["ref"] == "repo:memory/cards/r.md"
 
 
+def test_search_scores_all_stores_against_one_corpus(stores):
+    # BM25 statistics come from the combined corpus, so a repo card is not
+    # out-scored by identical user cards just because the user store also
+    # holds many unrelated cards. Identical cards tie, and repo wins the tie.
+    repo, user = stores
+    _card(repo, "r.md", "Vlan notes", "trunk")
+    for index in range(21):
+        _card(user, f"u{index:02d}.md", "Vlan notes", "trunk")
+    for index in range(200):
+        _card(user, f"other{index:03d}.md", f"Backup {index}", "restic snapshot")
+    matches, failed = _tools(repo).call("search_cards", {"query": "vlan"})
+    assert failed is False
+    assert len(matches) == memory_mcp_core.SEARCH_LIMIT
+    assert matches[0]["ref"] == "repo:memory/cards/r.md"
+    assert len({m["score"] for m in matches}) == 1
+
+
 def test_resources_use_card_uris_per_origin(stores):
     repo, user = stores
     _card(repo, "a.md", "A", "a")

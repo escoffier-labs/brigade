@@ -278,9 +278,15 @@ New canonical cards mint one opaque `card-<uuid4>` ID in frontmatter. A valid ID
 
 `brigade memory care backfill` (dry-run by default) writes a deterministic mapping receipt under `.brigade/memory-care/backfills/dry-run-mapping.json` when there is at least one candidate. The receipt reports explicit-ID coverage, path fallbacks, malformed IDs, duplicate IDs (including workspaces without `memory/NAMESPACE`), and alias collisions. `old_id` is the consumer-facing identity (explicit ID, topic, stem, or path) so care queues, search logs, and refresh imports can be remapped. It contains relative paths and IDs only: no card bodies and no absolute paths. A zero-candidate dry run writes nothing. Missing IDs stay a doctor warning until audited coverage is 100 percent; backfill mints an ID on complete care cards that only lack one so that end state is reachable. `--apply` is the named reviewed rewrite that may mint IDs on existing cards and writes the same IDs the dry-run receipt previewed; it refuses to write when aliases collide.
 
+## Search ranking
+
+`brigade memory search` ranks cards with plain BM25 (k1=1.2, b=0.75, #2196). Each card is one field: title, tags, summary, and the full card text. Words are lowercased and split on anything that is not a letter, digit, or underscore, so `gate` no longer matches `gateway`. Repeated query words count once. The ranker builds its index in memory on every call and keeps no cache and no index file.
+
+Each match's `score` is a non-negative float rounded to 4 decimals. Higher ranks first, and equal scores sort by card path. Scores compare only within one result list: they depend on the corpus, so a score from one workspace or query says nothing about another. The text output prints the score to 2 decimals. Before #2196, `score` was a small integer (3 per query term in the title, tags, or summary, 1 per term found only in the body); that scorer survives only as the `substring` baseline in the [retrieval eval](../evals/memory-retrieval/README.md). A query with no word characters, such as the dashboard list-all query `:`, keeps the old literal substring match, and every match scores 0.
+
 ## Search recall signal
 
-`brigade memory search` appends a local-only event to `.brigade/memory/search-log.jsonl` on each real query (timestamp, normalized query, top-K card ids, no card body). The log is capped and drops oldest entries. `memory care status` prints search counts and the follow-up rate. `memory care status --json` surfaces a rolling `search_recall` object: `searches`, `followup_rate`, plus the window and K constants. It also reports `compared_pairs`, `repeat_queries`, `repeat_results`, and `repeat_query_results` over adjacent valid log events within the same window. Repeated queries ignore case and whitespace. Repeated results require equal nonempty card-id sets, regardless of order. The combined count requires both. Empty results, malformed events, backwards timestamps, and pairs outside the window do not count as repeated results. Card aliases are not resolved for these equality counts. Status reads the existing log without running searches or adding events. A follow-up within the window whose top-K ids share nothing with the prior search counts as a miss. Overlap or no follow-up counts as satisfied. This is second-class evidence (like `brief_hit_rate`): it informs whether the keyword scorer is good enough and feeds failed queries into the offline retrieval eval harness, but it never flips doctor/`valid`. The dashboard list-all query (`:`) is not logged.
+`brigade memory search` appends a local-only event to `.brigade/memory/search-log.jsonl` on each real query (timestamp, normalized query, top-K card ids, no card body). The log is capped and drops oldest entries. `memory care status` prints search counts and the follow-up rate. `memory care status --json` surfaces a rolling `search_recall` object: `searches`, `followup_rate`, plus the window and K constants. It also reports `compared_pairs`, `repeat_queries`, `repeat_results`, and `repeat_query_results` over adjacent valid log events within the same window. Repeated queries ignore case and whitespace. Repeated results require equal nonempty card-id sets, regardless of order. The combined count requires both. Empty results, malformed events, backwards timestamps, and pairs outside the window do not count as repeated results. Card aliases are not resolved for these equality counts. Status reads the existing log without running searches or adding events. A follow-up within the window whose top-K ids share nothing with the prior search counts as a miss. Overlap or no follow-up counts as satisfied. Prompt-driven recall (see below) adds events to the same log without the query text: it records `query_hmac`, an HMAC-SHA256 of the normalized query keyed by a per-host secret in `.brigade/memory/search-log-key` (created on first use, mode 0600, never synced), plus `query_source` and the returned card ids. A plain hash of a short prompt could be reversed by guessing, so the key matters. Only explicit `memory search` calls log raw query text. This is second-class evidence (like `brief_hit_rate`): it informs whether the ranker is good enough and feeds failed queries into the offline retrieval eval harness, but it never flips doctor/`valid`. The dashboard list-all query (`:`) is not logged.
 
 ## Safe Fix Planning
 
@@ -325,17 +331,30 @@ Receipts with malformed fields are ignored rather than honored: only a `reviewed
 
 Memory care does not run a scheduler, mutate canonical memory, perform remote sync, or promote imports automatically. Card edits stay explicit: routine scan and plan commands never write card files. Only `brigade memory care backfill --apply` may add derived frontmatter, with a receipt. Refreshes stay explicit through reviewed work tasks or the existing Memory Handoff flow. Scheduling those care commands is the operator's job: see the [execution model](execution-model.md). Opt-in `brigade care install` can install target-namespaced systemd user timers on Linux or launchd agents on macOS without Brigade owning a daemon.
 
-## Session-start recall (#466 Slice 1)
+## Session-start and prompt recall (#466 Slice 1, #2196)
 
 `brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --query "token refresh" --limit 5`
 runs deterministic card search using caller-supplied task terms. `--query` is
 optional, normalized to one printable line, and bounded to 256 characters.
-Precedence is a nonempty explicit query, stable repository basename from the
-Git common directory at a checkout root, cwd basename split on `-` and `_`,
-then `workspace` when no basename exists. At the memory root, callers without
-a task query use `workspace` without probing Git. A blank task query falls back
+Callers that have the user's prompt pass it as the query. Precedence is the
+prompt or a nonempty explicit query, then the stable repository basename from
+the Git common directory at a checkout root, then the cwd basename split on `-`
+and `_`, then `workspace` when no basename exists. At the memory root, callers
+without a query use `workspace` without probing Git. A blank query falls back
 to checkout context. Linked worktrees share repository terms. Subdirectories
 and unavailable or untrusted Git context retain the cwd fallback.
+
+The payload's `query_source` says where the query came from: `prompt` (the
+user's prompt, from the `UserPromptSubmit` hook), `explicit` (`--query`), `cwd`
+(a repository or folder basename), or `workspace` (the generic fallback at the
+memory root). Folder names make poor queries, so readers should discount `cwd`
+and `workspace` results. Before #2196 a repository basename was labeled `repo`.
+
+Prompt text never reaches disk. The prompt travels to the recall child over
+stdin. Prompt recall output starts with `memory recall (from your prompt):`
+instead of echoing the query, because hook output is persisted under
+`.brigade/work/claude-hooks/`. Its search-log event stores only a keyed hash of
+the query (see [search recall signal](#search-recall-signal)).
 
 Query context never changes `--target`. Output is index-level only: title,
 tags, and card path (at most 5 matches / 10 lines). Card bodies never appear.
@@ -356,7 +375,12 @@ Machine-local config key: `memory_recall_target` in `.brigade/config.json`.
 - Workspace-depth installs may omit the key; recall defaults to the current target.
 - Repo-depth installs stay unconfigured until an explicit hub or mirror path is set.
 - Claude's managed `SessionStart` hook merges recall beside the work brief once per
-  session and fails open when the target is missing, empty, or unreadable.
+  session and fails open when the target is missing, empty, or unreadable. With
+  no prompt available it searches folder terms and labels them `cwd`.
+- Claude's managed `UserPromptSubmit` hook recalls cards for each prompt, using
+  the trimmed prompt capped at 256 characters, with the same five-second
+  deadline and 5 match / 10 line caps. It adds one recall subprocess per prompt
+  and does nothing unless a recall target is active.
 
 ### Operator smoke (before merge)
 

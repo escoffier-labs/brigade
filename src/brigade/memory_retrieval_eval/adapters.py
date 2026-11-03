@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from brigade import memory_bm25
 from brigade.memory_cmd import search_cards_payload
 
 from .corpus import CardDoc
@@ -32,7 +33,7 @@ def tokenize(text: str) -> list[str]:
 
 
 def current_adapter(target: Path) -> AdapterFn:
-    """Existing keyword scorer from ``memory_cmd.search_cards_payload``."""
+    """Production search: ``memory_cmd.search_cards_payload`` (BM25 since #2196)."""
 
     def search(query: str, limit: int) -> list[tuple[str, float]]:
         payload = search_cards_payload(target, query, limit=limit)
@@ -40,6 +41,45 @@ def current_adapter(target: Path) -> AdapterFn:
         for match in payload["matches"]:
             ranked.append((str(match.get("card_id") or match["path"]), float(match["score"])))
         return ranked
+
+    return search
+
+
+def bm25_adapter(cards: Sequence[CardDoc]) -> AdapterFn:
+    """``memory_bm25`` over the loaded cards, with the index built once per eval run."""
+    texts = [card.searchable_text for card in cards]
+    index = memory_bm25.Bm25Index.build(texts)
+
+    def search(query: str, limit: int) -> list[tuple[str, float]]:
+        # A query with no word characters takes production's literal fallback.
+        raw = index.scores(query) if memory_bm25.tokenize(query) else dict(memory_bm25.rank(texts, query))
+        # Ties break by card path, as in ``search_cards_payload``; ids come after sorting.
+        scored = [(round(score, memory_bm25.SCORE_DIGITS), cards[doc]) for doc, score in raw.items()]
+        scored.sort(key=lambda item: (-item[0], item[1].path))
+        return [(card.card_id, score) for score, card in scored[:limit]]
+
+    return search
+
+
+def substring_adapter(cards: Sequence[CardDoc]) -> AdapterFn:
+    """The pre-#2196 production scorer, kept only as a named eval baseline.
+
+    Each whitespace query term scores 3 when it is a substring of the title,
+    tags, or summary, else 1 when it is a substring of the card text.
+    """
+
+    def search(query: str, limit: int) -> list[tuple[str, float]]:
+        terms = [term for term in query.lower().split() if term]
+        scored: list[tuple[float, CardDoc]] = []
+        for card in cards:
+            heading = f"{card.title} {' '.join(card.tags)} {card.summary}".lower()
+            body = card.body.lower()
+            score = sum(3 if term in heading else 1 if term in body else 0 for term in terms)
+            if score > 0:
+                scored.append((float(score), card))
+        # Ties break by card path, as the pre-#2196 production scorer did.
+        scored.sort(key=lambda item: (-item[0], item[1].path))
+        return [(card.card_id, score) for score, card in scored[:limit]]
 
     return search
 
@@ -138,6 +178,10 @@ def build_adapters(
             "reason": None,
             "search": current_adapter(target),
         }
+    if "bm25" in wanted:
+        adapters["bm25"] = {"available": True, "reason": None, "search": bm25_adapter(cards)}
+    if "substring" in wanted:
+        adapters["substring"] = {"available": True, "reason": None, "search": substring_adapter(cards)}
     if "grep" in wanted:
         adapters["grep"] = {
             "available": True,
