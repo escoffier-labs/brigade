@@ -134,7 +134,7 @@ def _evidence_log(target: Path) -> EvidenceLog:
 def register(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("reflect", help="Derive cited memory candidates without editing cards.")
     commands = parser.add_subparsers(dest="memory_reflect_command", required=True)
-    for name in ("run", "status", "candidates", "show", "propose"):
+    for name in ("run", "status", "candidates", "show", "propose", "preflight"):
         command = commands.add_parser(name, help=f"{name.capitalize()} deterministic memory reflection candidates.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -142,8 +142,10 @@ def register(sub: argparse._SubParsersAction) -> None:
             command.add_argument("--scope", help="Exact card frontmatter scope (missing scope means repo).")
             command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
-        elif name in ("show", "propose"):
+        elif name in ("show", "propose", "preflight"):
             command.add_argument("candidate_id")
+            if name == "preflight":
+                command.add_argument("--policy", help="Target-relative diagnostic policy JSON.")
             if name == "propose":
                 command.add_argument("--reason", required=True)
 
@@ -300,6 +302,17 @@ def _terminal_text(value: str) -> str:
 
 def dispatch(args: argparse.Namespace) -> int:
     target = Path(args.target.absolute())
+    if args.memory_reflect_command == "preflight":
+        from .memory_tier0_preflight import preflight_payload
+
+        payload = preflight_payload(target=args.target, candidate_id=args.candidate_id, policy_path=args.policy)
+        if args.json:
+            print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+        else:
+            print(f"memory reflect preflight: {payload['status']} (diagnostic only, eligible=false)")
+            for check in payload["checks"]:
+                print(f"{check['state']}: {check['code']}: {check['explanation']}")
+        return 2 if payload["status"] == "refused" else 0
     try:
         with io.directory(target):
             pass

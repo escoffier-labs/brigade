@@ -1219,12 +1219,15 @@ def cmd_hub_contract(args: argparse.Namespace) -> int:
                 "would_launch": would_launch,
                 "would_create": str(work) if work else None,
                 "covered_routes": list(hc.COVERED_ROUTES),
+                "covered_message_actions": list(hc.COVERED_MESSAGE_ACTIONS),
             }
         )
     startup_timeout = float(args.startup_timeout)
     if not (0 < startup_timeout < float("inf")):
         raise HelperError(f"--startup-timeout must be a positive, finite number of seconds, not {args.startup_timeout}")
     admin_token = os.environ.get(args.admin_token_env, "").strip() if external else None
+    if args.operator_recipient and not external:
+        raise HelperError("--operator-recipient applies to --hub-url; a launched hub gets a fresh operator")
     work = None if external else hub_contract_workdir(args, root, dry_run=False)
     try:
         hub, result = hc.drive(
@@ -1234,6 +1237,7 @@ def cmd_hub_contract(args: argparse.Namespace) -> int:
             hub_url=args.hub_url,
             admin_token=admin_token,
             startup_timeout=startup_timeout,
+            operator=args.operator_recipient,
         )
     except hc.ContractError as exc:
         raise HelperError(str(exc)) from exc
@@ -1268,6 +1272,7 @@ def cmd_hub_contract(args: argparse.Namespace) -> int:
             "cases_total": len(result["cases"]),
             "cases_failed": sum(1 for case in result["cases"] if not case["ok"]),
             "covered_routes": result["covered_routes"],
+            "covered_message_actions": result["covered_message_actions"],
             "mismatches": mismatches,
             "cases": result["cases"],
             "capture": str(capture),
@@ -1923,6 +1928,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--admin-token-env",
         default="BRIGADE_HUB_CONTRACT_ADMIN_TOKEN",
         help="Env var holding the admin token for --hub-url.",
+    )
+    p.add_argument(
+        "--operator-recipient",
+        default=None,
+        help="For --hub-url: the agent:<name> the hub has in BRIGADE_FLEET_OPERATOR_RECIPIENT. "
+        "The drive enrolls it, so use a fresh name per run.",
     )
     p.add_argument("--startup-timeout", type=float, default=30.0, help="Seconds to wait for /health.")
     add_dry_run(p, "Report the hub command and covered routes without starting anything.")
