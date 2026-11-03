@@ -263,6 +263,9 @@ def _apply_mirror(
                 task["status"] = mapped
                 if mapped == "done":
                     task["completed_at"] = now
+                else:
+                    # A reopen in bd: the task is no longer complete.
+                    task.pop("completed_at", None)
                 bd_meta["applied_status"] = mapped
                 summary["status_changed"].append({"bd_id": bd_id, "task_id": task["id"], "from": current, "to": mapped})
                 stamp(task, spec, bd_id)

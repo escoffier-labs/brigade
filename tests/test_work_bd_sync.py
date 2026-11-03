@@ -194,6 +194,18 @@ def test_deferred_content_is_applied_once_a_closed_issue_reopens(tmp_path, capsy
     assert task["metadata"]["bd"]["content_digest"] != stale_digest
 
 
+def test_a_mirrored_reopen_clears_the_completion_time(tmp_path, capsys):
+    bd_id = by_title("1.3.2")["Implement the parser"]
+    closed = with_row(rows("1.3.2"), bd_id, status="closed")
+    assert sync(tmp_path, capsys, write_rows(tmp_path / "closed.jsonl", closed))[0] == 0
+    assert mirror(tmp_path)[bd_id].get("completed_at")
+    reopened = with_row(rows("1.3.2"), bd_id, status="open")
+    assert sync(tmp_path, capsys, write_rows(tmp_path / "reopened.jsonl", reopened))[0] == 0
+    task = mirror(tmp_path)[bd_id]
+    assert task["status"] == "pending"
+    assert task.get("completed_at") is None
+
+
 def test_manual_edges_survive_bd_removal(tmp_path, capsys):
     assert sync(tmp_path, capsys, fixture("1.3.2"))[0] == 0
     ids = by_title("1.3.2")
