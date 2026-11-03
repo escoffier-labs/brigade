@@ -7,7 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Add `brigade work import bd` to mirror a Beads (`bd`) project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. It runs only `bd version --json` and `bd export`, pins the bd 1.3.x export schema, and fails closed on anything else. Add `brigade work export bd-outcomes` to write closeout receipts and PR links per bd issue id as JSONL. The `--from-bd-jsonl` inbox import now uses the same version pin (#2209).
 - Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
 - Guard can use an optional local `brigade-guard` PCRE2 JIT binary for large ASCII inputs, with Python regex fallback and unchanged policy decisions.
@@ -17,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence new key publication and sealed admission to an installed Hub identity, retaining per-signer sequence history, paired migration readback and exact retained retries. Older Hub binaries must not rewrite identity metadata after history exists: inconsistent signer state refuses new mesh writes and requires operator recovery from a consistent backup without discarding signer history.
 - Allow writing and frontend task roles to use explicit Hub policy seat fallbacks and optional host-local instructions files, with bounded reads and fail-closed dispatch.
 
+- Add `brigade work import bd` to mirror a Beads (`bd`) project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. It runs only `bd version --json` and `bd export`, pins the bd 1.3.x export schema, and fails closed on anything else. Add `brigade work export bd-outcomes` to write closeout receipts and PR links per bd issue id as JSONL. The `--from-bd-jsonl` inbox import now uses the same version pin (#2209).
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
