@@ -1182,10 +1182,19 @@ try {
     $mcpRequest = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
     foreach ($mcpExe in @(@($codeGraphMcpExe, $graphtrailMcpExe) | Select-Object -Unique)) {
         $mcpName = [IO.Path]::GetFileNameWithoutExtension($mcpExe)
-        $mcpStdout = Invoke-ExternalCommand -StderrRoot $acceptRoot -Command {
-            $mcpRequest | & $mcpExe
-        } -FailureMessage "$mcpName absolute-path smoke failed"
-        $mcpText = ($mcpStdout | Out-String).Trim()
+        # Feed the request from a file so stdin holds exactly one UTF-8 line, with no
+        # BOM and no PowerShell pipe encoding in between.
+        $mcpIn = Join-Path $acceptRoot "$mcpName-initialize.json"
+        $mcpOut = Join-Path $acceptRoot "$mcpName-initialize.out"
+        $mcpErr = Join-Path $acceptRoot "$mcpName-initialize.err"
+        [IO.File]::WriteAllText($mcpIn, $mcpRequest + "`n", (New-Object System.Text.UTF8Encoding($false)))
+        $mcpProc = Start-Process -FilePath $mcpExe -RedirectStandardInput $mcpIn -RedirectStandardOutput $mcpOut `
+            -RedirectStandardError $mcpErr -NoNewWindow -Wait -PassThru
+        if ($mcpProc.ExitCode -ne 0) {
+            $mcpStderr = Get-BoundedStderr -Path $mcpErr
+            throw "$mcpName absolute-path smoke failed (exit $($mcpProc.ExitCode)): $mcpStderr"
+        }
+        $mcpText = ([IO.File]::ReadAllText($mcpOut)).Trim()
         if ($mcpText -notmatch '"jsonrpc"') {
             throw "$mcpName absolute-path smoke returned no JSON-RPC response: $mcpText"
         }
