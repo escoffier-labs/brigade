@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../engines/brigade-guard"
+cargo fmt --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-features
+cargo check --locked --no-default-features
+cargo build --locked --release
