@@ -273,8 +273,10 @@ pub fn sort_impact_edges(edges: &mut [EdgeRow]) {
 
 fn limit_truncated_edge(shown: usize, total: usize, hops: usize) -> EdgeRow {
     EdgeRow {
+        // frozen identifier: see docs/phase-engine-rename.md; machine-matched output marker.
         source_id: "__graphtrail_limit_truncated__".to_string(),
         source: format!("results limited to {shown} of {total} edges"),
+        // frozen identifier: see docs/phase-engine-rename.md; machine-matched output marker.
         target_id: "__graphtrail_limit_truncated_target__".to_string(),
         target: "pass a higher limit to see more".to_string(),
         kind: TRUNCATED_EDGE_KIND.to_string(),
@@ -291,6 +293,7 @@ fn truncated_edge(direction: Direction, hops: usize, current_symbol: &str) -> Ed
         Direction::Incoming => "incoming",
         Direction::Outgoing => "outgoing",
     };
+    // frozen identifier: see docs/phase-engine-rename.md; machine-matched output marker.
     let marker_id = format!("__graphtrail_truncated_{direction_label}__");
     EdgeRow {
         source_id: marker_id.clone(),
