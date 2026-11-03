@@ -30,7 +30,10 @@ def counts(root: Path) -> dict[str, int]:
             continue
         path = root / name
         # Deleted tracked files lower counts. Do not follow tracked symlinks.
-        content = path.read_bytes() if path.is_file() and not path.is_symlink() else b""
+        if path.is_symlink():
+            content = str(path.readlink()).encode("utf-8", errors="surrogateescape")
+        else:
+            content = path.read_bytes() if path.is_file() else b""
         count = len(RETIRED.findall(raw)) + len(RETIRED.findall(content))
         if count:
             result[name] = count
