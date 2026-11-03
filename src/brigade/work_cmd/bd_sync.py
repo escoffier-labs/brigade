@@ -124,6 +124,8 @@ def _read_export(
         resolved = shutil.which(bd_bin)
         if resolved is None:
             raise _bd_missing(bd_bin)
+        # which() keeps a relative name relative; resolve it before running in bd_repo.
+        resolved = os.path.abspath(resolved)
         if not bd_repo.is_dir():
             raise BdImportError(f"--bd-repo is not a directory: {bd_repo}", reason="bd_import_io_error")
         version = detect_bd_version(resolved, cwd=bd_repo)

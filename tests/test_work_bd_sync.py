@@ -312,6 +312,17 @@ def test_live_bd_read_runs_only_version_and_export(tmp_path, capsys):
     assert len(mirror(target)) == 5
 
 
+def test_relative_bd_bin_resolves_from_the_caller_directory(tmp_path, capsys, monkeypatch):
+    script, log = fake_bd(tmp_path)
+    target = tmp_path / "repo"
+    target.mkdir()
+    monkeypatch.chdir(tmp_path)
+    rc = cli.main(["work", "import", "bd", "--target", str(target), "--bd-bin", "./bin/bd", "--json"])
+    assert rc == 0, capsys.readouterr()
+    assert [json.loads(line) for line in log.read_text().splitlines()] == [["version", "--json"], ["export"]]
+    assert script.is_file()
+
+
 def test_live_bd_with_unpinned_release_fails_before_export(tmp_path, capsys):
     script, log = fake_bd(tmp_path, version="1.4.0")
     rc = cli.main(["work", "import", "bd", "--target", str(tmp_path), "--bd-bin", str(script), "--json"])
