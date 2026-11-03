@@ -740,6 +740,24 @@ def test_user_record_inside_the_target_is_ignored(tmp_path: Path, monkeypatch) -
     assert work_mode.set_rails(repo, "off") is not None
 
 
+def test_user_record_inside_an_enclosing_checkout_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    outer = tmp_path / "outer"
+    outer.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=outer, check=True)
+    repo = _wired(outer / "nested")
+    settings = outer / "settings"
+    settings.mkdir()
+    config_home = tmp_path / "config-home"
+    _symlink(config_home, settings, directory=True)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    record = work_mode.rails_record_path()
+    assert record is not None
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"version": 1, "rails_off": {work_mode.repository_key(repo): {}}}), encoding="utf-8")
+    assert work_mode.rails_enabled(repo) is True
+    assert work_mode.set_rails(repo, "off") is not None
+
+
 def test_rails_off_for_a_subdirectory_warns_about_the_hook_root(tmp_path: Path, capsys) -> None:
     repo = _wired(tmp_path)
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)

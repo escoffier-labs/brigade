@@ -134,6 +134,27 @@ def _inside(path: Path, target: Path) -> bool:
     return True
 
 
+def _enclosing_work_trees(target: Path) -> list[Path]:
+    """``target`` and every ancestor that holds a ``.git`` entry, found without running git.
+
+    A record inside any of these is content of the repository being pushed (or of
+    a superproject that contains it), so it cannot be trusted to turn rails off.
+    """
+    try:
+        current = Path(os.path.realpath(target))
+    except OSError:
+        return [target]
+    trees = [current]
+    for directory in (current, *current.parents):
+        if (directory / ".git").exists() and directory not in trees:
+            trees.append(directory)
+    return trees
+
+
+def _record_in_target_repository(record: Path, target: Path) -> bool:
+    return any(_inside(record, tree) for tree in _enclosing_work_trees(target))
+
+
 def _read_rails_off(record: Path) -> dict[str, Any]:
     """The ``rails_off`` map of the record; empty (rails on everywhere) when unreadable or invalid."""
     try:
@@ -151,10 +172,11 @@ def rails_enabled(target: Path) -> bool:
 
     Nothing inside the repository is read, so no committed file, symlink,
     submodule, or nested repository can disable the leak checks of anyone who
-    pushes from a clone. A record that resolves inside ``target`` is ignored.
+    pushes from a clone. A record that resolves inside ``target`` or inside any
+    work tree that encloses it is ignored.
     """
     record = rails_record_path()
-    if record is None or _inside(record, target):
+    if record is None or _record_in_target_repository(record, target):
         return True
     return repository_key(target) not in _read_rails_off(record)
 
@@ -222,8 +244,8 @@ def set_rails(target: Path, state: str) -> str | None:
     record = rails_record_path()
     if record is None:
         return "no per-user config directory (HOME, or LOCALAPPDATA on Windows, is unset)"
-    if _inside(record, target):
-        return f"the per-user rails record {record} sits inside {target}; rails stay on"
+    if _record_in_target_repository(record, target):
+        return f"the per-user rails record {record} sits inside the repository at or above {target}; rails stay on"
     if state == "off":
         try:
             if load_config(target) is None:
