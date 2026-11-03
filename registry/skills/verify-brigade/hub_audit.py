@@ -41,6 +41,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -57,7 +58,13 @@ MUTATION_POINTS = {
     "GET /status": ("brigade.fleet_hub", "latest_status"),
     "POST /messages count": ("brigade.fleet_hub_messages", "unread_count"),
 }
-MUTATION_KINDS = ("write", "noop", "begin", "helper")
+MUTATION_KINDS = ("write", "noop", "begin", "begin-semicolon", "begin-comment", "helper")
+# The SQL each `begin*` mutation runs: plain, with a trailing semicolon, and behind a comment.
+BEGIN_FORMS = {
+    "begin": "BEGIN IMMEDIATE",
+    "begin-semicolon": "BEGIN IMMEDIATE;",
+    "begin-comment": "/* read */ BEGIN EXCLUSIVE",
+}
 # The `helper` mutation: a plain interpreter in the hub's process group takes and releases the write lock.
 HELPER_SCRIPT = (
     "import sqlite3, sys\n"
@@ -135,11 +142,27 @@ def _authorizer(recorder: Recorder):
     return check
 
 
+_SQL_COMMENT = re.compile(r"--[^\n]*|/\*.*?(?:\*/|\Z)", re.DOTALL)
+_SQL_WORD = re.compile(r"[A-Za-z_]+")
+
+
+def begin_mode(statement: str) -> str | None:
+    """`immediate` or `exclusive` when `statement` opens a write-locking transaction, else None.
+
+    Comments become whitespace and punctuation separates words, so `BEGIN IMMEDIATE;`,
+    `/* read */ BEGIN EXCLUSIVE` and `BEGIN/**/IMMEDIATE` are all recognized.
+    """
+    words = _SQL_WORD.findall(_SQL_COMMENT.sub(" ", statement).upper())
+    if len(words) >= 2 and words[0] == "BEGIN" and words[1] in ("IMMEDIATE", "EXCLUSIVE"):
+        return words[1].lower()
+    return None
+
+
 def _trace(recorder: Recorder):
     def trace(statement: str) -> None:
-        words = statement.strip().upper().split()
-        if len(words) >= 2 and words[0] == "BEGIN" and words[1] in ("IMMEDIATE", "EXCLUSIVE"):
-            recorder.emit("begin", mode=words[1].lower())
+        mode = begin_mode(statement)
+        if mode is not None:
+            recorder.emit("begin", mode=mode)
 
     return trace
 
@@ -224,7 +247,7 @@ def mutate(spec: str, db_path: str, recorder: Recorder) -> None:
                 conn.commit()
             else:
                 conn.isolation_level = None
-                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(BEGIN_FORMS[kind])
                 conn.execute("ROLLBACK")
         finally:
             conn.close()

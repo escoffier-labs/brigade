@@ -43,6 +43,26 @@ def _load(name: str):
 
 
 hr = _load("hub_readonly")
+audit_launcher = _load("hub_audit")
+
+
+@pytest.mark.parametrize(
+    ("statement", "mode"),
+    [
+        ("BEGIN IMMEDIATE", "immediate"),
+        ("begin immediate;", "immediate"),
+        ("/* read */ BEGIN EXCLUSIVE", "exclusive"),
+        ("-- note\nBEGIN EXCLUSIVE TRANSACTION;", "exclusive"),
+        ("BEGIN/**/IMMEDIATE", "immediate"),
+        ("  BEGIN\n\tIMMEDIATE  ", "immediate"),
+        ("BEGIN", None),
+        ("BEGIN DEFERRED;", None),
+        ("SELECT 'BEGIN IMMEDIATE'", None),
+        ("/* BEGIN IMMEDIATE */ SELECT 1", None),
+    ],
+)
+def test_begin_mode_reads_through_comments_and_punctuation(statement, mode):
+    assert audit_launcher.begin_mode(statement) == mode
 
 
 def _assert_clean_audit(payload: dict) -> None:
@@ -110,6 +130,18 @@ def test_prod_readonly_audit_passes_through_the_rust_front(tmp_path):
             "GET /status:begin",
             ["a listed operation wrote, or took the write lock"],
             {"kind": "begin", "mode": "immediate"},
+            [],
+        ),
+        (
+            "GET /status:begin-semicolon",
+            ["a listed operation wrote, or took the write lock"],
+            {"kind": "begin", "mode": "immediate"},
+            [],
+        ),
+        (
+            "GET /owners:begin-comment",
+            ["a listed operation wrote, or took the write lock"],
+            {"kind": "begin", "mode": "exclusive"},
             [],
         ),
     ],
