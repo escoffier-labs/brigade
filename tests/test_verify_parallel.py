@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._coverage_env import isolated_coverage_env
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -18,7 +20,7 @@ def test_shard_runner_aggregates_real_results_and_preserves_failure_output(tmp_p
         "def test_skip():\n    pass\n"
         f"def test_other():\n    assert {not failing!r}, 'shard failure sentinel'\n"
     )
-    env = dict(os.environ, BRIGADE_VERIFY_SHARDS="2")
+    env = isolated_coverage_env(BRIGADE_VERIFY_SHARDS="2")
     result = subprocess.run(
         [
             sys.executable,
@@ -66,7 +68,7 @@ def test_shard_runner_keeps_subtest_counts_separate(tmp_path):
             "--cov-reset",
             f"--cov={tmp_path}",
         ],
-        env=dict(os.environ, BRIGADE_VERIFY_SHARDS="2"),
+        env=isolated_coverage_env(BRIGADE_VERIFY_SHARDS="2"),
         cwd=ROOT,
         capture_output=True,
         text=True,
@@ -109,7 +111,7 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
             str(suite),
             f"--confcutdir={tmp_path}",
         ],
-        env=dict(os.environ, BRIGADE_VERIFY_SHARDS="1"),
+        env=isolated_coverage_env(BRIGADE_VERIFY_SHARDS="1"),
         cwd=ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
@@ -158,7 +160,7 @@ def test_combined_coverage_floor_fails_after_successful_shards(tmp_path):
             "--cov-reset",
             f"--cov={tmp_path}",
         ],
-        env=dict(os.environ, BRIGADE_VERIFY_SHARDS="2"),
+        env=isolated_coverage_env(BRIGADE_VERIFY_SHARDS="2"),
         cwd=ROOT,
         capture_output=True,
         text=True,

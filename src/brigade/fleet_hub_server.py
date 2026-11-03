@@ -1,5 +1,9 @@
 """Bound Fleet Hub connections before starting unauthenticated handler threads."""
 
+import ipaddress
+import os
+import sys
+
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from socket import socket
@@ -36,6 +40,13 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         *,
         db_path: Path,
     ) -> None:
+        # Private managed-front escape hatch. Never lift admission on a public bind.
+        managed = os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") == "1"
+        if managed and not ipaddress.ip_address(server_address[0]).is_loopback:
+            raise ValueError("managed upstream requires a numeric loopback bind")
+        self._source_limit = MAX_HANDLER_THREADS if managed else MAX_HANDLERS_PER_SOURCE
+        if managed:
+            self.request_queue_size = MAX_HANDLER_THREADS
         self._admission_lock = threading.Lock()
         self._active_requests: dict[socket | tuple[bytes, socket], str] = {}
         self._source_counts: dict[str, int] = {}
@@ -50,6 +61,9 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
             super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+            # A deferred bind has no port yet. That caller announces it after binding.
+            if managed and bind_and_activate:
+                print(f"BRIGADE_UPSTREAM_PORT={self.server_port}", flush=True, file=sys.stdout)
         except BaseException:
             self._close_db_if_idle()
             raise
@@ -77,7 +91,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             admitted = (
                 not self._closing
                 and len(self._active_requests) < MAX_HANDLER_THREADS
-                and source_count < MAX_HANDLERS_PER_SOURCE
+                and source_count < self._source_limit
             )
             if admitted:
                 self._active_requests[request] = source

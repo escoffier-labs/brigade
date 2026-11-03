@@ -49,6 +49,37 @@ def validate_arguments(name: str, arguments: dict[str, Any], *, tools: frozenset
     return result
 
 
+def argument_problem(name: object, arguments: object, *, tools: frozenset[str] = TOOLS) -> str:
+    """Why a tools/call fails validate_arguments, in schema-owned words only.
+
+    The text never repeats caller-supplied keys or values, so it is safe to return to the
+    client and cheap to act on: a client can fix an out-of-range limit instead of retrying.
+    """
+    if not isinstance(name, str) or name not in tools or name not in ALL_TOOL_SCHEMAS:
+        return "unknown tool"
+    if not isinstance(arguments, dict):
+        return "arguments must be an object"
+    fields = ALL_TOOL_SCHEMAS[name].fields
+    unknown = sum(1 for key in arguments if key not in fields)
+    if unknown:
+        accepted = ", ".join(sorted(fields)) or "none"
+        return f"{unknown} unsupported argument(s); accepted arguments: {accepted}"
+    for key, spec in fields.items():
+        value = arguments.get(key)
+        if value is None:
+            if spec.required:
+                return f"missing required argument {key}"
+            continue
+        try:
+            spec.validator(value)
+        except DotError:
+            describe = getattr(spec.validator, "describe", None)
+            if callable(describe):
+                return f"{key} must be {describe()}"
+            return f"invalid value for {key}"
+    return "invalid arguments"
+
+
 class DotTools:
     def __init__(
         self,

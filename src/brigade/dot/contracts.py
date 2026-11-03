@@ -70,12 +70,21 @@ def _text(
     return validate
 
 
-def _integer(minimum: int, maximum: int) -> Callable[[Any], int]:
-    def validate(value: Any) -> int:
-        require(type(value) is int and minimum <= value <= maximum)
+@dataclass(frozen=True)
+class _IntegerRange:
+    minimum: int
+    maximum: int
+
+    def __call__(self, value: Any) -> int:
+        require(type(value) is int and self.minimum <= value <= self.maximum)
         return value
 
-    return validate
+    def describe(self) -> str:
+        return f"an integer from {self.minimum} to {self.maximum}"
+
+
+def _integer(minimum: int, maximum: int) -> Callable[[Any], int]:
+    return _IntegerRange(minimum, maximum)
 
 
 def _boolean(value: Any) -> bool:

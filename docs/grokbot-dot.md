@@ -196,6 +196,14 @@ runtime. Tool schemas reject unknown arguments, and subprocess calls use fixed
 argv with bounded input and output. The dispatch gate defaults to the runtime's
 explicit boolean and does not replace fleet admission or owner authorization.
 
+A `tools/call` whose arguments fail these checks is refused before the MCP SDK
+runs, with HTTP 400 and a JSON-RPC `-32602` error naming the problem in schema
+terms, for example `invalid arguments: limit must be an integer from 1 to 50`.
+The message never repeats caller-supplied keys or values. The call log row
+carries the usual allowlisted argument summary, so `bridge-calls --tool inbox_list`
+shows which value was refused. Other refusals keep the bare
+`{"error":"request_denied"}` body.
+
 Hub message state is scoped to the normalized Hub endpoint and credential together.
 This includes queued sends and replies, the inbox mirror, acknowledgement state,
 sync cursors, pending flush flags, wake events, and watcher deduplication. Agent
