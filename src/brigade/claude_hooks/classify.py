@@ -91,11 +91,13 @@ def classify(target: Path) -> dict[str, Any] | None:
     integrity_issue = None
     yolo = work_mode.is_yolo(target)
     try:
-        # Yolo mode opts out of receipts, so a missing one is not dormancy (#2233).
-        dormant = not yolo and _recent_write_without_receipt(target)
+        # The integrity scan runs in every mode; only dormancy depends on yolo.
+        recent_unreceipted = _recent_write_without_receipt(target)
     except SessionIntegrityError as exc:
-        dormant = False
+        recent_unreceipted = False
         integrity_issue = f"session directory integrity refused: {exc}"
+    # Yolo mode opts out of receipts, so a missing one is not dormancy (#2233).
+    dormant = recent_unreceipted and not yolo
 
     issues: list[str] = []
     if not instruction_current:

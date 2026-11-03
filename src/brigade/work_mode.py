@@ -26,6 +26,7 @@ from .config import (
     CONFIG_REL_PATH,
     DEFAULT_WORK_MODE,
     LEGACY_WORKSPACE_DIRNAMES,
+    SUPPORTED_VERSIONS,
     WORK_MODES,
     load_config,
     validate_safety_rails,
@@ -64,7 +65,11 @@ def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | Non
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return {}, path
-        work = data.get("work") if isinstance(data, dict) else None
+        # Match load_config: a config with an unsupported version is invalid, so its
+        # settings must not switch anything off (enforced, rails on).
+        if not isinstance(data, dict) or data.get("version") not in SUPPORTED_VERSIONS:
+            return {}, path
+        work = data.get("work")
         return (work if isinstance(work, dict) else {}), path
     return {}, None
 
@@ -86,20 +91,34 @@ def is_yolo(target: Path) -> bool:
 
 
 def _config_is_tracked(target: Path, path: Path | None = None) -> bool:
-    """True when git tracks the config at ``path``, or when that cannot be ruled out.
+    """True when rails-off cannot be honored for the config at ``path``.
 
-    ``path`` is the file that actually supplied the settings, which may be a legacy
-    location; it defaults to the canonical config.
+    Rails off counts only for a plain, machine-local, untracked file. This returns
+    True (rails stay on) when git tracks the config, when git cannot say, and when
+    the file is reached through a symlink: the path itself or any parent directory
+    inside the target is a symlink, or it resolves outside the target. A committed
+    ``.brigade`` symlink to a tracked directory would otherwise let a pushed commit
+    disable the checks for every clone. ``path`` is the file that actually supplied
+    the settings, which may be a legacy location; it defaults to the canonical config.
     """
-    relative = CONFIG_REL_PATH
-    if path is not None:
-        try:
-            relative = path.relative_to(target).as_posix()
-        except ValueError:
-            return True
+    config_file = target / CONFIG_REL_PATH if path is None else path
+    try:
+        relative_parts = config_file.relative_to(target).parts
+    except ValueError:
+        return True
+    probe = target
+    try:
+        for part in relative_parts:
+            probe = probe / part
+            if probe.is_symlink():
+                return True
+        resolved_target = target.resolve()
+        relative = config_file.resolve().relative_to(resolved_target).as_posix()
+    except (OSError, RuntimeError, ValueError):
+        return True
     try:
         result = subprocess.run(
-            ["git", "-C", str(target), "ls-files", "--error-unmatch", "--", relative],
+            ["git", "-C", str(resolved_target), "ls-files", "--error-unmatch", "--", relative],
             capture_output=True,
             timeout=5,
             check=False,
@@ -154,7 +173,10 @@ def _update(target: Path, **changes: Any) -> str | None:
         return f"unable to load Brigade config: {exc}"
     if cfg is None:
         return f"target is not Brigade-wired (no {CONFIG_REL_PATH}): {target}; run brigade init first"
-    write_config(target, dataclasses.replace(cfg, **changes))
+    try:
+        write_config(target, dataclasses.replace(cfg, **changes))
+    except OSError as exc:
+        return f"unable to write Brigade config: {exc}"
     return None
 
 
@@ -209,6 +231,15 @@ def doctor_checks(target: Path) -> list[tuple[str, str, str]]:
     if rails_enabled(target):
         if rails_off_requested(target):
             checks.append(("WARN", "safety rails", TRACKED_CONFIG_NOTE))
+        elif pre_push_hook_gated(target) is None:
+            checks.append(
+                (
+                    "INFO",
+                    "safety rails",
+                    "on: content guard and pre-push publication checks run only when hooks/pre-push is "
+                    "installed; none was found here",
+                )
+            )
         else:
             checks.append(("INFO", "safety rails", "on: content guard and pre-push publication checks are active"))
         return checks

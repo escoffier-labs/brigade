@@ -28,6 +28,11 @@ def _reconcile_claude_hooks(target: Path) -> str | None:
     if config is None or "claude" not in config.selection.harnesses:
         return None
     if not (target / install_cmd.SIDECAR_REL_PATH).is_file():
+        if install_cmd.status_payload(target).get("managed_events"):
+            return (
+                f"managed Claude hooks exist without {install_cmd.SIDECAR_REL_PATH}; "
+                f"run `brigade work hooks install --target {target}` so the mode's events match"
+            )
         return None
     if install_cmd.hooks_install(target=target, quiet=True) != 0:
         return f"run `brigade work hooks install --target {target}` after checking .claude/settings.json"

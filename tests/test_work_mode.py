@@ -273,7 +273,7 @@ def test_committed_legacy_config_cannot_disable_scanning(tmp_path: Path) -> None
     target = tmp_path / "repo"
     legacy = target / config.LEGACY_WORKSPACE_DIRNAMES[0]
     legacy.mkdir(parents=True)
-    (legacy / "config.json").write_text(json.dumps({"work": {"rails": "off"}}), encoding="utf-8")
+    (legacy / "config.json").write_text(json.dumps({"version": 1, "work": {"rails": "off"}}), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
     assert not (target / config.CONFIG_REL_PATH).exists()
     assert work_mode.rails_off_requested(target) is True
@@ -405,3 +405,117 @@ def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path) -> Non
     restored = push_hook()
     assert restored.returncode == 1, restored.stdout + restored.stderr
     assert "BLOCKED" in restored.stderr
+
+
+def test_session_integrity_scan_runs_in_yolo_mode(tmp_path: Path, monkeypatch, capsys) -> None:
+    target = _wired(tmp_path)
+    _set_mode(target, "yolo", capsys)
+
+    def refuse(_target: Path) -> bool:
+        raise classify.SessionIntegrityError("planted")
+
+    monkeypatch.setattr(classify, "_recent_write_without_receipt", refuse)
+    result = classify.classify(target)
+    assert result is not None and result["state"] == "error"
+    assert any("session directory integrity refused" in issue for issue in result["issues"])
+
+
+def test_init_yolo_prints_yolo_agent_workflow(tmp_path: Path, capsys) -> None:
+    target = tmp_path / "fresh"
+    args = ["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]
+    assert cli.main([*args, "--yolo"]) == 0
+    yolo_out = capsys.readouterr().out
+    assert "yolo work mode" in yolo_out
+    assert "THROUGH brigade" not in yolo_out and "outcome capture" not in yolo_out
+    other = tmp_path / "enforced"
+    assert cli.main(["init", "--target", str(other), "--depth", "repo", "--harnesses", "claude"]) == 0
+    assert "verify THROUGH brigade" in capsys.readouterr().out
+
+
+def test_unsupported_config_version_cannot_turn_rails_off(tmp_path: Path) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.update({"version": 99, "work": {"mode": "yolo", "rails": "off"}})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert work_mode.rails_off_requested(target) is False
+    assert work_mode.rails_enabled(target) is True
+    assert work_mode.resolve_mode(target) == "enforced"
+
+
+def test_config_write_failure_is_reported_and_keeps_old_config(tmp_path: Path, monkeypatch) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    before = path.read_text(encoding="utf-8")
+
+    def boom(_src, _dst) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(config.os, "replace", boom)
+    error = work_mode.set_mode(target, "yolo")
+    assert error is not None and "disk full" in error
+    assert path.read_text(encoding="utf-8") == before
+    assert sorted(item.name for item in path.parent.iterdir() if item.name.endswith(".tmp")) == []
+
+
+def test_mode_set_warns_when_managed_hooks_lack_sidecar(tmp_path: Path, capsys) -> None:
+    target = _wired(tmp_path)
+    (target / install_cmd.SIDECAR_REL_PATH).unlink()
+    assert cli.main(["work", "mode", "set", "yolo", "--target", str(target)]) == 0
+    assert "managed Claude hooks exist without" in capsys.readouterr().err
+
+
+def test_doctor_does_not_claim_checks_active_without_pre_push_hook(tmp_path: Path) -> None:
+    target = tmp_path / "bare"
+    (target / ".brigade").mkdir(parents=True)
+    config.write_config(
+        target,
+        config.Config(version=1, selection=Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])),
+    )
+    rows = {name: detail for _, name, detail in work_mode.doctor_checks(target)}
+    assert "none was found" in rows["safety rails"] and "are active" not in rows["safety rails"]
+
+
+def _git_repo_with_rails_off_settings(tmp_path: Path) -> Path:
+    repo = tmp_path / "repo"
+    (repo / "shared-settings").mkdir(parents=True)
+    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    config.write_config(repo, config.Config(version=1, selection=selection, safety_rails=False))
+    shared = repo / "shared-settings" / "config.json"
+    (repo / config.CONFIG_REL_PATH).replace(shared)
+    (repo / ".brigade").rmdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return repo
+
+
+def test_tracked_brigade_symlink_cannot_disable_rails(tmp_path: Path) -> None:
+    repo = _git_repo_with_rails_off_settings(tmp_path)
+    (repo / ".brigade").symlink_to("shared-settings", target_is_directory=True)
+    subprocess.run(["git", "add", ".brigade", "shared-settings/config.json"], cwd=repo, check=True)
+    assert work_mode.rails_off_requested(repo) is True
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_symlinked_config_file_cannot_disable_rails(tmp_path: Path) -> None:
+    repo = _git_repo_with_rails_off_settings(tmp_path)
+    (repo / ".brigade").mkdir()
+    (repo / config.CONFIG_REL_PATH).symlink_to("../shared-settings/config.json")
+    assert work_mode.rails_off_requested(repo) is True
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_config_resolving_outside_target_cannot_disable_rails(tmp_path: Path) -> None:
+    repo = _git_repo_with_rails_off_settings(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / "shared-settings" / "config.json").replace(outside / "config.json")
+    (repo / ".brigade").symlink_to(outside, target_is_directory=True)
+    assert work_mode.rails_off_requested(repo) is True
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_plain_untracked_config_still_turns_rails_off(tmp_path: Path) -> None:
+    repo = _git_repo_with_rails_off_settings(tmp_path)
+    (repo / ".brigade").mkdir()
+    (repo / "shared-settings" / "config.json").replace(repo / config.CONFIG_REL_PATH)
+    assert work_mode.rails_enabled(repo) is False

@@ -522,12 +522,23 @@ def install_selection(
             f"brigade: wired built-in skills ({', '.join(skills)}) into {', '.join(harnesses)} "
             "so your agent USES Brigade, not just installs it."
         )
-        print("Agent: each work session, follow the `brigade-work` skill -")
-        print("  1. `brigade work brief --target .`                                  (see pending work)")
-        print('  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)')
-        print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
-        print("  4. write a Memory Handoff at the end.")
-        print('  If `brigade outcome rank` ever says "ranking: none", work is not flowing through Brigade.')
+        from .work_mode import resolve_mode
+
+        if resolve_mode(target) == "yolo":
+            print("Agent: yolo work mode - verification is not enforced here -")
+            print("  1. `brigade work brief --target .`                                  (see pending work)")
+            print("  2. run checks directly; `brigade work verify run` still records a receipt when you want one")
+            print("  3. write a Memory Handoff when the work produced durable knowledge (optional).")
+            print("  `brigade work mode set enforced` restores the verification loop.")
+        else:
+            print("Agent: each work session, follow the `brigade-work` skill -")
+            print("  1. `brigade work brief --target .`                                  (see pending work)")
+            print(
+                '  2. `brigade work verify run --target . --command "<test>"`          (verify THROUGH brigade, not raw)'
+            )
+            print("  3. `brigade outcome capture <skill-or-card-id> --run-id latest`     (record the result)")
+            print("  4. write a Memory Handoff at the end.")
+            print('  If `brigade outcome rank` ever says "ranking: none", work is not flowing through Brigade.')
     if "hermes" in selection.harnesses:
         print(
             "brigade: the hermes adapter is validated against a real Hermes install "

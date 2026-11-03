@@ -214,3 +214,15 @@ def test_yolo_mode_allows_raw_verification_and_enforced_still_denies(tmp_path: P
 
     assert json.loads(yolo.stdout) == {"decision": "allow"}
     assert json.loads(enforced.stdout)["decision"] == "deny"
+
+
+def test_yolo_ignored_for_unsupported_config_version(tmp_path: Path):
+    target = tmp_path / "repo"
+    _write_config(target, ["grok"])
+    config_path = target / ".brigade" / "config.json"
+    config = json.loads(config_path.read_text())
+    config_path.write_text(json.dumps({**config, "version": 2, "work": {"mode": "yolo"}}))
+
+    result = _run_hook(tmp_path, _pre_tool_payload(target, "pytest -q"))
+
+    assert json.loads(result.stdout)["decision"] == "deny"

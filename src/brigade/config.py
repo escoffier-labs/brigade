@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -207,7 +208,16 @@ def write_config(target: Path, cfg: Config) -> None:
         work["rails"] = "on" if cfg.safety_rails else "off"
     if work:
         payload["work"] = work
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    # Write a sibling temp file and rename it over the config so a failed write
+    # (full disk, interrupt) never leaves a truncated config behind.
+    destination = Path(os.path.realpath(path))
+    temp = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(payload, indent=2) + "\n")
+        os.replace(temp, destination)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def load_config(target: Path) -> Optional[Config]:
