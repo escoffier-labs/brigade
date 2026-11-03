@@ -87,6 +87,17 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         assert not _denied(_bash("PreToolUse", repos["yolo"], command)), command
 
 
+def test_a_skippable_cd_does_not_move_the_check(repos) -> None:
+    # The cd is skipped when `false` fails, so pytest may run in the enforced start.
+    assert _denied(_bash("PreToolUse", repos["enforced"], f"false && cd {repos['yolo']}; pytest -q"))
+
+
+def test_a_preceding_background_job_does_not_detach_the_cd(repos) -> None:
+    # `&` backgrounds only `sleep`; the cd and pytest run in the foreground.
+    assert not _denied(_bash("PreToolUse", repos["enforced"], f"sleep 1 & cd {repos['yolo']} && pytest -q"))
+    assert _denied(_bash("PreToolUse", repos["yolo"], f"sleep 1 & cd {repos['enforced']} && pytest -q"))
+
+
 def test_post_failure_follows_the_verification_target(repos) -> None:
     command = f"cd {repos['enforced']} && pytest -q"
     result = _bash("PostToolUseFailure", repos["yolo"], command)
@@ -103,6 +114,11 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
         ("bash -c 'cd {yolo} && pytest -q'", ["yolo"]),
         ("cd {yolo} | cat; pytest -q", ["start"]),
         ("cd {yolo} & pytest -q", ["start"]),
+        ("sleep 1 & cd {yolo} && pytest -q", ["yolo"]),
+        ("false && cd {yolo}; pytest -q", [None]),
+        ("false || cd {yolo}; pytest -q", [None]),
+        ("true && cd {yolo} && pytest -q", ["yolo"]),
+        ("true && cd {yolo} && pytest -q; ruff check .", ["yolo", None]),
         ("cd {yolo} || exit 1; pytest -q", [None]),
         ("cd $DIR && pytest -q", [None]),
         ("cd - && pytest -q", [None]),

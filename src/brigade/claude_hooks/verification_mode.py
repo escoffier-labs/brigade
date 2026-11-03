@@ -22,7 +22,11 @@ _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until"
 # conditional, so a command mixing cd with these is not resolved.
 _GROUPING_CHARS = "(){}"
 _UNSTABLE_CD_SEPARATORS = {"||"}
-_DETACHED_CD_SEPARATORS = {"|", "|&", "&"}
+# A cd that only runs when the command before it succeeded or failed.
+_CONDITIONAL_SEPARATORS = {"&&", "||"}
+# A pipe on either side runs the cd in a subshell; a trailing `&` backgrounds it.
+# A preceding `&` only backgrounds the command before it, so the cd still runs here.
+_PIPE_SEPARATORS = {"|", "|&"}
 _MAX_DEPTH = 4
 
 
@@ -47,6 +51,8 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             segments[-1].append(token)
     found: list[Path | None] = []
     effective = cwd
+    # Set after a conditional cd: the directory holds only while the chain continues with &&.
+    conditional_chain = False
     # Judged on token text: `(cd x` and `{ cd x` hide the cd from a segment-head check.
     unplaceable_cd = any(token.lstrip("({") == "cd" for token in tokens) and (
         any(char in token for token in tokens for char in _GROUPING_CHARS)
@@ -60,8 +66,12 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             continue
         before = separators[index - 1] if index > 0 else ""
         after = separators[index] if index < len(separators) else ""
+        if conditional_chain and before != "&&":
+            # The conditional cd may have been skipped, so later commands may run in either directory.
+            effective = None
+            conditional_chain = False
         if Path(stripped[0]).name == "cd":
-            if before in _DETACHED_CD_SEPARATORS or after in _DETACHED_CD_SEPARATORS:
+            if before in _PIPE_SEPARATORS or after in _PIPE_SEPARATORS or after == "&":
                 continue  # runs in a subshell or the background; the shell's cwd is unchanged
             args = stripped[1:]
             if args[:1] == ["--"]:
@@ -70,7 +80,12 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             if effective is not None and len(args) == 1 and args[0] != "-":
                 path = _literal_path(args[0], effective)
             unstable = before in _UNSTABLE_CD_SEPARATORS or after in _UNSTABLE_CD_SEPARATORS
-            effective = None if unstable else path
+            conditional = before in _CONDITIONAL_SEPARATORS
+            if unstable or (conditional and after != "&&"):
+                effective = None
+            else:
+                effective = path
+                conditional_chain = conditional
             continue
         nested = rt._nested_shell_script(stripped)
         if nested is not None:
