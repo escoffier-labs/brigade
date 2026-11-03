@@ -54,12 +54,19 @@ fn config_rejected_by_python_before_listening() {
             "BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED",
         ),
     ] {
-        let out = hub(&args, &env);
-        assert_eq!(out.status.code(), Some(2));
-        assert!(
-            String::from_utf8_lossy(&out.stderr).contains(expected),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
+        for external in [false, true] {
+            let mut args = args.clone();
+            let upstream = format!("http://{}:1", Ipv4Addr::LOCALHOST);
+            if external {
+                args.extend(["--upstream", upstream.as_str()]);
+            }
+            let out = hub(&args, &env);
+            assert_eq!(out.status.code(), Some(2));
+            assert!(
+                String::from_utf8_lossy(&out.stderr).contains(expected),
+                "{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+        }
     }
 }

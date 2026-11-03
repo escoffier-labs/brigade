@@ -16,8 +16,12 @@ against the public bind address. No Rust storage or schema writes exist yet.
 
 `--upstream http://<numeric-loopback>:<port>` instead uses an existing Python
 hub. Its operator must configure that upstream with the same token, database,
-deck, sealing and trust settings. In this mode Python owns startup validation
-and lifecycle. Rust refuses non-loopback origins and never retries requests.
+deck, sealing and trust settings. A short Python validation process constructs
+and closes a server with those settings before Rust binds, without starting
+maintenance or callback delivery. Python may initialize or migrate the specified
+database during validation, as it does during managed startup. The existing
+upstream retains its own lifecycle. Rust refuses non-loopback origins and never
+retries requests.
 A failed upstream connection or response header timeout returns
 `503 {"error":"hub busy","reason":"upstream-unavailable"}`. Native health
 continues to answer the v1 liveness shape while the upstream is down.

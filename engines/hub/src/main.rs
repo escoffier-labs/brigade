@@ -297,6 +297,18 @@ async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body
 }
 async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Option<Child>), String> {
     if let Some(url) = &config.upstream {
+        let status =
+            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+                .arg("-c")
+                .arg(include_str!("../validate.py"))
+                .args(config.python_args(0).into_iter().skip(2))
+                .kill_on_drop(true)
+                .status()
+                .await
+                .map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err("Python upstream refused startup configuration".into());
+        }
         return Ok((url.trim_end_matches('/').into(), None));
     }
     let probe = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
