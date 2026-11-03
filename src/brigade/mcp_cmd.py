@@ -1434,6 +1434,16 @@ def build_sync_plan(
                     gate_declined = True
                     notes.append("user-scoped stdio destinations skipped: not confirmed at the prompt")
 
+    if gated and renames:
+        # A refused stdio write installs no replacement, so the rename cannot complete:
+        # keep the catalog key and every legacy projection, and plan a plain sync.
+        notes.extend(
+            f"kept server '{old}': rename to '{new}' needs the user-scoped stdio write, which was not acknowledged"
+            for old, new in sorted(renames.items())
+        )
+        renames = {}
+        planning_servers, leftovers, planned = _plan_all(renames, {})
+        servers = planning_servers
     all_items: list[dict[str, Any]] = []
     mutations: list[Any] = []
     native_write_paths: list[Path] = []

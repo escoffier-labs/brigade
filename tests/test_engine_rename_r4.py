@@ -392,6 +392,32 @@ def test_mcp_sync_rename_keeps_working_legacy_entry_when_canonical_key_is_foreig
     assert any(f"kept server '{LEGACY_GRAPH}'" in note and "claude" in note for note in payload["notes"])
 
 
+def test_mcp_sync_rename_is_held_when_the_user_scoped_stdio_write_is_refused(tmp_path, monkeypatch, capsys):
+    set_home(monkeypatch, tmp_path / "home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _catalog_with_legacy_graph(repo)
+    catalog = (repo / mcp_cmd.CANONICAL_REL).read_text()
+    capsys.readouterr()
+
+    rc = mcp_cmd.sync(
+        target=repo,
+        harness="cursor",
+        user_scope=True,
+        write=True,
+        rename_legacy_servers=True,
+        json_output=True,
+    )
+    payload = json.loads(capsys.readouterr().out)
+
+    # Non-interactive and unacknowledged: nothing is written, and the catalog keeps its key.
+    assert rc == 2
+    assert (repo / mcp_cmd.CANONICAL_REL).read_text() == catalog
+    assert set(mcp_cmd.load_canonical(repo)[0]) == {LEGACY_GRAPH}
+    assert not (tmp_path / "home" / ".cursor" / "mcp.json").exists()
+    assert any(f"kept server '{LEGACY_GRAPH}'" in note and "not acknowledged" in note for note in payload["notes"])
+
+
 def test_mcp_sync_rename_one_harness_at_a_time_ends_with_canonical_only(tmp_path, capsys):
     _catalog_with_legacy_graph(tmp_path)
     for harness_name in ("claude", "cursor"):
