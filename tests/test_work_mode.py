@@ -17,6 +17,7 @@ from brigade.claude_hooks import classify, install_cmd, runtime
 from brigade.install import install_selection
 from brigade.repos_cmd import adoption
 from brigade.selection import Selection
+from tests._home import set_home
 
 SRC = Path(brigade.__file__).resolve().parents[1]
 PRE_PUSH = Path(brigade.__file__).resolve().parent / "templates" / "hooks" / "pre-push"
@@ -439,7 +440,7 @@ def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path, monkey
     repo.mkdir()
     env = _git_env(tmp_path, shim_dir)
     # The hook's `brigade` and this process must read the same per-user rails record.
-    monkeypatch.setenv("HOME", env["HOME"])
+    set_home(monkeypatch, env["HOME"])
     monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
 
     def git(*args: str) -> str:
@@ -731,7 +732,7 @@ def test_unreadable_user_record_keeps_rails_on(tmp_path: Path, content: str) -> 
 def test_user_record_inside_the_target_is_ignored(tmp_path: Path, monkeypatch) -> None:
     repo = _wired(tmp_path)
     monkeypatch.setenv("XDG_CONFIG_HOME", str(repo / "config-home"))
-    monkeypatch.setenv("HOME", str(repo))
+    set_home(monkeypatch, repo)
     record = work_mode.rails_record_path()
     assert record is not None
     record.parent.mkdir(parents=True)
