@@ -26,9 +26,9 @@ def test_parse_preference_rejects_secret_material() -> None:
 
 def test_apply_to_roster_uses_local_chef_and_ignores_missing() -> None:
     roster = _FakeRoster(orchestrator="chef", agents={"chef": object(), "cursor_grok": object()})
-    pinned = run_preference.RunPreference(chef="cursor_grok", impl="cursor_grok")
+    pinned = run_preference.RunPreference(orchestrator="cursor_grok", impl="cursor_grok")
     assert run_preference.apply_to_roster(roster, pinned).orchestrator == "cursor_grok"
-    missing = run_preference.RunPreference(chef="absent")
+    missing = run_preference.RunPreference(orchestrator="absent")
     assert run_preference.apply_to_roster(roster, missing) is roster
 
 
@@ -148,7 +148,7 @@ def test_print_preference_sanitizes_control_characters(capsys) -> None:
     out = capsys.readouterr().out
     assert "impl: cursor_grok" in out
     assert "review: -" in out
-    assert "chef: -" in out
+    assert "orchestrator: -" in out
     assert "\x1b" not in out
     assert "\\x1b[31mred" in out
 
@@ -157,7 +157,7 @@ def test_role_fields_parse_round_trip_and_prefix(tmp_path) -> None:
     raw = {
         "impl": "agy_flash",
         "review": "claude_standby",
-        "chef": "chef",
+        "orchestrator": "chef",
         "research": "researcher",
         "security": "daybreak",
         "scout": "cursor_scout",
@@ -168,14 +168,14 @@ def test_role_fields_parse_round_trip_and_prefix(tmp_path) -> None:
     assert pref.security == "daybreak"
     assert pref.scout == "cursor_scout"
     assert pref.payload() == raw
-    assert run_preference.ROLE_FIELDS == ("impl", "review", "chef", "research", "security", "scout")
+    assert run_preference.ROLE_FIELDS == ("impl", "review", "orchestrator", "research", "security", "scout")
     run_preference.write_cached(pref, tmp_path)
     assert run_preference.load_cached(tmp_path) == pref
     prefix = pref.planner_prefix()
     assert "- default research: researcher" in prefix
     assert "- default security: daybreak" in prefix
     assert "- default scout: cursor_scout" in prefix
-    assert prefix.index("default chef") < prefix.index("default research")
+    assert prefix.index("default orchestrator") < prefix.index("default research")
 
 
 def test_role_fields_are_seat_names_and_never_dispatch() -> None:
@@ -262,7 +262,7 @@ def test_fleet_preference_cli_sets_and_prints_roles(tmp_path, monkeypatch, capsy
 
 
 @pytest.mark.parametrize("flag", ["--orchestrator", "--chef"])
-def test_fleet_preference_cli_orchestrator_alias_keeps_chef_payload(flag, tmp_path, monkeypatch, capsys) -> None:
+def test_fleet_preference_cli_orchestrator_alias_writes_canonical_payload(flag, tmp_path, monkeypatch, capsys) -> None:
     import json
 
     from brigade import cli
@@ -279,12 +279,12 @@ def test_fleet_preference_cli_orchestrator_alias_keeps_chef_payload(flag, tmp_pa
     assert cli.main(["fleet", "preference", "set", flag, "chef", "--json"]) == 0
 
     output = json.loads(capsys.readouterr().out)
-    assert submitted == [{"chef": "chef"}]
+    assert submitted == [{"orchestrator": "chef"}]
     assert output == {
         "preference": {
             "impl": None,
             "review": None,
-            "chef": "chef",
+            "orchestrator": "chef",
             "research": None,
             "security": None,
             "scout": None,
@@ -294,15 +294,15 @@ def test_fleet_preference_cli_orchestrator_alias_keeps_chef_payload(flag, tmp_pa
     }
     assert cli.main(["fleet", "preference", "set", flag, "chef"]) == 0
     text_output = capsys.readouterr().out
-    assert "chef: chef" in text_output
-    assert "orchestrator:" not in text_output
-    assert submitted == [{"chef": "chef"}, {"chef": "chef"}]
+    assert "orchestrator: chef" in text_output
+    assert "chef:" not in text_output
+    assert submitted == [{"orchestrator": "chef"}, {"orchestrator": "chef"}]
     cached = run_preference.load_cached()
-    assert cached.payload() == {"chef": "chef"}
-    assert "orchestrator" not in cached.payload()
+    assert cached.payload() == {"orchestrator": "chef"}
+    assert "chef" not in cached.payload()
     cache_text = run_preference.cache_path().read_text(encoding="utf-8")
-    assert "chef =" in cache_text
-    assert "orchestrator" not in cache_text
+    assert "orchestrator =" in cache_text
+    assert "chef =" not in cache_text
 
 
 @pytest.mark.parametrize(
@@ -324,7 +324,7 @@ def test_fleet_preference_orchestrator_alias_last_value_wins(arguments, expected
     monkeypatch.setattr("brigade.fleet_client.put_run_preference", fake_put)
     assert cli.main(["fleet", "preference", "set", *arguments]) == 0
     capsys.readouterr()
-    assert submitted == [{"chef": expected}]
+    assert submitted == [{"orchestrator": expected}]
 
 
 @pytest.mark.parametrize("flag", ["--orchestrator", "--chef"])
@@ -343,7 +343,7 @@ def test_fleet_preference_orchestrator_alias_rejects_invalid_or_missing_values(f
         cli.main(["fleet", "preference", "set", flag])
     assert missing.value.code == 2
     missing_error = capsys.readouterr().err
-    assert "argument --orchestrator/--chef: expected one argument" in missing_error
+    assert f"argument {flag}: expected one argument" in missing_error
     assert submitted == []
 
 
@@ -363,7 +363,8 @@ def test_fleet_preference_set_help_lists_neutral_aliases(capsys):
         cli.main(["fleet", "preference", "set", "--help"])
     assert result.value.code == 0
     help_text = capsys.readouterr().out
-    assert "--orchestrator SEAT, --chef SEAT" in help_text
+    assert "--orchestrator SEAT" in help_text
+    assert "--chef" not in help_text
     assert "Default orchestrator seat name." in help_text
 
 

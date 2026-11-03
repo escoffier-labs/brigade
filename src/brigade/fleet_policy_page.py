@@ -97,7 +97,7 @@ ROLE_LABELS: dict[str, str] = {
     "research": "Researcher",
     "scout": "Scout",
     "security": "Security reviewer",
-    "chef": "Orchestrator",
+    "orchestrator": "Orchestrator",
     "admission_default": "Admission fallback seat (legacy)",
 }
 # The omitted-seat admission fallback. It is a role name in its own right and
@@ -539,7 +539,7 @@ def load_view(
 ) -> PolicyView:
     """Project the current policy. Inventory is the injected snapshot or the SQL store."""
     current = fleet_hub_policy.current_policy(conn)
-    document = current["document"]
+    document = fleet_policy.canonical_role_document(current["document"])
     snapshot = adapt_inventory(inventory) if inventory is not None else load_server_inventory(conn, document=document)
     report = fleet_policy.validate_inventory(document, _inventory_mapping(document, snapshot))
     inventory_rows = {row["seat"]: row for row in report["seats"]}

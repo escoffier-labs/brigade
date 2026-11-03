@@ -840,6 +840,20 @@ def parse_document(raw: Any) -> dict[str, Any]:
     return document
 
 
+def canonical_role_document(document: Mapping[str, Any]) -> dict[str, Any]:
+    """Normalize role aliases without rewriting immutable v1 revisions or digests."""
+    parsed = parse_document(document)
+    trees = [parsed["defaults"]]
+    trees.extend(row["default_patches"] for row in parsed["consumers"].values())
+    trees.extend(row["patches"] for row in parsed["repositories"].values())
+    for tree in trees:
+        roles = tree.get("roles", {})
+        if "chef" in roles:
+            legacy = roles.pop("chef")
+            roles.setdefault("orchestrator", legacy)
+    return parsed
+
+
 def document_digest(document: Mapping[str, Any]) -> str:
     """``sha256:`` digest over the canonical form of a parsed document."""
     parsed = parse_document(document)
@@ -885,7 +899,10 @@ def _flatten_settings(settings: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(body, Mapping):
             continue
         for key in sorted(body):
-            flat[f"{section}.{key}"] = body[key]
+            role = "orchestrator" if section == "roles" and key == "chef" else key
+            if key == "chef" and "orchestrator" in body:
+                continue
+            flat[f"{section}.{role}"] = body[key]
     return flat
 
 

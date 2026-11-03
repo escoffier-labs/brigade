@@ -22,7 +22,7 @@ def test_served_overview_routing_matches_live_routing(tmp_path, monkeypatch, sta
         conn = fleet_hub.open_db(hub.db)
         try:
             doc = _document()
-            doc["defaults"]["roles"].update(chef="seat-alpha", research="seat-beta")
+            doc["defaults"]["roles"].update(orchestrator="seat-alpha", research="seat-beta")
             _seed(conn, doc)
             if conflict:
                 conn.execute(
@@ -30,7 +30,7 @@ def test_served_overview_routing_matches_live_routing(tmp_path, monkeypatch, sta
                     "VALUES ('seat-alpha','legacy-provider','legacy-model','low',1,'fixture')"
                 )
                 conn.execute(
-                    "INSERT INTO run_preference (id,impl,review,chef,research,updated_at) VALUES (1,'seat-alpha','seat-alpha','seat-alpha','seat-alpha','fixture') ON CONFLICT(id) DO UPDATE SET impl='seat-alpha',review='seat-alpha',chef='seat-alpha',research='seat-alpha'"
+                    "INSERT INTO run_preference (id,impl,review,orchestrator,research,updated_at) VALUES (1,'seat-alpha','seat-alpha','seat-alpha','seat-alpha','fixture') ON CONFLICT(id) DO UPDATE SET impl='seat-alpha',review='seat-alpha',orchestrator='seat-alpha',research='seat-alpha'"
                 )
                 conn.commit()
             schema = list(conn.execute("SELECT name,sql FROM sqlite_master ORDER BY name"))
@@ -52,7 +52,7 @@ def test_served_overview_routing_matches_live_routing(tmp_path, monkeypatch, sta
             assert [attrs["data-routing-role"] for _, attrs in cells] == [
                 "impl",
                 "review",
-                "chef",
+                "orchestrator",
                 "research",
                 "security",
                 "scout",
@@ -65,7 +65,7 @@ def test_served_overview_routing_matches_live_routing(tmp_path, monkeypatch, sta
                 title = {
                     "impl": "Worker",
                     "review": "Reviewer",
-                    "chef": "Orchestrator",
+                    "orchestrator": "Orchestrator",
                     "research": "Researcher",
                     "security": "Security reviewer",
                     "scout": "Scout",

@@ -332,7 +332,7 @@ def test_legacy_save_keeps_retired_assignments_until_the_operator_changes_them(t
         conn = fleet_hub.open_db(db)
         try:
             preference = fleet_hub_preference.get_run_preference(conn)
-            assert (preference["impl"], preference["review"], preference["chef"]) == ("coder", "coder", "coder")
+            assert (preference["impl"], preference["review"], preference["orchestrator"]) == ("coder", "coder", "coder")
             assert preference["scout"] == "daybreak"
             defaults = dict(conn.execute("SELECT consumer, seat FROM model_consumer_defaults").fetchall())
             assert defaults == {"brigade-run": "coder", "t3-fleet": "coder"}
@@ -533,10 +533,10 @@ def test_preview_editor_resubmit_keeps_retired_roles_and_both_admission_defaults
         editor = _editor_fields(previewed, '<select name="field.role_impl"', 'name="scope" value="defaults"')
         assert editor["field.role_impl"] == fleet_hub_roster_page.KEEP_CURRENT
         assert re.search(r'<option value="@keep-current" selected>seat-alpha \(retired', previewed)
-        editor["field.role_chef"] = "seat-beta"
+        editor["field.role_orchestrator"] = "seat-beta"
         _preview_and_save(hub, cookie, editor)
         roles = current()["defaults"]["roles"]
-        assert (roles["impl"], roles["review"], roles["chef"]) == ("seat-alpha", "seat-gamma", "seat-beta")
+        assert (roles["impl"], roles["review"], roles["orchestrator"]) == ("seat-alpha", "seat-gamma", "seat-beta")
 
         # Both consumers: an edited admission editor still keeps its retired default.
         for consumer in fleet_hub_roster_page.CONSUMERS:
@@ -715,7 +715,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         form["cloud.claude"] = "1"
         form["role.impl"] = "agy_flash"
         form["role.review"] = ""
-        form["role.chef"] = ""
+        form["role.orchestrator"] = ""
         form["role.security"] = "daybreak"
         form["default.brigade-run"] = "agy_flash"
         form["notes"] = "cursor via Other Models only"
@@ -881,7 +881,7 @@ def test_roles_keep_their_keys_and_gain_labels(tmp_path):
             assert f'name="role.{role}"' in page
             assert f"({role})" in page
         assert "Worker (impl)" in page
-        assert "Orchestrator (chef)" in page
+        assert "Orchestrator (orchestrator)" in page
 
 
 def test_staged_policy_is_labelled_and_legacy_writes_still_work(tmp_path):

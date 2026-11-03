@@ -38,7 +38,7 @@ It is meant for people running real tools, real docs, and real automation across
 
 The cookbook documents the broader setup. This package provides the local workspace wiring.
 
-The preferred `--orchestrator` spelling for Fleet preferences is available on main for the next release. `--chef` remains an alias, and persisted/JSON `chef` fields are unchanged. New `roster init` output and the `minimal-single-cli`, `review-heavy` and `budget-open-weight` presets name the planner seat `orchestrator` on main; their 0.30.0 equivalents use `chef`. Existing rosters using either name remain valid. Command examples here retain `brigade`, which the documented installation supplies.
+The preferred `--orchestrator` spelling for Fleet preferences is available on main for the next release. `--chef` is a hidden deprecated alias for one release. Preference caches, Hub storage and new policy revisions use `orchestrator`; v1 preference responses retain `chef` for old clients. New `roster init` output and the `minimal-single-cli`, `review-heavy` and `budget-open-weight` presets name the planner seat `orchestrator` on main; their 0.30.0 equivalents use `chef`. Existing rosters using either name remain valid. Command examples here retain `brigade`, which the documented installation supplies.
 
 ## Plain-English glossary
 

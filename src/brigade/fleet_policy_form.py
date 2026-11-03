@@ -18,7 +18,7 @@ from . import fleet_policy, fleet_policy_pr_rules
 _MAX_FIELDS = 1024
 SCOPES = ("defaults", "seat", "consumer", "repository", "pr_rules", "rollback")
 ACTIONS = ("preview", "save")
-RUNTIME_ROLES: tuple[str, ...] = ("impl", "review", "research", "scout", "security", "chef")
+RUNTIME_ROLES: tuple[str, ...] = ("impl", "review", "research", "scout", "security", "orchestrator")
 ADMISSION_ROLE = "admission_default"
 POLICY_ROLES: tuple[str, ...] = (*RUNTIME_ROLES, ADMISSION_ROLE)
 SEAT_TEXT_FIELDS = ("provider", "model", "effort", "cost_class", "retention", "quota_pool", "notes")
@@ -329,7 +329,7 @@ def _pr_rules_document(document: dict[str, Any], submission: Submission) -> dict
 
 def build_document(current: Mapping[str, Any], submission: Submission) -> dict[str, Any]:
     """One scoped edit applied to the current document. Never a wholesale copy-in."""
-    document = json.loads(json.dumps(fleet_policy.parse_document(current)))
+    document = json.loads(json.dumps(fleet_policy.canonical_role_document(current)))
     if submission.scope == "defaults":
         document["defaults"] = _merge_patch(document["defaults"], submission.fields, "")
         return document

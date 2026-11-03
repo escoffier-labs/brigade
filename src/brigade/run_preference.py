@@ -19,7 +19,7 @@ from . import toml_compat
 SCHEMA = "brigade.run_preference.v1"
 CACHE_REL_PATH = Path(".brigade") / "run-preference.toml"
 SEAT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
-ROLE_FIELDS = ("impl", "review", "chef", "research", "security", "scout")
+ROLE_FIELDS = ("impl", "review", "orchestrator", "research", "security", "scout")
 ALLOWED_FIELDS = (*ROLE_FIELDS, "notes")
 _SECRET_KEY_RE = re.compile(
     r"(token|secret|password|passwd|api[_-]?key|credential|env|path|home)",
@@ -39,7 +39,7 @@ class RunPreferenceError(ValueError):
 class RunPreference:
     impl: str | None = None
     review: str | None = None
-    chef: str | None = None
+    orchestrator: str | None = None
     research: str | None = None
     security: str | None = None
     scout: str | None = None
@@ -81,6 +81,10 @@ def parse_preference(raw: Any) -> RunPreference:
         return RunPreference()
     if not isinstance(raw, dict):
         raise RunPreferenceError("preference must be a JSON/TOML object")
+    raw = dict(raw)
+    legacy = raw.pop("chef", None)
+    if "orchestrator" not in raw and legacy is not None:
+        raw["orchestrator"] = legacy
     for key in raw:
         if _SECRET_KEY_RE.search(str(key)):
             raise RunPreferenceError("preference must not carry secret or path fields")
@@ -137,13 +141,13 @@ def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
 
 
 def apply_to_roster(roster: Any, preference: RunPreference) -> Any:
-    """Overlay default chef when that seat exists locally. Missing seats are ignored."""
-    chef = preference.chef
-    if not chef or chef not in getattr(roster, "agents", {}):
+    """Overlay default orchestrator when that seat exists locally. Missing seats are ignored."""
+    orchestrator = preference.orchestrator
+    if not orchestrator or orchestrator not in getattr(roster, "agents", {}):
         return roster
-    if chef == roster.orchestrator:
+    if orchestrator == roster.orchestrator:
         return roster
-    return replace(roster, orchestrator=chef)
+    return replace(roster, orchestrator=orchestrator)
 
 
 def apply_to_task(task: str, preference: RunPreference, *, worker: str | None) -> str:

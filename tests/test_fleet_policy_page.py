@@ -669,7 +669,7 @@ def test_runtime_role_keys_and_friendly_labels_both_render(conn):
     _seed(conn)
     view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory())
     page = _render(view)
-    for key in ("impl", "review", "research", "scout", "security", "chef"):
+    for key in ("impl", "review", "research", "scout", "security", "orchestrator"):
         assert f"role.{key}" in page or f'value="{key}"' in page or f">{key}<" in page
     assert "Worker" in page
     assert "Orchestrator" in page

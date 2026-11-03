@@ -487,11 +487,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pref_set.add_argument("--review", default=None, help="Default review seat name.")
     p_pref_set.add_argument(
         "--orchestrator",
-        "--chef",
-        dest="chef",
+        dest="orchestrator",
         default=None,
         metavar="SEAT",
         help="Default orchestrator seat name.",
+    )
+
+    class LegacyOrchestratorAction(argparse.Action):
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: Any,
+            option_string: str | None = None,
+        ) -> None:
+            print("warning: --chef is deprecated; use --orchestrator", file=sys.stderr)
+            setattr(namespace, self.dest, values)
+
+    p_pref_set.add_argument(
+        "--chef",
+        dest="orchestrator",
+        action=LegacyOrchestratorAction,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     p_pref_set.add_argument("--research", default=None, help="Default read-only research seat name.")
     p_pref_set.add_argument("--security", default=None, help="Default security review seat name.")
@@ -773,7 +791,8 @@ def _preference_payload(preference: object) -> dict[str, str | None]:
     if isinstance(preference, run_preference.RunPreference):
         return {field: getattr(preference, field) for field in run_preference.ALLOWED_FIELDS}
     if isinstance(preference, dict):
-        return {field: preference.get(field) for field in run_preference.ALLOWED_FIELDS}
+        parsed = run_preference.parse_preference(preference)
+        return {field: getattr(parsed, field) for field in run_preference.ALLOWED_FIELDS}
     return {field: None for field in run_preference.ALLOWED_FIELDS}
 
 
