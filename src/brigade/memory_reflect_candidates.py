@@ -165,6 +165,14 @@ def _evidence_id(ref: str) -> str:
     return f"miseledger:{bundle}" if bundle is not None else Path(cleaned).as_posix()
 
 
+def evidence_bundle_path(ref: str) -> tuple[bool, Path | None]:
+    """Return whether ref names an evidence bundle, and its cache path when the ID is valid."""
+    bundle = memory_cmd._miseledger_evidence_id(ref)
+    if bundle is None:
+        return False, None
+    return True, memory_cmd._miseledger_evidence_path(bundle)
+
+
 def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str, str]:
     result: dict[str, str] = {}
     if len(refs) > io.MAX_LIST:
@@ -173,9 +181,8 @@ def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str
         if not ref or len(ref) > 1024 or any(ord(c) < 32 for c in ref):
             continue
         try:
-            bundle = memory_cmd._miseledger_evidence_id(ref)
-            if bundle is not None:
-                path = memory_cmd._miseledger_evidence_path(bundle)
+            is_bundle, path = evidence_bundle_path(ref)
+            if is_bundle:
                 source = "evidence-bundle"
             else:
                 rel = io.relative(ref)
@@ -370,6 +377,40 @@ def _pending_rows(card: Card) -> list[dict[str, Any]]:
     ]
 
 
+def card_window(card: Card) -> tuple[Card, list[str], list[str]]:
+    """Normalize row identities and select the newest distinct evidence window.
+
+    Select before validating so invalid or repeated rows cannot expand the
+    newest-64 window into unbounded receipt/manifest/card IO.
+    """
+    refs = sorted({_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)})
+    card = replace(card, rows=[{**row, "evidence_id": _evidence_id(row["evidence_id"])} for row in card.rows])
+    newest = dict.fromkeys(
+        row["evidence_id"]
+        for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+    )
+    return card, refs, list(newest)[: io.MAX_LIST]
+
+
+def live_evidence(
+    target: Path, card: Card, refs: list[str], selected: list[str]
+) -> tuple[Card, list[str], set[str], list[str], list[str]]:
+    """Classify a windowed card's current evidence the way every candidate sees it.
+
+    Returns the card without invalid outcome rows, its valid citations, the
+    invalid IDs, and the pending contrary and review-only IDs. Current valid
+    citations are neither contrary nor review-only. None of these IDs is proof.
+    """
+    invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
+    invalid |= {row["evidence_id"] for row in card.rows if row["kind"] == "negative-outcome"}
+    refs = [ref for ref in refs if ref not in invalid]
+    card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
+    pending = _pending_rows(card)
+    contrary = sorted({row["evidence_id"] for row in pending if row["kind"] == "opposite-polarity"} - set(refs))
+    near_match = sorted({row["evidence_id"] for row in pending if row["kind"] == "near-match"} - set(refs))
+    return card, refs, invalid, contrary, near_match
+
+
 def _grouping_text(text: str) -> str:
     """Ignore addressable claim suffixes only for reflection equality.
 
@@ -443,15 +484,7 @@ def generate(
     roots = _evidence_roots(target)
     sources: dict[str, str] = {}
     for card in cards:
-        refs = sorted({_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)})
-        card = replace(card, rows=[{**row, "evidence_id": _evidence_id(row["evidence_id"])} for row in card.rows])
-        # Select before validating so invalid or repeated rows cannot expand the
-        # newest-64 window into unbounded receipt/manifest/card IO.
-        newest = dict.fromkeys(
-            row["evidence_id"]
-            for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
-        )
-        selected = list(newest)[: io.MAX_LIST]
+        card, refs, selected = card_window(card)
         bindings, unresolved = _negative_outcome_bindings(target, card, set(selected))
         negative_sources = _resolved(target, sorted(bindings), roots)
         # A receipt can disappear after binding validation. Keep the blocker,
@@ -472,11 +505,8 @@ def generate(
                     summary="Failed effectiveness verification requires human review. Claim truth is unadjudicated.",
                 )
             )
-        invalid = _invalid_outcome_ids(target, card, set(selected) | set(refs))
-        invalid |= {row["evidence_id"] for row in card.rows if row["kind"] == "negative-outcome"}
         retained_refs = refs
-        refs = [ref for ref in refs if ref not in invalid]
-        card = replace(card, rows=[row for row in card.rows if row["evidence_id"] not in invalid])
+        card, refs, invalid, contrary, near_match = live_evidence(target, card, refs, selected)
         current = _resolved(target, refs, roots)
         sources.update(current)
         resolved_rows = _resolved(target, [ref for ref in selected if ref not in invalid], roots)
@@ -487,15 +517,7 @@ def generate(
         stale_ids = (
             sorted({_evidence_id(ref) for ref in findings[0]["evidence_references"]} & row_ids) if findings else []
         )
-        pending_rows = _pending_rows(card)
-        contrary = sorted(
-            {row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} - set(refs)
-        )
-        review = sorted(
-            ({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
-            | set(negative_ids)
-            | unresolved
-        )
+        review = sorted(set(near_match) | set(negative_ids) | unresolved)
         blockers = sorted((set(contrary) | set(review)) - unresolved)
         for start in range(0, len(blockers), io.MAX_LIST):
             sources.update(_resolved(target, blockers[start : start + io.MAX_LIST], roots))

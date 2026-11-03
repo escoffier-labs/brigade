@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
 - Guard can use an optional local `brigade-guard` PCRE2 JIT binary for large ASCII inputs, with Python regex fallback and unchanged policy decisions.
 
 - Add a `grokbot-memory` connector pack for Grok Bot on the Dot connector code. It registers only `memory_search`, `memory_card` and `handoff_write`, has its own runtime schema and Hub principal `agent:grokbot-memory`, and runs no inbox poll. See `docs/grokbot-memory-connector.md`.
