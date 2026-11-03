@@ -256,7 +256,10 @@ def set_rails(target: Path, state: str) -> str | None:
     key = repository_key(target)
     if state == "off":
         entries[key] = {"set_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    elif entries.pop(key, None) is None:
+    elif key in entries:
+        # Membership, not the value, turns rails off, so clear any entry, null included.
+        del entries[key]
+    else:
         return None
     try:
         localio.write_json(record, {"version": RAILS_RECORD_VERSION, "rails_off": entries})

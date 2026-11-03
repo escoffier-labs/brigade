@@ -740,6 +740,17 @@ def test_user_record_inside_the_target_is_ignored(tmp_path: Path, monkeypatch) -
     assert work_mode.set_rails(repo, "off") is not None
 
 
+def test_rails_on_clears_an_entry_whose_value_is_null(tmp_path: Path) -> None:
+    repo = _wired(tmp_path)
+    assert work_mode.set_rails(repo, "off") is None
+    record = work_mode.rails_record_path()
+    assert record is not None
+    record.write_text(json.dumps({"version": 1, "rails_off": {work_mode.repository_key(repo): None}}), encoding="utf-8")
+    assert work_mode.rails_enabled(repo) is False
+    assert work_mode.set_rails(repo, "on") is None
+    assert work_mode.rails_enabled(repo) is True
+
+
 def test_user_record_inside_an_enclosing_checkout_is_ignored(tmp_path: Path, monkeypatch) -> None:
     outer = tmp_path / "outer"
     outer.mkdir()
