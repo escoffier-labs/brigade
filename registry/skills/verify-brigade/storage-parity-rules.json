@@ -1,0 +1,81 @@
+{
+ "comment": "Storage parity rules: columns holding random values (mapped to first-seen order per id space) and JSON text columns with the encoding Python writes. A rule may be an object with a space and a match pattern, so only values the hub generated are mapped. Every other column compares exactly. Owners are traversed first, so each placeholder is numbered in the table that defines it. The query-binding column is derived, not random: storage_parity.paging_bindings recomputes it before the placeholder is applied, and a Rust comparator must do the same. Read by storage_parity.py; the Rust comparator reads the same file.",
+ "owners": [
+  "nodes",
+  "fleet_message_principals",
+  "fleet_event_subscriptions",
+  "fleet_events",
+  "fleet_read_snapshots",
+  "fleet_questions"
+ ],
+ "random": {
+  "fleet_event_attempts": {
+   "subscription_id": "subscription"
+  },
+  "fleet_event_deliveries": {
+   "subscription_id": "subscription"
+  },
+  "fleet_event_subscriptions": {
+   "id": "subscription",
+   "generation": "subscription-generation"
+  },
+  "fleet_events": {
+   "event_id": "event"
+  },
+  "fleet_message_principals": {
+   "token_hash": "token-digest",
+   "enrollment_id": "enrollment",
+   "authorization_enrollment_epoch": "principal-epoch",
+   "grant_epoch": "grant-epoch"
+  },
+  "fleet_messages": {
+   "client_id": {
+    "space": "client-id",
+    "match": "[0-9a-f]{32}"
+   }
+  },
+  "fleet_questions": {
+   "generation": "token-digest",
+   "question_id": "question"
+  },
+  "fleet_read_snapshot_groups": {
+   "snapshot_id": "snapshot"
+  },
+  "fleet_read_snapshot_rows": {
+   "snapshot_id": "snapshot"
+  },
+  "fleet_read_snapshots": {
+   "snapshot_id": "snapshot",
+   "query_hash": "query-binding"
+  },
+  "nodes": {
+   "token_sha256": "token-digest"
+  }
+ },
+ "json": {
+  "fleet_audit_log": {
+   "detail": "canonical"
+  },
+  "fleet_event_subscriptions": {
+   "arguments": "canonical"
+  },
+  "fleet_events": {
+   "data": "compact"
+  },
+  "fleet_message_keys": {
+   "record": "python-default"
+  },
+  "fleet_messages": {
+   "envelope": "canonical"
+  },
+  "fleet_policy_revisions": {
+   "document": "canonical"
+  },
+  "fleet_read_snapshot_rows": {
+   "payload": "compact"
+  },
+  "interactive_sessions": {
+   "dirty_paths_json": "python-default-unicode"
+  }
+ }
+}
