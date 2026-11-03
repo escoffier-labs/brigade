@@ -1,3 +1,11 @@
+---
+status: active
+proof: drive
+surfaces: guard scan, guard redact
+drive: guard-parity
+last-drive: 2026-11-03 31d5c549d
+---
+
 # Guard scan and redact parity
 
 `brigade guard scan` and `brigade guard redact` are the content guard's two
@@ -19,6 +27,9 @@ for any engine that keeps the CLI contract.
   instead.
 - Both exit 1 when any finding's action is `block`, else 0. The drive's policy
   sets every category to `redact`, so a healthy run exits 0 on all four calls.
+- Not driven: `--baseline`, `--no-allow-comments`, `--opf`, `--opf-bin`,
+  `--opf-device`, `--scan-frontmatter`, and `--skip-code-blocks`. The goldens
+  hold for the default options only.
 - The policy's `rules` map overrides a rule's action. `example-phone-555`
   carries a built-in `warn` override, so the parity policy sets it to `redact`
   explicitly.
@@ -78,7 +89,8 @@ check: `scan findings` with `missing` and `unexpected` rows, `scan match`,
 `redact stdout`, `redact stdin stdout`, `redact --in-place bytes`, or
 `<call> exit code`.
 
-Observed on main `b18e6f51d`: exit 0, `"mismatches": []`, 11 findings. The
+Observed on main `b18e6f51d`, and again on `31d5c549d`: exit 0,
+`"mismatches": []`, 11 findings. The
 goldens were pasted from that run and checked by hand against each rule.
 
 ### What the fixture covers

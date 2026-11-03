@@ -1,4 +1,21 @@
+---
+status: paused
+proof: drive
+surfaces: run cloud grokbot feed, run cloud grokbot status
+drive: grokbot-feed, grokbot-status
+last-drive: 2026-11-03 31d5c549d
+reason: grokbot status projects the queue through the Fleet Hub when the host has a hub URL, so its answer there is a hub answer; feed validation without --apply is local
+unpause: pending: a decision on driving Grok Bot verbs against a hub-free home or a pinned Fleet Hub contract
+---
+
 # Grok Bot job queue and feed
+
+> **Paused.** `grokbot status` projects the queue through the Fleet Hub
+> whenever the host has a hub URL configured, so on such a host its answer is
+> the hub's. `grokbot-feed` without `--apply` reads only the target and
+> stays local. The header says what unpauses it. The observations
+> below were last checked on main `31d5c549d`; do not cite them as current
+> proof until the status is `active` again.
 
 The private local job queue that Grok Bot workers lease from. Work only enters
 it through an explicitly approved manifest - the feed never invents jobs - and
@@ -57,10 +74,15 @@ Observed end state on a fresh target:
   never passes `--apply`, `$TARGET/.brigade/` gains no queue state - diff the
   directory before and after to confirm.
 - `grokbot-status` -> helper exit 3, `{"ok": false, "reason": "auth-failed"}`,
-  because a fresh target has no hub authority. That is the honest reading: the
-  command parsed, resolved the target, and refused to project a queue it cannot
-  authenticate to. A green `status` here would mean the helper picked up
-  someone else's credentials.
+  on main `31d5c549d` and on a host with a hub URL configured. The queue
+  authority there is the hub, and the fresh target holds no hub credential.
+  The same `status` call run straight against the CLI with a throwaway `HOME`
+  (no fleet config) printed `{"jobs": []}` and exited 0: with no hub URL, the
+  queue is local. That run bypassed the helper, so it is a hand check, not a
+  recorded drive. On the hub-configured host, `auth-failed` is the honest
+  reading: the command parsed, resolved the target, and refused to project a
+  queue it cannot authenticate to. A green `status` there would mean the call
+  picked up some other credential.
 
 To prove a validation failure is caught, break one field. `"ownership_paths":
 ["docs/"]` (trailing slash) returns exit 2 and `error: invalid-ownership-paths`.

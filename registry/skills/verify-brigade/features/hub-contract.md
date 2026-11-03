@@ -1,3 +1,11 @@
+---
+status: active
+proof: drive
+surfaces: fleet serve
+drive: hub-contract
+last-drive: 2026-11-03 546c8870c
+---
+
 # Fleet Hub wire contract
 
 The Fleet Hub (`brigade fleet serve`) is the HTTP service every node, the
@@ -121,6 +129,10 @@ fresh random node names, so a second run against the same hub still passes.
 
 ## Gotchas
 
+- **Serve flags the drive leaves alone.** It launches `fleet serve` with only
+  `--host`, `--port`, `--db`, and `--token-file`. It does not exercise
+  `--deck-config`, `--trust-forwarded-proto`, or `--trust-tailscale-identity`,
+  which change deck and proxy-auth behavior outside the wire contract.
 - **The drive needs default hub flags.** `--allow-admin-writes` turns the
   admin-write refusals into successes, `--require-sealed` rejects the
   plaintext sends, and `BRIGADE_WORKLORE_ENABLED=1` makes `/work/items` answer.

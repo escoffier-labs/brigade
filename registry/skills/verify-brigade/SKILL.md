@@ -139,6 +139,9 @@ Real commands from this repo, one per mapped feature. The full map is in
 [`features/README.md`](features/README.md); drive the feature your change
 actually touched, not just the convenient one.
 
+A paused feature can still be driven by hand, but its observations are
+about to change: read its header before citing the result.
+
 ```bash
 C=registry/skills/verify-brigade/control-brigade.py
 
@@ -149,6 +152,7 @@ $C doctor-target --target "$TARGET"
 $C work-verify --target "$TARGET" --capture verify-brigade
 
 # Grok Bot connector pack lifecycle (implementation-worker is the worker pack)
+# PAUSED: pack doctor goes through the Fleet Hub on a host with a hub URL
 $C grokbot-pack-setup  --target "$TARGET" --id implementation-worker
 $C grokbot-pack-setup  --target "$TARGET" --id implementation-worker --apply
 $C grokbot-pack-doctor --target "$TARGET" --id implementation-worker
@@ -156,10 +160,12 @@ $C grokbot-pack-canary --target "$TARGET" --id implementation-worker
 $C grokbot-pack-remove --target "$TARGET" --id implementation-worker
 
 # feed manifest validation and queue projection
+# PAUSED: grokbot status goes through the Fleet Hub on a host with a hub URL
 $C grokbot-feed   --target "$TARGET" --sample
 $C grokbot-status --target "$TARGET"
 
 # handoff inbox lint
+# PAUSED: the handoff format may change with hub memory v2
 $C handoff-lint --target "$TARGET" --content-guard
 
 # guard scan and redact parity (lookbehind and backreference goldens)
@@ -278,8 +284,10 @@ next drive; remove it only when you are done with the tree
 
 CLI surfaces in this repo and the tests that cover them. Drive the helper
 feature your change actually touched (`features/README.md`); use the
-pytest selectors here when the proof is a focused gate. Names confirmed
-present under `tests/` on this checkout.
+pytest selectors here when the proof is a focused gate. These selectors are
+**stand-in proofs**: a passing test is not a drive of the command, so cite it
+as a stand-in and never as "driven". Names confirmed present under `tests/`
+on this checkout.
 
 | Surface | Command | Tests |
 |---|---|---|
@@ -304,7 +312,7 @@ registry/skills/verify-brigade/control-brigade.py --help
 Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 `grokbot-pack-setup`, `grokbot-pack-doctor`, `grokbot-pack-canary`,
 `grokbot-pack-remove`, `grokbot-feed`, `grokbot-status`, `handoff-lint`,
-`guard-parity`, `hub-contract`, `evidence`, `cleanup`.
+`guard-parity`, `hub-contract`, `audit`, `evidence`, `cleanup`.
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
@@ -333,6 +341,38 @@ that `--dry-run` writes nothing.
 in-repo hub and asserts zero mismatches, checks the covered routes against
 `docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
 prove each drift is reported.
+
+`tests/test_verify_brigade_audit.py` runs `audit` against the shipped map and
+against broken copies of it, so CI fails when the map drifts from the CLI.
+
+## Keeping the map honest
+
+The feature map drifts as the CLI changes. When a change adds, renames, or
+removes a command or flag, or changes output a feature file asserts on, run
+the audit and follow the loop in
+[`features/MAINTENANCE.md`](features/MAINTENANCE.md):
+
+```bash
+registry/skills/verify-brigade/control-brigade.py audit
+```
+
+The audit is read-only. It reads the live command tree from
+`brigade completions bash` (plus `--help` for families such as `guard` that
+parse their own verbs), checks every active feature's commands still answer
+`--help`, and prints one JSON object: `uncovered` commands, `uncovered_flags`,
+`stale` features with no recent drive, `paused` and `unreachable` features
+with their reasons, and `failures`. Exit 0 means the map matches the CLI
+apart from documented gaps. Exit 3 means it does not.
+
+Three rules from that page apply to every proof:
+
+- **Coverage.** A drive covers the commands it runs and nothing else. One
+  convenient entry point driven once says nothing about its siblings.
+- **Stand-ins are labeled.** A pytest selector, a mock, or a fake `brigade`
+  wrapper is a stand-in proof. Say so; never call it driven.
+- **Pauses and unreachable marks carry a reason.** A paused feature names
+  what unpauses it. An unreachable one names what blocked it. "Not driven
+  yet" is a gap, not unreachability.
 
 ## Reporting the proof
 
