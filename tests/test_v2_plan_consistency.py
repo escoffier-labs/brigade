@@ -35,6 +35,7 @@ ACCEPTANCE_UNRELATED = "acceptance-names-unrelated-slice"
 GATED_PREREQ_OUTSIDE_WAVES = "gated-prerequisite-outside-waves"
 GATE_DEPENDS_ON_GATED = "gate-depends-on-gated"
 UNRESOLVED_DEP = "unresolved-dependency"
+GATED_IN_GATE = "gated-slice-in-release-gate"
 PARSE = "parse"
 
 
@@ -370,6 +371,12 @@ def check_plan(plan: Plan) -> list[Failure]:
                         )
                     )
 
+    # A slice marked gated, outside the release, cannot also be a release requirement.
+    for slice_id in sorted(plan.gate & plan.gated):
+        failures.append(
+            Failure(slice_id, GATED_IN_GATE, "is listed in the release gate but marked gated, outside the release")
+        )
+
     # Release gate closure.
     for slice_id in sorted(plan.gate):
         if slice_id not in table_ids:
@@ -604,6 +611,12 @@ def test_gated_slice_with_prerequisite_outside_the_waves() -> None:
     dep_list = [line.replace("S5: S3", "S5: S3 S6") for line in BASE_LIST] + ["S6: S3"]
     failures = failures_of(make_doc(rows=rows, waves=waves, dep_list=dep_list))
     assert has(failures, "S5", GATED_PREREQ_OUTSIDE_WAVES, "S6")
+
+
+def test_gated_slice_listed_in_the_release_gate() -> None:
+    gate = [line.replace("S3 and S4. S5 is not in the release gate.", "S3, S4 and S5.") for line in BASE_GATE]
+    assert gate != BASE_GATE
+    assert has(failures_of(make_doc(gate=gate)), "S5", GATED_IN_GATE)
 
 
 def test_release_gate_slice_depends_on_gated_slice() -> None:
