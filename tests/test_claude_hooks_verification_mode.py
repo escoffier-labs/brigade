@@ -102,12 +102,17 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         "sleep 1 & cd {yolo} && pytest -q",
         "echo `pytest -q`; cd {yolo} && ruff check .",
         "if false; then cd {yolo}; fi; bash -c 'pytest -q'",
+        "cd {yolo} && pushd {enforced} && pytest -q",
+        "cd {yolo} && popd && pytest -q",
+        "cd {yolo} && env -C {enforced} pytest -q",
+        "cd {yolo} && env --chdir={enforced} pytest -q",
+        "cd {yolo} && make -C {enforced} test",
     ],
 )
 def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, template: str) -> None:
     # Each shape can run a check outside the cd destination: a skipped or failed cd, a
     # backgrounded list, a substitution, or a control structure. So none may count as yolo.
-    command = template.format(yolo=_sh(repos["yolo"]))
+    command = template.format(yolo=_sh(repos["yolo"]), enforced=_sh(repos["enforced"]))
     assert not verification_mode.verification_in_yolo(command, str(repos["enforced"]), repos["enforced"])
     assert _denied(_bash("PreToolUse", repos["enforced"], command))
 

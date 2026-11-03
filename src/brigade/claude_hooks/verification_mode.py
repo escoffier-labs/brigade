@@ -22,6 +22,19 @@ _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until"
 # process substitution.
 _COMPLEX_MARKERS = ("(", ")", "{", "}", "`", "$(", "<(", ">(")
 _MAX_DEPTH = 4
+# Options through which a wrapper or tool runs the check somewhere other than the shell's
+# directory (`env -C`, `make -C`, `npm --prefix`, `uv --directory`, ...). A verifier that
+# carries one has an undetermined directory.
+_CWD_OPTIONS = ("-C", "--chdir", "--directory", "--cwd", "--prefix", "--rootdir", "--manifest-path")
+
+
+def _overrides_cwd(segment: list[str]) -> bool:
+    for token in segment:
+        if token in _CWD_OPTIONS or any(token.startswith(f"{option}=") for option in _CWD_OPTIONS if option != "-C"):
+            return True
+        if token.startswith("-C") and not token.startswith("--"):
+            return True  # `-C<dir>` written as one token
+    return False
 
 
 def _plain_and_chain(command: str, segments: list[list[str]], separators: list[str]) -> bool:
@@ -75,6 +88,9 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             stripped = rt._strip_command_prefixes(stripped[1:])
         if not stripped:
             continue
+        if Path(stripped[0]).name in {"pushd", "popd"}:
+            effective = None  # the directory stack is not modeled
+            continue
         if Path(stripped[0]).name == "cd":
             args = stripped[1:]
             if args[:1] == ["--"]:
@@ -92,7 +108,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
                 found.extend(verifier_cwds(nested, effective, depth=depth + 1))
             continue
         if rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment)):
-            found.append(effective)
+            found.append(None if _overrides_cwd(segment) else effective)
     return found
 
 
