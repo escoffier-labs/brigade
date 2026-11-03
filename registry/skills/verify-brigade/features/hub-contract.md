@@ -1,0 +1,147 @@
+# Fleet Hub wire contract
+
+The Fleet Hub (`brigade fleet serve`) is the HTTP service every node, the
+`brigade fleet` CLI, and the Dot/Duet connectors talk to. It is due to be
+rewritten in Rust, and clients must not notice the swap. This drive is the
+acceptance suite for that swap: it starts a hub, drives it over HTTP only, and
+checks the answers against the recorded contract. It never imports
+`brigade.*`, so it runs the same way against any hub binary.
+
+The full route inventory, the contract version, what counts as a breaking
+change, and the hub behaviors recorded as observed live in
+[`docs/phase-hub-contract.md`](../../../../docs/phase-hub-contract.md).
+
+## Sub-features
+
+- **Health.** `GET /health` answers `{"ok": true, "service": "brigade-fleet-hub"}`
+  without a token. There is no version endpoint.
+- **Registration.** `POST /nodes` `add` and `revoke`, `GET /nodes`, and
+  `POST /message-principals` `add`, all admin-only.
+- **Heartbeat.** `POST /events` (run events, deduplicated) feeds `GET /status`,
+  and `POST /sessions` `upsert` and `end` feed `GET /sessions`. Both reads hide
+  terminal rows unless `?all=1`.
+- **Claims.** `POST /claims` `acquire`, `renew`, `inspect`, `release` in holder
+  scope, plus `GET /claims`.
+- **Messages.** `POST /messages` `send` (idempotent on `client_id`), `list` with
+  the paging guarantee, `count`, `ack`, `sent`, and `identity`.
+- **Owners.** `GET /owners` returns the `brigade.fleet_owners.v1` view.
+- **Auth failures.** Missing, wrong, non-Bearer, revoked, and wrong-kind
+  tokens. Also a node token on an admin route, the admin token on a node write,
+  a node writing for another node, a message principal without a send grant,
+  and a token in the query string.
+- **Gates.** Worklore is off by default, so `/work/*` is a 404.
+
+The drive runs 77 cases over 14 routes. Per case it checks the status code,
+`Content-Type: application/json`, the required keys and their JSON types,
+exact text for fixed error messages and `code` values, and cross-response
+guarantees: message ids ascend, `next_cursor` is the last id on the page,
+`after` excludes ids at or below it, and a retried send returns the first id.
+
+## How to get to it (user POV)
+
+Nobody calls the hub by hand. A user runs:
+
+```bash
+brigade fleet status --json
+brigade fleet claims --json
+brigade fleet msg send --to <node> --subject hi --body-file note.txt
+brigade fleet msg list
+brigade fleet msg ack <id>
+brigade fleet owners show
+```
+
+and each one is one HTTP request to the hub. A Duet session asking for a fleet
+digest runs `fleet status` and `fleet claims` underneath and lists the inbox.
+If a rewritten hub moves a status code or drops a key, those commands start
+failing in ways that are hard to trace back. This drive catches it first.
+
+## Driving it with control-brigade
+
+```bash
+C=registry/skills/verify-brigade/control-brigade.py
+$C hub-contract --dry-run   # the launch command and the covered routes, nothing started
+$C hub-contract             # the in-repo Python hub, in a fresh temp state dir
+$C evidence --label hub-contract
+$C cleanup
+```
+
+No `--target` is needed. Without one the helper makes a fresh directory under
+`<state-root>/targets/`, records it for `cleanup`, and keeps the hub's
+`hub.db`, `admin-token` (mode 0600), `hub.log`, and a fake `home/` there. With
+`--target "$TARGET"` the same files go under `$TARGET/hub-contract/<stamp>/`.
+
+What the default run does:
+
+1. Writes a throwaway admin token, picks a free loopback port, and starts
+   `{brigade} fleet serve --host {host} --port {port} --db {db} --token-file {token_file}`
+   with every `BRIGADE_*` variable dropped and `HOME` pointed at the fake home,
+   so the hub cannot read an operator token or config.
+2. Polls `GET /health` until the hub answers (`--startup-timeout`, default 30s).
+3. Enrolls three throwaway nodes and one message principal with random
+   suffixes, then runs every case.
+4. Stops the hub (its whole process group on POSIX) and prints one JSON object.
+
+Proof, from the helper's output:
+
+- helper exit 0, `"ok": true`, `"mismatches": []`
+- `"contract_version": 1`, `"cases_total": 77`, `"cases_failed": 0`
+- `"covered_routes"` lists the 14 routes the inventory marks `covered`
+
+A drift is helper exit 3, `"ok": false`, and one `mismatches` entry per
+problem, each naming its `case` and `check` (`status`, `content-type`, `body`
+with a JSON `path`, or `invariant`). A hub that never answers `/health`, a
+`--hub-cmd` without `{port}`, or an unsafe `--hub-url` is helper exit 1 with an
+`error`.
+
+Observed on main `31d5c549d`: exit 0, 77 cases, `"mismatches": []`, about one
+second end to end.
+
+### Against another hub binary
+
+Give `--hub-cmd` a launch template. The placeholders are `{port}` (required),
+`{host}` (the IPv4 loopback address), `{db}`, `{state_dir}`, `{token_file}`
+(the admin token, one line), and `{brigade}` (the resolved Brigade command, as
+its own word). The hub also gets the admin token as `BRIGADE_FLEET_TOKEN`.
+
+```bash
+$C hub-contract --hub-cmd "/path/to/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}"
+```
+
+To drive a hub you started yourself, pass its origin and name the variable
+that holds its admin token. Only a loopback origin is accepted, because the
+drive enrolls nodes and sends messages:
+
+```bash
+export BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=<throwaway admin token>
+$C hub-contract --hub-url "http://<loopback>:<port>"
+```
+
+Start that hub with its default flags and an empty database. Each run uses
+fresh random node names, so a second run against the same hub still passes.
+
+## Gotchas
+
+- **The drive needs default hub flags.** `--allow-admin-writes` turns the
+  admin-write refusals into successes, `--require-sealed` rejects the
+  plaintext sends, and `BRIGADE_WORKLORE_ENABLED=1` makes `/work/items` answer.
+  Each one shows up as mismatches that point at the flag.
+- **Never point it at a shared hub.** It enrolls nodes, revokes one, and leaves
+  messages behind. `--hub-url` refuses anything that is not loopback, and the
+  launched hub never sees the operator's `BRIGADE_*` variables or home.
+- **Six hub quirks are pinned as observed**, including two auth-failure
+  envelopes and the admin token on `/messages` getting the events wording.
+  The list is in the inventory doc. A hub that fixes one fails the drive until
+  the golden and `CONTRACT_VERSION` move with it.
+- **Not everything is compared.** Timestamps, ids, tokens, and key order are
+  never checked, and extra response keys are allowed. A shape spec lists only
+  the keys a client reads or that the contract promises.
+- **The capture redacts tokens.** Every exchange lands in
+  `captures/<stamp>-hub-contract.json`, with any `token` key replaced by
+  `[redacted]` and no request headers recorded. `hub.log` stays in the state
+  dir, which `cleanup` removes.
+- **Coverage is checked three ways.** The drive's routes must equal
+  `COVERED_ROUTES` in `hub_contract.py`, and the test compares both to the
+  `covered` rows in the inventory. Adding a case on a new route means updating
+  all three.
+- **Browser routes are out of scope.** The Command Deck and dashboard pages
+  return HTML and no client calls them. The inventory lists them as `not yet`.
