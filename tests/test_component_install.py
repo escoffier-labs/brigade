@@ -2417,6 +2417,34 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
     assert calls[4][0] == [managed["sessionfind"], "--help"]
 
 
+@pytest.mark.parametrize(
+    ("banner", "server_name"),
+    [
+        ("brigade-code-graph 0.4.0", "brigade-code-graph"),
+        ("graphtrail 0.4.0", "graphtrail"),
+    ],
+)
+def test_run_post_install_smoke_accepts_and_records_either_code_graph_identity(tmp_path, banner, server_name):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    cli_script = (
+        '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n'
+        f"    print({banner!r})\n    raise SystemExit(0)\nraise SystemExit(1)\n"
+    )
+    mcp_script = (
+        "#!/usr/bin/env python3\nimport json, sys\nreq = json.load(sys.stdin)\n"
+        'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": '
+        f'{{"serverInfo": {{"name": {server_name!r}, "version": "0.4.0"}}}}}}))\n'
+    )
+    by_family = {component_manifest.family_id(cid): cid for cid in managed}
+    cli_id, mcp_id = by_family["brigade-code-graph"], by_family["brigade-code-graph-mcp"]
+    managed[cli_id] = _write_managed_stub(tmp_path, "cli-stub", script=cli_script)
+    managed[mcp_id] = _write_managed_stub(tmp_path, "mcp-stub", script=mcp_script)
+
+    observations = run_post_install_smoke(managed)
+
+    assert observations == {cli_id: {"banner": banner}, mcp_id: {"server_name": server_name}}
+
+
 def test_run_post_install_smoke_rejects_relative_paths(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
     managed["graphtrail"] = "graphtrail"
@@ -2442,7 +2470,7 @@ def test_run_post_install_smoke_rejects_graphtrail_nonzero_exit(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
     script = smoke_stub_script("graphtrail").replace("raise SystemExit(0)", "raise SystemExit(1)")
     managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*exited 1"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph smoke failed.*exited 1"):
         run_post_install_smoke(managed)
 
 
@@ -2453,7 +2481,7 @@ def test_run_post_install_smoke_rejects_graphtrail_empty_stdout(tmp_path):
     )
     managed = _write_managed_smoke_stubs(tmp_path)
     managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*empty stdout"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph smoke failed.*empty stdout"):
         run_post_install_smoke(managed)
 
 
@@ -2461,7 +2489,7 @@ def test_run_post_install_smoke_rejects_graphtrail_mcp_malformed_json(tmp_path):
     script = '#!/usr/bin/env python3\nprint("not-json")\n'
     managed = _write_managed_smoke_stubs(tmp_path)
     managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*malformed JSON-RPC"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke failed.*malformed JSON-RPC"):
         run_post_install_smoke(managed)
 
 
@@ -2474,7 +2502,7 @@ def test_run_post_install_smoke_rejects_graphtrail_mcp_nonzero_exit(tmp_path):
             return subprocess.CompletedProcess(argv, 1, completed.stdout, completed.stderr)
         return completed
 
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*exited 1"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke failed.*exited 1"):
         run_post_install_smoke(managed, runner=nonzero_runner)
 
 
@@ -2539,7 +2567,7 @@ def test_run_post_install_smoke_rejects_timeout(tmp_path):
         return subprocess.run(argv, **kwargs)
 
     managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=sleep_script)
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke timed out"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke timed out"):
         run_post_install_smoke(managed, runner=slow_runner)
 
 

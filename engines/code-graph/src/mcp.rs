@@ -1,10 +1,10 @@
-//! Minimal MCP server: newline-delimited JSON-RPC 2.0 over stdin/stdout, exposing GraphTrail's
+//! Minimal MCP server: newline-delimited JSON-RPC 2.0 over stdin/stdout, exposing the code graph's
 //! read-only queries as tools. No async runtime and no extra dependencies, keeping the sidecar
 //! small.
 //!
 //! Multi-repo: the server holds a default db path but opens the database lazily per `tools/call`.
-//! Each tool accepts an optional `repo` (uses `<repo>/.graphtrail/graphtrail.db`) or `db` (explicit
-//! path) argument, so a single registered server can answer for any indexed repository. Query
+//! Each tool accepts an optional `repo` (uses the repository's index, see
+//! [`crate::store::resolve_repo_db`]) or `db` (explicit path) argument, so a single registered server can answer for any indexed repository. Query
 //! connections are always opened `SQLITE_OPEN_READ_ONLY`; the opt-in `refresh: true` parameter is
 //! the one sanctioned write path, running the CLI's incremental sync (fail-open) before the query.
 
@@ -21,6 +21,7 @@ use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
+use crate::cli::MCP_IDENTITY;
 use crate::model::Direction;
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
@@ -30,7 +31,9 @@ use crate::query::{
     impact_query_with_matches, limit_edges, normalize_depth, outline, personalize_context_pack,
     render_markdown, render_markdown_budgeted, search_symbols_with_path, stats,
 };
-use crate::store::{init_schema, open_db, open_read_only, sync_repo};
+use crate::store::{
+    init_schema, open_db, open_read_only, repo_root_for_db, resolve_repo_db, sync_repo,
+};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const REFRESH_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,8 +73,19 @@ struct ToolSpec {
 }
 
 /// Read JSON-RPC requests line by line and write one response line per request. `default_db` is the
-/// fallback database used when a request does not specify its own `repo`/`db`.
-pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> Result<()> {
+/// fallback database used when a request does not specify its own `repo`/`db`. The server reports
+/// the canonical `serverInfo.name`; see [`serve_as`].
+pub fn serve(default_db: &Path, input: impl BufRead, output: impl Write) -> Result<()> {
+    serve_as(MCP_IDENTITY.server_name, default_db, input, output)
+}
+
+/// Like [`serve`], reporting `server_name` as `serverInfo.name` (the invoked entry point's name).
+pub fn serve_as(
+    server_name: &str,
+    default_db: &Path,
+    input: impl BufRead,
+    mut output: impl Write,
+) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -89,7 +103,7 @@ pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> 
                 continue;
             }
         };
-        if let Some(resp) = handle_request(default_db, &req) {
+        if let Some(resp) = handle_request_as(server_name, default_db, &req) {
             writeln!(output, "{}", serde_json::to_string(&resp)?)?;
             output.flush()?;
         }
@@ -99,6 +113,11 @@ pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> 
 
 /// Handle one JSON-RPC message. Returns `None` for notifications (no response expected).
 pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
+    handle_request_as(MCP_IDENTITY.server_name, default_db, req)
+}
+
+/// Like [`handle_request`], reporting `server_name` as `serverInfo.name`.
+pub fn handle_request_as(server_name: &str, default_db: &Path, req: &Value) -> Option<Value> {
     if !req.is_object() {
         return Some(error(None, -32600, "invalid request"));
     }
@@ -121,7 +140,7 @@ pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
                 json!({
                     "protocolVersion": pv,
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": "graphtrail", "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": server_name, "version": env!("CARGO_PKG_VERSION") }
                 }),
             ))
         }
@@ -164,13 +183,13 @@ pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
     }
 }
 
-/// Resolve which database a call targets: explicit `db`, else `<repo>/.graphtrail/graphtrail.db`,
-/// else the server default.
+/// Resolve which database a call targets: explicit `db`, else the `repo` index (canonical, or the
+/// legacy index in place when only that exists), else the server default.
 fn resolve_db(default_db: &Path, args: &Value) -> PathBuf {
     if let Some(db) = args.get("db").and_then(|v| v.as_str()) {
         PathBuf::from(db)
     } else if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
-        Path::new(repo).join(".graphtrail").join("graphtrail.db")
+        resolve_repo_db(Path::new(repo)).path
     } else {
         default_db.to_path_buf()
     }
@@ -391,8 +410,8 @@ fn tool_specs() -> &'static [ToolSpec] {
 fn build_tool_specs() -> Vec<ToolSpec> {
     // Every tool also accepts an optional repo/db selector for multi-repo use.
     let location = json!({
-        "repo": { "type": "string", "description": "Repo path; uses <repo>/.graphtrail/graphtrail.db." },
-        "db": { "type": "string", "description": "Explicit graphtrail.db path (overrides repo and the server default)." }
+        "repo": { "type": "string", "description": "Repo path; uses <repo>/.brigade/code-graph/code-graph.db, or an older index in place when only that exists." },
+        "db": { "type": "string", "description": "Explicit index database path (overrides repo and the server default)." }
     });
     let refresh = json!({
         "refresh": { "type": "boolean", "description": "Default false; sync is incremental and cheap on warm repos." }
@@ -488,7 +507,7 @@ fn build_tool_specs() -> Vec<ToolSpec> {
         ..tool(
             ToolId::SemanticSearch,
             "semantic_search",
-            "Code Search semantic hits, optionally blended with GraphTrail graph centrality.",
+            "Code Search semantic hits, optionally blended with code graph centrality.",
             with_location(
                 with_refresh(json!({
                     "query": { "type": "string", "description": "Semantic search query." },
@@ -613,12 +632,12 @@ fn build_tool_specs() -> Vec<ToolSpec> {
         tool(
             ToolId::Diff,
             "diff",
-            "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `graphtrail --db <path> sync <root>`.",
+            "Structural diff of two indexed graph DBs (before -> after): added/removed/changed symbols and added/removed call edges. Build the two DBs with `brigade-code-graph --db <path> sync <root>`.",
             json!({
                 "type": "object",
                 "properties": {
-                    "before": { "type": "string", "description": "Path to the 'before' graphtrail.db." },
-                    "after": { "type": "string", "description": "Path to the 'after' graphtrail.db." }
+                    "before": { "type": "string", "description": "Path to the 'before' index database." },
+                    "after": { "type": "string", "description": "Path to the 'after' index database." }
                 },
                 "required": ["before", "after"]
             }),
@@ -629,7 +648,7 @@ fn build_tool_specs() -> Vec<ToolSpec> {
             "repos",
             "Default database metadata plus optional one-level scans for indexed repos under root directories.",
             with_location(
-                json!({ "roots": { "type": "array", "items": { "type": "string" }, "description": "Root directories to scan one level for .graphtrail/graphtrail.db." } }),
+                json!({ "roots": { "type": "array", "items": { "type": "string" }, "description": "Root directories to scan one level for indexed repos (.brigade/code-graph/code-graph.db, or an older index in place)." } }),
                 json!([]),
             ),
             false,
@@ -713,8 +732,8 @@ fn refresh_root(default_db: &Path, args: &Value, db: &Path) -> PathBuf {
     if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
         return PathBuf::from(repo);
     }
-    repo_from_db(db)
-        .or_else(|| repo_from_db(default_db))
+    repo_root_for_db(db)
+        .or_else(|| repo_root_for_db(default_db))
         .or_else(|| db.parent().map(|path| path.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -723,8 +742,8 @@ fn doctor_root(default_db: &Path, args: &Value, db: &Path) -> PathBuf {
     if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
         return PathBuf::from(repo);
     }
-    repo_from_db(db)
-        .or_else(|| repo_from_db(default_db))
+    repo_root_for_db(db)
+        .or_else(|| repo_root_for_db(default_db))
         .or_else(|| db.parent().map(|path| path.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
 }
@@ -794,8 +813,8 @@ fn code_search_repo_root(default_db: &Path, args: &Value, db: &Path) -> Option<P
     if let Some(repo) = args.get("repo").and_then(|v| v.as_str()) {
         return Some(PathBuf::from(repo));
     }
-    repo_from_db(db)
-        .or_else(|| repo_from_db(default_db))
+    repo_root_for_db(db)
+        .or_else(|| repo_root_for_db(default_db))
         .or_else(|| std::env::current_dir().ok())
 }
 
@@ -940,10 +959,11 @@ fn roots_arg(args: &Value) -> Vec<PathBuf> {
 
 fn graph_dbs_one_level(root: &Path) -> Result<Vec<PathBuf>> {
     let mut dbs = Vec::new();
-    let direct = root.join(".graphtrail").join("graphtrail.db");
-    if direct.exists() {
-        dbs.push(direct);
-    }
+    let indexed = |dir: &Path| {
+        let found = resolve_repo_db(dir);
+        (found.source != crate::store::DbSource::New).then_some(found.path)
+    };
+    dbs.extend(indexed(root));
     if !root.is_dir() {
         return Ok(dbs);
     }
@@ -951,10 +971,7 @@ fn graph_dbs_one_level(root: &Path) -> Result<Vec<PathBuf>> {
         let entry = entry?;
         let path = entry.path();
         if path.is_dir() {
-            let db = path.join(".graphtrail").join("graphtrail.db");
-            if db.exists() {
-                dbs.push(db);
-            }
+            dbs.extend(indexed(&path));
         }
     }
     dbs.sort();
@@ -963,26 +980,11 @@ fn graph_dbs_one_level(root: &Path) -> Result<Vec<PathBuf>> {
 
 fn repo_info(db: &Path) -> Result<RepoInfo> {
     Ok(RepoInfo {
-        repo: repo_from_db(db).map(|path| path.to_string_lossy().to_string()),
+        repo: repo_root_for_db(db).map(|path| path.to_string_lossy().to_string()),
         db: db.to_string_lossy().to_string(),
         exists: db.exists(),
         metadata: db_metadata(db)?,
     })
-}
-
-fn repo_from_db(db: &Path) -> Option<PathBuf> {
-    let graph_dir = db.parent()?;
-    if graph_dir.file_name()? != ".graphtrail" {
-        return None;
-    }
-    let parent = graph_dir.parent()?;
-    // A relative default like `.graphtrail/graphtrail.db` has an empty parent here;
-    // the repo root in that case is the current directory.
-    if parent.as_os_str().is_empty() {
-        std::env::current_dir().ok()
-    } else {
-        Some(parent.to_path_buf())
-    }
 }
 
 fn db_metadata(db: &Path) -> Result<BTreeMap<String, String>> {

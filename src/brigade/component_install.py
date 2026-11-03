@@ -615,53 +615,67 @@ def _validate_smoke_managed_paths(
     return resolved
 
 
-def _smoke_graphtrail(
+# Smoke observations: what each engine reported about itself. The code graph smokes accept
+# either entry point identity (legacy or canonical banner and serverInfo.name) and record it
+# instead of comparing names; see docs/phase-engine-rename.md, "Entry point identity".
+SmokeObservation = dict[str, str]
+
+
+def _smoke_code_graph(
     path: Path,
     run: Callable[..., subprocess.CompletedProcess[str]],
-) -> None:
+) -> SmokeObservation:
     argv = [str(path), "--version"]
+    label = "brigade-code-graph"
     try:
         completed = _invoke_smoke_runner(run, argv)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(f"graphtrail smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
+        raise ComponentInstallError(f"{label} smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
-        raise ComponentInstallError(f"graphtrail smoke failed to run {path}: {exc}") from exc
+        raise ComponentInstallError(f"{label} smoke failed to run {path}: {exc}") from exc
 
     if completed.returncode != 0:
-        raise ComponentInstallError(f"graphtrail smoke failed: {path} --version exited {completed.returncode}")
-    if not (completed.stdout or "").strip():
-        raise ComponentInstallError(f"graphtrail smoke failed: {path} --version produced empty stdout")
+        raise ComponentInstallError(f"{label} smoke failed: {path} --version exited {completed.returncode}")
+    banner = (completed.stdout or "").strip()
+    if not banner:
+        raise ComponentInstallError(f"{label} smoke failed: {path} --version produced empty stdout")
+    return {"banner": banner.splitlines()[0]}
 
 
-def _smoke_graphtrail_mcp(
+def _smoke_code_graph_mcp(
     path: Path,
     run: Callable[..., subprocess.CompletedProcess[str]],
-) -> None:
+) -> SmokeObservation:
     argv = [str(path)]
+    label = "brigade-code-graph-mcp"
     try:
         completed = _invoke_smoke_runner(run, argv, input=_JSONRPC_INIT_REQUEST)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(f"graphtrail-mcp smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
+        raise ComponentInstallError(f"{label} smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed to run {path}: {exc}") from exc
+        raise ComponentInstallError(f"{label} smoke failed to run {path}: {exc}") from exc
 
     if completed.returncode != 0:
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} exited {completed.returncode}")
+        raise ComponentInstallError(f"{label} smoke failed: {path} exited {completed.returncode}")
     stdout = (completed.stdout or "").strip()
     if not stdout:
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} produced empty stdout")
+        raise ComponentInstallError(f"{label} smoke failed: {path} produced empty stdout")
     try:
         response = json.loads(stdout)
     except json.JSONDecodeError as exc:
-        raise ComponentInstallError(
-            f"graphtrail-mcp smoke failed: {path} returned malformed JSON-RPC response"
-        ) from exc
+        raise ComponentInstallError(f"{label} smoke failed: {path} returned malformed JSON-RPC response") from exc
+    if not isinstance(response, dict):
+        raise ComponentInstallError(f"{label} smoke failed: {path} returned malformed JSON-RPC response")
     if response.get("jsonrpc") != "2.0":
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} returned invalid JSON-RPC version")
+        raise ComponentInstallError(f"{label} smoke failed: {path} returned invalid JSON-RPC version")
     if response.get("id") != 1:
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} JSON-RPC response id mismatch")
+        raise ComponentInstallError(f"{label} smoke failed: {path} JSON-RPC response id mismatch")
     if "result" not in response:
-        raise ComponentInstallError(f"graphtrail-mcp smoke failed: {path} JSON-RPC response missing result")
+        raise ComponentInstallError(f"{label} smoke failed: {path} JSON-RPC response missing result")
+    result = response["result"]
+    server_info = result.get("serverInfo") if isinstance(result, dict) else None
+    name = server_info.get("name") if isinstance(server_info, dict) else None
+    return {"server_name": name} if isinstance(name, str) and name else {}
 
 
 def _smoke_miseledger(
@@ -734,10 +748,12 @@ def _smoke_agent_notify(
         raise ComponentInstallError(f"agent-notify smoke failed: {path} JSON missing version field")
 
 
-_SMOKE_DISPATCH: dict[str, Callable[[Path, Callable[..., subprocess.CompletedProcess[str]]], None]] = {
+_SMOKE_DISPATCH: dict[
+    str, Callable[[Path, Callable[..., subprocess.CompletedProcess[str]]], SmokeObservation | None]
+] = {
     "agent-notify": _smoke_agent_notify,
-    "graphtrail": _smoke_graphtrail,
-    "graphtrail-mcp": _smoke_graphtrail_mcp,
+    "graphtrail": _smoke_code_graph,
+    "graphtrail-mcp": _smoke_code_graph_mcp,
     "miseledger": _smoke_miseledger,
     "sessionfind": _smoke_sessionfind,
 }
@@ -748,15 +764,23 @@ def run_post_install_smoke(
     *,
     runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     expected_components: Sequence[str] = _SMOKE_COMPONENT_IDS,
-) -> None:
-    """Run post-install smoke checks using only absolute managed executable paths."""
+) -> dict[str, SmokeObservation]:
+    """Run post-install smoke checks using only absolute managed executable paths.
+
+    Returns what each component reported about itself (the code graph banner and MCP
+    ``serverInfo.name``), keyed by component id. Components that report nothing are omitted.
+    """
     paths = _validate_smoke_managed_paths(managed_paths, expected_components=expected_components)
     run = runner if runner is not None else _default_smoke_runner
 
+    observations: dict[str, SmokeObservation] = {}
     for component_id in expected_components:
-        _SMOKE_DISPATCH[
+        observed = _SMOKE_DISPATCH[
             next(name for name in component_manifest.family_names(component_id) if name in _SMOKE_DISPATCH)
         ](paths[component_id], run)
+        if observed:
+            observations[component_id] = observed
+    return observations
 
 
 def _load_rollback_state(
