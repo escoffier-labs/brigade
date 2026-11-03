@@ -7,6 +7,7 @@ name = "brigade-guard"
 version = "0.1.0"
 dependencies = [
  "pcre2",
+ "pcre2-sys",
  "serde",
  "serde_json",
 ]

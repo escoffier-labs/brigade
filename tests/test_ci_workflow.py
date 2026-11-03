@@ -40,7 +40,7 @@ def test_ci_gate_accepts_confirmed_docs_skips_but_keeps_lightweight_checks_requi
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     for event in ("pull_request", "merge_group", "push"):
         needs = {name: {"result": "skipped"} for name in names}
-        for name in ("changes", "content-guard", "repo-metadata"):
+        for name in ("changes", "content-guard", "repo-metadata", "changelog-fragments"):
             needs[name] = {"result": "success"}
         needs["changes"]["outputs"] = {"docs_only": "true"}
         if mutation in {"full", "unknown", "missing-classification"}:
@@ -117,7 +117,7 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                     assert not _job_admitted(
                         text, name, docs=docs, cancelled=True, dependency=dependency, event=event
                     ), (name, event, docs, dependency)
-            if name in {"changes", "content-guard", "repo-metadata", "ci-gate"}:
+            if name in {"changes", "content-guard", "repo-metadata", "changelog-fragments", "ci-gate"}:
                 assert _job_admitted(text, name, docs="true", event=event)
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
@@ -407,6 +407,23 @@ def test_ci_workflow_does_not_skip_docs_only_content_guard():
     # existing synthetic corpus. Both are load-bearing.
     assert "--strict" in text
     assert "--baseline .content-guard-baseline.json" in text
+
+
+def test_changelog_fragments_job_checks_fragments_and_guards_changelog_edits_on_every_diff():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    section = _workflow_job_section(text, "changelog-fragments")
+
+    # Always runs, including docs-only diffs: a lone CHANGELOG.md edit is classified as documentation.
+    assert "\n    if:" not in section
+    assert "\n    needs:" not in section
+    assert "python3 scripts/changelog_fragments.py check" in section
+    assert 'python3 scripts/changelog_fragments.py guard --base "$base"' in section
+    assert "fetch-depth: 2" in section
+    # The guard is skipped after merge, and the base is the test-merge parent, not pull_request.base.sha.
+    assert "if: ${{ github.event_name != 'push' }}" in section
+    assert "base=$(git rev-parse HEAD^1)" in section
+    assert 'if [ "$(git rev-parse HEAD^2 2>/dev/null)" != "$PR_HEAD_SHA" ]; then' in section
+    assert "github.event.merge_group.base_sha" in section
 
 
 def test_repo_metadata_command_inventory_failure_is_actionable_and_preserves_status():
@@ -714,7 +731,7 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
     needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
     needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
     # main's 20 required contexts, including the test/installer/quickstart
-    # matrix names, map to these nine jobs. Keep this snapshot independent
+    # matrix names, map to these jobs. Keep this snapshot independent
     # of the workflow so a rename cannot silently remove gate coverage.
     required_jobs = {
         "changes",
@@ -723,6 +740,7 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "component-manifest-provenance",
         "content-guard",
         "repo-metadata",
+        "changelog-fragments",
         "install-from-source",
         "quickstart-smoke",
         "windows-native-acceptance",
@@ -1683,6 +1701,7 @@ EXISTING_CI_JOBS = {
     "cosign-integration": "cosign (${{ matrix.cosign }})",
     "content-guard": None,
     "repo-metadata": None,
+    "changelog-fragments": None,
     "install-from-source": None,
     "quickstart-smoke": "quickstart-smoke (${{ matrix.os }})",
     "windows-native-acceptance": "windows-native-acceptance",
