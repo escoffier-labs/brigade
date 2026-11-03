@@ -868,7 +868,8 @@ fn legacy_only_repository_is_read_and_written_in_place() {
     fs::write(root.join("extra.py"), "def extra():\n    return helper()\n").unwrap();
     let sync = engine_in(root, &["sync", "."]);
     assert_eq!(sync.status.code(), Some(0), "{sync:?}");
-    let stdout = String::from_utf8_lossy(&sync.stdout);
+    // Windows prints the relative path with backslashes.
+    let stdout = String::from_utf8_lossy(&sync.stdout).replace('\\', "/");
     assert!(
         stdout.contains("db=./.graphtrail/graphtrail.db"),
         "{stdout}"
@@ -897,7 +898,8 @@ fn fresh_repository_gets_canonical_index_and_ignore_entry() {
 
     let sync = engine_in(root, &["sync", "."]);
     assert_eq!(sync.status.code(), Some(0), "{sync:?}");
-    let stdout = String::from_utf8_lossy(&sync.stdout);
+    // Windows prints the relative path with backslashes.
+    let stdout = String::from_utf8_lossy(&sync.stdout).replace('\\', "/");
     assert!(
         stdout.contains("db=./.brigade/code-graph/code-graph.db"),
         "{stdout}"
