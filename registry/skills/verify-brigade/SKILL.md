@@ -331,9 +331,11 @@ every subcommand resolves and creates first): `new-target`, `init`, `work-verify
 `grokbot-feed --sample`, `guard-parity`, `hub-contract`, `storage-parity`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
-`would_remove`, or `would_copy` list; `hub-contract` instead reports
-`would_launch` (the hub argv, or `null` for `--hub-url`) and `would_create` (the
-hub's state directory, or `null`).
+`would_remove`, or `would_copy` list; `hub-contract` with the default `contract`
+profile instead reports `would_launch` (the hub argv, or `null` for `--hub-url`)
+and `would_create` (the hub's state directory, or `null`), and with
+`--profile prod-readonly` it reports the allowed `operations` and the
+`excluded` ones.
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path

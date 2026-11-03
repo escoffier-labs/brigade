@@ -207,8 +207,8 @@ This is the only drive run allowed against production; the runbook is
 
 Observed on main `ff46d78f2` plus this change: the audit exits 0 on the Python
 hub and on the Rust front in managed proxy mode, with zero window findings, no
-digest change and all four controls writing. Each of the three mutation kinds
-exits 3.
+digest change and all four controls writing. Each of the six mutation kinds
+(`write`, `noop`, `begin`, `begin-semicolon`, `begin-comment`, `helper`) exits 3.
 
 ## Gotchas
 

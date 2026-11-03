@@ -296,7 +296,7 @@ def uninstrumented_holders(pgid: int, instrumented: set[int], *dbs: Path) -> lis
 # ----------------------------------------------------------- the open watch
 
 # inotify(7) masks.
-IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x20, 0x40, 0x80, 0x100, 0x200
+IN_ATTRIB, IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x4, 0x20, 0x40, 0x80, 0x100, 0x200
 IN_DELETE_SELF, IN_MOVE_SELF, IN_Q_OVERFLOW, IN_IGNORED = 0x400, 0x800, 0x4000, 0x8000
 WATCH_MASK = IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF
 EVENT_NAMES = {
@@ -321,13 +321,20 @@ class OpenWatch:
     hide that an event happened. The watch is the evidence, so when it cannot
     run (not Linux, no inotify, the queue overflowed, the directory went
     away) the audit says the front is not certified.
+
+    `inode`, when given, is also watched for IN_ATTRIB, which fires when its
+    link count changes through any path. A hard link made and removed while
+    requests run, which the final link-count check cannot see, then loses the
+    evidence. Attribute changes during launch are allowed, since the hub may
+    set the file mode then; the final check still sees a link made then.
     """
 
-    def __init__(self, directory: Path, name: str) -> None:
+    def __init__(self, directory: Path, name: str, inode: Path | None = None) -> None:
         self.names = {name, *(f"{name}{suffix}" for suffix in ("-wal", "-shm", "-journal"))}
         self.events: list[dict] = []
         self.lost: str | None = None
         self.fd = -1
+        self.inode_wd = -1
         self.phase = "launch"
         if not sys.platform.startswith("linux"):
             self.lost = f"inotify is Linux-only and this is {sys.platform}"
@@ -346,6 +353,12 @@ class OpenWatch:
         if add(fd, os.fsencode(str(directory)), WATCH_MASK) < 0:
             self.lost = f"inotify_add_watch failed: {os.strerror(ctypes.get_errno())}"
             self.close()
+            return
+        if inode is not None:
+            self.inode_wd = add(fd, os.fsencode(str(inode)), IN_ATTRIB)
+            if self.inode_wd < 0:
+                self.lost = f"inotify_add_watch on the database inode failed: {os.strerror(ctypes.get_errno())}"
+                self.close()
 
     def drain(self, next_phase: str | None = None) -> None:
         while self.fd >= 0:
@@ -355,11 +368,16 @@ class OpenWatch:
                 break
             offset = 0
             while offset + _EVENT.size <= len(raw):
-                _wd, mask, _cookie, length = _EVENT.unpack_from(raw, offset)
+                wd, mask, _cookie, length = _EVENT.unpack_from(raw, offset)
                 name = os.fsdecode(raw[offset + _EVENT.size : offset + _EVENT.size + length].rstrip(b"\0"))
                 offset += _EVENT.size + length
                 if mask & IN_Q_OVERFLOW:
                     self.lost = self.lost or "the inotify queue overflowed"
+                elif wd == self.inode_wd and self.inode_wd >= 0:
+                    if mask & (IN_IGNORED | IN_DELETE_SELF):
+                        self.lost = self.lost or "the database inode was removed during the run"
+                    elif mask & IN_ATTRIB and self.phase != "launch":
+                        self.lost = self.lost or "the database inode's links or attributes changed during the run"
                 elif mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
                     self.lost = self.lost or "the database directory was removed or moved during the run"
                 elif name in self.names:
@@ -648,7 +666,7 @@ def audit(
     template = (
         (hub_cmd or DEFAULT_HUB_CMD).replace("{python}", shlex.quote(python)).replace("{db}", shlex.quote(str(db)))
     )
-    watch = OpenWatch(db.parent, db.name)
+    watch = OpenWatch(db.parent, db.name, inode=db)
     try:
         try:
             hub = sp.launch(

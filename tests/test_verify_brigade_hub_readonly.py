@@ -189,7 +189,7 @@ class _NoInotify:
     events: list[dict] = []
     lost = "inotify is unavailable: test"
 
-    def __init__(self, directory, name) -> None:
+    def __init__(self, directory, name, inode=None) -> None:
         pass
 
     def drain(self, next_phase=None) -> None:
@@ -242,6 +242,33 @@ def test_prod_readonly_open_watch_sees_an_open_through_the_configured_path(tmp_p
     assert hr.route_intact(db, route, identity)
     os.link(db, tmp_path / "another-link.db")
     assert not hr.route_intact(db, route, identity)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
+def test_prod_readonly_open_watch_sees_a_link_made_and_removed_mid_run(tmp_path):
+    db, route, error = hr.prepare_route(tmp_path)
+    assert error is None and route is not None
+    identity = (db.lstat().st_dev, db.lstat().st_ino)
+    watch = hr.OpenWatch(db.parent, db.name, inode=db)
+    try:
+        db.chmod(0o600)  # attribute changes during launch are allowed
+        watch.drain("probe")
+        sqlite3.connect(route).close()
+        watch.drain()
+        assert watch.lost is None and watch.events == []
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        os.link(db, elsewhere / "copy.db")
+        sqlite3.connect(elsewhere / "copy.db").close()
+        os.unlink(elsewhere / "copy.db")
+        watch.drain()
+        assert watch.lost == "the database inode's links or attributes changed during the run"
+        # The opens went through another directory, so only the inode watch saw them.
+        assert watch.events == []
+    finally:
+        watch.close()
+    # The link is gone by the end, so the final check alone would have passed.
+    assert hr.route_intact(db, route, identity)
 
 
 def test_prod_readonly_open_watch_off_linux_is_lost(tmp_path, monkeypatch):
