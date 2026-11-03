@@ -11,9 +11,17 @@ from unittest.mock import Mock
 import pytest
 
 from brigade.guard.engine import scan_text
-from brigade.guard.native import MIN_NATIVE_CHARS, native_spans
+from brigade.guard import native as native_module
+from brigade.guard.native import MIN_NATIVE_CHARS, native_spans, rule_spans
 from brigade.guard.rules import DEFAULT_RULES
 from brigade.guard.types import Rule
+
+
+@pytest.fixture(autouse=True)
+def _reset_native_failures():
+    native_module.reset_native_failures()
+    yield
+    native_module.reset_native_failures()
 
 
 def test_native_matches_python(monkeypatch):
@@ -87,3 +95,28 @@ def test_parity_drive_uses_native_matching(monkeypatch):
     spans = native_spans(fixture, list(DEFAULT_RULES))
     assert spans is not None, "the acceptance fixture must execute in PCRE2, without fallback"
     assert spans == [[m.span() for m in re.finditer(r.pattern, fixture, r.flags)] for r in DEFAULT_RULES]
+
+
+def test_python_fallback_spans_stay_lazy_per_rule(monkeypatch):
+    # The fallback must not buffer every match before the engine filters them;
+    # discarded spans (such as fenced code with scan_code_blocks off) used to stream.
+    monkeypatch.setenv("BRIGADE_GUARD_BACKEND", "python")
+    rules = list(DEFAULT_RULES)
+    spans = rule_spans("plain text " * 100, rules)
+    assert len(spans) == len(rules)
+    assert all(not isinstance(per_rule, list) for per_rule in spans)
+    assert all(hasattr(per_rule, "__next__") for per_rule in spans)
+
+
+def test_failed_binary_is_not_retried_in_the_same_process(tmp_path, monkeypatch):
+    # A hung or broken binary must not stall every large file of a directory scan.
+    calls = tmp_path / "calls"
+    fake = tmp_path / "brigade-guard"
+    fake.write_text(f"#!/bin/sh\necho x >> {calls}\nexit 3\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_GUARD_BIN", str(fake))
+    monkeypatch.setenv("BRIGADE_GUARD_BACKEND", "native")
+    rules = list(DEFAULT_RULES)
+    assert native_spans("plain ascii text", rules) is None
+    assert native_spans("more plain ascii text", rules) is None
+    assert calls.read_text(encoding="utf-8").count("x") == 1
