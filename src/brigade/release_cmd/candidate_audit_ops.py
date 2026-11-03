@@ -73,6 +73,24 @@ def _candidate_reference_issues(candidate: dict[str, Any]) -> list[dict[str, Any
     return issues
 
 
+def _release_note_inputs(target: Path) -> list[str]:
+    """Repository files the release notes are built from, relative to ``target``.
+
+    Changelog fragments under ``changelog.d/`` are release-note inputs too, and the
+    directory itself is listed so an added or deleted fragment changes its mtime.
+    """
+    items = ["README.md", "CHANGELOG.md", "ROADMAP.md"]
+    fragments = target / "changelog.d"
+    if fragments.is_dir():
+        items.append("changelog.d")
+        items.extend(
+            f"changelog.d/{entry.name}"
+            for entry in sorted(fragments.glob("*.md"))
+            if entry.name != "README.md" and entry.is_file()
+        )
+    return items
+
+
 def _candidate_docs_changed_after_build(candidate: dict[str, Any]) -> list[str]:
     path = candidate.get("path")
     if not isinstance(path, str) or not path:
@@ -84,7 +102,7 @@ def _candidate_docs_changed_after_build(candidate: dict[str, Any]) -> list[str]:
         return []
     target = Path(str(candidate.get("target") or "."))
     changed: list[str] = []
-    for item in ("README.md", "CHANGELOG.md", "ROADMAP.md"):
+    for item in _release_note_inputs(target):
         repo_file = target / item
         if repo_file.exists() and repo_file.stat().st_mtime > evidence_mtime:
             changed.append(item)
@@ -255,7 +273,7 @@ def candidate_compare(*, target: Path, candidate_id: str = "latest", json_output
     changed_docs_after_candidate = []
     evidence_path = Path(str(candidate.get("path") or "")) / "EVIDENCE.json"
     evidence_mtime = evidence_path.stat().st_mtime if evidence_path.is_file() else None
-    for path in ("README.md", "CHANGELOG.md", "ROADMAP.md"):
+    for path in _release_note_inputs(target):
         repo_file = target / path
         if evidence_mtime is not None and repo_file.exists() and repo_file.stat().st_mtime > evidence_mtime:
             changed_docs_after_candidate.append(path)

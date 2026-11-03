@@ -277,3 +277,32 @@ def test_repository_fragments_are_valid_and_changelog_is_assemblable():
 
 def test_gitattributes_keeps_union_merge_for_older_branches():
     assert "/CHANGELOG.md merge=union" in (ROOT / ".gitattributes").read_text()
+
+
+def test_fragment_edits_after_a_candidate_mark_its_docs_stale(tmp_path) -> None:
+    import os
+
+    from brigade.release_cmd import candidate_audit_ops
+
+    candidate_dir = tmp_path / "candidate"
+    candidate_dir.mkdir()
+    evidence = candidate_dir / "EVIDENCE.json"
+    evidence.write_text("{}", encoding="utf-8")
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    fragment = fragments / "1234.md"
+    fragment.write_text("- Old entry.\n", encoding="utf-8")
+    (fragments / "README.md").write_text("# Fragments\n", encoding="utf-8")
+    built = evidence.stat().st_mtime
+    for path in (fragments, fragment, fragments / "README.md"):
+        os.utime(path, (built - 10, built - 10))
+    candidate = {"path": str(candidate_dir), "target": str(tmp_path)}
+    assert candidate_audit_ops._candidate_docs_changed_after_build(candidate) == []
+
+    fragment.write_text("- Edited entry.\n", encoding="utf-8")
+    os.utime(fragment, (built + 10, built + 10))
+    assert candidate_audit_ops._candidate_docs_changed_after_build(candidate) == ["changelog.d/1234.md"]
+
+    fragment.unlink()
+    os.utime(fragments, (built + 10, built + 10))
+    assert candidate_audit_ops._candidate_docs_changed_after_build(candidate) == ["changelog.d"]
