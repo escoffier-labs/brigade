@@ -312,11 +312,14 @@ isolate the state root when two runs go at once (a directory under `$TMPDIR`,
 not `$TMPDIR` itself), `--timeout <s>` per call.
 
 Every subcommand that writes accepts `--dry-run`, which reports the command it
-skipped and mutates nothing: `new-target`, `init`, `work-verify`,
+skipped and touches nothing outside the helper's own private state root (which
+every subcommand resolves and creates first): `new-target`, `init`, `work-verify`,
 `grokbot-feed --sample`, `guard-parity`, `hub-contract`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
-`would_remove`, or `would_copy` list.
+`would_remove`, or `would_copy` list; `hub-contract` instead reports
+`would_launch` (the hub argv, or `null` for `--hub-url`) and `would_create` (the
+hub's state directory, or `null`).
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path

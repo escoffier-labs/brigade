@@ -47,6 +47,8 @@ LOOPBACK_NAME = "local" + "host"
 DEFAULT_HUB_CMD = "{brigade} fleet serve --host {host} --port {port} --db {db} --token-file {token_file}"
 WRONG_TOKEN = "contract-wrong-" + "token"
 REQUEST_TIMEOUT = 10.0
+# A contract response is small; a hub that streams more than this is a mismatch, not a hang.
+MAX_BODY_BYTES = 4 * 1024 * 1024
 LOG_TAIL = 2000
 
 # Every route this drive exercises, as "METHOD /path" with the query dropped.
@@ -302,7 +304,10 @@ def expand_command(template: str, *, brigade: list[str], values: dict[str, str])
     `{brigade}` must stand alone as a word and expands to the whole Brigade
     command; the other placeholders are replaced inside any word.
     """
-    words = shlex.split(template)
+    try:
+        words = shlex.split(template)
+    except ValueError as exc:
+        raise ContractError(f"cannot parse --hub-cmd {template!r}: {exc}") from exc
     if not words:
         raise ContractError("empty --hub-cmd template")
     if "{port}" not in template:
@@ -398,24 +403,51 @@ def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_ti
     raise ContractError(f"the hub did not answer /health within {startup_timeout:g}s: {log_tail(log)}")
 
 
+def _group_alive(pgid: int) -> bool:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _signal_group(pgid: int, sig: int) -> None:
+    try:
+        os.killpg(pgid, sig)
+    except OSError:
+        pass
+
+
 def stop_hub(hub: Hub) -> None:
+    """Stop the hub's whole process group, even when a `--hub-cmd` launcher already exited.
+
+    A launcher can start the real server and return, or the server can ignore
+    SIGTERM; either way the group is signalled, then killed if members remain.
+    """
     process = hub.process
-    if process is not None and process.poll() is None:
-        try:
-            if os.name == "posix":
-                os.killpg(process.pid, signal.SIGTERM)
-            else:  # pragma: no cover
-                process.terminate()
-            process.wait(timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
-            if os.name == "posix":
-                try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except OSError:
-                    pass
-            else:  # pragma: no cover
+    if process is not None:
+        if os.name == "posix":
+            _signal_group(process.pid, signal.SIGTERM)
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            grace = time.monotonic() + 5
+            while _group_alive(process.pid) and time.monotonic() < grace:
+                time.sleep(0.1)
+            if _group_alive(process.pid):
+                _signal_group(process.pid, signal.SIGKILL)
+            if process.poll() is None:
+                process.wait(timeout=10)
+        elif process.poll() is None:  # pragma: no cover - Windows has no process groups to signal
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
                 process.kill()
-            process.wait(timeout=10)
+                process.wait(timeout=10)
     if hub.log_handle is not None:
         hub.log_handle.close()
         hub.log_handle = None
@@ -430,10 +462,14 @@ def log_tail(log: Path) -> str:
 
 def guard_hub_url(raw: str) -> str:
     """Accept only a loopback http(s) URL, so the drive can never reach a shared hub."""
-    parts = urllib.parse.urlsplit(raw)
-    if parts.scheme not in ("http", "https") or not parts.hostname:
+    try:
+        parts = urllib.parse.urlsplit(raw)
+        hostname = parts.hostname
+    except ValueError as exc:
+        raise ContractError(f"refusing --hub-url {raw!r}: {exc}") from exc
+    if parts.scheme not in ("http", "https") or not hostname:
         raise ContractError(f"refusing --hub-url {raw!r}: it must be an http or https URL")
-    host = parts.hostname
+    host = hostname
     loopback = host == LOOPBACK_NAME
     if not loopback:
         try:
@@ -474,6 +510,43 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
 _OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
 
 
+def _read_bounded(stream: Any, deadline: float) -> bytes:
+    """Read a response body with a size cap and an overall deadline.
+
+    The socket timeout restarts on every chunk, so a hub that keeps sending
+    could otherwise grow the body without limit and never return.
+    """
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if time.monotonic() > deadline:
+            raise TimeoutError("the response body did not finish within the request deadline")
+        chunk = stream.read(65536)
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > MAX_BODY_BYTES:
+            raise ValueError(f"the response body is larger than {MAX_BODY_BYTES} bytes")
+        chunks.append(chunk)
+
+
+def scrub(value: Any, secrets_: set[str]) -> Any:
+    """Replace every issued token value wherever it appears, keys included.
+
+    `redact` only knows keys named `token`; a drifting hub can echo a token in
+    any field the contract checks, and the mismatch would carry it verbatim.
+    """
+    if isinstance(value, str):
+        for secret in secrets_:
+            value = value.replace(secret, "[redacted]")
+        return value
+    if isinstance(value, dict):
+        return {scrub(key, secrets_): scrub(item, secrets_) for key, item in value.items()}
+    if isinstance(value, list):
+        return [scrub(item, secrets_) for item in value]
+    return value
+
+
 def request(
     base: str,
     method: str,
@@ -492,12 +565,18 @@ def request(
     if data is not None:
         sent.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(base + path, data=data, headers=sent, method=method)
+    deadline = time.monotonic() + timeout
     try:
         with _OPENER.open(req, timeout=timeout) as resp:
-            status, content_type, payload = resp.status, resp.headers.get("Content-Type", ""), resp.read()
+            status, content_type = resp.status, resp.headers.get("Content-Type", "")
+            payload = _read_bounded(resp, deadline)
     except urllib.error.HTTPError as exc:
-        status, content_type, payload = exc.code, exc.headers.get("Content-Type", ""), exc.read()
-    except (urllib.error.URLError, OSError) as exc:
+        status, content_type = exc.code, exc.headers.get("Content-Type", "")
+        try:
+            payload = _read_bounded(exc, deadline)
+        except (OSError, ValueError) as err:
+            return Response(status, content_type, b"", None, error=f"{type(err).__name__}: {err}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
         return Response(None, "", b"", None, error=f"{type(exc).__name__}: {exc}")
     try:
         parsed = json.loads(payload)
@@ -525,6 +604,8 @@ class Drive:
         self.mismatches: list[dict] = []
         self.exchanges: list[dict] = []
         self.routes: set[str] = set()
+        # Every token the drive holds or the hub issues, scrubbed from the result.
+        self.secrets: set[str] = {hub.admin_token} if hub.admin_token else set()
 
     def call(
         self,
@@ -554,7 +635,7 @@ class Drive:
         if resp.status != status:
             problems.append({"check": "status", "expected": status, "observed": resp.status or resp.error})
         if resp.status is not None and json_body:
-            if not resp.content_type.startswith("application/json"):
+            if resp.content_type.split(";", 1)[0].strip().lower() != "application/json":
                 problems.append(
                     {"check": "content-type", "expected": "application/json", "observed": resp.content_type}
                 )
@@ -675,6 +756,7 @@ def run_contract(hub: Hub) -> dict:
     }
     tok = {node: str(payload.get("token") or missing) for node, payload in added.items()}
     a, b, c = tok[node_a], tok[node_b], tok[node_c]
+    d.secrets.update(value for value in tok.values() if value != missing)
     label = _obj(added[node_a].get("node")).get("label")
     d.invariant("nodes add a", label == "contract node", "node.label echoes the request label", label)
     d.call(
@@ -735,6 +817,8 @@ def run_contract(hub: Hub) -> dict:
         },
     )
     principal_token = str(_obj(principal.get("principal")).get("token") or missing)
+    if principal_token != missing:
+        d.secrets.add(principal_token)
 
     # -- auth failures --------------------------------------------------------
     unauthorized = error_body("unauthorized")
@@ -1336,10 +1420,11 @@ def run_contract(hub: Hub) -> dict:
                 "observed": {"not in COVERED_ROUTES": unexpected, "never exercised": unlisted},
             }
         )
+    secrets_ = {secret for secret in d.secrets if len(secret) >= 8}
     return {
         "cases": d.cases,
-        "mismatches": d.mismatches,
-        "exchanges": d.exchanges,
+        "mismatches": scrub(d.mismatches, secrets_),
+        "exchanges": scrub(d.exchanges, secrets_),
         "covered_routes": sorted(d.routes),
     }
 

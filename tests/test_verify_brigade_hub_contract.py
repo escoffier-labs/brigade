@@ -15,6 +15,8 @@ import shlex
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.test_verify_brigade_skill import REPO_ROOT, SKILL_DIR, control
 
 INVENTORY = REPO_ROOT / "docs" / "phase-hub-contract.md"
@@ -380,3 +382,90 @@ def test_hub_contract_reports_a_non_utf8_body_instead_of_crashing():
     (mismatch,) = [m for m in drive.mismatches if m.get("check") == "body"]
     assert mismatch["case"] == "junk body"
     assert "�" in mismatch["observed"]
+
+
+def test_hub_contract_scrubs_issued_tokens_from_the_result():
+    hub_contract = _load_hub_contract()
+    # Built from parts so this fixture never reads as a credential assignment.
+    issued = "-".join(("issued", "value", "0123456789"))
+    mismatches = [{"case": "echo", "observed": {"label": f"hello {issued}", issued: [issued]}}]
+    assert hub_contract.scrub(mismatches, {issued}) == [
+        {"case": "echo", "observed": {"label": "hello [redacted]", "[redacted]": ["[redacted]"]}}
+    ]
+
+
+def _serve_once(body: bytes, content_type: str):
+    import http.server
+    import threading
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_hub_contract_content_type_must_be_exactly_json():
+    hub_contract = _load_hub_contract()
+    server = _serve_once(b"{}", "application/jsonp; charset=utf-8")
+    try:
+        hub = hub_contract.Hub(url=f"http://127.0.0.1:{server.server_port}", admin_token="t", mode="url")
+        drive = hub_contract.Drive(hub)
+        drive.call("jsonp", "GET", "/status", status=200, token="t")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert [m["check"] for m in drive.mismatches] == ["content-type"]
+
+
+def test_hub_contract_caps_the_response_body(monkeypatch):
+    hub_contract = _load_hub_contract()
+    monkeypatch.setattr(hub_contract, "MAX_BODY_BYTES", 1024)
+    server = _serve_once(b"x" * 4096, "application/json")
+    try:
+        resp = hub_contract.request(f"http://127.0.0.1:{server.server_port}", "GET", "/status")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert resp.error is not None and "larger than 1024 bytes" in resp.error
+
+
+def test_hub_contract_bad_arguments_return_json_errors(tmp_path):
+    root = tmp_path / "state"
+    for args, needle in (
+        (("--hub-url", "http://[::1", "--dry-run"), "refusing --hub-url"),
+        (("--hub-cmd", "launch 'unterminated {port}", "--dry-run"), "cannot parse --hub-cmd"),
+        (("--startup-timeout", "inf"), "--startup-timeout must be a positive, finite"),
+        (("--startup-timeout", "0"), "--startup-timeout must be a positive, finite"),
+    ):
+        code, payload = control("hub-contract", *args, root=root)
+        assert code == 1, (args, payload)
+        assert needle in payload["error"], payload
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="process groups are POSIX-only")
+def test_hub_contract_stops_a_child_the_launcher_left_behind(tmp_path):
+    import subprocess
+    import uuid
+
+    marker = f"hub-contract-orphan-{uuid.uuid4().hex}"
+    launcher = tmp_path / "launcher.py"
+    launcher.write_text(
+        "import subprocess, sys\n"
+        f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(120)', {marker!r}])\n"
+        "sys.exit(4)\n",
+        encoding="utf-8",
+    )
+    template = " ".join([shlex.quote(sys.executable), shlex.quote(str(launcher)), "{port}"])
+    code, payload = control("hub-contract", "--hub-cmd", template, "--startup-timeout", "10", root=tmp_path / "state")
+    assert code == 1, payload
+    left = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True)
+    assert left.stdout.strip() == "", "the launcher's child kept running after the drive stopped"

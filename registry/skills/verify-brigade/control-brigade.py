@@ -1217,6 +1217,9 @@ def cmd_hub_contract(args: argparse.Namespace) -> int:
                 "covered_routes": list(hc.COVERED_ROUTES),
             }
         )
+    startup_timeout = float(args.startup_timeout)
+    if not (0 < startup_timeout < float("inf")):
+        raise HelperError(f"--startup-timeout must be a positive, finite number of seconds, not {args.startup_timeout}")
     admin_token = os.environ.get(args.admin_token_env, "").strip() if external else None
     work = None if external else hub_contract_workdir(args, root, dry_run=False)
     try:
@@ -1226,7 +1229,7 @@ def cmd_hub_contract(args: argparse.Namespace) -> int:
             hub_cmd=template,
             hub_url=args.hub_url,
             admin_token=admin_token,
-            startup_timeout=float(args.startup_timeout),
+            startup_timeout=startup_timeout,
         )
     except hc.ContractError as exc:
         raise HelperError(str(exc)) from exc
