@@ -2957,7 +2957,7 @@ func TestCLISearchAllowsOnlyValidExactCodeReferenceWithoutLexicalQuery(t *testin
 	if code, _, stderr := run("search", "--code-reference", "{}", "--json"); code == 0 || !strings.Contains(stderr, "invalid code reference") {
 		t.Fatalf("malformed exact-only reference code=%d stderr=%q", code, stderr)
 	}
-	if code, _, stderr := run("search", "--json"); code == 0 || !strings.Contains(stderr, "usage: miseledger search <query>") {
+	if code, _, stderr := run("search", "--json"); code == 0 || !strings.Contains(stderr, "usage: "+CanonicalProgram+" search <query>") {
 		t.Fatalf("missing query and reference code=%d stderr=%q", code, stderr)
 	}
 }

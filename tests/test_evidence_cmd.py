@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, search_cmd
+from brigade import code_cmd, doctor as doctor_mod, evidence_cmd, evidence_runtime, search_cmd
 from brigade.station import DoctorContext
 
 
@@ -275,6 +275,35 @@ def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monke
     assert [str(binary), "crawl", "memory", str(workspace.resolve())] in payload["commands"]
     env = _isolated_miseledger_env(tmp_path / "home")
     _exec_printed_commands(payload["commands"], env)
+
+
+def test_both_engine_entry_points_meet_the_version_floor(tmp_path):
+    """Either banner parses, and the preflight floor passes on the real engines."""
+    go = shutil.which("go")
+    if go is None:
+        pytest.skip("go toolchain missing; cannot build the evidence entry points")
+    for name in evidence_runtime.component_manifest.family_names("brigade-evidence"):
+        binary = tmp_path / "bin" / name
+        built = subprocess.run(
+            [go, "build", "-o", str(binary), f"./cmd/{name}"],
+            cwd=_ENGINE_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert built.returncode == 0, built.stderr
+        home = tmp_path / f"home-{name}"
+        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
+        for variable, leaf in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")):
+            env[variable] = str(home / leaf)
+        _exec_printed_commands([[str(binary), "init"]], env)
+        banner = subprocess.run([str(binary), "version"], capture_output=True, text=True, env=env, check=False)
+        program, version = banner.stdout.split()
+        assert program == name
+        probe = evidence_runtime.probe_memory_projection(str(binary), env=env)
+        compat = evidence_runtime.check_memory_projection_preflight(probe)
+        assert probe.version == version
+        assert compat.state in {"ok", "warn"}, compat.detail
 
 
 def test_issue_1024_mutation_memory_on_clean_workspace_fails_on_bundled_engine(tmp_path):

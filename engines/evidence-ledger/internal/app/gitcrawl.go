@@ -39,7 +39,7 @@ type gitcrawlThread struct {
 
 func cmdCrawlGitcrawl(args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: "+nativeExporters["github"].usage)
+		fmt.Fprintln(out, "usage: "+usageLine(nativeExporters["github"].usage))
 		return 0
 	}
 	values, bools, rest, err := splitFlags(args,

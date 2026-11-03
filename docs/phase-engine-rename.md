@@ -262,6 +262,14 @@ So a v0.30 client that finds `miseledger` on its `PATH` keeps parsing
 canonical name when it resolves an executable, so Brigade's own runs do not
 print the deprecation line.
 
+That last guarantee holds only once R4 resolves canonical names first and R5
+installs canonical executables. Before then, Brigade finds only the legacy
+executable, and a stderr line would reach every relayed command and every
+PowerShell 5.1 caller that runs with `$ErrorActionPreference = 'Stop'`, where
+redirected native stderr becomes a terminating `NativeCommandError`. So the
+deprecation line ships in R5, not in the engine identity slices. Until then
+the legacy entry point's stderr stays byte-identical to v0.30.
+
 ## Slices
 
 Dependency order:
@@ -391,7 +399,9 @@ waits for R2, R3 and R4. R6 is last.
   `src/brigade/evidence_runtime.py` (`_normalize_miseledger_version` strips
   either name) and `src/brigade/evidence_cmd.py` (usage regex accepts both).
 - Behavior: identity drives the banner, usage, `serverInfo.name`, and the
-  `doctor --mcp` check, which accepts either name. `ResolvePaths` applies the
+  `doctor --mcp` check, which accepts either name. The legacy entry point
+  writes no deprecation line yet (see [Entry point identity](#entry-point-identity)).
+  `ResolvePaths` applies the
   resolution rule to the whole directory set, and the MAC key follows
   `DataDir`. The frozen strings stay untouched, and R0 fails if one of them moves.
 - Tests:
@@ -492,6 +502,10 @@ waits for R2, R3 and R4. R6 is last.
   The shim list comes from `COMPONENT_FAMILIES`, so `installed.json` needs no
   new field. `--rollback` and the next setup remove shims they created.
   Entry point identity makes each shim behave like the legacy binary.
+- Deprecation line: this slice turns on the legacy entry point's one stderr
+  line, because it is the first slice where Brigade itself no longer invokes
+  the legacy name. The Windows acceptance helper already treats stderr as
+  diagnostics and fails only on the exit code.
 - Tests:
   - A manifest with canonical keys round-trips.
   - A legacy-keyed v0.30 manifest and state still load, and a mixed-key

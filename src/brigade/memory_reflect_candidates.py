@@ -170,7 +170,7 @@ def evidence_bundle_path(ref: str) -> tuple[bool, Path | None]:
     bundle = memory_cmd._miseledger_evidence_id(ref)
     if bundle is None:
         return False, None
-    return True, memory_cmd._miseledger_evidence_path(bundle)
+    return True, memory_cmd._evidence_bundle_path(bundle)
 
 
 def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str, str]:

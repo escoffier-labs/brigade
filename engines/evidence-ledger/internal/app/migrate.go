@@ -20,7 +20,7 @@ var migrateBatchSize = 1000
 // cmdMigrate dispatches `miseledger migrate <target>`; mirrors cmdPrune.
 func cmdMigrate(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+		return fatalf(errw, "usage: "+program+" migrate codex-arguments [--dry-run] [--apply] [--json]")
 	}
 	if args[0] == "--help" || args[0] == "-h" || args[0] == "help" {
 		return writeMigrateHelp(out)
@@ -29,12 +29,12 @@ func cmdMigrate(args []string, out, errw io.Writer) int {
 	case "codex-arguments":
 		return cmdMigrateCodexArguments(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+		return fatalf(errw, "usage: "+program+" migrate codex-arguments [--dry-run] [--apply] [--json]")
 	}
 }
 
 func writeMigrateHelp(w io.Writer) int {
-	fmt.Fprintln(w, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+	fmt.Fprintln(w, "usage: "+program+" migrate codex-arguments [--dry-run] [--apply] [--json]")
 	fmt.Fprintln(w)
 	fmt.Fprintln(w, "Rewrite stored Codex tool-call rows to truncate oversized arguments and remove duplicate arguments.")
 	fmt.Fprintln(w, "Note: Candidate selection performs a full-table LIKE scan across items for matching metadata.")
@@ -65,7 +65,7 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 		return writeMigrateHelp(out)
 	}
 	if len(rest) != 0 || (bools["apply"] && bools["dry-run"]) {
-		return fatalf(errw, "usage: miseledger migrate codex-arguments [--dry-run] [--apply] [--json]")
+		return fatalf(errw, "usage: "+program+" migrate codex-arguments [--dry-run] [--apply] [--json]")
 	}
 	isDryRun := true
 	if bools["apply"] {

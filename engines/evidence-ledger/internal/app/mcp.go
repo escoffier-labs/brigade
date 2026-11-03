@@ -48,7 +48,7 @@ const (
 
 func cmdMCP(args []string, out, errw io.Writer) int {
 	if len(args) != 0 {
-		return fatalf(errw, "usage: miseledger mcp")
+		return fatalf(errw, "usage: "+program+" mcp")
 	}
 	reader := bufio.NewReader(stdin)
 	framing := framingUnknown
@@ -87,7 +87,7 @@ func handleMCPRequest(req mcpRequest) mcpResponse {
 		resp.Result = map[string]any{
 			"protocolVersion": "2024-11-05",
 			"capabilities":    map[string]any{"tools": map[string]any{}},
-			"serverInfo":      map[string]any{"name": "miseledger", "version": Version},
+			"serverInfo":      map[string]any{"name": program, "version": Version},
 		}
 	case "tools/list":
 		resp.Result = map[string]any{"tools": mcpTools()}
@@ -118,7 +118,7 @@ func mcpDoctorChecks() []doctorCheck {
 		server, _ := result["serverInfo"].(map[string]any)
 		name, _ := server["name"].(string)
 		version, _ := server["version"].(string)
-		add("mcp_initialize", ok && name == "miseledger" && version != "", fmt.Sprintf("server=%s version=%s", name, version))
+		add("mcp_initialize", ok && isServerName(name) && version != "", fmt.Sprintf("server=%s version=%s", name, version))
 	}
 
 	toolsResp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "doctor-tools", Method: "tools/list"})

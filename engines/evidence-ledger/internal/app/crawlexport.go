@@ -35,12 +35,12 @@ func (e nativeExporter) adapterCmd() []string {
 }
 
 var nativeExporters = map[string]nativeExporter{
-	"discord": {binary: "discrawl", sourceKind: "discord", usage: "miseledger crawl discord [--since RFC3339] [--limit N] [--channel NAME] [--guild ID] [--json] [--dry-run]"},
-	"github":  {binary: "gitcrawl", sourceKind: "github", usage: "miseledger crawl github --repo OWNER/NAME [--state open|closed|all] [--numbers LIST] [--limit N] [--json] [--dry-run]"},
-	"slack":   {binary: "slacrawl", sourceKind: "slack", usage: "miseledger crawl slack [--workspace ID] [--channel ID] [--limit N] [--json] [--dry-run]"},
-	"granola": {binary: "graincrawl", sourceKind: "granola", usage: "miseledger crawl granola [--limit N] [--json] [--dry-run]"},
-	"notion":  {binary: "notcrawl", sourceKind: "notion", usage: "miseledger crawl notion [--limit N] [--json] [--dry-run]"},
-	"gmail":   {binary: "mailcrawl", sourceKind: "gmail", exportCmd: []string{"gmail", "export"}, usage: "miseledger crawl gmail --account EMAIL --query QUERY [--limit N] [--metadata-only] [--json] [--dry-run]"},
+	"discord": {binary: "discrawl", sourceKind: "discord", usage: "crawl discord [--since RFC3339] [--limit N] [--channel NAME] [--guild ID] [--json] [--dry-run]"},
+	"github":  {binary: "gitcrawl", sourceKind: "github", usage: "crawl github --repo OWNER/NAME [--state open|closed|all] [--numbers LIST] [--limit N] [--json] [--dry-run]"},
+	"slack":   {binary: "slacrawl", sourceKind: "slack", usage: "crawl slack [--workspace ID] [--channel ID] [--limit N] [--json] [--dry-run]"},
+	"granola": {binary: "graincrawl", sourceKind: "granola", usage: "crawl granola [--limit N] [--json] [--dry-run]"},
+	"notion":  {binary: "notcrawl", sourceKind: "notion", usage: "crawl notion [--limit N] [--json] [--dry-run]"},
+	"gmail":   {binary: "mailcrawl", sourceKind: "gmail", exportCmd: []string{"gmail", "export"}, usage: "crawl gmail --account EMAIL --query QUERY [--limit N] [--metadata-only] [--json] [--dry-run]"},
 }
 
 // cmdCrawlExporter shells out to a crawler's `export adapter` subcommand and
@@ -50,7 +50,7 @@ var nativeExporters = map[string]nativeExporter{
 // handled here.
 func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: "+ex.usage)
+		fmt.Fprintln(out, "usage: "+usageLine(ex.usage))
 		return 0
 	}
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
