@@ -268,7 +268,7 @@ def launch(
         )
     except OSError as exc:
         handle.close()
-        raise ParityError(f"could not start the {engine.name} hub: {exc}") from exc
+        raise ParityError(f"could not start hub engine {engine.name}: {exc}") from exc
     hub = hc.Hub(
         url=f"http://{hc.LOOPBACK}:{port}",
         admin_token=admin_token,

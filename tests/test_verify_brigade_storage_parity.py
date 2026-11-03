@@ -14,6 +14,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -309,7 +310,7 @@ def test_storage_parity_reports_a_hub_that_never_starts(tmp_path):
     code, payload = control(
         "storage-parity",
         "--hub-cmd",
-        f"{sys.executable} -c 'raise SystemExit(4)' {{port}} {{clock_file}}",
+        " ".join([shlex.quote(sys.executable), "-c", shlex.quote("raise SystemExit(4)"), "{port}", "{clock_file}"]),
         "--startup-timeout",
         "5",
         root=tmp_path / "state",
