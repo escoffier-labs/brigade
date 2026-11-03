@@ -63,7 +63,7 @@ class MemoryTools:
             if self.profile.prompt_load_scan:
                 rule = blocked_rule(_card_texts(item))
                 if rule:
-                    matches.append({"card_id": item["card_id"], "blocked": rule})
+                    matches.append({"card_id": _blocked_card_id(item), "blocked": rule})
                     continue
             item["content_trust"] = "untrusted"
             matches.append(item)
@@ -253,14 +253,31 @@ class MemoryTools:
         return skill_get(self.workspace, name, resource, offset)
 
 
+_SAFE_CARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
 def _card_texts(item: dict[str, Any]) -> list[str]:
     # Card-authored fields of a search match; path and score come from the search itself.
-    texts = [item.get("title"), item.get("summary")]
+    # A legacy card's id can come from its frontmatter, so it is card-authored too.
+    texts = [item.get("card_id"), item.get("title"), item.get("summary")]
     for key in ("tags", "card_aliases"):
         values = item.get(key)
         if isinstance(values, list):
             texts.extend(values)
     return [text for text in texts if isinstance(text, str)]
+
+
+def _blocked_card_id(item: dict[str, Any]) -> str | None:
+    """An identifier for a blocked match that carries no card-authored free text.
+
+    Keep the card id only when it is a plain slug, else fall back to the file stem
+    memory_card reads by, and return None when neither is a plain slug.
+    """
+    path = item.get("path")
+    for value in (item.get("card_id"), PurePath(path).stem if isinstance(path, str) else None):
+        if isinstance(value, str) and _SAFE_CARD_ID.fullmatch(value):
+            return value
+    return None
 
 
 def _skill_names(item: dict[str, Any]) -> set[str]:

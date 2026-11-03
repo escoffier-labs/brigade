@@ -382,6 +382,18 @@ class MemoryOutput(Fixture):
         assert matches[4]["card_id"] == "clean" and matches[4]["content_trust"] == "untrusted"
 
     @requires_local_state
+    def test_a_card_authored_legacy_id_is_scanned_and_never_echoed(self):
+        self.search_reply(
+            {**self.match("legacy-card"), "card_id": ROLE_OVERRIDE},
+            {**self.match("odd-card", summary=ROLE_OVERRIDE), "card_id": "a b", "path": "memory/cards/c d.md"},
+        )
+        matches = self.memory(GROKBOT_MEMORY).memory_search("release")["matches"]
+        assert matches == [
+            {"card_id": "legacy-card", "blocked": "role-override"},
+            {"card_id": None, "blocked": "role-override"},
+        ]
+
+    @requires_local_state
     def test_dot_and_duet_keep_returning_unscanned_text(self):
         text, _ = BLOCKED_CARDS["guard-card"]
         (self.cards / "guard-card.md").write_text(text)
