@@ -53,7 +53,7 @@ def validate_work_mode(value: Any) -> str:
 
 
 def validate_safety_rails(value: Any) -> bool:
-    if value not in {"on", "off"}:
+    if not isinstance(value, str) or value not in {"on", "off"}:
         raise ValueError("work.rails must be on or off")
     return value == "on"
 

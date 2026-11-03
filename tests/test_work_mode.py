@@ -228,7 +228,7 @@ def test_adoption_reports_yolo_and_never_bypassed(tmp_path: Path, capsys) -> Non
 
 def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, monkeypatch, capsys) -> None:
     target = _wired(tmp_path)
-    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target: False)
+    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target, _path=None: False)
     _set_mode(target, "yolo", capsys)
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     capsys.readouterr()
@@ -243,7 +243,7 @@ def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, monkeypatch, caps
 
 def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, monkeypatch, capsys) -> None:
     target = _wired(tmp_path)
-    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target: False)
+    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target, _path=None: False)
     assert cli.main(["work", "rails", "check", "--target", str(target)]) == 0
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     first = capsys.readouterr().err
@@ -267,6 +267,35 @@ def test_committed_rails_off_cannot_disable_scanning(tmp_path: Path, capsys) -> 
     assert work_mode.rails_enabled(target) is True
     status, _, detail = work_mode.doctor_checks(target)[1]
     assert status == "WARN" and "git tracks .brigade/config.json" in detail
+
+
+def test_committed_legacy_config_cannot_disable_scanning(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    legacy = target / config.LEGACY_WORKSPACE_DIRNAMES[0]
+    legacy.mkdir(parents=True)
+    (legacy / "config.json").write_text(json.dumps({"work": {"rails": "off"}}), encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    assert not (target / config.CONFIG_REL_PATH).exists()
+    assert work_mode.rails_off_requested(target) is True
+    assert work_mode.rails_enabled(target) is False
+    subprocess.run(["git", "add", "-f", str(legacy / "config.json")], cwd=target, check=True)
+    assert work_mode.rails_enabled(target) is True
+
+
+@pytest.mark.parametrize("value", [[], {}, ["off"], 0, None])
+def test_non_string_rails_values_fail_safe(tmp_path: Path, value, capsys) -> None:
+    target = _wired(tmp_path)
+    path = target / config.CONFIG_REL_PATH
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data.setdefault("work", {})["rails"] = value
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError):
+        config.validate_safety_rails(value)
+    assert work_mode.rails_off_requested(target) is False
+    assert work_mode.rails_enabled(target) is True
+    assert work_mode.summary(target)["rails"] == "on"
+    cli.main(["work", "rails", "show", "--target", str(target)])
+    capsys.readouterr()
 
 
 def _git_env(home: Path, shim_dir: Path) -> dict[str, str]:

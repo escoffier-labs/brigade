@@ -51,18 +51,26 @@ RAILS_OFF_WARNING = (
 )
 
 
-def _work_settings(target: Path) -> dict[str, Any]:
-    candidates = [target / CONFIG_REL_PATH, *(target / legacy / "config.json" for legacy in LEGACY_WORKSPACE_DIRNAMES)]
-    for path in candidates:
+def _config_candidates(target: Path) -> list[Path]:
+    return [target / CONFIG_REL_PATH, *(target / legacy / "config.json" for legacy in LEGACY_WORKSPACE_DIRNAMES)]
+
+
+def _work_settings_with_source(target: Path) -> tuple[dict[str, Any], Path | None]:
+    """The ``work`` settings and the config file that supplied them (the first that exists)."""
+    for path in _config_candidates(target):
         try:
             if not path.is_file():
                 continue
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return {}
+            return {}, path
         work = data.get("work") if isinstance(data, dict) else None
-        return work if isinstance(work, dict) else {}
-    return {}
+        return (work if isinstance(work, dict) else {}), path
+    return {}, None
+
+
+def _work_settings(target: Path) -> dict[str, Any]:
+    return _work_settings_with_source(target)[0]
 
 
 def resolve_mode(target: Path) -> str:
@@ -77,11 +85,21 @@ def is_yolo(target: Path) -> bool:
     return resolve_mode(target) == MODE_YOLO
 
 
-def _config_is_tracked(target: Path) -> bool:
-    """True when git tracks the config, or when that cannot be ruled out."""
+def _config_is_tracked(target: Path, path: Path | None = None) -> bool:
+    """True when git tracks the config at ``path``, or when that cannot be ruled out.
+
+    ``path`` is the file that actually supplied the settings, which may be a legacy
+    location; it defaults to the canonical config.
+    """
+    relative = CONFIG_REL_PATH
+    if path is not None:
+        try:
+            relative = path.relative_to(target).as_posix()
+        except ValueError:
+            return True
     try:
         result = subprocess.run(
-            ["git", "-C", str(target), "ls-files", "--error-unmatch", "--", CONFIG_REL_PATH],
+            ["git", "-C", str(target), "ls-files", "--error-unmatch", "--", relative],
             capture_output=True,
             timeout=5,
             check=False,
@@ -94,11 +112,18 @@ def _config_is_tracked(target: Path) -> bool:
     return result.returncode not in {1, 128}
 
 
-def rails_off_requested(target: Path) -> bool:
+def _rails_off_source(target: Path) -> Path | None:
+    """The config file that explicitly sets ``work.rails: off``, or None."""
+    settings, source = _work_settings_with_source(target)
     try:
-        return not validate_safety_rails(_work_settings(target).get("rails", "on"))
+        off = not validate_safety_rails(settings.get("rails", "on"))
     except ValueError:
-        return False
+        return None
+    return source if off else None
+
+
+def rails_off_requested(target: Path) -> bool:
+    return _rails_off_source(target) is not None
 
 
 def rails_enabled(target: Path) -> bool:
@@ -107,7 +132,8 @@ def rails_enabled(target: Path) -> bool:
     A committed config cannot turn the rails off: a pushed commit must never be
     able to disable the leak checks of everyone who later pushes from a clone.
     """
-    return not rails_off_requested(target) or _config_is_tracked(target)
+    source = _rails_off_source(target)
+    return source is None or _config_is_tracked(target, source)
 
 
 def summary(target: Path) -> dict[str, str]:
