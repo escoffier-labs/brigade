@@ -33,6 +33,7 @@ type AdapterResult struct {
 	FilesSkipped int      `json:"files_skipped"`
 }
 
+// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 const sourceScanSentinelSchema = "miseledger.internal.source_scan.v1"
 
 type sourceScanSentinel struct {
@@ -321,6 +322,7 @@ func resolveRelations(tx *sql.Tx) (int64, error) {
 	// source.kind + optional collection.external_id + item.external_id.
 	// Always select the latest non-tombstoned version for that identity so an
 	// edit that mints a new content-addressed item id repoints existing edges.
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	const backupCollectionLike = "__miseledger_memory_backup__:%"
 	qualified, err := tx.Exec(`update relations
 set target_item_id = (
@@ -628,6 +630,7 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 		return false, err
 	}
 	capturedAt := optionalString(createdAt)
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
 	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
 	if err != nil {
@@ -768,6 +771,7 @@ on conflict(source_id, external_id) do update set type=excluded.type, name=exclu
 		createdAt = now
 	}
 	capturedAt := optionalString(createdAt)
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
 	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
 	if err != nil {
@@ -803,6 +807,7 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 			return err
 		}
 	}
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	itemLocator := fmt.Sprintf("miseledger://%s/%s/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID)
 	_ = itemLocator
 	envelope, err := buildIngestEnvelope(rec, now, capturedAt, rec.Item.Text, raw, rec.Collection.ExternalID, rec.Item.ExternalID, "uri", itemLocator)
@@ -891,6 +896,7 @@ func replaceItemSideTables(tx *sql.Tx, rec adapter.Record, itemID, sourceID, col
 func buildIngestEnvelope(rec adapter.Record, ingestedAt string, capturedAt *string, text string, raw []byte, collectionID, itemID, locatorKind, locatorValue string) (provenance.Envelope, error) {
 	at := ingestedAt
 	return provenance.NewEvidenceEnvelope(provenance.EvidenceInput{
+		// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 		SourceSystem: "miseledger", SourceKind: rec.Source.Kind, SourceProducer: "ingest.upsertRecord",
 		Origin: "external-service", RepositoryID: "unknown",
 		CollectionID: collectionID, ItemID: itemID,
@@ -909,10 +915,12 @@ func artifactLocator(rec adapter.Record, art adapter.Artifact) (string, string) 
 }
 
 func artifactProvenanceLocator(rec adapter.Record, art adapter.Artifact) string {
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	return fmt.Sprintf("miseledger://%s/%s/%s/artifact/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID, art.ExternalID)
 }
 
 func linkProvenanceLocator(rec adapter.Record, linkURL string) string {
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	return fmt.Sprintf("miseledger://%s/%s/%s/link/%s", rec.Source.Kind, rec.Collection.ExternalID, rec.Item.ExternalID, stableID("link", linkURL))
 }
 

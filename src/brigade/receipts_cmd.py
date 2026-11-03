@@ -33,15 +33,20 @@ LEGACY = "LEGACY"
 SIGNED_OK = "SIGNED-OK"
 SIGNATURE_MISMATCH = "SIGNATURE-MISMATCH"
 UNVERIFIABLE_SIGNATURE = "UNVERIFIABLE-SIGNATURE"
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 MISELEDGER_SCHEMA = "miseledger.adapter.v1"
 # Receipts are Brigade-written artifacts of workspace activity, not session
 # captures; classify them (and their redaction scope) as workspace origin.
 RECEIPT_ORIGIN = "workspace"
 MISELEDGER_SOURCE = {"kind": "brigade", "name": "Brigade", "version": __version__}
 MISELEDGER_ACTOR = {"external_id": "brigade:system", "type": "system", "name": "Brigade"}
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 MISELEDGER_CURSOR_REL = Path(".brigade") / "work" / "miseledger-export-cursor.json"
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 MISELEDGER_EXPORT_RESULT_SCHEMA = "brigade.miseledger_export_result.v1"
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 MISELEDGER_FLEET_EXPORT_RESULT_SCHEMA = "brigade.miseledger_fleet_export_result.v1"
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 MISELEDGER_INDEX_RESULT_SCHEMA = "brigade.miseledger_index_result.v1"
 _FLEET_STATUS_PRECEDENCE = ("failed", "exported", "nothing-new", "empty")
 _CODE_REFERENCE_LIMIT = 100
@@ -1429,6 +1434,7 @@ def _write_miseledger_cursor_hashes(target: Path, hashes: set[str]) -> None:
     localio.write_json(
         _miseledger_cursor_path(target),
         {
+            # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
             "schema": "brigade.miseledger_export_cursor.v1",
             "source": "brigade",
             "raw_hashes": sorted(hashes),
