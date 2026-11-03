@@ -7,7 +7,7 @@ from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
-from .. import localio
+from .. import localio, work_mode
 from ..config import load_config
 from ..templates import template_root
 from .install_cmd import status_payload
@@ -89,8 +89,10 @@ def classify(target: Path) -> dict[str, Any] | None:
     skill_present, skill_current = _skill_current(target)
     instruction_current = _instruction_import_current(target)
     integrity_issue = None
+    yolo = work_mode.is_yolo(target)
     try:
-        dormant = _recent_write_without_receipt(target)
+        # Yolo mode opts out of receipts, so a missing one is not dormancy (#2233).
+        dormant = not yolo and _recent_write_without_receipt(target)
     except SessionIntegrityError as exc:
         dormant = False
         integrity_issue = f"session directory integrity refused: {exc}"
@@ -117,6 +119,8 @@ def classify(target: Path) -> dict[str, Any] | None:
     if integrity_issue is not None:
         state = "error"
         issues.append(integrity_issue)
+    elif yolo:
+        state = "yolo"
     elif dormant:
         state = "dormant"
         issues.append("recent work has no verification receipt")
@@ -129,6 +133,7 @@ def classify(target: Path) -> dict[str, Any] | None:
 
     return {
         "state": state,
+        "work_mode": work_mode.summary(target),
         "issues": issues,
         "instruction_import": instruction_current,
         "skill_present": skill_present,

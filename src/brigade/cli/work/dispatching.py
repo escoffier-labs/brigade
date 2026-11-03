@@ -90,6 +90,14 @@ def _dispatch_impl(args) -> int:
             return install_cmd.hooks_uninstall(target=args.target, scope=args.scope)
         args._brigade_parser.error(f"unknown hooks command: {args.hooks_command}")
         return 2
+    if args.work_command in {"mode", "rails"}:
+        from ...work_mode_cmd import mode_command, rails_command
+
+        if args.work_command == "mode":
+            return mode_command(
+                target=args.target, action=args.mode_command, mode=getattr(args, "mode", None), json_output=args.json
+            )
+        return rails_command(target=args.target, action=args.rails_command, json_output=args.json)
     if args.work_command == "hook-run":
         from ...claude_hooks.runtime import hook_run
 

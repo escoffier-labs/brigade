@@ -124,6 +124,20 @@ if [[ -z "$target" || -z "$brigade_bin" ]]; then
   exit 0
 fi
 
+# Work mode (#2233): yolo keeps the brief and drops verification enforcement.
+work_mode="$(python3 - "$target/.brigade/config.json" <<'PY' 2>/dev/null || true
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as config_file:
+        work = json.load(config_file).get("work")
+except (AttributeError, OSError, TypeError, ValueError):
+    work = None
+print(work.get("mode") if isinstance(work, dict) and work.get("mode") == "yolo" else "enforced")
+PY
+)"
+
 mkdir -p "$state_dir" "$state_root/logs"
 log_file="$state_root/logs/$safe_session.log"
 printf '%s\t%s\t%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$event" "$tool_name" >>"$log_file"
@@ -202,6 +216,8 @@ close_out_work() {
   if has_new_receipt; then
     "$brigade_bin" receipts export miseledger --target "$target" --new-only --import >>"$log_file" 2>&1 || true
     rm -f "$state_dir/substantive" "$state_dir/friction.reported"
+  elif [[ "$work_mode" == "yolo" ]]; then
+    rm -f "$state_dir/substantive"
   elif [[ ! -f "$state_dir/friction.reported" ]]; then
     "$brigade_bin" friction add --target "$target" --type workflow_correction --severity high --workflow grok/brigade-work --evidence "grok-session:$session_id" "Grok session $session_id ended after edits without a new Brigade verify receipt" >>"$log_file" 2>&1 || true
     touch "$state_dir/friction.reported"
@@ -228,7 +244,7 @@ case "$event" in
       if is_direct_brigade_status; then
         allow
       fi
-      if ! is_direct_brigade_verification && is_raw_verification; then
+      if [[ "$work_mode" != "yolo" ]] && ! is_direct_brigade_verification && is_raw_verification; then
         deny "This repository is Brigade-wired. Run the check through: brigade work verify run --target . --command \"<test command>\" --capture brigade-work"
       fi
     fi

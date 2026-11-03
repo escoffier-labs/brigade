@@ -350,16 +350,17 @@ def _write_surface_evidence(target: Path, selection: Selection, *, projection_on
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
-def _merged_config(target: Path, selection: Selection) -> Config:
+def _merged_config(target: Path, selection: Selection, *, work_mode: str | None = None) -> Config:
     try:
         existing = load_config(target)
     except (ValueError, AttributeError, TypeError) as exc:
         # An unreadable config is replaced, as a first install would.
         print(f"warning: replacing unreadable .brigade/config.json ({exc})", file=sys.stderr)
         existing = None
-    if existing is None:
-        return Config(version=1, selection=selection)
-    return dataclasses.replace(existing, version=1, selection=selection)
+    merged = Config(version=1, selection=selection) if existing is None else existing
+    merged = dataclasses.replace(merged, version=1, selection=selection)
+    # None keeps a recorded mode; `brigade init --yolo` passes "yolo" (#2233).
+    return merged if work_mode is None else dataclasses.replace(merged, work_mode=work_mode)
 
 
 def install_selection(
@@ -372,6 +373,7 @@ def install_selection(
     update_gitignore: bool = True,
     wire_skills: bool = True,
     projection_only: bool = False,
+    work_mode: str | None = None,
 ) -> int:
     """Install a Selection into `target`. Returns process exit code."""
     selection.validate()
@@ -436,7 +438,7 @@ def install_selection(
 
     # Persist config.json. Keep settings an operator already recorded (verify
     # retention, run-lock wait, recall target, ...); only the selection changes.
-    write_config(target, _merged_config(target, selection))
+    write_config(target, _merged_config(target, selection, work_mode=work_mode))
     _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so

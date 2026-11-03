@@ -22,6 +22,10 @@ DEFAULT_VERIFY_RUNS_KEEP = 50
 DEFAULT_VERIFY_ARCHIVE_ENABLED = True
 DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
+# Work-loop enforcement mode and the independent safety-rails switch (#2233).
+WORK_MODES = ("enforced", "yolo")
+DEFAULT_WORK_MODE = "enforced"
+DEFAULT_SAFETY_RAILS = True
 
 
 @dataclass
@@ -38,6 +42,20 @@ class Config:
     # Absent on repo installs until the operator sets an explicit path.
     memory_recall_target: str | None = None
     run_record: str = "metadata-only"
+    work_mode: str = DEFAULT_WORK_MODE
+    safety_rails: bool = DEFAULT_SAFETY_RAILS
+
+
+def validate_work_mode(value: Any) -> str:
+    if not isinstance(value, str) or value not in WORK_MODES:
+        raise ValueError(f"work.mode must be one of: {', '.join(WORK_MODES)}")
+    return value
+
+
+def validate_safety_rails(value: Any) -> bool:
+    if value not in {"on", "off"}:
+        raise ValueError("work.rails must be on or off")
+    return value == "on"
 
 
 def validate_run_record(value: Any) -> str:
@@ -182,6 +200,13 @@ def write_config(target: Path, cfg: Config) -> None:
     memory_recall_target = validate_memory_recall_target(cfg.memory_recall_target)
     if memory_recall_target is not None:
         payload["memory_recall_target"] = memory_recall_target
+    work: dict[str, str] = {}
+    if validate_work_mode(cfg.work_mode) != DEFAULT_WORK_MODE:
+        work["mode"] = cfg.work_mode
+    if cfg.safety_rails is not DEFAULT_SAFETY_RAILS:
+        work["rails"] = "on" if cfg.safety_rails else "off"
+    if work:
+        payload["work"] = work
     path.write_text(json.dumps(payload, indent=2) + "\n")
 
 
@@ -222,6 +247,11 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
+    work = data.get("work", {})
+    if not isinstance(work, dict):
+        raise ValueError("work must be an object")
+    work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
+    safety_rails = validate_safety_rails(work.get("rails", "on"))
     return Config(
         version=version,
         selection=sel,
@@ -233,4 +263,6 @@ def load_config(target: Path) -> Optional[Config]:
         run_lock_wait_seconds=run_lock_wait_seconds,
         memory_recall_target=memory_recall_target,
         run_record=run_record,
+        work_mode=work_mode,
+        safety_rails=safety_rails,
     )
