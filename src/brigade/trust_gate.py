@@ -26,6 +26,7 @@ RESEARCH_EVENTS_NAME = "provenance-events.jsonl"
 OPERATOR_REVIEW = "operator:brigade evidence trust review"
 OPERATOR_VERIFY = "brigade receipts verify"
 
+# frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 ITEM_REF_MISELEDGER = "miseledger:item:"
 ITEM_REF_WORK_IMPORT = "work-import:"
 ITEM_REF_RESEARCH = "research-finding:"

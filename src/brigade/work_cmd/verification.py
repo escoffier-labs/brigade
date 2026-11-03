@@ -1958,6 +1958,7 @@ def _attach_miseledger_indexing(
     else:
         indexing = receipts_cmd.index_miseledger_receipts(target=target, quiet=False)
         print(indexing["message"])
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
     receipt["miseledger_indexing"] = {key: value for key, value in indexing.items() if key != "message"}
 
 
