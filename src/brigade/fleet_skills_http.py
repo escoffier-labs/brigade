@@ -7,10 +7,13 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
 from . import fleet_hub, fleet_skills_page as page, fleet_skills_review as review
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 PLAIN = "text/plain; charset=utf-8"
 MAX_REPORT_BODY = 2 * 1024 * 1024
@@ -132,3 +135,17 @@ def post_report(handler: Any, db_path: Path, query: str) -> None:
             conn.close()
     except (sqlite3.Error, fleet_hub.FleetHubError):
         handler._send_json(503, {"error": "skills store unavailable"})
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add(
+        "GET",
+        lambda request, path, query: serve(request, hub.db_path, hub.token, path, query),
+        paths=("/deck/skills", "/deck/skills/plan"),
+    )
+    routes.add(
+        "POST", lambda request, _path, _query: post_form(request, hub.db_path, hub.token), paths=("/deck/skills",)
+    )
+    routes.add(
+        "POST", lambda request, _path, query: post_report(request, hub.db_path, query), paths=("/skills/report",)
+    )
