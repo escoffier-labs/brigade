@@ -287,6 +287,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "t3-dispatch",
             "dot",
             "duet",
+            "grokbot-memory",
             "wazuh-triage",
             "n8n-operator",
         ),
@@ -1051,7 +1052,7 @@ def _grokbot_health_reason(reason: str) -> str:
 
 def _grokbot_bearer_valid(args, pack_id: str | None) -> bool:
     has_bearer = args.bearer_file is not None or args.bearer_env is not None
-    if pack_id in ("dot", "duet"):
+    if pack_id in ("dot", "duet", "grokbot-memory"):
         if has_bearer:
             print(f"error: the {pack_id} pack takes no bearer; it verifies Cloudflare Access tokens", file=sys.stderr)
             return False
@@ -1159,7 +1160,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         target, **listener_kwargs
                     )
                     grokbot_operations_relay.run_listener(operations_config, operations_tools)
-                elif args.pack in ("dot", "duet"):
+                elif args.pack in ("dot", "duet", "grokbot-memory"):
                     from .. import dot
 
                     dot_config, dot_tools, dot_runtime = dot.build_listener_from_target(

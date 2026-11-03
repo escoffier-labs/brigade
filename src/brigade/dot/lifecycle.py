@@ -336,7 +336,11 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
         service = EventService(
             tools.state,
             fleet_status=fleet.fleet_status if fleet is not None else _no_fleet_status,
-            hub=tools.inbox.hub if runtime.events_enabled or not tools.profile.fleet_dispatch else None,
+            hub=(
+                tools.inbox.hub
+                if runtime.events_enabled or (not tools.profile.fleet_dispatch and tools.profile.hub_inbox)
+                else None
+            ),
             hub_poll_seconds=runtime.hub.poll_seconds,
             callback_hosts=frozenset(runtime.callback_hosts),
         )

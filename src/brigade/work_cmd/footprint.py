@@ -256,6 +256,7 @@ def receipt_graph_delta(receipt: dict[str, Any] | None) -> dict[str, Any] | None
     """Return the verify receipt's graphtrail delta field (canonical or alias)."""
     if not isinstance(receipt, dict):
         return None
+    # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
     for key in ("code_graph_delta", "graphtrail_delta"):
         value = receipt.get(key)
         if isinstance(value, dict):
