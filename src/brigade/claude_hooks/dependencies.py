@@ -175,7 +175,7 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     # Incremental sync handles ordinary edits. Only force extraction when the
     # independent content check finds edits the size/mtime shortcut missed.
     for extra in ((), ("--force",)):
-        result = graphtrail_delta._run_graphtrail(binary, db, "sync", *extra, timeout=GRAPH_TIMEOUT_SECONDS)
+        result = graphtrail_delta._run_graphtrail(binary, db, "sync", *extra, timeout=GRAPH_TIMEOUT_SECONDS, cwd=target)
         if result.get("timed_out"):
             return None, "sync_timed_out"
         if result.get("returncode") != 0:
@@ -196,7 +196,7 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     else:
         return None, "stale_graph"
     result = graphtrail_delta._run_graphtrail(
-        binary, db, "affected", path, timeout=GRAPH_TIMEOUT_SECONDS, json_output=True
+        binary, db, "affected", path, timeout=GRAPH_TIMEOUT_SECONDS, json_output=True, cwd=target
     )
     if result.get("timed_out"):
         return None, "affected_timed_out"

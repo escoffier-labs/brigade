@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from brigade import code_export, component_bins, context_cmd, engine_paths, proc, search_cmd
+from brigade import code_export, component_bins, context_cmd, engine_paths, graphtrail_delta, proc, search_cmd
 from brigade.aboyeur import briefs
 from brigade.claude_hooks import dependencies
 from brigade.operator_cmd import lifecycle
@@ -214,3 +214,28 @@ def test_hook_dependents_sync_the_resolved_index_from_the_repo_root(tmp_path, mo
     assert _db_arg(calls[0]["argv"]) == str(expected)
     assert calls[0]["argv"][2] == "sync"
     assert Path(calls[0]["cwd"]) == repo
+
+
+@pytest.mark.skipif(os.name == "nt", reason="shebang stub engine")
+def test_an_index_outside_the_repo_still_syncs_the_repo(tmp_path, monkeypatch):
+    """`sync` indexes its working directory, so a custom index location must not move it."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    custom = tmp_path / "cache" / "project.db"
+    custom.parent.mkdir()
+    custom.write_bytes(b"")
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_DB", str(custom))
+    script, log = _recording_engine(tmp_path)
+    _fake_engine(monkeypatch, str(script))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    assert engine_paths.code_graph_repo_root(custom) is None
+    assert dependencies._dependents(repo, "api.py") == (None, "sync_failed")
+    graphtrail_delta.capture_before(repo, tmp_path / "run")
+
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert [call["argv"][2] for call in calls] == ["sync", "sync"]
+    assert all(_db_arg(call["argv"]) == str(custom) for call in calls)
+    assert all(Path(call["cwd"]) == repo for call in calls)
