@@ -753,6 +753,8 @@ def _retired_assignment_errors(
     conn: sqlite3.Connection, current: Mapping[str, Any], proposed: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     """Keep historical leaves, but refuse a retired seat newly assigned to any role."""
+    current = fleet_policy.canonical_role_document(current)
+    proposed = fleet_policy.canonical_role_document(proposed)
     retired_rows = fleet_hub_model_roster.raw_retired_rows(conn)
     errors: list[dict[str, Any]] = []
     scopes = [("defaults", "", current["defaults"], proposed["defaults"], None)]

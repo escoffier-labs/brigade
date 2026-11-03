@@ -502,7 +502,7 @@ def preview_policy(
             }
         )
     try:
-        proposed = fleet_policy.parse_document(document)
+        proposed = fleet_policy.canonical_role_document(document)
     except FleetPolicyError as exc:
         errors.append({"code": "invalid_document", "detail": str(exc)})
         return {

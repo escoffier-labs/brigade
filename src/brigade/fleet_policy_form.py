@@ -177,6 +177,10 @@ def _patch_from(fields: Mapping[str, str], prefix: str) -> dict[str, Any] | None
 
 def _merge_patch(existing: Mapping[str, Any], fields: Mapping[str, str], prefix: str) -> dict[str, Any]:
     """Apply the submitted leaves onto an existing sparse tree, leaf by leaf."""
+    fields = dict(fields)
+    legacy_role = f"{prefix}role_chef"
+    if legacy_role in fields:
+        fields.setdefault(f"{prefix}role_orchestrator", fields[legacy_role])
     submitted = _patch_from(fields, prefix)
     if submitted is None:
         return {section: dict(body) for section, body in existing.items()}

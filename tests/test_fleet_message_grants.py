@@ -294,7 +294,7 @@ def test_authorization_upgrade_from_intact_v45_via_init_db(tmp_path):
         )
         assert conn.execute("SELECT * FROM fleet_message_send_grants").fetchall() == prior_grants
         assert conn.execute("SELECT * FROM fleet_messages ORDER BY id").fetchall() == prior_messages
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 47
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     finally:
         conn.close()
     conn = fleet_hub.init_db(db)
@@ -519,7 +519,7 @@ def test_authorization_migration_rollback_and_concurrent_startup(tmp_path, monke
         left, right = pool.submit(initialize), pool.submit(initialize)
         result = left.result(timeout=10)
         assert right.result(timeout=10) == result
-    assert result[1] == 47 and all(isinstance(value, str) for value in result[0])
+    assert result[1] == fleet_hub.SCHEMA_VERSION and all(isinstance(value, str) for value in result[0])
 
 
 def test_authorization_backfill_preserves_nonnull_metadata(tmp_path):

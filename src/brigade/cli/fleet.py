@@ -746,7 +746,7 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     preference_source = "hub"
     try:
         preference_payload = _preference_payload(fleet_client.fetch_run_preference())
-    except fleet_client.FleetClientError:
+    except (fleet_client.FleetClientError, run_preference.RunPreferenceError):
         preference_payload = _preference_payload(run_preference.load_cached())
         preference_source = "cached"
     if args.json:

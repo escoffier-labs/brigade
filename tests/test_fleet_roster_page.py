@@ -732,6 +732,7 @@ def test_roster_post_applies_everything_in_one_revision(tmp_path):
         preference = json.loads(pref)["preference"]
         assert preference["impl"] == "agy_flash" and preference["security"] == "daybreak"
         assert preference.get("review") is None and preference["notes"] == "cursor via Other Models only"
+        assert preference.get("chef") is None
         assert None not in preference.values()
         _status, _headers, cloud = _request(hub, "GET", "/cloud", headers=_bearer())
         providers = {row["provider"]: row["enabled"] for row in json.loads(cloud)["policy"]["providers"]}
