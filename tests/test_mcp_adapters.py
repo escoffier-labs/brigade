@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
-from brigade import mcp_adapters as A
+from brigade import component_manifest, engine_paths, mcp_adapters as A
 from brigade.mcp_adapters import CanonicalServer
 
 
@@ -667,10 +666,11 @@ def test_review_non_codex_projection_refuses_lossy_native_auth(auth):
 
 # --- cursor-user projection drops repo-local code graph --db pins --- #
 
-_LEGACY_SERVER = "graphtrail"
-_LEGACY_COMMAND = "graphtrail-mcp"
-_LEGACY_DB = Path(".graphtrail") / "graphtrail.db"
-_CANONICAL_DB = Path(".brigade") / "code-graph" / "code-graph.db"
+# Legacy names come from their compatibility owners so this file adds no retired names.
+_LEGACY_SERVER = component_manifest.family_names("brigade-code-graph")[1]
+_LEGACY_COMMAND = component_manifest.family_names("brigade-code-graph-mcp")[1]
+_LEGACY_DB = engine_paths.LEGACY_CODE_GRAPH_DB
+_CANONICAL_DB = engine_paths.CODE_GRAPH_DB
 
 
 def _code_graph_server(name, command, args, transport="stdio", url=None):
