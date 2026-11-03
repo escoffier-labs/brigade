@@ -100,6 +100,7 @@ is rejected by the duet pack, and the reverse.
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
+| `memory_push` | boolean | Optional, default `true`. `false` stops `inbox_list` and `fleet_digest` from carrying `memory_hits` (see the Dot guide). |
 
 There is no `dispatch_enabled`, `events_enabled`, `callback_hosts`,
 `paths.fleet_config`, `paths.bin.t3_fleet` or `owner_authorization`. Those keys

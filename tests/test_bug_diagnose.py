@@ -280,7 +280,7 @@ def test_prepare_uses_local_report_controls(tmp_path, capsys, monkeypatch):
     # Select the CLI surface before guarding evidence collection. Parser setup
     # consults the installed extras marker independently of report preparation.
     parser = cli._build_parser()
-    monkeypatch.setattr(cli, "_build_parser", lambda: parser)
+    monkeypatch.setattr(cli, "_build_parser_for", lambda argv: parser)
 
     def forbidden(*args, **kwargs):
         pytest.fail("report preparation attempted ambient collection or transport")
