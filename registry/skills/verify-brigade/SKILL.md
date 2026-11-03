@@ -176,6 +176,9 @@ $C guard-parity --target "$TARGET"
 # the refusal-text and tombstone golden from the in-repo hub.
 $C hub-contract
 
+# Read-only production profile: audit it on a throwaway hub (the only profile allowed against production)
+$C hub-contract --profile prod-readonly
+
 # Fleet Hub storage parity: every stored row against the golden (own hub, stepped clock)
 $C storage-parity
 ```
@@ -330,10 +333,12 @@ every subcommand resolves and creates first): `new-target`, `init`, `work-verify
 `grokbot-feed --sample`, `guard-parity`, `hub-contract`, `storage-parity`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
-`would_remove`, or `would_copy` list; `hub-contract` instead reports
-`would_launch` (the hub argv, or `null` for `--hub-url`), `would_create` (the
-hub's state directory, or `null`), and `lifecycle.would_launch` (the clocked
-hub's argv, or `null` with the reason in `lifecycle.skipped`).
+`would_remove`, or `would_copy` list; `hub-contract` with the default `contract`
+profile instead reports `would_launch` (the hub argv, or `null` for `--hub-url`),
+`would_create` (the hub's state directory, or `null`), and `lifecycle.would_launch`
+(the clocked hub's argv, or `null` with the reason in `lifecycle.skipped`). With
+`--profile prod-readonly` it reports the allowed `operations` and the `excluded`
+ones.
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
@@ -349,6 +354,9 @@ in-repo hub and asserts zero mismatches, checks the covered routes against
 prove each drift is reported. `tests/test_verify_brigade_hub_lifecycle.py` runs
 a drifting hub on the drive's clock to prove a tombstone read back as sealed and
 a reworded refusal are both reported, and pins the golden comparator.
+`tests/test_verify_brigade_hub_readonly.py` runs the `prod-readonly` audit on the
+in-repo hub, proves each mutation kind fails it, and proves an unlisted case
+stops the run before any request.
 `tests/test_verify_brigade_storage_parity.py` runs `storage-parity` in every
 profile and in a mixed-engine run, requires each to equal its golden, and
 changes one stored value at a time (a timestamp format, a JSON separator, a

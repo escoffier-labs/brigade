@@ -59,6 +59,10 @@ def add_parser(sub: Any, helper: Any, add_dry_run: Callable[[Any, str], None]) -
     p.add_argument("--startup-timeout", type=float, default=30.0, help="Seconds to wait for /health.")
     add_dry_run(p, "Report the hub commands and covered routes without starting anything.")
     p.set_defaults(func=lambda args: command(args, helper))
+    try:  # the read-only production profile (S29) lives in its own sibling module
+        helper.load_sibling("hub_readonly").add_arguments(p)
+    except ImportError:
+        pass
     return p
 
 
@@ -151,6 +155,8 @@ def _fail_cases(cases: list[dict], problems: list[dict]) -> None:
 
 def command(args: Any, helper: Any) -> int:
     """Drive a Fleet Hub over HTTP and compare it to the recorded wire contract and goldens."""
+    if getattr(args, "profile", "contract") == "prod-readonly":
+        return helper.load_sibling("hub_readonly").command(args, helper)
     root = helper.state_root(args)
     external, clocked, skip = _plan(args, helper)
     try:

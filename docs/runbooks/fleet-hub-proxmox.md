@@ -251,6 +251,34 @@ unset smoke_token
 
 The response from `/events` reports `accepted: 1` for the first post. Reposting the same body reports it as a duplicate, which confirms the idempotency key. Posting the same event with the admin token instead answers HTTP 403 on a hub without `--allow-admin-writes`, which confirms that node tokens are required.
 
+### Read-only drive probe
+
+The hub contract drive enrolls nodes, sends messages and takes claims, so its
+default profile never runs against production. The only drive run allowed
+against the production hub is `--profile prod-readonly`. It runs a fixed list
+of operations that an authorizer audit proves write nothing, refuses any other
+case before its first request, and never enrolls. Run it on the hub host
+against the loopback port, because the drive refuses non-loopback URLs.
+
+Enroll a probe principal once, with no send grants, and keep its token in a
+private file next to a node token:
+
+```bash
+set -euo pipefail
+umask 077
+brigade fleet msg principals add hub-probe --json | jq -j '.principal.token' > hub-probe.token
+BRIGADE_HUB_PROBE_PRINCIPAL_TOKEN="$(cat hub-probe.token)" \
+BRIGADE_HUB_PROBE_NODE_TOKEN="$(cat <node token file>)" \
+  python registry/skills/verify-brigade/control-brigade.py hub-contract \
+  --profile prod-readonly --hub-url "http://<loopback>:<port>"
+```
+
+Exit 0 means every listed operation answered as the contract expects. Exit 3
+lists the mismatches. Before running a newer checkout's profile against
+production, run its audit (`hub-contract --profile prod-readonly` without
+`--hub-url`) on a throwaway hub from the same code. Never point any other
+drive profile, `storage-parity`, or `--audit-mutation` at production.
+
 ## 7. Enroll and configure each Brigade client
 
 Every machine needs its own node token. On the machine, print its machine identity (`brigade node --machine` creates it once under `BRIGADE_HOME`, `~/.brigade/node.toml` by default; this is the identity every event and claim is stamped with, never a workspace-local one):

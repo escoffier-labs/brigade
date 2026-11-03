@@ -212,6 +212,66 @@ Start that hub with its default flags, an empty database, and
 principal, so pick a new name for every run. Nodes get fresh random names, so
 a second run against the same hub still passes.
 
+### Read-only production profile (`--profile prod-readonly`)
+
+`--profile prod-readonly` runs an exact list of operations and nothing else:
+`GET /health`, `GET /owners`, `GET /status`, `GET /sessions`, `GET /claims`,
+and `POST /messages` `identity` (without `peers`), `count` and `keys_get`.
+The list lives in `ALLOWED_OPERATIONS` in `hub_readonly.py`. A case outside
+it, or `--only` naming an operation outside it, stops the run before the first
+request. `list`, `sent`, `sent_lookup`, `ack`, `who`, `claims`, every
+`question_*` action, `GET /policy/inventory` and the browser routes write on
+main and stay off the list.
+
+Without `--hub-url` it runs the audit that keeps the list honest. It launches a
+throwaway hub through `hub_audit.py`, which puts a SQLite authorizer and a
+statement trace on every connection the Python hub opens and keeps the
+background sweepers from starting. It builds a fixture on a controlled clock
+with every kind of overdue row (mail past retention, sealed mail acknowledged
+more than 7 days ago, send-ledger rows older than a day, a question past its
+deadline, an expired paging snapshot), then digests every table, the schema
+and `user_version`, runs the profile, and digests again. Any recorded write,
+any `BEGIN IMMEDIATE` or `BEGIN EXCLUSIVE`, or any digest change fails the run.
+Retention has no exception. Afterwards the excluded operations run as
+positive controls, and each must record a write.
+
+```bash
+$C hub-contract --profile prod-readonly
+$C hub-contract --profile prod-readonly --hub-cmd "/path/to/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}"
+$C hub-contract --profile prod-readonly --audit-mutation "GET /owners:write"   # must exit 3
+```
+
+With `--hub-cmd`, the front's managed Python child starts through the audit
+launcher by way of `BRIGADE_HUB_PYTHON`, so the Rust front with every family
+proxied is audited the same way. The hooks see only the instrumented child's
+connections, so the audit also needs evidence that nothing else opened the
+database. The child opens it through a private hard link, and an inotify watch
+on the `--db` directory runs for the whole hub lifetime: any open through the
+configured path fails the run, even a helper's connection that locks, rolls
+back and closes before the response. The audit also fails when any process in
+the hub's process group still holds the database open without the hooks. That
+is where the Rust-side statement signals have to arrive once S5 to S8 give the
+front its own connections. Where the watch cannot run (not Linux, no inotify,
+an overflowed queue, a replaced or extra-linked database file), the run
+reports the front as not certified and exits 3. `--audit-mutation
+OPERATION:KIND` adds a `write`, a `noop` UPDATE that matches no row, a `begin`
+that takes and releases the write lock, or a `helper` process that does the
+same through its own connection, to `GET /owners`, `GET /status` or
+`POST /messages count`.
+
+With `--hub-url` it probes a running hub using a node token from
+`BRIGADE_HUB_PROBE_NODE_TOKEN` and the token of an operator-enrolled probe
+principal with no send grants from `BRIGADE_HUB_PROBE_PRINCIPAL_TOKEN`
+(`--node-token-env` and `--probe-token-env` rename them). It never enrolls.
+This is the only drive run allowed against production; the runbook is
+`docs/runbooks/fleet-hub-proxmox.md`.
+
+Observed on main `ff46d78f2` plus this change: the audit exits 0 on the Python
+hub and on the Rust front in managed proxy mode, with zero window findings, no
+digest change and all four controls writing. Each of the seven mutation kinds
+(`write`, `noop`, `begin`, `begin-semicolon`, `begin-comment`, `pragma-checkpoint`,
+`helper`) exits 3.
+
 ## Gotchas
 
 - **Serve flags the drive leaves alone.** It launches `fleet serve` with only
