@@ -30,6 +30,7 @@ from . import (
     fleet_inbox,
     heartbeat,
     presence,
+    verification_mode,
     write_attribution,
 )
 from .fingerprint import repo_worktree_fingerprint
@@ -2379,7 +2380,9 @@ def _handle_event(
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        if not is_raw_verification(command) or work_mode.is_yolo(target):
+        if not is_raw_verification(command) or verification_mode.verification_in_yolo(
+            command, payload.get("cwd"), target
+        ):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
@@ -2491,7 +2494,11 @@ def _handle_event(
         tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
         verifier = is_raw_verification(command) or _is_routed_verify(command)
-        if payload.get("tool_name") == "Bash" and verifier and not work_mode.is_yolo(target):
+        if (
+            payload.get("tool_name") == "Bash"
+            and verifier
+            and not verification_mode.verification_in_yolo(command, payload.get("cwd"), target)
+        ):
             from .. import outcome_cmd
 
             capture_id = outcome_cmd.resolve_capture_artifact_id(
