@@ -297,3 +297,56 @@ def test_hub_contract_feature_is_registered():
         "## Gotchas",
     ):
         assert heading in feature, heading
+
+
+def _load_hub_contract():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("hub_contract_under_test", SKILL_DIR / "hub_contract.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    # Dataclasses resolve their module through sys.modules, so register it first.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_hub_contract_requests_do_not_follow_redirects():
+    # A redirect is the hub's answer, and following it would forward the bearer
+    # token to another origin, so the drive must report the 3xx as-is.
+    import http.server
+    import threading
+
+    hits: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server API
+            hits.append(self.path)
+            if self.path == "/start":
+                self.send_response(302)
+                self.send_header("Location", "/landed")
+                self.end_headers()
+                return
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            return
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        hub_contract = _load_hub_contract()
+        resp = hub_contract.request(f"http://127.0.0.1:{server.server_port}", "GET", "/start", token="secret")
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert resp.status == 302
+    assert hits == ["/start"]
+
+
+def test_hub_contract_keys_skip_malformed_identifiers():
+    hub_contract = _load_hub_contract()
+    items = [{"run_id": []}, {"run_id": {"x": 1}}, {"run_id": None}, {"run_id": "run-1", "state": "ok"}]
+    assert hub_contract._keyed(items, "run_id") == {"run-1": {"run_id": "run-1", "state": "ok"}}

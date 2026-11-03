@@ -462,6 +462,18 @@ class Response:
     error: str | None = None
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirects: a 3xx is the hub's answer, and following it would forward the bearer token."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        return None
+
+
+# No redirects, and no proxies from the environment: requests go only to the hub
+# address the drive validated, so the token cannot reach any other host.
+_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect)
+
+
 def request(
     base: str,
     method: str,
@@ -481,7 +493,7 @@ def request(
         sent.setdefault("Content-Type", "application/json")
     req = urllib.request.Request(base + path, data=data, headers=sent, method=method)
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with _OPENER.open(req, timeout=timeout) as resp:
             status, content_type, payload = resp.status, resp.headers.get("Content-Type", ""), resp.read()
     except urllib.error.HTTPError as exc:
         status, content_type, payload = exc.code, exc.headers.get("Content-Type", ""), exc.read()
@@ -599,6 +611,16 @@ def _items(payload: Any, key: str) -> list[dict]:
     return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
 
+def _keyed(items: list[dict], key: str) -> dict[str, dict]:
+    """Index objects by a string identifier, skipping malformed ids.
+
+    A drifting hub can return an id that is a list or an object. The shape check
+    already records that mismatch, so skipping it here keeps the drive reporting
+    instead of raising TypeError.
+    """
+    return {item[key]: item for item in items if isinstance(item.get(key), str)}
+
+
 def _ids(page: Any) -> list[Any]:
     messages = page.get("messages") if isinstance(page, dict) else None
     return [m.get("id") if isinstance(m, dict) else None for m in messages] if isinstance(messages, list) else []
@@ -669,7 +691,7 @@ def run_contract(hub: Hub) -> dict:
         shape=error_body("node field 'action' must be one of: add, revoke"),
     )
     listed = d.call("nodes list", "GET", "/nodes", status=200, token=admin, shape={"nodes": [NODE]})
-    seen = {n.get("node_id") for n in _items(listed, "nodes")} if listed else set()
+    seen = set(_keyed(_items(listed, "nodes"), "node_id")) if listed else set()
     d.invariant("nodes list", {node_a, node_b, node_c} <= seen, "every enrolled node is listed", sorted(seen))
     d.call(
         "nodes revoke",
@@ -883,7 +905,7 @@ def run_contract(hub: Hub) -> dict:
         shape=error_body("event field 'run_id' must be a non-empty string"),
     )
     status = d.call("status", "GET", "/status", status=200, token=b, shape=STATUS)
-    runs = {r.get("run_id"): r for r in _items(status, "runs")}
+    runs = _keyed(_items(status, "runs"), "run_id")
     d.invariant(
         "status",
         live_run in runs and done_run not in runs,
@@ -898,7 +920,7 @@ def run_contract(hub: Hub) -> dict:
         {key: live.get(key) for key in ("node_id", "state", "sequence")},
     )
     every = d.call("status all", "GET", "/status?all=1", status=200, token=admin, shape=STATUS)
-    every_runs = {r.get("run_id"): r for r in _items(every, "runs")}
+    every_runs = _keyed(_items(every, "runs"), "run_id")
     done = every_runs.get(done_run, {})
     d.invariant(
         "status all",
@@ -965,7 +987,7 @@ def run_contract(hub: Hub) -> dict:
     ids = [s.get("session_id") for s in _items(after_end, "sessions")]
     d.invariant("sessions after end", session_id not in ids, "the default view hides an ended session", ids)
     ended = d.call("sessions all", "GET", "/sessions?all=1", status=200, token=b, shape={"sessions": [SESSION]})
-    states = {s.get("session_id"): s.get("state") for s in _items(ended, "sessions")}
+    states = {key: item.get("state") for key, item in _keyed(_items(ended, "sessions"), "session_id").items()}
     d.invariant("sessions all", states.get(session_id) == "ended", "?all=1 includes the ended session", states)
 
     # -- claims ---------------------------------------------------------------
