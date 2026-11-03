@@ -305,3 +305,23 @@ def test_terminal_observation_started_during_busy_followup_keeps_slot(fleet):
     assert tools.fleet_status(REQUEST)["ok"]
     run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": "other", "state": "running"})
     assert submit(tools)["error"] == "open_limit"
+
+
+@requires_local_state
+def test_duet_never_leaves_undeliverable_completion_rows(fleet):
+    from brigade.dot.duet_dispatch import DuetFleetTools
+    from tests.test_dot_fleet_tools import REQUEST
+
+    tools, _ = fleet
+
+    def tracked():
+        with tools.state.transaction() as connection:
+            return connection.execute("SELECT COUNT(*) FROM tracked_requests").fetchone()[0]
+
+    assert submit(tools)["ok"]
+    assert tracked() == 0
+    # Rows recovered from the journal or left by an older build are cleared on startup.
+    with tools.state.transaction() as connection:
+        connection.execute("INSERT OR IGNORE INTO tracked_requests(request_id) VALUES (?)", (REQUEST,))
+    DuetFleetTools(tools.runtime, tools.state, runner=tools.runner, commands=tools.commands, clock=tools.clock)
+    assert tracked() == 0

@@ -22,6 +22,19 @@ class DuetFleetTools(FleetTools):
                 open INTEGER NOT NULL, busy INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0)""")
             connection.execute("""CREATE TABLE IF NOT EXISTS duet_dispatch_attempts (
                 ts REAL NOT NULL)""")
+            # Completion notices are sent with the node credential, which a Duet listener never
+            # holds. Tracked rows would retry forever and starve the poller, so Duet tracks none
+            # (including rows BridgeState recovers from the journal) and polls with fleet_status.
+            connection.execute("DELETE FROM tracked_requests")
+
+    def fleet_submit(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = super().fleet_submit(*args, **kwargs)
+        request_id = result.get("request_id")
+        if isinstance(request_id, str):
+            # finish_operation tracks every successful submit; Duet cannot deliver those notices.
+            with self.state.transaction() as connection:
+                connection.execute("DELETE FROM tracked_requests WHERE request_id=?", (request_id,))
+        return result
 
     def _fleet(self, action: str, payload: dict[str, Any], *, timeout: float, mutating: bool = False) -> dict[str, Any]:
         limits = self.runtime.dispatch_limits

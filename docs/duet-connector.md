@@ -158,6 +158,11 @@ Only requests created through this Duet state can be read or controlled.
 Typed refusals include `repository_not_allowed`, `open_limit`, `daily_limit`,
 `prompt_too_large`, `unknown_request` and `request_busy`.
 
+Duet gets no completion notice in its inbox. Those notices are sent with the
+node credential, which a Duet listener never holds, so Duet tracks no requests
+for completion and follows its work with `fleet_status`, `fleet_wait` and
+`fleet_recent`.
+
 Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 `message_send` follows `dispatch_enabled` as before.
 
