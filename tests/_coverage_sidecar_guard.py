@@ -130,6 +130,11 @@ def _read_logs(directory: Path):
     return workers, spawns, starts
 
 
+# File timestamps come from the kernel's coarse clock, which can trail ``time.time()`` by a
+# few milliseconds, so a sidecar written just after a test starts can look older than it.
+_MTIME_SLACK = 0.05
+
+
 def attribute_sidecar(sidecar: Path, directory: Path, mtime: float) -> str:
     """Say which test or worker likely produced ``sidecar``, from the logs in ``directory``."""
     match = _PID_IN_NAME.search(sidecar.name)
@@ -139,7 +144,7 @@ def attribute_sidecar(sidecar: Path, directory: Path, mtime: float) -> str:
     workers, spawns, starts = _read_logs(directory)
     latest = []
     for label, tests in sorted(starts.items()):
-        before = [entry for entry in tests if entry[0] <= mtime]
+        before = [entry for entry in tests if entry[0] <= mtime + _MTIME_SLACK]
         if before:
             latest.append(f"{label}: {before[-1][1]}")
     detail = f"; latest test started on each worker by then: {'; '.join(latest)}" if latest else ""
@@ -215,8 +220,11 @@ class _Attribution:
 
         subprocess.Popen.__init__ = init  # type: ignore[method-assign]
 
-    def pytest_runtest_logstart(self, nodeid: str, location) -> None:
-        self.config.stash[_LOG].test_started(nodeid)
+    @pytest.hookimpl(tryfirst=True)
+    def pytest_runtest_protocol(self, item: pytest.Item, nextitem) -> None:
+        # Runs only in the process that executes the test. ``pytest_runtest_logstart`` also
+        # fires in the xdist controller, which would record every test under "main".
+        self.config.stash[_LOG].test_started(item.nodeid)
 
     @pytest.hookimpl(optionalhook=True)
     def pytest_configure_node(self, node) -> None:

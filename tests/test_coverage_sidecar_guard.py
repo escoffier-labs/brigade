@@ -223,6 +223,8 @@ def test_guard_names_the_test_that_started_the_child_that_left_a_sidecar(tmp_pat
     assert "is the test process gw" in lines["self"][0]
     assert "itself; latest test started on each worker by then:" in lines["self"][0]
     assert "test_sidecar.py::test_worker_left_the_sidecar" in lines["self"][0]
+    # The xdist controller runs no tests, so it must not show up as a worker.
+    assert "main:" not in lines["self"][0]
 
 
 def test_repo_conftest_registers_the_guard_hooks():
