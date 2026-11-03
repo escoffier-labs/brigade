@@ -55,6 +55,28 @@ def _plain_and_chain(command: str, segments: list[list[str]], separators: list[s
     )
 
 
+def _single_leading_cd(segments: list[list[str]]) -> bool:
+    """True when the only directory change is one ``cd`` to a literal path, first in the chain.
+
+    One leading ``cd`` with no ``..`` component lands where its resolved path says:
+    there is no earlier logical directory for ``..`` to climb from, and no directory
+    stack. ``pushd``, ``popd``, a second ``cd``, or a later one are not modeled.
+    """
+    rt = _rt()
+    heads = []
+    for segment in segments:
+        stripped = rt._strip_command_prefixes(segment)
+        if stripped:
+            heads.append(stripped)
+    changes = [index for index, head in enumerate(heads) if Path(head[0]).name in {"cd", "pushd", "popd"}]
+    if changes != [0] or Path(heads[0][0]).name != "cd":
+        return False
+    args = heads[0][1:]
+    if args[:1] == ["--"]:
+        args = args[1:]
+    return len(args) == 1 and ".." not in Path(args[0]).parts
+
+
 def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Path | None]:
     """Directories in which each verification segment of ``command`` runs.
 
@@ -78,7 +100,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             segments[-1].append(token)
     # Judged on token text: `(cd x`, `{ cd x`, `$(cd x` and a backtick cd hide it from a segment-head check.
     changes_directory = any(token.lstrip("({`$") in {"cd", "pushd", "popd"} for token in tokens)
-    if changes_directory and not _plain_and_chain(command, segments, separators):
+    if changes_directory and not (_plain_and_chain(command, segments, separators) and _single_leading_cd(segments)):
         return [None]
     found: list[Path | None] = []
     effective = cwd
@@ -87,9 +109,6 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
         while stripped and stripped[0] in _KEYWORDS:
             stripped = rt._strip_command_prefixes(stripped[1:])
         if not stripped:
-            continue
-        if Path(stripped[0]).name in {"pushd", "popd"}:
-            effective = None  # the directory stack is not modeled
             continue
         if Path(stripped[0]).name == "cd":
             args = stripped[1:]
@@ -105,7 +124,9 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             if depth >= _MAX_DEPTH:
                 found.append(None)
             else:
-                found.extend(verifier_cwds(nested, effective, depth=depth + 1))
+                # A wrapper such as `env -C dir bash -c ...` starts the nested shell elsewhere.
+                start = None if _overrides_cwd(stripped) else effective
+                found.extend(verifier_cwds(nested, start, depth=depth + 1))
             continue
         if rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment)):
             found.append(None if _overrides_cwd(segment) else effective)

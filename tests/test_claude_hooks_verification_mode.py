@@ -107,6 +107,9 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         "cd {yolo} && env -C {enforced} pytest -q",
         "cd {yolo} && env --chdir={enforced} pytest -q",
         "cd {yolo} && make -C {enforced} test",
+        "cd {yolo} && env -C {enforced} bash -c 'pytest -q'",
+        "cd {yolo} && cd .. && pytest -q",
+        "cd {yolo}/.. && pytest -q",
     ],
 )
 def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, template: str) -> None:
@@ -129,14 +132,17 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
         ("pytest -q", ["start"]),
         ("cd {yolo} && pytest -q", ["yolo"]),
         ("cd {yolo}; cd {other} && pytest -q", [None]),
-        ("cd {yolo} && pytest -q && cd {other} && ruff check .", ["yolo", "other"]),
+        ("cd {yolo} && pytest -q && cd {other} && ruff check .", [None]),
+        ("cd {yolo} && pytest -q && bash -c 'cd {other} && ruff check .'", ["yolo", "other"]),
+        ("cd {yolo}/.. && pytest -q", [None]),
+        ("cd {yolo} && cd .. && pytest -q", [None]),
         ("bash -c 'cd {yolo} && pytest -q'", ["yolo"]),
         ("cd {yolo} | cat; pytest -q", [None]),
         ("cd {yolo} & pytest -q", [None]),
         ("sleep 1 & cd {yolo} && pytest -q", [None]),
         ("false && cd {yolo}; pytest -q", [None]),
         ("false || cd {yolo}; pytest -q", [None]),
-        ("true && cd {yolo} && pytest -q", ["yolo"]),
+        ("true && cd {yolo} && pytest -q", [None]),
         ("true && cd {yolo} && pytest -q; ruff check .", [None]),
         ("cd {yolo} && bash -c 'pytest -q'", ["yolo"]),
         ("cd {yolo} && echo $(pytest -q)", [None]),
@@ -156,9 +162,9 @@ def test_verifier_cwds(repos, template: str, expected: list) -> None:
 
 
 def test_every_verification_in_a_command_must_be_yolo(repos) -> None:
-    mixed = f"cd {_sh(repos['yolo'])} && pytest -q && cd {_sh(repos['enforced'])} && ruff check ."
+    mixed = f"cd {_sh(repos['enforced'])} && pytest -q && bash -c 'cd {_sh(repos['yolo'])} && ruff check .'"
     assert not verification_mode.verification_in_yolo(mixed, str(repos["yolo"]), repos["yolo"])
-    both = f"cd {_sh(repos['enforced'])} && cd {_sh(repos['yolo'])} && pytest -q"
+    both = f"cd {_sh(repos['yolo'])} && pytest -q && bash -c 'ruff check .'"
     assert verification_mode.verification_in_yolo(both, str(repos["enforced"]), repos["enforced"])
 
 
