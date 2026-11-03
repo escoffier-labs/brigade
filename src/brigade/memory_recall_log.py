@@ -37,6 +37,19 @@ def _read_key(path: Path) -> bytes:
     return key
 
 
+def _ignore_key(path: Path) -> None:
+    """Keep the key out of Git even when Brigade's .gitignore block was skipped.
+
+    ``apply_gitignore`` normally excludes ``.brigade/`` state, but setups that
+    opt out of gitignore edits would let a plain ``git add`` commit the key.
+    A one-line ``.gitignore`` beside it covers that case; an existing file is
+    left alone.
+    """
+    ignore = path.parent / ".gitignore"
+    if not ignore.exists():
+        ignore.write_text(f"/{path.name}\n", encoding="utf-8")
+
+
 def load_or_create_key(target: Path) -> bytes | None:
     """Return the per-host key, creating it (0600) on first use; ``None`` on failure."""
     path = key_path(target)
@@ -55,10 +68,16 @@ def load_or_create_key(target: Path) -> bytes | None:
         try:
             with os.fdopen(fd, "w", encoding="ascii") as handle:
                 handle.write(secrets.token_bytes(_KEY_BYTES).hex() + "\n")
+            _ignore_key(path)
             try:
                 os.link(tmp, path)
             except FileExistsError:
                 pass
+            except OSError:
+                # No hard links on this filesystem. The temp file is complete,
+                # so an atomic replace still never exposes a partial key.
+                if not path.exists():
+                    os.replace(tmp, path)
         finally:
             tmp.unlink(missing_ok=True)
         return _read_key(path)

@@ -82,6 +82,11 @@ def split_ref(ref: str) -> tuple[str | None, str]:
     return None, ref
 
 
+def _inside_store(root: Path) -> Callable[[Path], bool]:
+    """A path filter that keeps only paths inside ``root``."""
+    return lambda path: _inside(path, root)
+
+
 def _inside(path: Path, root: Path) -> bool:
     return path.resolve().is_relative_to(root.resolve())
 
@@ -176,8 +181,9 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": "search_cards",
             "description": (
-                "Keyword-search memory cards across the repo and user stores. A term in a card's title, tags, "
-                "or summary outranks one found only in the body, and repo matches rank first on ties. Returns "
+                "Keyword-search memory cards across the repo and user stores with BM25: each card's title, "
+                "tags, summary, and body form one field, so rare terms weigh more than common ones and no "
+                "field is boosted. Repo matches rank first on ties. Returns "
                 f"up to {SEARCH_LIMIT} matches with path, title, tags, summary, score, origin, and ref; read "
                 "one with get_card."
             ),
@@ -333,11 +339,10 @@ class MemoryTools:
         eligible: list[tuple[int, MemoryStore, dict[str, Any]]] = []
         for rank, store in enumerate(self.resolution().stores):
             root = store.root.expanduser().resolve()
-            for fields in memory_cmd.search_card_fields(root, store.config):
-                # Outside-the-store cards are dropped before ranking, so they
-                # neither crowd out real matches nor shift the statistics.
-                if _inside(store.root / _posix(fields["rel"]), store.root):
-                    eligible.append((rank, store, fields))
+            # Outside-the-store cards are dropped before they are read or
+            # ranked, so they neither crowd out real matches nor shift the statistics.
+            for fields in memory_cmd.search_card_fields(root, store.config, keep=_inside_store(store.root)):
+                eligible.append((rank, store, fields))
         texts = [memory_bm25.card_text(fields) for _, _, fields in eligible]
         ranked: list[tuple[int, dict[str, Any]]] = []
         for index, score in memory_bm25.rank(texts, query):

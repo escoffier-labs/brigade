@@ -12,6 +12,7 @@ import sys
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
+from collections.abc import Callable
 from typing import Any
 
 from . import mcp_server, memory_bm25, runbook_cmd, toml_compat as tomllib, work_cmd
@@ -1823,15 +1824,21 @@ def _record_search_log(
 
 def _append_search_log_entry(target: Path, entry: dict[str, Any]) -> None:
     """Append one entry to the capped rolling log; fail-open on I/O errors."""
+    from .inbox_lock import held_file_lock
+
     path = _search_log_path(target)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        existing = _read_jsonl_dicts(path)
-        existing.append(entry)
-        if len(existing) > SEARCH_LOG_MAX_ENTRIES:
-            existing = existing[-SEARCH_LOG_MAX_ENTRIES:]
-        rendered = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in existing)
-        _write_text_atomic(path, rendered)
+        # Concurrent recalls and searches would otherwise drop each other's
+        # entries. A busy lock past the deadline raises a TimeoutError (an
+        # OSError), so logging still fails open.
+        with held_file_lock(path.with_suffix(".lock"), deadline_seconds=1.0):
+            existing = _read_jsonl_dicts(path)
+            existing.append(entry)
+            if len(existing) > SEARCH_LOG_MAX_ENTRIES:
+                existing = existing[-SEARCH_LOG_MAX_ENTRIES:]
+            rendered = "".join(json.dumps(item, sort_keys=True, separators=(",", ":")) + "\n" for item in existing)
+            _write_text_atomic(path, rendered)
     except OSError:
         return
 
@@ -1856,11 +1863,14 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
-def search_card_fields(target: Path, config: MemoryCareConfig | None = None) -> list[dict[str, Any]]:
-    """Searchable fields for every card under a resolved ``target``."""
+def search_card_fields(
+    target: Path, config: MemoryCareConfig | None = None, *, keep: Callable[[Path], bool] | None = None
+) -> list[dict[str, Any]]:
+    """Searchable fields for every card under a resolved ``target``; ``keep`` filters paths before any read."""
     if config is None:
         config = load_config(target) or MemoryCareConfig()
-    return [fields for path in _iter_cards(target, config) if (fields := _card_search_fields(path, target))]
+    paths = [path for path in _iter_cards(target, config) if keep is None or keep(path)]
+    return [fields for path in paths if (fields := _card_search_fields(path, target))]
 
 
 def card_search_match(fields: dict[str, Any], score: float) -> dict[str, Any]:

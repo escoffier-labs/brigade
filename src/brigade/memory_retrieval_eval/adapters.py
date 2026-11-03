@@ -47,11 +47,14 @@ def current_adapter(target: Path) -> AdapterFn:
 
 def bm25_adapter(cards: Sequence[CardDoc]) -> AdapterFn:
     """``memory_bm25`` over the loaded cards, with the index built once per eval run."""
-    index = memory_bm25.Bm25Index.build([card.searchable_text for card in cards])
+    texts = [card.searchable_text for card in cards]
+    index = memory_bm25.Bm25Index.build(texts)
 
     def search(query: str, limit: int) -> list[tuple[str, float]]:
+        # A query with no word characters takes production's literal fallback.
+        raw = index.scores(query) if memory_bm25.tokenize(query) else dict(memory_bm25.rank(texts, query))
         # Ties break by card path, as in ``search_cards_payload``; ids come after sorting.
-        scored = [(round(score, memory_bm25.SCORE_DIGITS), cards[doc]) for doc, score in index.scores(query).items()]
+        scored = [(round(score, memory_bm25.SCORE_DIGITS), cards[doc]) for doc, score in raw.items()]
         scored.sort(key=lambda item: (-item[0], item[1].path))
         return [(card.card_id, score) for score, card in scored[:limit]]
 

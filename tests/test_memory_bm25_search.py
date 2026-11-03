@@ -130,7 +130,22 @@ def test_eval_reports_bm25_beside_current_and_does_not_regress_fixture_recall():
     current = adapters["current"]["overall"]["recall_at_k"]
     # current is production search, which is BM25: the direct adapter must agree.
     assert adapters["bm25"]["overall"] == adapters["current"]["overall"]
+    # Overall metrics ignore order inside the top k, so compare each query's ranking too.
+    assert [q["ranked"] for q in adapters["bm25"]["queries"]] == [q["ranked"] for q in adapters["current"]["queries"]]
     assert current >= adapters["substring"]["overall"]["recall_at_k"]
+
+
+def test_bm25_eval_adapter_keeps_the_literal_fallback_for_punctuation_queries():
+    from brigade.memory_retrieval_eval.adapters import bm25_adapter
+    from brigade.memory_retrieval_eval.corpus import CardDoc
+
+    def card(card_id: str, body: str) -> CardDoc:
+        return CardDoc(
+            card_id=card_id, path=f"memory/cards/{card_id}.md", title=card_id, tags=(), summary="", body=body
+        )
+
+    search = bm25_adapter([card("colon", "key: value"), card("plain", "no punctuation")])
+    assert search(":", limit=5) == [("colon", 0.0)]
 
 
 # --- recall query source and private search log ---
@@ -257,3 +272,45 @@ def test_vocabulary_build_scores_match_a_full_build():
     partial = memory_bm25.Bm25Index.build(texts, vocabulary={"restic", "backup"})
     assert partial.scores("restic backup") == full.scores("restic backup")
     assert set(partial.postings) == {"restic", "backup"}
+
+
+def test_control_only_prompt_recalls_nothing_and_skips_the_cwd_fallback(wired_with_hub, monkeypatch):
+    target, _hub = wired_with_hub
+    calls: list[dict] = []
+    monkeypatch.setattr(memory_hooks, "recall_cards_payload", lambda **kwargs: calls.append(kwargs) or {})
+    assert memory_hooks.recall_text_for_hook(wired_target=target, prompt="\x00\x01 \t") == ""
+    assert calls == []
+
+
+def test_prompt_recall_keeps_the_key_out_of_git(tmp_path: Path):
+    hub = tmp_path / "hub"
+    _card(hub, "comet.md", "Comet token rotation", "rotate the comet token")
+    memory_hooks.recall_cards_payload(target=hub, cwd=tmp_path, query="comet token", query_source="prompt")
+    key = memory_recall_log.key_path(hub)
+    assert key.is_file()
+    assert (key.parent / ".gitignore").read_text(encoding="utf-8") == f"/{key.name}\n"
+
+
+def test_key_creation_falls_back_when_hard_links_are_unsupported(tmp_path: Path, monkeypatch):
+    def no_links(_src, _dst):
+        raise OSError("hard links not supported")
+
+    monkeypatch.setattr(memory_recall_log.os, "link", no_links)
+    hub = tmp_path / "hub"
+    key = memory_recall_log.load_or_create_key(hub)
+    assert key is not None and len(key) == 32
+    assert memory_recall_log.load_or_create_key(hub) == key
+    assert [p.name for p in memory_recall_log.key_path(hub).parent.iterdir() if p.name.endswith(".tmp")] == []
+
+
+def test_search_log_append_fails_open_while_another_writer_holds_the_lock(tmp_path: Path):
+    from brigade.inbox_lock import held_file_lock
+
+    log = tmp_path / memory_cmd.SEARCH_LOG_REL
+    log.parent.mkdir(parents=True)
+    entry = {"ts": "2026-11-03T00:00:00Z", "query": "comet", "card_ids": []}
+    with held_file_lock(log.with_suffix(".lock"), deadline_seconds=1.0):
+        memory_cmd._append_search_log_entry(tmp_path, entry)
+    assert not log.exists()
+    memory_cmd._append_search_log_entry(tmp_path, entry)
+    assert [row["query"] for row in _search_log(tmp_path)] == ["comet"]

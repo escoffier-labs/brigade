@@ -416,7 +416,11 @@ def recall_text_for_hook(
         session_cwd = cwd if cwd is not None else wired_target
         if not recall_target.exists():
             return ""
-        if prompt is not None and _normalize_query(prompt):
+        if prompt is not None and not _normalize_query(prompt):
+            # A prompt that normalizes to nothing (whitespace or control
+            # characters) recalls nothing, like a blank prompt; no cwd fallback.
+            return ""
+        if prompt is not None:
             payload = recall_cards_payload(
                 target=recall_target, cwd=session_cwd, limit=limit, query=prompt, query_source="prompt"
             )
