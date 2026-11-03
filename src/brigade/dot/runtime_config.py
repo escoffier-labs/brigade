@@ -77,6 +77,14 @@ class OwnerAuthorization:
 
 
 @dataclass(frozen=True)
+class DispatchLimits:
+    repositories: frozenset[str] | None = None
+    max_open: int = 3
+    daily_limit: int = 20
+    prompt_max_bytes: int = 32768
+
+
+@dataclass(frozen=True)
 class Runtime:
     auth: AuthConfig
     paths: PathsConfig
@@ -93,6 +101,7 @@ class Runtime:
     schema: str = RUNTIME_SCHEMA
     # Opt-out: false stops inbox_list and fleet_digest from carrying memory hits.
     memory_push: bool = True
+    dispatch_limits: DispatchLimits | None = None
 
 
 def _invalid() -> DotError:
@@ -246,21 +255,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
 
     auth = _parse_auth(root["auth"])
 
-    paths_data = _object(root["paths"], {"state_dir", "workspace", "fleet_config", "bin"})
-    bin_data = _object(paths_data["bin"], {"t3_fleet", "brigade", "git", "gh"}, optional={"octopool"})
-    bins = BinPaths(
-        t3_fleet=str(_absolute_path(bin_data["t3_fleet"])),
-        brigade=str(_absolute_path(bin_data["brigade"])),
-        git=str(_absolute_path(bin_data["git"])),
-        gh=str(_absolute_path(bin_data["gh"])),
-        octopool=str(_absolute_path(bin_data["octopool"])) if "octopool" in bin_data else None,
-    )
-    paths = PathsConfig(
-        state_dir=_absolute_path(paths_data["state_dir"]),
-        workspace=_absolute_path(paths_data["workspace"]),
-        fleet_config=_absolute_path(paths_data["fleet_config"]),
-        bin=bins,
-    )
+    paths = _parse_dispatch_paths(root["paths"])
 
     hub = _parse_hub(root["hub"])
 
@@ -275,17 +270,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
 
     notify_command = _parse_notify(root)
 
-    owner_data = _object(root["owner_authorization"], {"version", "text"})
-    version = _string(owner_data["version"])
-    if len(version) > 64 or any(not " " <= char <= "~" for char in version):
-        raise _invalid()
-    authorization_text = _string(owner_data["text"])
-    try:
-        if len(authorization_text.encode("utf-8")) > 4096:
-            raise _invalid()
-    except UnicodeError:
-        raise _invalid() from None
-    owner_authorization = OwnerAuthorization(version, authorization_text)
+    owner_authorization = _parse_owner_authorization(root["owner_authorization"])
 
     return Runtime(
         auth=auth,
@@ -300,6 +285,38 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
         messaging_enabled=messaging_enabled,
         memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
     )
+
+
+def _parse_dispatch_paths(value: object) -> PathsConfig:
+    paths_data = _object(value, {"state_dir", "workspace", "fleet_config", "bin"})
+    bin_data = _object(paths_data["bin"], {"t3_fleet", "brigade", "git", "gh"}, optional={"octopool"})
+    bins = BinPaths(
+        t3_fleet=str(_absolute_path(bin_data["t3_fleet"])),
+        brigade=str(_absolute_path(bin_data["brigade"])),
+        git=str(_absolute_path(bin_data["git"])),
+        gh=str(_absolute_path(bin_data["gh"])),
+        octopool=str(_absolute_path(bin_data["octopool"])) if "octopool" in bin_data else None,
+    )
+    return PathsConfig(
+        state_dir=_absolute_path(paths_data["state_dir"]),
+        workspace=_absolute_path(paths_data["workspace"]),
+        fleet_config=_absolute_path(paths_data["fleet_config"]),
+        bin=bins,
+    )
+
+
+def _parse_owner_authorization(value: object) -> OwnerAuthorization:
+    owner_data = _object(value, {"version", "text"})
+    version = _string(owner_data["version"])
+    if len(version) > 64 or any(not " " <= char <= "~" for char in version):
+        raise _invalid()
+    authorization_text = _string(owner_data["text"])
+    try:
+        if len(authorization_text.encode("utf-8")) > 4096:
+            raise _invalid()
+    except UnicodeError:
+        raise _invalid() from None
+    return OwnerAuthorization(version, authorization_text)
 
 
 def _parse_hosted_paths(value: object) -> PathsConfig:
@@ -320,17 +337,54 @@ def _parse_hosted_paths(value: object) -> PathsConfig:
     )
 
 
+def _parse_dispatch_limits(value: object) -> DispatchLimits:
+    data = _object(value, set(), optional={"repositories", "max_open", "daily_limit", "prompt_max_bytes"})
+    defaults = DispatchLimits()
+    numbers = {}
+    for key, maximum in (("max_open", 20), ("daily_limit", 200), ("prompt_max_bytes", 32768)):
+        number = data.get(key, getattr(defaults, key))
+        if type(number) is not int or not 1 <= number <= maximum:
+            raise _invalid()
+        numbers[key] = number
+    repositories = None
+    if "repositories" in data:
+        raw = data["repositories"]
+        if not isinstance(raw, list) or len(raw) > 256:
+            raise _invalid()
+        if any(not isinstance(item, str) or _ALIAS_RE.fullmatch(item) is None for item in raw):
+            raise _invalid()
+        repositories = frozenset(raw)
+    return DispatchLimits(repositories=repositories, **numbers)
+
+
 def _parse_duet_runtime(payload: object) -> Runtime:
-    """Duet has no dispatch, fleet client, owner authorization or event webhooks to configure."""
+    """Duet dispatch requires an explicit complete opt-in; events remain unavailable."""
     root = _object(
         payload,
         {"schema", "auth", "paths", "hub", "messaging_enabled", "digest_pr_repo"},
-        optional={"notify_command", "skills_deny", "memory_push"},
+        optional={
+            "notify_command",
+            "skills_deny",
+            "memory_push",
+            "dispatch_enabled",
+            "owner_authorization",
+            "dispatch_limits",
+        },
     )
     if root["schema"] != DUET_RUNTIME_SCHEMA:
         raise _invalid()
     auth = _parse_auth(root["auth"])
-    paths = _parse_hosted_paths(root["paths"])
+    enabled = _boolean(root.get("dispatch_enabled", False))
+    limits = None
+    owner = None
+    if enabled:
+        paths = _parse_dispatch_paths(root["paths"])
+        owner = _parse_owner_authorization(root.get("owner_authorization"))
+        limits = _parse_dispatch_limits(root.get("dispatch_limits", {}))
+    else:
+        if "owner_authorization" in root or "dispatch_limits" in root:
+            raise _invalid()
+        paths = _parse_hosted_paths(root["paths"])
     hub = _parse_hub(root["hub"])
     # Duet never shares another agent's Hub principal, inbox or acknowledgement state.
     if hub.principal != DUET_PRINCIPAL:
@@ -348,15 +402,16 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         auth=auth,
         paths=paths,
         hub=hub,
-        dispatch_enabled=False,
+        dispatch_enabled=enabled,
         events_enabled=False,
         digest_pr_repo=_parse_repo(root["digest_pr_repo"]),
         callback_hosts=(),
         notify_command=_parse_notify(root),
-        owner_authorization=None,
+        owner_authorization=owner,
         messaging_enabled=_boolean(root["messaging_enabled"]),
         skills_deny=skills_deny,
         schema=DUET_RUNTIME_SCHEMA,
+        dispatch_limits=limits,
         memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
     )
 

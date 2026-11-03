@@ -154,7 +154,7 @@ daily                no feature file yet
 dogfood              no feature file yet; extras surface
 evidence             no feature file yet; evidence moves with hub memory, add a feature after that lands
 extras               no feature file yet
-fleet *              stand-in only: tests/test_fleet_*.py; only `fleet serve` is driven (hub-contract.md)
+fleet *              stand-in only: tests/test_fleet_*.py; only `fleet serve` is driven (hub-contract.md, storage-parity.md)
 friction             no feature file yet; extras surface
 governance           no feature file yet
 handoff-template     no feature file yet

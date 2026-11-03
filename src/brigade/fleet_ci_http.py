@@ -5,9 +5,12 @@ from __future__ import annotations
 import secrets
 import sqlite3
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fleet_ci_board as board, fleet_ci_page as page, fleet_hub
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 
 def route(handler: Any, db_path: Path, *, method: str) -> None:
@@ -69,3 +72,14 @@ def route(handler: Any, db_path: Path, *, method: str) -> None:
         handler._send_json(400, {"error": "invalid CI observation"})
     except (sqlite3.Error, fleet_hub.FleetHubError):
         handler._send_json(503, {"error": "CI store unavailable"})
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add(
+        "GET",
+        lambda request, _path, _query: route(request, hub.db_path, method="GET"),
+        paths=("/deck/ci", "/ci", "/ci/work"),
+    )
+    routes.add(
+        "POST", lambda request, _path, _query: route(request, hub.db_path, method="POST"), paths=("/ci", "/ci/refresh")
+    )

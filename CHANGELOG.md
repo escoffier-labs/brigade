@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Add explicit opt-in Duet dispatch with seven fleet tools, repository and prompt bounds, and atomic open-request and daily-attempt limits in private state. Approval, answer and doctor relays remain unavailable; default discovery stays at 22 tools.
+
 - Answer a Dot-family `tools/call` with out-of-range or unsupported arguments (for example `inbox_list` with `limit` above 50) with a JSON-RPC `-32602` error that names the argument, instead of an opaque `request_denied`, and record the allowlisted argument summary in the call log.
 - Push up to three memory card hits into Dot and Duet `inbox_list` and `fleet_digest` responses as an optional `memory_hits` field: card path plus wrapped title and tags, no bodies, with the query derived from the item shown and logged only as an HMAC. Turn it off per connector with `"memory_push": false` in the runtime JSON.
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
@@ -17,10 +19,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fence new key publication and sealed admission to an installed Hub identity, retaining per-signer sequence history, paired migration readback and exact retained retries. Older Hub binaries must not rewrite identity metadata after history exists: inconsistent signer state refuses new mesh writes and requires operator recovery from a consistent backup without discarding signer history.
 - Allow writing and frontend task roles to use explicit Hub policy seat fallbacks and optional host-local instructions files, with bounded reads and fail-closed dispatch.
 - Stop `tests/test_proc.py` and `tests/test_run_detach.py` from flaking on loaded CI runners: real children now publish their ready and PID files through a rename and the tests poll for non-empty content (#2188), and the partial-output timeout tests start the timeout clock only after the child has flushed. `proc.py` is unchanged: its timeout path keeps partial output.
+- Add a UTF mode to the optional `brigade-guard` engine for Hub scanning (PCRE2 UTF and UCP, character and byte offsets, linked PCRE2 and Unicode versions in the response). Twelve default rules that differ from Python `re` on Unicode text are listed with reasons in `brigade.guard.utf_parity`; the local guard still sends only ASCII to the engine, and ASCII responses are byte-identical.
 - Stop the Fleet Hub's 8-connection per-source handler cap from capping the whole fleet behind a local HTTPS front. On a loopback bind, a loopback peer such as Tailscale Serve is exempt and bounded by the 32-handler global cap, of which long-poll message waiters hold at most 8. Other peers, including loopback peers of a non-loopback bind, keep the 8-connection cap (#2229).
 
 - Add `brigade work import bd` to mirror a Beads (`bd`) project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. It runs only `bd version --json` and `bd export`, pins the bd 1.3.x export schema, and fails closed on anything else. Add `brigade work export bd-outcomes` to write closeout receipts and PR links per bd issue id as JSONL. The `--from-bd-jsonl` inbox import now uses the same version pin (#2209).
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
+- Add the verify-brigade `storage-parity` drive for the Fleet Hub: one scripted sequence on a stepped clock, every table dumped and compared exactly with a checked-in golden (timestamp shape and offset, id mapping, recomputed digests, sealed tombstones past the 7-day lifetime), with defaults, events-outbox, migrated-fixture and mixed-engine runs.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
 
@@ -52,6 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Fleet Hub capacity views count live interactive agent sessions per machine, and a machine with running sessions but no managed jobs reads `working` instead of `idle`.
 
 - Dot policy reads report unavailable required sources, and Fleet digests distinguish partial data from complete results.
+
+- Fleet Hub HTTP routes register through a route table (`fleet_hub_routes`): each route module adds its own methods, exact paths and prefixes, an exact path wins over the longest matching prefix, and a second claim on one route is refused. The bearer JSON API moves to `fleet_hub_api_http`. Responses are unchanged.
 
 - Runbook cancellation cleans up owned process groups without hanging on blocked captures, and binary pin checks resolve each step's first command token while accepting equal-content path changes.
 

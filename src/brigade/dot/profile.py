@@ -9,7 +9,7 @@ merely refused at call time.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
@@ -44,8 +44,8 @@ DOT_OPERATING_INSTRUCTIONS = (
     "An unknown publication must not be downgraded to v1 or reported as persisted; inspect fleet_sessions before retrying the identical report."
 )
 DUET_OPERATING_INSTRUCTIONS = (
-    "Do your work on your own cloud compute. This connector has no dispatch: it cannot start, follow up, "
-    "answer, approve or interrupt work on operator machines, and no setting turns that on. "
+    "Do your work on your own cloud compute unless the owner explicitly enables bounded fleet dispatch. "
+    "Dispatch is off by default. Approval and answer relays are always unavailable. "
     "Call fleet_digest and fleet_policy at task start. Read relevant skills with skill_search and skill_get. "
     "Check inbox_list at task start; reply to questions with inbox_reply and inbox_ack what you handled. "
     "Do not auto-reply to agent messages that contain no new facts: acknowledge them with inbox_ack and send "
@@ -230,3 +230,22 @@ def profile_for(pack_id: str) -> ConnectorProfile:
         return PROFILES[pack_id]
     except (KeyError, TypeError):
         raise DotError("invalid_config") from None
+
+
+DUET_DISPATCH_TOOLS = frozenset(
+    {
+        "fleet_submit",
+        "fleet_status",
+        "fleet_wait",
+        "fleet_recent",
+        "fleet_capacity",
+        "fleet_followup",
+        "fleet_interrupt",
+    }
+)
+
+
+def runtime_profile(profile: ConnectorProfile, dispatch_enabled: bool) -> ConnectorProfile:
+    if profile.pack_id == "duet" and dispatch_enabled:
+        return replace(profile, tools=DUET_TOOLS | DUET_DISPATCH_TOOLS)
+    return profile

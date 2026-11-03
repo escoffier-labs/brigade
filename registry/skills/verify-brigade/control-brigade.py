@@ -42,6 +42,7 @@ writes nothing, and needs no target or state root.
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -1145,14 +1146,16 @@ def cmd_guard_parity(args: argparse.Namespace) -> int:
     )
 
 
-def load_hub_contract():
-    """Import the sibling `hub_contract` module however this helper was started."""
+def load_sibling(name: str):
+    """Import a module that sits next to this helper (`hub_contract`, `storage_parity`) however it was started."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
-    import hub_contract
+    return importlib.import_module(name)
 
-    return hub_contract
+
+def load_hub_contract():
+    return load_sibling("hub_contract")
 
 
 def hub_contract_workdir(args: argparse.Namespace, root: Path, *, dry_run: bool) -> Path:
@@ -1938,6 +1941,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--startup-timeout", type=float, default=30.0, help="Seconds to wait for /health.")
     add_dry_run(p, "Report the hub command and covered routes without starting anything.")
     p.set_defaults(func=cmd_hub_contract)
+
+    try:  # a lone copy of this helper, without its sibling modules, has no storage-parity
+        load_sibling("storage_parity").add_parser(sub, sys.modules[__name__], add_dry_run)
+    except ImportError:
+        pass
 
     p = sub.add_parser("audit", help="Read-only: compare the feature map against the live CLI command tree.")
     p.add_argument("--features-dir", default=None, help="Feature map to audit (default: this skill's features/).")

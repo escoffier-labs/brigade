@@ -5,10 +5,13 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs
 
 from .fleet_hub import FleetHubError
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 
 def serve_get(handler: Any, query: str, db_path: Path, *, open_db: Callable[[Path], sqlite3.Connection]) -> None:
@@ -33,3 +36,11 @@ def serve_get(handler: Any, query: str, db_path: Path, *, open_db: Callable[[Pat
         handler._send_json(400, {"error": str(exc)})
     except (FleetHubError, sqlite3.Error):
         handler._send_json(500, {"error": "hub database error"})
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add(
+        "GET",
+        lambda request, _path, query: serve_get(request, query, hub.db_path, open_db=hub.open_db),
+        paths=("/audit",),
+    )
