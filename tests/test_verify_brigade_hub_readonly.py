@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._posix import requires_process_groups
 from tests.test_verify_brigade_skill import REPO_ROOT, SKILL_DIR, control
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the audit wrapper and process checks are POSIX")
@@ -52,6 +53,8 @@ def _assert_clean_audit(payload: dict) -> None:
     assert audit["problems"] == []
     assert audit["hooks_live"] is True and audit["sweepers_paused"] is True
     assert audit["instrumented_pids"] and audit["uninstrumented_holders"] == []
+    assert audit["open_evidence"] == {"complete": True, "reason": None, "outside_opens": []}
+    assert audit["certified"] is True
     assert audit["fixture_failures"] == []
     assert set(audit["overdue_rows"]) == {
         "messages past retention",
@@ -124,6 +127,96 @@ def test_prod_readonly_audit_fails_when_a_listed_operation_writes(tmp_path, muta
     assert audit["problems"] == problems
     assert [{key: item[key] for key in finding} for item in audit["window_findings"]] == [finding]
     assert audit["digest_changes"] == changed
+
+
+def test_prod_readonly_audit_fails_when_a_helper_locks_the_database_and_exits(tmp_path):
+    """A helper in the hub's process group runs BEGIN IMMEDIATE; ROLLBACK during GET /status and closes.
+
+    Its connection has no hooks, the digest does not change and it is gone
+    before any /proc scan, so only the open watch can see it.
+    """
+    mutation = "GET /status:helper"
+    code, payload = control(
+        "hub-contract", "--profile", "prod-readonly", "--audit-mutation", mutation, root=tmp_path / "state"
+    )
+    assert code == 3, payload
+    assert payload["ok"] is False and payload["mismatches"] == []
+    audit = payload["audit"]
+    assert audit["mutation"] == mutation
+    assert audit["problems"] == ["a process opened the database outside the audit hooks"]
+    assert audit["certified"] is False
+    assert audit["window_findings"] == [] and audit["digest_changes"] == []
+    assert audit["uninstrumented_holders"] == []
+    opens = audit["open_evidence"]["outside_opens"]
+    assert {"phase": "probe", "name": "hub.db", "events": ["open"]} in opens, opens
+
+
+class _NoInotify:
+    """An open watch where inotify is unavailable."""
+
+    events: list[dict] = []
+    lost = "inotify is unavailable: test"
+
+    def __init__(self, directory, name) -> None:
+        pass
+
+    def drain(self, next_phase=None) -> None:
+        pass
+
+    def close(self) -> None:
+        pass
+
+
+def test_prod_readonly_audit_without_open_evidence_is_not_certified(tmp_path, monkeypatch):
+    monkeypatch.setattr(hr, "OpenWatch", _NoInotify)
+    state = tmp_path / "audit"
+    state.mkdir()
+    hub, result = hr.audit(
+        brigade=[sys.executable, "-m", "brigade"],
+        state_dir=state,
+        hub_cmd=None,
+        startup_timeout=30,
+        mutation=None,
+        only=["GET /health"],
+    )
+    audit = result["audit"]
+    assert audit["certified"] is False
+    assert audit["problems"] == [
+        "no evidence that every database open went through the audit hooks"
+        " (inotify is unavailable: test): not certified"
+    ]
+    assert audit["open_evidence"]["complete"] is False
+    assert audit["window_findings"] == [] and audit["digest_changes"] == []
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
+def test_prod_readonly_open_watch_sees_an_open_through_the_configured_path(tmp_path):
+    db, route, error = hr.prepare_route(tmp_path)
+    assert error is None and route is not None
+    identity = (db.lstat().st_dev, db.lstat().st_ino)
+    watch = hr.OpenWatch(db.parent, db.name)
+    try:
+        assert watch.lost is None
+        sqlite3.connect(route).close()
+        (db.parent / "unrelated.txt").write_text("x", encoding="utf-8")
+        watch.drain("probe")
+        assert watch.events == []
+        conn = sqlite3.connect(db)
+        conn.close()
+        watch.drain()
+        assert watch.events == [{"phase": "probe", "name": "hub.db", "events": ["open"]}]
+    finally:
+        watch.close()
+    assert hr.route_intact(db, route, identity)
+    os.link(db, tmp_path / "another-link.db")
+    assert not hr.route_intact(db, route, identity)
+
+
+def test_prod_readonly_open_watch_off_linux_is_lost(tmp_path, monkeypatch):
+    monkeypatch.setattr(hr.sys, "platform", "darwin")
+    watch = hr.OpenWatch(tmp_path, "hub.db")
+    assert watch.lost == "inotify is Linux-only and this is darwin" and watch.fd == -1
+    watch.close()
 
 
 class _Recorder:
@@ -282,6 +375,7 @@ def test_prod_readonly_probe_runs_against_a_running_hub_without_enrolling(tmp_pa
     assert env[hr.NODE_TOKEN_ENV] not in capture and env[hr.PROBE_TOKEN_ENV] not in capture
 
 
+@requires_process_groups
 @pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc")
 def test_prod_readonly_finds_a_process_holding_the_database_without_hooks(tmp_path):
     db = tmp_path / "hub.db"

@@ -182,12 +182,21 @@ $C hub-contract --profile prod-readonly --audit-mutation "GET /owners:write"   #
 
 With `--hub-cmd`, the front's managed Python child starts through the audit
 launcher by way of `BRIGADE_HUB_PYTHON`, so the Rust front with every family
-proxied is audited the same way. The audit also fails when any process in the
-hub's process group holds the database open without the audit hooks, which is
-where the Rust-side statement signals have to arrive once S5 to S8 give the
-front its own connections. `--audit-mutation OPERATION:KIND` adds a `write`,
-a `noop` UPDATE that matches no row, or a `begin` that takes and releases the
-write lock to `GET /owners`, `GET /status` or `POST /messages count`.
+proxied is audited the same way. The hooks see only the instrumented child's
+connections, so the audit also needs evidence that nothing else opened the
+database. The child opens it through a private hard link, and an inotify watch
+on the `--db` directory runs for the whole hub lifetime: any open through the
+configured path fails the run, even a helper's connection that locks, rolls
+back and closes before the response. The audit also fails when any process in
+the hub's process group still holds the database open without the hooks. That
+is where the Rust-side statement signals have to arrive once S5 to S8 give the
+front its own connections. Where the watch cannot run (not Linux, no inotify,
+an overflowed queue, a replaced or extra-linked database file), the run
+reports the front as not certified and exits 3. `--audit-mutation
+OPERATION:KIND` adds a `write`, a `noop` UPDATE that matches no row, a `begin`
+that takes and releases the write lock, or a `helper` process that does the
+same through its own connection, to `GET /owners`, `GET /status` or
+`POST /messages count`.
 
 With `--hub-url` it probes a running hub using a node token from
 `BRIGADE_HUB_PROBE_NODE_TOKEN` and the token of an operator-enrolled probe

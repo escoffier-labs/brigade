@@ -14,15 +14,23 @@ way `hub_clock.py` does, and adds what the S29 read-only audit needs:
 - The hub's background sweepers (Grok Bot expiry, stats retention, the MCP
   Events dispatcher) never start, so no row changes under the audit for a
   reason the probe did not cause.
+- With `HUB_AUDIT_DB` (the hub's `--db` path) and `HUB_AUDIT_DB_ROUTE` (a
+  hard link to the same file in a private directory) set, every instrumented
+  connection to the database opens the route instead. The drive watches the
+  `--db` directory with inotify, so any open through the configured path came
+  from outside these hooks: a front's own connection, or a helper process.
 - `HUB_AUDIT_MUTATE=<operation>:<kind>` adds a write to one read path, for
   the mutation test that proves the audit sees it. Kinds: `write` changes a
-  row, `noop` prepares an UPDATE that matches nothing, and `begin` takes and
-  releases the write lock.
+  row, `noop` prepares an UPDATE that matches nothing, `begin` takes and
+  releases the write lock, and `helper` runs a plain interpreter in the hub's
+  process group that takes and releases the write lock and closes before the
+  response.
 
 Configuration comes from the environment, so the Rust front's managed mode can
 start this launcher through `BRIGADE_HUB_PYTHON`, which passes `-m brigade`
 first: `HUB_AUDIT_FILE` (required, JSON lines), `HUB_AUDIT_CLOCK` (optional
-clock file, as in `hub_clock.py`) and `HUB_AUDIT_MUTATE` (optional).
+clock file, as in `hub_clock.py`), `HUB_AUDIT_DB` and `HUB_AUDIT_DB_ROUTE`
+(optional, together) and `HUB_AUDIT_MUTATE` (optional).
 
 This is the Python hub's test adapter, like `hub_clock.py`. The drive in
 `hub_readonly.py` never imports Brigade; only this hub-side process does.
@@ -34,8 +42,11 @@ import importlib
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
+import urllib.parse
+from pathlib import Path
 from typing import Any
 
 # Pragmas that change only the connection that ran them, never the file.
@@ -46,7 +57,15 @@ MUTATION_POINTS = {
     "GET /status": ("brigade.fleet_hub", "latest_status"),
     "POST /messages count": ("brigade.fleet_hub_messages", "unread_count"),
 }
-MUTATION_KINDS = ("write", "noop", "begin")
+MUTATION_KINDS = ("write", "noop", "begin", "helper")
+# The `helper` mutation: a plain interpreter in the hub's process group takes and releases the write lock.
+HELPER_SCRIPT = (
+    "import sqlite3, sys\n"
+    "conn = sqlite3.connect(sys.argv[1], timeout=10, isolation_level=None)\n"
+    "conn.execute('BEGIN IMMEDIATE')\n"
+    "conn.execute('ROLLBACK')\n"
+    "conn.close()\n"
+)
 SWEEPERS = (
     ("brigade.fleet_hub_grokbot", "start_expiry_sweeper"),
     ("brigade.fleet_admin_stats", "start_retention_sweeper"),
@@ -125,10 +144,32 @@ def _trace(recorder: Recorder):
     return trace
 
 
-def instrument(recorder: Recorder) -> None:
+def _reroute(database: Any, uri: bool, configured: str, route: str) -> Any:
+    """`database` with the configured path replaced by the route; anything else is returned unchanged."""
+    if not isinstance(database, (str, bytes, os.PathLike)):
+        return database
+    text = os.fsdecode(database)
+    if uri and text.startswith("file:"):
+        parts = urllib.parse.urlsplit(text)
+        if parts.netloc not in ("", "localhost") or os.path.realpath(urllib.parse.unquote(parts.path)) != configured:
+            return database
+        return Path(route).as_uri() + (f"?{parts.query}" if parts.query else "")
+    if text and text != ":memory:" and os.path.realpath(text) == configured:
+        return route
+    return database
+
+
+def instrument(recorder: Recorder, db: str = "", route: str = "") -> None:
     real_connect = sqlite3.connect
+    configured = os.path.realpath(db) if db else ""
 
     def connect(*args: Any, **kwargs: Any) -> sqlite3.Connection:
+        if configured and route:
+            uri = bool(kwargs.get("uri", False))
+            if args:
+                args = (_reroute(args[0], uri, configured, route), *args[1:])
+            elif "database" in kwargs:
+                kwargs["database"] = _reroute(kwargs["database"], uri, configured, route)
         conn = real_connect(*args, **kwargs)
         conn.set_authorizer(_authorizer(recorder))
         conn.set_trace_callback(_trace(recorder))
@@ -166,6 +207,10 @@ def mutate(spec: str, db_path: str, recorder: Recorder) -> None:
     real = getattr(module, attr)
 
     def with_write(*args: Any, **kwargs: Any) -> Any:
+        if kind == "helper":
+            # Not through the patched connect: the helper opens the configured path, locks, and is gone before any scan.
+            subprocess.run([sys.executable, "-c", HELPER_SCRIPT, db_path], check=True, timeout=30)
+            return real(*args, **kwargs)
         # A fresh connection through the patched connect, so the audit hooks see it.
         conn = sqlite3.connect(db_path, timeout=10)
         try:
@@ -206,7 +251,13 @@ def main(argv: list[str]) -> int:
             return 2
         hub_clock._install(os.path.abspath(clock_file))
     recorder = Recorder(audit_file)
-    instrument(recorder)
+    db, route = os.environ.get("HUB_AUDIT_DB", ""), os.environ.get("HUB_AUDIT_DB_ROUTE", "")
+    if bool(db) != bool(route):
+        print("hub_audit: HUB_AUDIT_DB and HUB_AUDIT_DB_ROUTE go together", file=sys.stderr)
+        return 2
+    instrument(recorder, db, route)
+    if route:
+        recorder.emit("route", db=db, route=route)
     pause_sweepers(recorder)
     spec = os.environ.get("HUB_AUDIT_MUTATE", "")
     if spec:

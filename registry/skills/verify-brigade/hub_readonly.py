@@ -23,17 +23,28 @@ Two modes:
   front, such as the Rust hub in managed proxy mode, whose Python child starts
   through `hub_audit.py` by way of `BRIGADE_HUB_PYTHON`.
 
+  The hooks see only connections the instrumented child opens, so the audit
+  also needs evidence that nothing else opened the database. The child opens
+  it through a private hard link, and an inotify watch on the `--db` path's
+  directory runs for the whole hub lifetime. Any open through the configured
+  path fails the run, even one that is closed again before the response, such
+  as a front's own connection or a helper process. Where that watch cannot
+  run, the front is reported as not certified, never as passing.
+
 Like the contract drive, nothing here imports `brigade.*`.
 """
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import secrets
 import shlex
 import sqlite3
+import struct
+import sys
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -255,12 +266,12 @@ def _summary(records: list[dict]) -> list[dict]:
     return sorted(counted.values(), key=lambda item: json.dumps(item, sort_keys=True))
 
 
-def uninstrumented_holders(pgid: int, instrumented: set[int], db: Path) -> list[dict]:
-    """Processes in the hub's group that hold the database open without the audit hooks (Linux only)."""
+def uninstrumented_holders(pgid: int, instrumented: set[int], *dbs: Path) -> list[dict]:
+    """Processes in the hub's group that hold a database path open without the audit hooks (Linux only)."""
     proc = Path("/proc")
     if not proc.is_dir():
         return []
-    names = {str(db.resolve()), *(f"{db.resolve()}{suffix}" for suffix in ("-wal", "-shm", "-journal"))}
+    names = {f"{db.resolve()}{suffix}" for db in dbs for suffix in ("", "-wal", "-shm", "-journal")}
     holders = []
     for entry in proc.iterdir():
         if not entry.name.isdigit() or int(entry.name) in instrumented:
@@ -280,6 +291,113 @@ def uninstrumented_holders(pgid: int, instrumented: set[int], db: Path) -> list[
         if open_files & names:
             holders.append({"pid": int(entry.name), "files": sorted(open_files & names)})
     return holders
+
+
+# ----------------------------------------------------------- the open watch
+
+# inotify(7) masks.
+IN_OPEN, IN_MOVED_FROM, IN_MOVED_TO, IN_CREATE, IN_DELETE = 0x20, 0x40, 0x80, 0x100, 0x200
+IN_DELETE_SELF, IN_MOVE_SELF, IN_Q_OVERFLOW, IN_IGNORED = 0x400, 0x800, 0x4000, 0x8000
+WATCH_MASK = IN_OPEN | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_MOVE_SELF
+EVENT_NAMES = {
+    IN_OPEN: "open",
+    IN_MOVED_FROM: "moved_from",
+    IN_MOVED_TO: "moved_to",
+    IN_CREATE: "create",
+    IN_DELETE: "delete",
+}
+_EVENT = struct.Struct("iIII")
+
+
+class OpenWatch:
+    """Watch the configured database's directory, so an open through that path is seen even after it closes.
+
+    The instrumented child opens the database through a private hard link
+    instead, and the drive reads it through the same link, so nothing the
+    audit trusts uses the configured path. Any open of the database file (or
+    its `-wal`, `-shm` or `-journal`) through it, or any create, delete or
+    rename of one, came from outside the hooks. One event is enough: inotify
+    coalesces identical unread events, which would break a count but cannot
+    hide that an event happened. The watch is the evidence, so when it cannot
+    run (not Linux, no inotify, the queue overflowed, the directory went
+    away) the audit says the front is not certified.
+    """
+
+    def __init__(self, directory: Path, name: str) -> None:
+        self.names = {name, *(f"{name}{suffix}" for suffix in ("-wal", "-shm", "-journal"))}
+        self.events: list[dict] = []
+        self.lost: str | None = None
+        self.fd = -1
+        self.phase = "launch"
+        if not sys.platform.startswith("linux"):
+            self.lost = f"inotify is Linux-only and this is {sys.platform}"
+            return
+        try:
+            libc = ctypes.CDLL(None, use_errno=True)
+            init, add = libc.inotify_init1, libc.inotify_add_watch
+        except (OSError, AttributeError) as exc:
+            self.lost = f"inotify is unavailable: {exc}"
+            return
+        fd = init(os.O_NONBLOCK | os.O_CLOEXEC)
+        if fd < 0:
+            self.lost = f"inotify_init1 failed: {os.strerror(ctypes.get_errno())}"
+            return
+        self.fd = fd
+        if add(fd, os.fsencode(str(directory)), WATCH_MASK) < 0:
+            self.lost = f"inotify_add_watch failed: {os.strerror(ctypes.get_errno())}"
+            self.close()
+
+    def drain(self, next_phase: str | None = None) -> None:
+        while self.fd >= 0:
+            try:
+                raw = os.read(self.fd, 64 * 1024)
+            except BlockingIOError:
+                break
+            offset = 0
+            while offset + _EVENT.size <= len(raw):
+                _wd, mask, _cookie, length = _EVENT.unpack_from(raw, offset)
+                name = os.fsdecode(raw[offset + _EVENT.size : offset + _EVENT.size + length].rstrip(b"\0"))
+                offset += _EVENT.size + length
+                if mask & IN_Q_OVERFLOW:
+                    self.lost = self.lost or "the inotify queue overflowed"
+                elif mask & (IN_IGNORED | IN_DELETE_SELF | IN_MOVE_SELF):
+                    self.lost = self.lost or "the database directory was removed or moved during the run"
+                elif name in self.names:
+                    kinds = [label for bit, label in EVENT_NAMES.items() if mask & bit]
+                    self.events.append({"phase": self.phase, "name": name, "events": kinds})
+        if next_phase:
+            self.phase = next_phase
+
+    def close(self) -> None:
+        if self.fd >= 0:
+            self.drain()
+            os.close(self.fd)
+            self.fd = -1
+
+
+def prepare_route(state_dir: Path) -> tuple[Path, Path | None, str | None]:
+    """The configured database path, its private route, and why there is no route (if there is none)."""
+    db_dir = state_dir / "db"
+    db_dir.mkdir(mode=0o700)
+    db = db_dir / "hub.db"
+    # Created here, empty and private, so the hub finds nothing to create or fix through this path.
+    os.close(os.open(db, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600))
+    route_dir = state_dir / f"db-route-{secrets.token_hex(8)}"
+    route_dir.mkdir(mode=0o700)
+    route = route_dir / "hub.db"
+    try:
+        os.link(db, route)
+    except OSError as exc:
+        return db, None, f"could not link the database route: {exc}"
+    return db, route, None
+
+
+def route_intact(db: Path, route: Path, identity: tuple[int, int]) -> bool:
+    try:
+        a, b = db.lstat(), route.lstat()
+    except OSError:
+        return False
+    return (a.st_dev, a.st_ino) == (b.st_dev, b.st_ino) == identity and a.st_nlink == 2
 
 
 # ----------------------------------------------------------- the fixture
@@ -512,54 +630,82 @@ def audit(
     clock = sp.Clock(state_dir / "clock")
     clock.set(0)
     log = AuditLog(state_dir / "audit.jsonl")
+    db, route, route_error = prepare_route(state_dir)
+    info = db.lstat()
+    identity = (info.st_dev, info.st_ino)
+    # The drive reads through the route too: the WAL lives beside the path the hub's connections open.
+    read_db = route or db
     env = {
         "HUB_AUDIT_FILE": str(log.path),
         "HUB_AUDIT_CLOCK": str(clock.path),
         "BRIGADE_HUB_PYTHON": str(_wrapper(state_dir, python)),
         "BRIGADE_FLEET_MESSAGES_RETENTION_DAYS": str(RETENTION_DAYS),
     }
+    if route:
+        env.update({"HUB_AUDIT_DB": str(db), "HUB_AUDIT_DB_ROUTE": str(route)})
     if mutation:
         env["HUB_AUDIT_MUTATE"] = mutation
-    template = (hub_cmd or DEFAULT_HUB_CMD).replace("{python}", shlex.quote(python))
+    template = (
+        (hub_cmd or DEFAULT_HUB_CMD).replace("{python}", shlex.quote(python)).replace("{db}", shlex.quote(str(db)))
+    )
+    watch = OpenWatch(db.parent, db.name)
     try:
-        hub = sp.launch(
-            sp.Engine("audited", template),
-            brigade=brigade,
-            state_dir=state_dir,
-            admin_token=admin_token,
-            env_extra=env,
-            phase=1,
-            startup_timeout=startup_timeout,
-        )
-    except sp.ParityError as exc:
-        raise hc.ContractError(str(exc)) from exc
-    db = state_dir / "hub.db"
-    try:
-        fixture, fixture_failures = build_fixture(hub, clock)
-        setup = log.since(0)
-        overdue = overdue_rows(db, sp.T0 + PROBE_AT)
-        time.sleep(SETTLE_SECONDS)
-        start = log.offset()
-        before = digest(db)
-        probe = run_profile(
-            hub.url, node_token=fixture.node_token, principal_token=fixture.principal_token, cases=cases
-        )
-        time.sleep(SETTLE_SECONDS)
-        after = digest(db)
-        window = log.since(start)
-        control_results = []
-        for name, method, path, body, token in controls(fixture):
-            mark = log.offset()
-            resp = hc.request(hub.url, method, path, body=body, token=token)
+        try:
+            hub = sp.launch(
+                sp.Engine("audited", template),
+                brigade=brigade,
+                state_dir=state_dir,
+                admin_token=admin_token,
+                env_extra=env,
+                phase=1,
+                startup_timeout=startup_timeout,
+            )
+        except sp.ParityError as exc:
+            raise hc.ContractError(str(exc)) from exc
+        try:
+            watch.drain("fixture")
+            fixture, fixture_failures = build_fixture(hub, clock)
+            setup = log.since(0)
+            overdue = overdue_rows(read_db, sp.T0 + PROBE_AT)
             time.sleep(SETTLE_SECONDS)
-            wrote = findings(log.since(mark))
-            control_results.append({"operation": name, "status": resp.status, "writes": len(wrote), "ok": bool(wrote)})
-        instrumented = {int(record["pid"]) for record in log.since(0) if record.get("kind") == "ready"}
-        holders = (
-            uninstrumented_holders(hub.process.pid, instrumented, db) if hub.process and os.name == "posix" else []
-        )
+            watch.drain("probe")
+            start = log.offset()
+            before = digest(read_db)
+            probe = run_profile(
+                hub.url, node_token=fixture.node_token, principal_token=fixture.principal_token, cases=cases
+            )
+            time.sleep(SETTLE_SECONDS)
+            after = digest(read_db)
+            window = log.since(start)
+            watch.drain("controls")
+            control_results = []
+            for name, method, path, body, token in controls(fixture):
+                mark = log.offset()
+                resp = hc.request(hub.url, method, path, body=body, token=token)
+                time.sleep(SETTLE_SECONDS)
+                wrote = findings(log.since(mark))
+                control_results.append(
+                    {"operation": name, "status": resp.status, "writes": len(wrote), "ok": bool(wrote)}
+                )
+            instrumented = {int(record["pid"]) for record in log.since(0) if record.get("kind") == "ready"}
+            dbs = [db, *([route] if route else [])]
+            holders = (
+                uninstrumented_holders(hub.process.pid, instrumented, *dbs)
+                if hub.process and os.name == "posix"
+                else []
+            )
+            watch.drain("shutdown")
+        finally:
+            hc.stop_hub(hub)
     finally:
-        hc.stop_hub(hub)
+        watch.close()
+    routed = any(record.get("kind") == "route" for record in log.since(0))
+    lost = route_error or watch.lost
+    if not lost and not routed:
+        lost = "the instrumented hub did not report its database route"
+    if not lost and route and not route_intact(db, route, identity):
+        lost = "the database file was replaced or linked elsewhere during the run"
+    open_evidence = {"complete": lost is None, "reason": lost, "outside_opens": watch.events}
     hooks_live = bool(instrumented) and any(record.get("kind") == "write" for record in setup)
     sweepers_paused = any(record.get("kind") == "sweepers" for record in setup)
     report = {
@@ -567,6 +713,7 @@ def audit(
         "hooks_live": hooks_live,
         "sweepers_paused": sweepers_paused,
         "uninstrumented_holders": holders,
+        "open_evidence": open_evidence,
         "fixture_failures": fixture_failures,
         "overdue_rows": overdue,
         "window_findings": _summary(findings(window)),
@@ -581,6 +728,10 @@ def audit(
         problems.append("the audited hub did not report its sweepers paused")
     if holders:
         problems.append("a process holds the database open without the audit hooks")
+    if watch.events:
+        problems.append("a process opened the database outside the audit hooks")
+    if lost:
+        problems.append(f"no evidence that every database open went through the audit hooks ({lost}): not certified")
     if fixture_failures:
         problems.append("the fixture did not build")
     if not all(overdue.values()):
@@ -592,6 +743,7 @@ def audit(
     if not all(item["ok"] for item in control_results):
         problems.append("an excluded operation recorded no write: the audit cannot see writes")
     report["problems"] = problems
+    report["certified"] = not problems
     secrets_ = {secret for secret in fixture.secrets if len(secret) >= 8}
     return hub, {**probe, "audit": hc.scrub(report, secrets_)}
 
