@@ -124,6 +124,28 @@ partly resolved, no blocker, 2 new majors and 4 minors. Revision 6 changes:
   restart or boot, a `user_version` bump guarding the claim recovery floor,
   and the window bound for a batch that spans the whole window.
 
+Revision 7 (2026-11-03) records two maintainer decisions and answers no
+review. Hosting (D28, Q8 closed): the production hub stays on the LXC hub
+host, the embedder runs on the GPU workstation and production calls it over
+the tailnet, a dogfood hub on the workstation runs the Compose recipe and is
+not production (S31), and a production move is a separate gated step (S32).
+Retrieval modes (D30): `hybrid` and BM25 are both first-class, setup picks
+the mode and backend, one setting removes the embedder, and status keeps a
+chosen BM25 mode apart from a fallback. Revision 7 changes:
+
+- D28 is Decided with the measured `fdatasync` evidence, and Hosting is
+  rewritten around it: the remote-endpoint contract (tailnet bind, ACL,
+  token, deadlines, batching, scan gate, shared GPU), the dogfood hub, a
+  general restore section and the gated move.
+- On a single-user machine the owner's agents run as the owner. The separate
+  agent account and no-`sudo` rule become optional hardening. Agent `sudo`
+  on the LXC hub host is a known risk owned by an operations cleanup outside
+  this design, and the recommendation that this design end it is withdrawn.
+- New Retrieval modes section and D30. S15, S16a, S16b, S31, the release
+  gate, the risks and the review appendix follow both decisions, and S15
+  gains a build edge on S18.
+- Non-goals add serverless edge hosting.
+
 Planned commands and flags appear without the `brigade` prefix, for example
 "the planned `fleet serve --engine rust`". Commands written with the prefix
 exist today.
@@ -205,6 +227,9 @@ Non-goals:
 - Memory log compaction in 0.31.0. Its invariants are recorded here (#2210).
 - A second task database. Duties extend the existing owners charters.
 - New runtime dependencies for the Python package.
+- Hosting the hub on serverless edge platforms. The hub is a long-running
+  server with one writer and long-polls (D30). A remote embedding service on
+  any provider is supported through the remote-endpoint contract.
 
 ## Decisions
 
@@ -226,7 +251,7 @@ maintainer can decide.
 | D7 | Memory v2 lives in its own SQLite file, owned by the Rust hub. | The Python hub never opens it, so rollback stays clean, and memory gets its own writer and size profile. Authority across the two files is D23. | Proposed |
 | D8 | Memory v2 is an event log on the hub. Content hashes address bytes, blobs and vectors. The index is flat postings plus dense matrices per embedder version. Retrieval is BM25 plus dense, fused with reciprocal rank fusion (k=60), with an optional LLM rerank for top-1 answers. Any principal with a grant writes events. Curation is a policy. Derived rows carry fingerprints and lineage. | Judged real prompts: BM25 hit@5 0.66 to 0.74, hybrid with a 0.6B embedder 0.83 to 0.94, an LLM rerank of the top 20 lifted first-result correctness from about 0.64 to about 0.91. | Decided. Card identity amended by D22 |
 | D9 | The LLM rerank runs outside the hub, in the caller's own read-only seat. | Keeps model calls and provider credentials out of the hub process and the request path. Matches #1856: no provider integration enters core. | Proposed |
-| D10 | Two embedder backends behind one interface: a 0.6B-class model on the hub's CPU, and a separate GPU host that computes and ships vectors. Measure both, then pick the default. | The 0.6B hybrid nearly matched an 8B model on real prompts. The reference hub allotment is 1 vCPU and 512 MB. S16a (#2217) found that no CPU embedder it tested fits there. | Decided. Backend names amended by D28 |
+| D10 | Two embedder backends behind one interface: a 0.6B-class model on the hub's CPU, and a separate GPU host that computes and ships vectors. Measure both, then pick the default. | The 0.6B hybrid nearly matched an 8B model on real prompts. The reference hub allotment is 1 vCPU and 512 MB. S16a (#2217) found that no CPU embedder it tested fits there. | Decided. Backend names amended by D28, the `remote` contract and the default by D30 |
 | D11 | Both backends talk HTTP to an embedding server: on loopback for the `local` backend, over the private network for the `remote` backend. The hub binary links no ML runtime. | Keeps model runtimes out of the five-platform native release matrix. Loopback HTTP adds about a millisecond to a query embedding that measured 61 ms. | Proposed |
 | D12 | Memory is pushed to agents. Hub-built packets and the tool responses agents already call (`fleet_digest`, `inbox_list`) carry the top memory hits. Session-start and stop hooks inject and capture. Cloud connectors need no new tools. | Connector test: a hosted assistant used Brigade memory on 4 of 10 prompts and gave a card-backed answer on 3 of 10. Two other connectors used it on 0 of 2 each. | Decided |
 | D13 | Grok Bot gets a read-mostly memory profile (`memory_search`, `memory_card`, `handoff_write`) and a separate inbox profile with sender allowlists. Grok Bot does X work only. | Small quota, and a cloud agent should not hold write or dispatch authority it does not need. The connectivity PR in flight ships the read-only part first. | Decided |
@@ -244,8 +269,9 @@ maintainer can decide.
 | D25 | Hub Tier 0 auto-apply stays off until the hub verifies evidence itself (S19e). Until then every hub proposal waits for review. | Local evidence ids cannot be resolved on the hub, and three submitted strings are not proof. | Proposed (Q6) |
 | D26 | The Rust front answers upstream failures with 502 or 504, never 503. `/health` keeps its v1 liveness meaning. A new `GET /ready` reports readiness. Proxied requests that may write are never retried. | The v1 claim client treats a 503 as an answer and maps any other HTTP error to `hub-unavailable` (`fleet_client.py`, the `claim` path). A dead upstream must look like an unreachable hub to that client, so it retries instead of reporting a refusal. | Proposed |
 | D27 | Hub work dependency edges and the ready view (#2210) are built on the Rust hub after the Worklore family port. The memory log compaction invariants from #2210 are recorded now. | #2210 asks for one build, in the Rust hub, with a Python version only if the Rust schedule slips. | Proposed (Q7) |
-| D28 | The whole Fleet Hub, memory included, moves from the current LXC hub host to the GPU workstation and runs there in Docker: one container for `fleet serve`, the Rust hub and the Python upstream, one for the private network's HTTPS front, both joining a network namespace that a holder container owns, and one container for the embedding server, which alone gets the GPU. No hub port is published, and agents on the workstation run under a separate account with no Docker rights and no `sudo`. Memory alone on the workstation is the alternative ([Hosting](#hosting)). | The current LXC hub host has no GPU the hub can use. S16a (#2217) found no CPU embedder that fits the 1 vCPU / 512 MB allotment, and only the 8B model in hybrid mode passed both private halves of R1. The GPU workstation has the GPU and a UPS, though no UPS monitor yet. One process keeps D23's lock on one host, and the move runs the Docker recipe other operators will use. | Proposed, needs the maintainer (Q8) |
+| D28 | The production Fleet Hub stays on the LXC hub host. The embedder runs on the GPU workstation, and the production hub calls it over the tailnet under the remote-endpoint contract: the endpoint binds only the workstation's tailnet address, a tailnet ACL admits only the hub host, and the hub holds the endpoint's token, with a per-request deadline and fallback to BM25. A second hub, the dogfood hub, runs on the GPU workstation from the Docker Compose recipe as the everyday install path and is not production: a holder container owns the network namespace that the hub and the private network's HTTPS front join, no hub port is published, and the embedder container alone gets the GPU. Production moves to the workstation only through a separate gated step (S32), if the dogfood hub's deployment runs meet their latency targets or after the hub volume gets a device of its own. On a single-user machine the owner's agents run as the owner, and a separate agent account with no Docker rights and no `sudo` is optional hardening for multi-user or shared hosts ([Hosting](#hosting)). | `fdatasync` on the LXC hub host's data volume at load 1.4: median 1.01 ms, p99 1.71 and 2.60 ms, maximum 23.8 and 26.6 ms. On the GPU workstation at load 7 to 8: median 1.03 and 1.12 ms, p99 2.38 and 28.52 ms, maximum 4.25 and 38.6 ms, and the earlier overnight probe under load 38 to 183 had p99 871 to 928 ms and a 2.8 s maximum (two 6 s runs of 4 KiB write plus `fdatasync` per host, 2026-11-03). The medians match, and the tail decides how long a `FULL` commit holds every write behind it. The LXC hub host has no GPU the hub can use, S16a (#2217) found no CPU embedder that fits the allotment, and only the 8B hybrid passed both private halves of R1, so the GPU stays on the workstation and only embedding crosses hosts. D23's lock stays in one process on one host. | Decided (2026-11-03) |
 | D29 | Behind a local HTTPS front, the TCP peer is the front itself. When the hub binds a loopback address, a loopback peer is the front: it is exempt from per-source connection and waiter caps. A request counts against a credential's budgets only after its token digest matches an active credential. Every other request, junk tokens included, shares one front-wide unauthenticated budget, browser routes have their own, and each credential holds at most a fixed share of the proxied slots. Per-principal waiter caps and the global caps apply as well. These budgets bound one credential and the anonymous traffic as a whole, on the stated assumption that only tailnet members reach the front. A client address supplied by the front is used only under an explicit trust flag, and a front that accepts public traffic is unsupported without it. | The documented deployments forward every client from a loopback front, so a per-source cap is a fleet-wide cap. Python already exempts loopback from its waiter cap for this reason, but not from its 8-handler cap, and the merged Rust front applies 256 per source with no exemption. #2226 keys any `Authorization` value as a credential with a cap of 64, larger than its 24-slot proxied pool, so 24 slow bodies under distinct junk tokens can hold every proxied slot. | Proposed |
+| D30 | Retrieval has two first-class modes. `hybrid` (BM25 plus embeddings) is the install default wherever setup finds an embedder running a model that passed R1: the Compose recipe's embedder service on a supported local GPU, otherwise a configured remote endpoint under the same remote-endpoint contract the production hub uses. With neither, setup says so and starts in BM25 mode (`lexical`). BM25 mode is a supported, tested configuration with its own acceptance and status, and no degraded warning when chosen. One setting, `retrieval = "lexical"`, removes the embedder, and the `gpu` Compose profile keeps its container from running. Switching either way keeps search working. An unreachable configured embedder gives BM25 answers reported as `degraded`, distinct from BM25 chosen on purpose. Hosting the hub on serverless edge platforms is out of scope, and a remote embedding service on any provider is supported through the contract once its model passes R1 ([Retrieval modes](#retrieval-modes)). | Only the 8B hybrid has passed R1's private halves so far (#2217), so any other default model needs R1 first. BM25 alone reached prompt hit@5 of 0.42 to 0.69 on the private gold set (#2201), useful on its own for installs without an embedder. Keeping the chosen mode apart from the runtime fallback lets status tell a choice from a fault. The hub is a long-running single-writer server with long-polls, which serverless edge platforms do not host. | Decided (2026-11-03) |
 
 ## System overview
 
@@ -968,7 +994,9 @@ outbox enabled (`BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS`).
   the namespace. An agent with root on the container's host can enter the
   container's namespace, so on this fleet's server that hosts the LXC
   container, where the agent account has passwordless `sudo`, the example
-  does not hold (Q8).
+  does not hold. That is a known risk owned by an operations cleanup outside
+  this design ([Threat model for an everyday
+  install](#threat-model-for-an-everyday-install)).
 - The upstream runs in a planned upstream mode (S3c): loopback bind, no
   per-source cap of its own (Rust applies D29's caps), the client address
   taken from a header that only the Rust front can set, keyed by a random
@@ -1261,20 +1289,20 @@ then profile default.
   Rollback is removing `--engine rust`.
 - Container: `ops/fleet-hub/Containerfile` adds the verified binary and uses
   `fleet serve --engine rust`. Python stays in the image for the upstream.
-  The compose recipe changes as
-  [option b](#option-b-the-whole-hub-on-the-gpu-workstation) describes: no
+  The compose recipe changes as [The dogfood hub on the GPU
+  workstation](#the-dogfood-hub-on-the-gpu-workstation) describes: no
   published port, a loopback bind inside a network namespace that a holder
   container owns, the hub and an HTTPS front both joining that namespace, a
   health watchdog that also exits on a namespace left with loopback only, a stop grace
   period, secrets for the admin token and the HMAC key, a slice example for
-  reserved resources, and an optional `gpu` profile for an embedding server
-  on an internal compose network.
+  reserved resources, and the embedder service on an internal compose
+  network, run under the `gpu` profile that setup writes (D30).
 
 ### Cutover
 
 | Phase | What changes | Gate to move on |
 |---|---|---|
-| 0 | Python hub on the public port (today), on the GPU workstation once S31 has moved it if Q8 picks option b. Baseline: the S29 read-only probe every 60 s for 48 hours on the host phase 1 will use, plus the events spool depth nodes report | Release slices merged. Contract drive, storage parity and the S4a power-cut test pass against Rust in CI |
+| 0 | Python hub on the public port of the LXC hub host (today), where production stays (D28). Baseline: the S29 read-only probe every 60 s for 48 hours on the host phase 1 will use, plus the events spool depth nodes report | Release slices merged. Contract drive, storage parity and the S4a power-cut test pass against Rust in CI |
 | 1. Front | Rust takes the public port with the upstream in upstream mode, every family in `proxy` mode | 48 hours with probe p95 latency within 10% of the phase 0 baseline, no more probe errors than phase 0, and `/ready` green |
 | 2. Mirror reads | Heartbeat, claims and messages reads, and `GET /nodes`, in `shadow` | 7 days, at least 1,000 comparisons in each family, zero definite mismatches, and every inconclusive, boundary or projection record reviewed |
 | 3. Flip writes | Heartbeat to `native`, then claims, then messages, then registration, one family at a time | Each family runs 48 hours with no new errors and writer queue depth under 10% of its cap. The S29 profile passes hourly against production, and the full drive passes against a copy of production taken with the online backup API and served on a throwaway loopback port |
@@ -1444,10 +1472,12 @@ Holding the hub lock is bounded as well as acquiring it:
 - Worst case per batch: a batch that has started runs to its end, so the
   bucket cannot cut it short. Its residence is at most 10 ms of apply time
   plus one memory `FULL` commit, and the hub does not control how long that
-  commit's sync takes. On the workstation probe in
-  [Evidence](#durability-cost-with-group-commit), sync p99 was 871 to 928 ms
-  and the maximum 2.8 s, so one batch can hold the hub lock for about a second
-  at p99 and close to 3 s at worst. Over any window of W seconds, memory
+  commit's sync takes. On the production LXC hub host's data volume, sync p99
+  was 1.71 and 2.60 ms and the maximum 26.6 ms ([Why production stays on the
+  LXC hub host](#why-production-stays-on-the-lxc-hub-host)). On the loaded
+  workstation probe in [Evidence](#durability-cost-with-group-commit), sync
+  p99 was 871 to 928 ms and the maximum 2.8 s, so there one batch can hold the
+  hub lock for about a second at p99 and close to 3 s at worst. Over any window of W seconds, memory
   residence is at most 250 ms plus 0.25 W plus the whole residence of one
   batch: the last batch to start in the window, whether it ends inside the
   window or runs past it, or, if none starts in it, the batch running at its
@@ -1470,8 +1500,9 @@ Holding the hub lock is bounded as well as acquiring it:
   falls back as in any hub outage.
 - `/metrics` records the hub-lock residence of each memory batch as well as
   the wait to acquire it, the maximum, and the bucket's balance.
-- If the workstation run in S16b misses its targets, the I/O remedies in
-  [Hosting](#hosting) apply to the memory file as well. After the rollback
+- If the dogfood hub's run in S16b misses its targets, production does not
+  move (S32), and the I/O remedies in [Hosting](#hosting) apply to the
+  memory file as well. After the rollback
   window, once every credential and policy write is Rust-native, a narrower
   barrier becomes possible: only credential and policy commits wait for an
   in-flight memory commit, and other hub writes stop waiting for memory.
@@ -1504,11 +1535,12 @@ storage:
 - An `SQLITE_FULL` on the memory commit, injected through the shim, releases
   the hub lock at once and answers the batch with 503, and hub writes go on.
 
-These targets hold on quiet storage only. Under option b of
-[Hosting](#hosting), S16b's run on the GPU workstation adds 20 memory writes
-per second to its load and records authority-lock wait and residence (p99 and
-maximum) and claim and revocation commit p99 against these targets. That run,
-not S13a's, decides whether the bounds hold where the hub will live.
+These targets hold on quiet storage, which the production LXC hub host's
+sync numbers resemble. S16b's run on the dogfood hub on the GPU workstation
+adds 20 memory writes per second to a loaded host and records authority-lock
+wait and residence (p99 and maximum) and claim and revocation commit p99
+against these targets. That run decides whether the bounds hold there, and
+S32 needs it before production moves.
 
 ### Trust, grants and scan state
 
@@ -1829,8 +1861,11 @@ hub copies its semantics from `src/brigade/memory_bm25.py` and
    only.
 8. Return at most 20 matches with `scope`, `card_id`, `revision`, `title`,
    `summary`, `tags`, `score`, `content_hash`, `trust` and each list's rank.
-   The response says which mode ran (`lexical`, `hybrid`) and why a hybrid
-   query degraded (`embedder-timeout`, `embedder-unavailable`, `no-vectors`).
+   The response says which mode ran (`lexical`, `hybrid`, or
+   `lexical-fallback` when a configured embedder could not answer) and why a
+   hybrid query degraded (`embedder-timeout`, `embedder-unavailable`,
+   `embedder-refused`, `digest-mismatch`, `no-vectors`), as in [Retrieval
+   modes](#retrieval-modes).
 9. Optional rerank (D9): a caller that wants one answer reranks the top 20
    with its own read-only seat, through the planned `memory answer`. The hub
    is not involved.
@@ -1871,8 +1906,9 @@ Measured so far, with untuned RRF weights (#2217): only the 8B hybrid passes
 both private halves of R1, with hit@5 gains of 0.20 to 0.26 over BM25 under
 the three judges and keyword R@5 0.034 below BM25, inside the 0.05 limit. The
 0.6B hybrid gains 0.13 to 0.24 on hit@5 but loses 0.075 on keyword R@5. S17
-tunes the weights and runs the public-fixture half. Until R1 passes, the
-default mode is `lexical` and `hybrid` is opt-in.
+tunes the weights and runs the public-fixture half. Until R1 passes for a
+model, setup does not offer it for `hybrid`, and an install without such a
+model starts in BM25 mode ([Retrieval modes](#retrieval-modes)).
 
 ### Embedder interface and backends
 
@@ -1898,26 +1934,132 @@ Backends:
 | Backend | Document vectors | Query vectors | Where text goes |
 |---|---|---|---|
 | `local` (named `hub-cpu` before revision 3) | the embed scheduler calls an embedding server on the hub's loopback, or in a container recipe on an internal network shared only with the hub, on whatever device that host has | same server, synchronously, within the 300 ms budget | stays on the hub host |
-| `remote` | an embed worker on the GPU host pulls jobs from the hub (`embed_lease`), embeds locally, and submits vectors (`embed_submit`) | the hub calls the GPU host's server directly when a `query_endpoint` is configured and reachable. Otherwise lexical only | the GPU host |
+| `remote` | the embed scheduler calls an endpoint on another host under the remote-endpoint contract. For a GPU host the hub cannot reach, `memory embed-worker` on that host pulls jobs from the hub instead (`embed_lease`), embeds locally, and submits vectors (`embed_submit`) | the hub calls the same endpoint, within the 300 ms budget. With pull mode and no reachable `query_endpoint`, BM25 only | the endpoint's host |
 
 The device belongs to the embedding server, not to the hub, so `local` covers
 a CPU server and a GPU server alike. S16a's `hub-cpu` rows are `local` on CPU.
 Both backends put the query call behind a breaker: after one embedding failure
-the hub skips the embedder for 30 s and answers lexically. S16a measured a hung
-server costing the full 300 ms budget on every query without it.
+the hub skips the embedder for 30 s and answers in BM25 mode, labeled as a
+fallback. While the breaker is open, one background probe with a 10 s
+deadline pays any cold load, and the breaker closes when it succeeds. S16a
+measured a hung server costing the full 300 ms budget on every query without
+the breaker.
+
+The remote-endpoint contract is the same for the production hub calling the
+GPU workstation and for any install calling an endpoint on any provider:
+a bind to a private address or HTTPS, an allowlist entry naming the endpoint,
+a bearer token the hub holds as a secret file, a 250 ms query deadline and a
+30 s document deadline, the batching rules, the model digest check, and the
+scan gate on what text leaves the hub. [Remote embedder on the GPU
+workstation](#remote-embedder-on-the-gpu-workstation) states each rule.
 
 The HTTP client speaks two request shapes, `/api/embed` and
-`/v1/embeddings`, selected in `hub.toml`. Embedding endpoints must be loopback
-or on an allowlist of private hosts, the same pattern as the events callback
-hosts, and HTTPS endpoints use rustls. The embed worker is the planned
+`/v1/embeddings`, selected in `hub.toml`. Embedding endpoints must be
+loopback, an allowlisted private host (the same pattern as the events
+callback hosts), or an allowlisted HTTPS endpoint the operator names, and
+HTTPS endpoints use rustls. The embed worker is the planned
 `memory embed-worker`, stdlib Python. It holds a principal with only the
-`embed` grant and pulls, so the GPU host needs no inbound route from the hub
-for document work.
+`embed` grant and pulls, so a GPU host in pull mode needs no inbound route
+from the hub for document work.
 
 During an embedder change both matrices exist. The new one backfills in the
 background, and the default flips by configuration only after the new id
 covers every live card and passes R1. The old matrix is dropped one release
 later.
+
+### Retrieval modes
+
+Decided 2026-11-03 (D30). Retrieval has two first-class modes, and both are
+supported, documented and tested release configurations:
+
+- `hybrid`: BM25 plus dense retrieval fused by RRF ([Retrieval
+  pipeline](#retrieval-pipeline)). It is the install default wherever setup
+  finds an embedder running a model that passed R1.
+- BM25 mode, `lexical` in configuration: BM25 alone, with no embedder. It is
+  a configuration in its own right. #2201 reported
+  prompt hit@5 of 0.42 to 0.69 with BM25 alone on the private gold set, and
+  S15 reports BM25 mode's numbers on that set in aggregate, the same way.
+
+Configuration. `hub.toml` has one setting, `[memory] retrieval = "hybrid"` or
+`"lexical"`, and a `[memory.embedder]` table naming the backend, the
+endpoint, the token file and the model. `retrieval = "lexical"` is the one
+explicit setting that removes the embedder: the hub starts no embed
+scheduler, makes no embedding call and loads no matrix. A leftover embedder
+table is reported once at `INFO` as unused. In the Compose
+recipe the embedder container belongs to the `gpu` profile, so a project
+without that profile never creates it, and the runbook's removal step stops a
+running one with `docker compose --profile gpu rm -sf embedder`.
+
+Setup. The recipe's setup script picks the mode and the backend, in order:
+
+1. A supported local GPU: the GPU vendor's container runtime is present, a
+   probe container sees the GPU, and the card has free memory for the model
+   (about 6 GB for the 8B model in S16a). Setup writes the `gpu` profile to
+   the project's `.env`, the `local` backend and `retrieval = "hybrid"`.
+2. Otherwise, a remote endpoint the user supplied, with its URL and token
+   file. Setup probes it once with a test embedding, checks the dimensions
+   and the reported model digest, and writes the `remote` backend and
+   `retrieval = "hybrid"`. The embedder container is not created.
+3. Otherwise, BM25 mode. Setup says so plainly, names the checks that failed
+   (for example no GPU runtime and no remote endpoint given), writes
+   `retrieval = "lexical"`, and prints how to switch later.
+
+Setup never writes a hybrid configuration it could not probe. It offers only
+models that passed R1. Only the 8B hybrid has passed R1's private halves so
+far, and S17 runs the public-fixture half, so any other default model,
+a provider's included, needs an R1 run first. If no model has passed all of
+R1 in a release, setup starts every install in BM25 mode and says why. A
+`local` server on CPU stays opt-in, and setup never picks it, because S16a
+found none that fits the reference allotment.
+
+Status. `memory hub status`, the planned memory status route and `/metrics`
+report three fields. `/ready` does not depend on them: a hub serving BM25
+answers is ready.
+
+| Situation | `mode` | `effective` | `state` | Warning |
+|---|---|---|---|---|
+| BM25 mode chosen | `lexical` | `lexical` | `ok` | none |
+| Hybrid, embedder healthy | `hybrid` | `hybrid` | `ok` | none |
+| Hybrid, embedder unreachable, timing out, refusing the token or the digest, or the breaker open | `hybrid` | `lexical-fallback` | `degraded` | the reason (`embedder-unavailable`, `embedder-timeout`, `embedder-refused`, `digest-mismatch`) |
+| Switching to hybrid, vectors still backfilling | `hybrid` | `lexical` | `switching` | none, with coverage as cards with a vector out of live cards |
+
+Each search response carries the `effective` value that answered it, and a
+fallback answer carries its reason, as step 8 of the [Retrieval
+pipeline](#retrieval-pipeline) says. A single query that misses its deadline
+behind the hub's own document request is answered in fallback but does not
+turn status `degraded`, because it does not open the breaker.
+
+Switching modes is safe in both directions, and search keeps working
+throughout:
+
+- `hybrid` to BM25: set `retrieval = "lexical"` and restart the hub, which
+  takes seconds and which clients ride out on their spool and replica. The
+  first query after the restart is answered in BM25 mode, with state `ok`.
+  Stored vectors and their lineage rows stay in the memory file, unloaded,
+  at about 16 KB per card at 4,096 dimensions. They are removed only by the
+  planned `memory reindex --drop <embedder id>`, which an operator runs on
+  purpose and which removes only that embedder's rows.
+- BM25 to `hybrid`: set `retrieval = "hybrid"` with an embedder table and
+  restart. The hub answers in BM25 mode with state `switching` while the
+  embed scheduler backfills every live card that has no vector for the
+  configured `EmbedderId`, reusing every stored vector that still matches,
+  and switches to hybrid once that id covers every live card, as for an
+  embedder change. The planned `memory reindex` starts or resumes the same
+  backfill on demand and is idempotent. At S16a's rate the 8B model took
+  11.4 to 11.7 minutes for 1,891 cards.
+- No write waits for embedding in either mode. A card written during a
+  switch is findable by BM25 at once and gets its vector when the backfill
+  reaches it.
+
+Out of scope and supported:
+
+- Hosting the hub on a serverless edge platform is out of scope. The hub is a
+  long-running server with one writer, a WAL, in-process locks (D2, D23) and
+  long-polls held open for up to the wait limit.
+- A remote embedding service on any provider is supported through the
+  remote-endpoint contract, once its model passes R1. Card text and query
+  text then leave the operator's network for that provider, under the scan
+  gate, and status names the endpoint's host so that is visible.
 
 ### Embedder benchmark and default
 
@@ -1938,27 +2080,36 @@ this design takes from it:
   backfilled 1,891 cards in 11.4 to 11.7 minutes.
 - Quality: only the 8B hybrid passed both private halves of R1 ([Eval
   gates](#eval-gates)).
-- With the embedding server stopped, every query got a lexical answer, at
+- With the embedding server stopped, every query got a BM25 answer, at
   2.4 to 2.8 ms p95 in the harness. A hung server cost the full 300 ms budget
   per query until a 30 s breaker skipped it, so S15 includes the breaker.
 
-S16b sets the default once S17's R1 numbers and the S6a harness exist, and,
-for option b of [Hosting](#hosting), once S31 has moved the hub:
+S16a set `remote` as the provisional default for a hub without a usable GPU,
+which the hosting decision keeps for production. S16b confirms the defaults
+once S17's R1 numbers, the S6a harness and S31's dogfood hub exist:
 
-- Hub host with a GPU (option b): `local` on that GPU becomes the default
-  backend, with the 8B model, when, measured on that host inside the hub's
-  reserved slice with an S6a run and a synthetic agent fan-out active, the
-  hybrid query p95 at the hub is at most 200 ms, the lexical answer with the
-  server stopped stays under 20 ms at p95, the S6 write gate still holds, and
-  the model fits beside the host's other GPU work.
-- Hub host without a GPU: `remote` is the default, as S16a found. `local` on
-  CPU stays opt-in, and any CPU default still needs the original rule: query
-  p95 at most 150 ms inside the allotment, the hub plus the embedder under 70%
-  of the allotment's memory at peak, and the S6 gate held.
-- The default mode flips to `hybrid` only when R1 passes, the public-fixture
-  half included.
+- `remote`, for the production hub and for any install whose setup finds no
+  local GPU but has an endpoint: the 8B model on the workstation's GPU is the
+  production backend when, measured from a throwaway hub at the reference
+  allotment on the LXC hub host, calling the workstation endpoint over the
+  tailnet with a model loaded beside the embedder by other GPU work, the
+  hybrid query p95 at the hub is at most 200 ms, the BM25 fallback with the
+  endpoint stopped stays under 20 ms at p95, a cold load and an eviction
+  leave every query answered within the query budget, and the S6 write gate
+  still holds at the allotment.
+- `local` on a GPU, for an install whose setup finds a supported GPU: the 8B
+  model qualifies when, measured on the dogfood hub inside its reserved slice
+  with an S6a run and a synthetic agent fan-out active, the hybrid query p95
+  at the hub is at most 200 ms, the BM25 fallback with the server stopped
+  stays under 20 ms at p95, the S6 write gate still holds, and the model fits
+  beside the host's other GPU work.
+- `local` on CPU stays opt-in, and any CPU default still needs the original
+  rule: query p95 at most 150 ms inside the allotment, the hub plus the
+  embedder under 70% of the allotment's memory at peak, and the S6 gate held.
+- Setup offers a model for `hybrid` only once R1 passes for it, the
+  public-fixture half included. Otherwise BM25 mode is the default.
 - Output: the measurements and the default in the S16b PR, aggregate numbers
-  only.
+  only, with BM25 mode's numbers from S15 beside the hybrid ones.
 
 ### Local memory and the hub
 
@@ -2343,36 +2494,178 @@ agent sees a real event (an email, a job post, a pull request)
 
 ## Hosting
 
-Proposed, needs the maintainer (D28, Q8). This section is about the
-maintainer's own hosts, so it names them by role: the current LXC hub host and
-the GPU workstation.
+Decided 2026-11-03 (D28, Q8 closed). This section is about the maintainer's
+own hosts, so it names them by role: the LXC hub host, the server that hosts
+the hub's LXC container, and the GPU workstation.
+
+The decision:
+
+1. The production hub stays on the LXC hub host, through the Rust cutover and
+   after it ([Why production stays on the LXC hub
+   host](#why-production-stays-on-the-lxc-hub-host)).
+2. The embedder runs on the GPU workstation, and the production hub calls it
+   over the private network (the tailnet) under the remote-endpoint contract
+   ([Remote embedder on the GPU
+   workstation](#remote-embedder-on-the-gpu-workstation)). This is the
+   `remote` default S16a set.
+3. A second hub, the dogfood hub, runs on the GPU workstation from the Docker
+   Compose recipe, the install path this design offers everyday users. It is
+   not production. The holder namespace layout, the boot unit, the UPS
+   monitor, the I/O controls and the deployment runs in S6 and S16b apply to
+   it ([The dogfood hub on the GPU
+   workstation](#the-dogfood-hub-on-the-gpu-workstation), S31).
+4. Production moves to the workstation only through a separate gated step,
+   S32, and only if the dogfood hub's deployment runs meet their latency
+   targets or after the hub volume gets a device of its own ([Future
+   production move (S32)](#future-production-move-s32)).
+5. On a single-user machine the owner's agents run as the owner. A separate
+   agent account and the no-`sudo` rule are documented optional hardening for
+   multi-user or shared hosts, not defaults ([Threat model for an everyday
+   install](#threat-model-for-an-everyday-install)).
 
 ### Where the hub runs today
 
-The Fleet Hub runs in an LXC container on a server, the current LXC hub host,
-at the reference allotment of 1 vCPU and 512 MB, with 256 MB of swap and an
-8 GB root disk. The Proxmox runbook (`docs/runbooks/fleet-hub-proxmox.md`)
-creates the container with 512 MB of swap and a 4 GB root disk, so the
-runbook and the running container have drifted, and S31's runbook change
-records the real values. The root disk matters once the memory file and local
-backups sit beside the hub file, because disk-pressure admission starts at
-1 GiB free ([Checkpoints and disk](#checkpoints-and-disk)). The container's
+The Fleet Hub runs in an LXC container on the LXC hub host, at the reference
+allotment of 1 vCPU and 512 MB, with 256 MB of swap and an 8 GB root disk.
+The Proxmox runbook (`docs/runbooks/fleet-hub-proxmox.md`) creates the
+container with 512 MB of swap and a 4 GB root disk, so the runbook and the
+running container have drifted, and S31's runbook change records the real
+values. The root disk matters once the memory file and local backups sit
+beside the hub file, because disk-pressure admission starts at 1 GiB free
+([Checkpoints and disk](#checkpoints-and-disk)). The container's
 private-network front runs inside the container, so the hub's loopback peer
 is that front, and the hub sees every client as one source today.
 
 That host has no GPU the hub can use: its only GPU is passed through to a
 different virtual machine. S16a (#2217) found no CPU embedder that fits the
 allotment, and only the 8B model in hybrid mode passed both private halves of
-R1. On the current host, hybrid retrieval therefore needs the `remote`
-backend, with a second host in every query. The GPU workstation has the GPU
-and is on a UPS, though no UPS monitor is installed there yet.
+R1. Hybrid retrieval on the production hub therefore uses the `remote`
+backend, with the GPU workstation in every hybrid query. The GPU workstation
+has the GPU and is on a UPS, though no UPS monitor is installed there yet. The
+LXC hub host has no UPS. It has been stable, and a UPS for it is a later
+purchase outside this design. `FULL` stays either way (D3).
 
-Under option b no production hub runs at the reference allotment any more.
-S6a, S6 and S8 numbers "at the allotment" then come from a 1 vCPU / 512 MB
-cgroup on the reference machine, which is what other operators' small hubs
-look like.
+The production hub keeps the reference allotment, so S6a, S6 and S8 numbers
+"at the allotment" describe it directly. Memory raises one sizing question
+there. A 4,096-dimension float32 matrix is about 31 MB at today's 1,891 cards
+and about 328 MB at 20,000, and an embedder change holds two. S15 records peak
+resident memory at both sizes, and the runbook raises the container's memory
+limit, a setting of the existing container, before the live card count
+reaches the point where the hub, the index and both matrices would pass 70%
+of the allotment.
+
+### Why production stays on the LXC hub host
+
+Measured 2026-11-03: two 6 s runs on each host of 4 KiB writes, each followed
+by `fdatasync`, on the volume that holds the hub's data (on the workstation,
+the volume the dogfood hub's data sits on).
+
+| Host | Load average | Median ms | p99 ms | Maximum ms |
+|---|---|---|---|---|
+| LXC hub host, hub data volume | 1.4 | 1.01 | 1.71, 2.60 | 23.8, 26.6 |
+| GPU workstation | 7 to 8 | 1.03, 1.12 | 2.38, 28.52 | 4.25, 38.6 |
+| GPU workstation, earlier overnight probe ([Evidence](#durability-cost-with-group-commit)) | 38 to 183 | 1.04, 1.08 | 928, 871 | 2,843, 1,316 |
+
+Pairs in a cell are run 1, then run 2.
+
+The medians match, at about 1 ms. The tails do not. On the LXC hub host p99
+stayed under 3 ms in both runs. On the workstation it moved from 2.38 to
+28.52 ms between two runs at a light load and reached 871 to 928 ms, with a
+2.8 s maximum, while agent fan-outs loaded it. A commit at `FULL` inherits
+the sync tail. Group commit spreads one sync over a batch, so a slow median
+costs little, but a sync near a second delays every write queued behind it:
+claims, revocations and memory turns
+([Authority across the two files](#authority-across-the-two-files)).
+
+Staying also keeps D23's lock in one process on one host, needs no new
+package on any host, and keeps the container backups that cover the hub
+today. What production gives up: hybrid queries cross the tailnet, and a
+workstation outage, reboot or GPU contention puts production search in BM25
+fallback, which status reports as degraded (D30).
+
+### Remote embedder on the GPU workstation
+
+The remote-endpoint contract of [Embedder interface and
+backends](#embedder-interface-and-backends), as the production hub uses it.
+Any install that configures a remote endpoint, on any provider, uses the same
+contract (D30).
+
+- Bind. The endpoint binds only the workstation's tailnet address, never
+  `0.0.0.0` and never a LAN address. If the embedding server cannot check a
+  token itself, it binds loopback and a small authenticating proxy binds the
+  tailnet address in front of it.
+- Access. A tailnet ACL lets only the LXC hub host's node reach the endpoint's
+  port. Every request carries a bearer token that the hub holds as a secret
+  file, mode 0600, like the admin token, and the endpoint refuses a request
+  without it. The ACL does not filter processes on the workstation itself,
+  which reach its address locally, and on a single-user machine they can read
+  the token ([Threat model for an everyday
+  install](#threat-model-for-an-everyday-install)). The exposure is the one
+  already stated for the recipe: a local process can use the embedder and the
+  GPU. The endpoint holds no hub secret.
+- Transport. The hub's endpoint allowlist names the endpoint by its tailnet
+  name. The private network encrypts and authenticates each link, so plain
+  HTTP is accepted for an allowlisted tailnet address. Any other non-loopback
+  endpoint needs HTTPS through rustls.
+- Timeouts. A query embedding call gets 250 ms, connect included, inside the
+  300 ms query budget. A document request gets 30 s.
+- Fallback. A failed or timed-out query is answered in BM25 mode, labeled
+  `lexical-fallback` with its reason, and status reports `degraded` (D30).
+  After one failure the breaker skips the embedder for 30 s. While it is open
+  the hub sends one background probe embedding with a 10 s deadline, so a cold
+  load finishes on the probe and not on a user query, and the breaker closes
+  when the probe succeeds. Search never waits for the embedder past the
+  deadline, and no write waits for it at all.
+- Batching. Queries: one text per request, never batched with other queries
+  or with documents, at most 4 in flight. A fifth query is answered in
+  fallback at once. Documents: the embed scheduler sends at most 4 cards and
+  32 KiB of normalized text per request, keeps at most one document request
+  in flight, and holds the next one while any query is in flight and for 1 s
+  after. A query that arrives while a document request runs can still miss
+  its deadline: at S16a's backfill rate, 1,891 cards in 11.4 to 11.7 minutes,
+  a 4-card request takes about 1.5 s on the 8B model. That miss is counted as
+  contention, does not open the breaker, and is answered in fallback. In
+  steady state a few cards an hour need vectors. Backfills follow an embedder
+  change, a switch to `hybrid` or an import. A `429` or `503` from the
+  endpoint backs document requests off, honoring `Retry-After`, from 1 s
+  doubling to 60 s.
+- What text leaves the hub. Card text for document embedding, built by
+  normalizer 1 (title, summary and body, cut at the model's input limit), and
+  query text after normalization (one line, at most 256 characters). Nothing
+  else: no credential, token digest, message body, audit row or card
+  metadata beyond those fields. Embed jobs exist only for versions whose scan
+  state is `clean` or `flagged`. The guard refuses a blocked version before
+  it is stored, and a version stored `pending` while the scanner is
+  unavailable waits for its scan before any of its text leaves. A query that
+  matches a blocking guard rule is answered in BM25 mode and never sent, and
+  while the scanner is unavailable no query goes to a non-loopback endpoint.
+  A secret therefore leaves only if the guard misses it, the same residual
+  the prompt-load scan carries ([Content scanning](#content-scanning)).
+- Vectors. The endpoint reports the loaded model's digest with each response.
+  The hub refuses a response whose digest differs from the configured
+  `EmbedderId`, so a model swapped in by other work on the GPU never mixes
+  into a matrix.
+- Shared GPU. The card also serves other local model work and has no memory
+  partitioning. A large model loaded beside the embedder can evict it or
+  block it. A cold load of the 8B model took 2.4 to 6.4 s in S16a, past every
+  query deadline, so the hub is built to tolerate it: queries are answered in
+  fallback, the background probe pays the load, and document requests retry.
+  The 8B model used about 6 GB of GPU memory and about 1.15 GB of host memory
+  in S16a.
+- Outbound path. The hub's call leaves through the production container's
+  private-network node. S16b checks that path from a throwaway container on
+  the LXC hub host, set up like production and granted by the ACL for the run
+  only, never from the production container.
+- Service. The embedding server runs as a host service on the workstation,
+  outside the dogfood hub's compose project, so dogfood maintenance does not
+  touch it. It starts at boot and restarts on failure.
+- Pull mode. `memory embed-worker` stays for a GPU host that the hub cannot
+  reach. The production hub does not use it.
 
 ### Option a: memory only on the GPU workstation
+
+Not chosen. It is kept here because it is the obvious alternative and the
+reasons still hold.
 
 The hub (the Rust front, the hub writer, the Python upstream and
 `fleet-hub.db`) stays on the current LXC hub host. A memory service (the
@@ -2403,18 +2696,26 @@ Option a also needs:
   the authority numbering agree
 - fencing, so two memory services never serve at once
 
-What option a keeps: claims and messages stay on a server that agent work does
-not load, and a workstation reboot takes down memory only, which clients
-already survive through the replica.
+The decision keeps what option a was for, claims and messages on a server
+that agent work does not load, and gets the GPU through the remote embedder
+instead, with only embedding crossing hosts.
 
-### Option b: the whole hub on the GPU workstation
+### The dogfood hub on the GPU workstation
 
-Recommended. One container runs the planned `fleet serve --engine rust` with
-the Rust hub and the Python upstream, as S10 already plans, and both database
-files sit on one volume. The memory writer takes the hub write lock inside the
-same process, so D23 and its bounds are unchanged. The move also puts the
-Docker recipe in `ops/fleet-hub/` that other operators will run under real
-load.
+A second hub runs on the GPU workstation from the Docker Compose recipe in
+`ops/fleet-hub/`, the install path this design offers everyday users. It is
+not production. No production node points at it: the workstation's own node
+and test principals enroll there, and it holds dogfood data only. Its job is
+to run the recipe under real agent load and to measure what a production move
+would get. One container runs the planned `fleet serve --engine rust` with the
+Rust hub and the Python upstream, as S10 plans, and both database files sit
+on one volume. The memory writer takes the hub write lock inside the same
+process, so D23 and its bounds are unchanged. S31 builds it with today's
+Python hub, and S10 moves it to Rust.
+
+The layout below is the recipe's layout for every install. The reservations,
+the UPS monitor and the deployment runs are specific to this host and are
+what S32 would rely on.
 
 Host prerequisites. Each item is a new dependency on the maintainer's
 workstation and needs the maintainer's approval before anyone installs it:
@@ -2423,43 +2724,54 @@ workstation and needs the maintainer's approval before anyone installs it:
   the desktop power service reports no UPS device.
 - The GPU vendor's container toolkit, which adds the runtime a compose GPU
   reservation needs. Docker on the workstation has only the `runc` runtime
-  today, so the `gpu` profile cannot start.
-- Rootless Docker's packages for the separate agent account, if agents'
-  Docker-based builds and tests are to keep running there (Q8).
+  today, so the recipe's GPU embedder service cannot start.
+- Rootless Docker's packages, only if the optional separate agent account
+  ([Threat model for an everyday
+  install](#threat-model-for-an-everyday-install)) is adopted and its
+  Docker-based builds and tests are to keep running there.
 
-Configuring the I/O cost model and moving agents to a separate account with
-no `docker` group and no `sudo` rule are host settings, with no package to
-install. S31 records both.
+Configuring the I/O cost model is a host setting with no package to install,
+and S31 records it.
 
-GPU access:
+The embedder service:
 
-- The hub container gets no GPU and links no ML runtime (D11). A second
-  container in the same compose project runs the embedding server and gets one
-  GPU through a compose device reservation with the `gpu` capability, which
-  needs the toolkit above. It joins an internal compose network shared only
-  with the hub container and publishes no port. The hub reaches it by service
-  name, which the embedding endpoint allowlist names.
-- The server keeps the chosen model loaded, because a cold load of the 8B
-  model took 2.4 to 6.4 s in S16a. Model files live on their own volume. The
-  model digest the server reports is part of `EmbedderId`, so a model swap
-  changes the id instead of mixing vectors in one matrix.
-- The card has no memory partitioning, so nothing isolates the embedder's GPU
-  memory. Other GPU work on the workstation, the host's own model server
-  included, shares the card, and a large model loaded there can evict or block
-  the embedder, which then pays the cold load or fails. The 8B model used about
-  6 GB of GPU memory in S16a. When the server fails or cannot load, the breaker
-  sends queries to the lexical path, which answered at 2.4 to 2.8 ms p95 in
-  S16a. S16b measures with a model loaded beside it.
+- The recipe ships the embedder as a normal service, defined in the compose
+  file and enabled by the `gpu` profile that the recipe's setup writes when it
+  finds a supported GPU (D30). With a remote endpoint or in BM25 mode the
+  profile is not set and the container is never created.
+- The hub container gets no GPU and links no ML runtime (D11). The embedder
+  container gets one GPU through a compose device reservation with the `gpu`
+  capability, which needs the toolkit above. It joins an internal compose
+  network shared only with the holder and publishes no port. The hub reaches
+  it by service name, which the embedding endpoint allowlist names.
+- The server keeps the chosen model loaded. Model files live on their own
+  volume. The model digest the server reports is part of `EmbedderId`, so a
+  model swap changes the id instead of mixing vectors in one matrix.
+- On this workstation the card also runs the production embedder (above) and
+  other local model work, with no memory partitioning. Between test runs the
+  dogfood hub uses the remote-endpoint contract against the production
+  embedder's host service, with a token of its own, so only one copy of the 8B
+  model stays loaded. Traffic from the workstation to its own tailnet address
+  is local, so the ACL does not apply to it. S31's GPU setup check and S16b's
+  GPU branch start the recipe's embedder service. If the card cannot hold a
+  second copy beside the other GPU work, those runs stop the production
+  embedder for their length, and production search answers in BM25
+  fallback, reported as degraded, for that time.
+- When the embedder fails or cannot load, the breaker sends queries to BM25,
+  which answered at 2.4 to 2.8 ms p95 in S16a. S16b measures with a model
+  loaded beside it.
 
 Reserved CPU, memory and I/O. Agent fan-outs pushed the workstation's load
 average to about 170 on 24 threads on the night of 2026-11-02. Docker's `cpus`
 and memory limits are caps, and a cap does not protect the hub from that load.
-The recipe puts both containers under a dedicated systemd slice (compose
-`cgroup_parent` with the systemd cgroup driver) and reserves:
+The recipe ships a slice example that puts the hub and embedder containers
+under a dedicated systemd slice (compose `cgroup_parent` with the systemd
+cgroup driver), and the dogfood hub runs under it, so its deployment runs
+measure what a production move would get:
 
-| Resource | Hub container | Embedding container | How |
+| Resource | Hub container | Embedder container | How |
 |---|---|---|---|
-| CPU | 2 performance cores | 1 performance core | `AllowedCPUs` on the hub slice. The workstation's CPU has 8 performance cores and 16 efficiency cores, so agents keep 5 performance cores and all 16 efficiency cores. Agent work runs in user sessions under `user.slice`, the separate agent account's included once option b moves agents there, and in system services (the host model server and the agent session servers), not in a dedicated slice, so the exclusion is `AllowedCPUs` on `user.slice` and on drop-ins for those services. The hub slice sits outside `user.slice`, under rootful Docker. S31 reads `cpuset.cpus.effective` on each slice, never the configured value alone, because a cgroup whose configured set cannot be met falls back to its parent's set without an error. `CPUWeight=10000` on the hub slice as a second guard |
+| CPU | 2 performance cores | 1 performance core | `AllowedCPUs` on the hub slice. The workstation's CPU has 8 performance cores and 16 efficiency cores, so agents keep 5 performance cores and all 16 efficiency cores. Agent work runs in user sessions under `user.slice`, an optional separate agent account's included, and in system services (the host model server, the production embedder and the agent session servers), not in a dedicated slice, so the exclusion is `AllowedCPUs` on `user.slice` and on drop-ins for those services. The hub slice sits outside `user.slice`, under rootful Docker. S31 reads `cpuset.cpus.effective` on each slice, never the configured value alone, because a cgroup whose configured set cannot be met falls back to its parent's set without an error. `CPUWeight=10000` on the hub slice as a second guard |
 | Memory | `MemoryMin` 1 GiB, `MemoryMax` 3 GiB | `MemoryMin` 2 GiB, `MemoryMax` 4 GiB | `MemoryMin` is a hard reservation under cgroup v2. A negative OOM score adjustment makes the kernel's OOM killer pick agent processes first |
 | I/O | `IOWeight=1000` and an I/O latency target on the database device | default | Not effective on the workstation as it stands: both NVMe devices use the `none` scheduler and `io.cost.qos` is empty, so no controller enforces weights and only the latency target would act. S31 either configures the cost model for the database device and shows the weight taking effect under a synthetic agent writer, or records that only the latency target is in force |
 
@@ -2471,19 +2783,27 @@ upstream. The embedding server used about 1.15 GB of host memory and 0.13 to
 0.15 CPU seconds per 8B query in S16a. S6a, S13b and S16b measure inside this
 slice.
 
-I/O is the harder resource. This document's durability numbers come from a
-24-thread desktop-class machine under heavy load from other jobs, where
-`fdatasync` p99 was 871 to 928 ms. A commit at `FULL` on the workstation
-inherits that tail unless the hub's I/O is protected or its volume sits on a
-device agent work does not use. No such device exists on the workstation
-today: Docker's data root is on the first NVMe device's system partition, and
-the home volume spans both NVMe devices. S6 adds a deployment run on the GPU
-workstation inside this slice while a synthetic fan-out holds the load average
-near 170. It records `FULL` commit p99, claim p99 and wake p99 against the
-heartbeat, claims and long-poll targets. S16b repeats the run with memory
-writes and embedding active and records authority-lock residence. If either
-run misses, the remedy is a separate device for the volume, which on this
-workstation means buying one (Q8), not a lower `synchronous` level.
+I/O is the harder resource. A commit at `FULL` on the workstation inherits the
+sync tail in [Why production stays on the LXC hub
+host](#why-production-stays-on-the-lxc-hub-host) unless the hub's I/O is
+protected or its volume sits on a device agent work does not use. No such
+device is in use on the workstation today: Docker's data root is on the first
+NVMe device's system partition, and the home volume spans both NVMe devices.
+S6 adds a deployment run on the dogfood hub inside this slice while a
+synthetic fan-out holds the load average near 170. It records `FULL` commit
+p99, claim p99 and wake p99 against the heartbeat, claims and long-poll
+targets. S16b repeats the run with memory writes and embedding active and
+records authority-lock residence. A miss does not fail either slice. It keeps
+production where it is: the remedy before any move is a device of the
+volume's own (S32), not a lower `synchronous` level.
+
+The maintainer has spare 1 TB hard disks that could become that device
+through a spare SATA port later. A hard disk isolates the hub from the
+agents' NVMe I/O, so its sync tail stays stable, but its sync median is
+several milliseconds, against about 1 ms on NVMe. Group commit absorbs that: one
+sync covers a batch, and batches grow with load ([Durability cost with group
+commit](#durability-cost-with-group-commit)). It is a later option, not a
+dependency of this design.
 
 Restart and reboot:
 
@@ -2494,7 +2814,8 @@ Restart and reboot:
   `/health` every 10 s and exits after 3 failures, and the restart policy
   brings the container back. The same watchdog exits after 3 checks that find
   no network interface but loopback in the container's namespace (below).
-  Until S10 ships, the Python-only move uses a host timer with the same rules.
+  Until S10 ships, the Python-only recipe uses a host timer with the same
+  rules.
 - `stop_grace_period: 40s`, which covers the hub's drain of at most 25 s (its
   10 s writer drain included), its final checkpoint and the upstream's
   shutdown. A host shutdown must allow the same time, and the Docker daemon's
@@ -2502,14 +2823,13 @@ Restart and reboot:
   runbook sets it, and a reboot test checks that the hub logged a clean exit.
 - No UPS monitor runs on the workstation yet. S31 installs one once the
   maintainer approves it, and a simulated low-battery event must end in a
-  clean host shutdown and a clean hub exit before the move counts as done.
-  `FULL` stays (D3): a UPS does not cover a kernel panic, a power supply
-  failure or a battery that fails first.
-- Suspend is off on the workstation. A reboot for updates takes the hub down
-  for its length. Nodes keep events in the spool, claims fall back to the
-  local run lock unless a run requires a hub claim, and memory answers from
-  the replica, as in any hub outage today. The difference is that outages now
-  follow the workstation's maintenance.
+  clean host shutdown and a clean hub exit before S31 counts as done. `FULL`
+  stays (D3): a UPS does not cover a kernel panic, a power supply failure or
+  a battery that fails first.
+- Suspend is off on the workstation. A reboot for updates takes the dogfood
+  hub down for its length, and its node spools as in any hub outage. That is
+  accepted for a hub that is not production, and it is one more reason
+  production stays on the LXC hub host.
 
 Network and local access:
 
@@ -2520,13 +2840,13 @@ Network and local access:
   never exits, has no health check, has an out-of-memory score adjustment of
   -1000 and uses almost no memory, so the daemon has no reason to restart it.
   It is attached to the compose default network, for the front's egress, and
-  to the internal network the embedding server is on. The hub container and
-  the private network's HTTPS front both join it (compose `network_mode:
+  to the internal network the embedder is on. The hub container and the
+  private network's HTTPS front both join it (compose `network_mode:
   "service:netns"`). The front holds the hub's private-network identity,
   terminates HTTPS and forwards to `127.0.0.1:3774`, so the hub's peer is
-  loopback, as on the current LXC hub host. The image's CI smoke already
-  exercises a loopback proxy in the hub's namespace: HTTPS enrollment through
-  a proxy sharing it (`docs/runbooks/fleet-hub-containers.md`).
+  loopback, as on the LXC hub host. The image's CI smoke already exercises a
+  loopback proxy in the hub's namespace: HTTPS enrollment through a proxy
+  sharing it (`docs/runbooks/fleet-hub-containers.md`).
 - Why a holder. A container that joins another container's namespace keeps
   the namespace it joined. When the owner restarts it gets a new namespace,
   and the joiner is left with loopback only. Review E reproduced this on the
@@ -2561,154 +2881,225 @@ Network and local access:
 - Running the front inside the hub container under `fleet serve` would avoid
   the problem too, but it would put the private network's daemon and its
   state in Brigade's image. The holder leaves the image as it is.
-- The embedding server runs in its own namespace, on the internal compose
-  network shared with the holder.
-- Processes on the workstation itself, agents included, run in the host's
-  network namespace, so they cannot connect to the hub's loopback port or the
-  upstream on any address of the hub's namespace, its bridge addresses
-  included. They reach the hub through the front with a token, like any node.
-  They can reach the embedding server: under rootful Docker the host holds the
-  gateway address of every compose network, the internal one included, and
-  review E fetched an internal container's port from a host process. The
-  server holds no secrets, and a model swap changes `EmbedderId`, so the
+- The embedder runs in its own namespace, on the internal compose network
+  shared with the holder.
+- Processes on the host itself run in the host's network namespace, so
+  without Docker rights or `sudo` they cannot connect to the hub's loopback
+  port or the upstream on any address of the hub's namespace, its bridge
+  addresses included. They reach the hub through the front with a token, like
+  any node. They can reach the embedder: under rootful Docker the host holds
+  the gateway address of every compose network, the internal one included,
+  and review E fetched an internal container's port from a host process. The
+  embedder holds no secrets, and a model swap changes `EmbedderId`, so the
   exposure is that a host process can load the embedder, whose breaker then
-  sends queries to the lexical path. Revision 4's claim that the host cannot
-  reach it is withdrawn.
+  sends queries to BM25.
 - Behind the front, every client arrives from loopback. The fleet already
-  counts as one source this way on today's LXC hub host, with or without
-  Docker, and D29 says how the caps handle it. Docker port mapping would not
-  change that count. It would change the address: the hub would see the bridge
+  counts as one source this way on the LXC hub host, with or without Docker,
+  and D29 says how the caps handle it. Docker port mapping would not change
+  that count. It would change the address: the hub would see the bridge
   gateway, which is not loopback, so Python's loopback waiter exemption would
   stop applying. Port mapping also needs a non-loopback bind inside the
   container, and then `--trust-tailscale-identity` and
   `--trust-forwarded-proto` refuse to start, because startup requires a
   loopback `--host` (`fleet_hub_startup.py`) and each trusted request also
   requires a loopback peer. The recipe on main publishes `127.0.0.1:3774`
-  through port mapping with a `0.0.0.0` bind inside the container, so it
-  changes to the holder layout (S31 under option b, S10 otherwise).
+  through port mapping with a `0.0.0.0` bind inside the container, so S31
+  changes it to the holder layout.
 - `--trust-tailscale-identity` is allowed in this layout because only the
   holder's pause process, the hub's own processes and the front share the
   namespace. Host networking is not used: it would put the hub's trusted
-  loopback port in the workstation's namespace, where any agent process could
-  send a forged identity header and get operator access to the dashboard and
-  an operator login on action routes. The front's node runs with the private
+  loopback port in the host's namespace, where any process could send a
+  forged identity header and get operator access to the dashboard and an
+  operator login on action routes. The front's node runs with the private
   network's SSH server off, because a remote shell into the front would sit
   in the hub's namespace. The Proxmox runbook makes the identity flag depend
   on the front stripping a client's own `Tailscale-User-Login`, and S31
   tests that through the real front.
-- Agent accounts. Membership in the `docker` group is equivalent to root on
-  the host: such a user can `docker exec` into the hub container, read both
-  secrets and the volume, or start a container that joins the hub's
-  namespace. Passwordless `sudo` is equivalent too: `sudo docker exec`,
-  `sudo nsenter` or a direct read of the volume works whatever the group
-  membership. On the workstation today agent processes run as an account
-  that is in the `docker` group and holds passwordless `sudo` (`id` and
-  `sudo -n true`, 2026-11-03). Option b therefore needs agents to run under a separate unprivileged
-  account: not in the `docker` group, with no `sudo` rule, and unable to act
-  as the operator account or as the account that runs the compose project.
-  The compose project runs under rootful Docker, managed from the operator
-  account. The hub is only as isolated as its host's most privileged agent
-  account, so S31 tests each right from the agent account itself.
 - Rootless Docker for the hub, which revision 4 offered as an alternative, is
   dropped. On the workstation `user@.service` delegates only the `cpu`,
   `memory` and `pids` controllers, so a rootless hub could not hold its
   `cpuset` or I/O reservations. It would also run under `user.slice`, where
   the agent CPU exclusion would confine it to the agents' cores, its user
   would have to linger for it to start at boot, and the GPU toolkit would
-  need its rootless setup. Rootless Docker stays an option for the agent
-  account's own builds (Q8).
+  need its rootless setup. Rootless Docker stays an option for an optional
+  agent account's own builds.
 - Upstream mode still refuses requests without the per-start key (S3c), as a
-  second guard inside the namespace. The embedding server holds no secrets
-  and only computes embeddings.
-- Nodes keep their hub URL if the private network can move the hub's name to
-  the workstation. If it cannot, each node's hub URL in `fleet.toml` changes
-  once. Either way, the move runbook lists every client path (node CLIs and
-  hooks, the connector relays that call the hub for cloud agents, the Grok Bot
-  relay) and probes each one through the new host before and after the name
-  moves.
+  second guard inside the namespace. The embedder holds no secrets and only
+  computes embeddings.
 
 TLS and auth stay as they are:
 
-- The hub keeps serving plain HTTP on loopback behind a local HTTPS front, now
-  in its own container in the hub's namespace, so TLS works as it does today.
-  If the hub's URL changes, its
-  certificate is the one the private network issues for the new name.
-- Node and principal token digests live in `fleet-hub.db` and move with it, so
-  no node or principal enrolls again. The admin token moves as a Docker
-  secret.
-- The recall-log and findings HMAC key moves as a second secret. It cannot sit
+- The hub keeps serving plain HTTP on loopback behind a local HTTPS front, in
+  its own container in the hub's namespace, so TLS works as it does on the
+  LXC hub host. The dogfood hub's certificate is the one the private network
+  issues for its own name.
+- Node and principal token digests live in `fleet-hub.db`. The admin token is
+  a Docker secret.
+- The recall-log and findings HMAC key is a second secret. It cannot sit
   beside the token file, because the secrets mount is read-only. Keeping it
   off the state volume also keeps the rule that a database copy alone cannot
   test guesses true for volume backups.
 
 Backups:
 
-- Today the current LXC hub host's container backups cover the hub. After the
-  move they do not.
+- The production hub keeps the LXC hub host's container backups, which cover
+  it today.
 - The planned `fleet backup` (S31) copies each database file through the
   SQLite online backup API into a dated directory every hour, runs
-  `integrity_check` on each copy, and keeps 48 hourly and 14 daily copies.
-  Each copy that passes is shipped to storage on the server that hosts the
-  LXC container, through a credential that can only write there. The
-  workstation's existing off-host backup job also picks up the directory,
-  never the live volume, because committed rows can sit in the WAL.
+  `integrity_check` on each copy, and keeps 48 hourly and 14 daily copies. On
+  the dogfood hub the copies stay on the workstation, and the workstation's
+  existing off-host backup job picks up the directory, never the live volume,
+  because committed rows can sit in the WAL. Shipping copies to another host
+  belongs to S32. The production hub can run `fleet backup` inside its
+  container once S31 ships.
 - Where the copies sit. The hub's named volume is under Docker's data root,
   on the workstation's root filesystem, which had 22 GB free of 98 GB on
   2026-11-03. Retention there could push the volume under the hub's 1 GiB
   disk-pressure threshold ([Checkpoints and disk](#checkpoints-and-disk)), so
   the backup directory is on the home volume, a separate filesystem across
-  both NVMe devices with 426 GB free that day. The hub file is at most a few
-  GB today: the whole LXC container uses 3.2 GB. S31 records both file sizes
-  and sets retention from them so the directory stays under 10% of the home
-  volume's free space at setup, keeping fewer hourly copies if 48 do not fit.
-  A copy that would leave that volume under
-  20 GiB free is not written: the oldest hourly copy goes first, and the job
-  reports it.
+  both NVMe devices with 426 GB free that day. The production hub file is at
+  most a few GB today: the whole LXC container uses 3.2 GB. S31 records both
+  of the dogfood hub's file sizes and sets retention from them so the
+  directory stays under 10% of the home volume's free space at setup,
+  keeping fewer hourly copies if 48 do not fit. A copy that would leave that
+  volume under 20 GiB free is not written: the oldest hourly copy goes first,
+  and the job reports it.
 - The backup directory holds message bodies, card text and the audit log. It
-  belongs to the account that runs the compose project, mode 0700, agent
-  accounts cannot read it, and it is in the off-host job's include set. S31
-  checks all four.
-- The shipped copies and the rollback host. The access rule in Network and
-  local access covers the server that hosts the LXC container too, and on
-  this fleet it fails there: the agent account on that server has
-  passwordless `sudo` (verified read-only on 2026-11-03). Agents can
-  therefore read the shipped copies and enter the LXC container. That
-  server's own container backups hold today's hub file under the same
-  exposure, and today's production hub runs in that container, so agents can
-  already read its live database, its admin token and its HMAC key, and send
-  requests to its loopback port. Two routes are open to the maintainer
-  (Q8):
-  1. Encrypt the copies before they leave the workstation, to a key held off
-     both hosts. This protects stored copies only. A planned rollback or a
-     disaster recovery decrypts a copy into the LXC container and runs the
-     hub there, and for that whole period an agent with root on the server
-     can enter the container, read the live database and both secrets, and
-     reach the loopback port. A rollback hub there must also run without
-     `--trust-tailscale-identity`. The residual exposure is recorded, not
-     removed.
-  2. End agent `sudo` on that server. This is the only route that removes
-     the exception, for the copies, for a rollback or disaster-recovery hub
-     and for today's production hub.
+  belongs to the account that runs the compose project, mode 0700, and it is
+  in the off-host job's include set. On a single-user machine the owner's
+  agents can read it, as they can read the volume. Under the optional
+  hardening an agent account cannot. S31 checks owner, mode and the include
+  set.
 - The admin token and the HMAC key are backed up apart from the database
   copies.
 - A restore test runs the full drive against a restored copy in a throwaway
-  container on a loopback port, once before the move counts as done and
-  monthly after.
+  container on a loopback port, once before S31 counts as done and monthly
+  after.
 - The runbook forbids `docker compose down -v`, which deletes the named
   volume.
-- Recovery point: a planned rollback loses nothing (below). Losing the
-  workstation loses the writes since the newest shipped copy, at most one hour
-  plus the time to ship it.
 
-The current LXC container as the rollback target:
+### Restoring from a backup
 
-- The move stops the hub on the current LXC hub host, takes a final online
-  backup, starts the hub on the workstation from it, then moves the name.
-  Nothing writes during the copy, so no acknowledged write is lost and no id
+Any restore of a hub from a copy older than its last write is lossy: the
+production hub from a container backup or a `fleet backup` copy, the dogfood
+hub from its copies, and, after S32, production after losing the
+workstation. Everything committed after that copy is gone: acknowledged
+messages, claims and their generations, enrollments and revocations, roster
+and policy changes, uploaded mesh statements, and the audit rows that
+recorded them. Before clients reconnect, the restore tool (part of the
+planned `fleet backup`, S31) changes the restored copy, and the operator
+finishes the rest:
+
+- Message ids. The `fleet_messages` sequence moves up by 2^32, far beyond
+  what an hour can issue and far below the 64-bit limit, so no recipient
+  cursor skips a new message.
+- Claims. The tool ends every claim in the copy through the force-release
+  path, which records each holder as retired, so every target is free and a
+  renewal from any holder at copy time is refused as stale. It then writes a
+  recovery floor F into a `recovery` row of the existing `hub_meta` table,
+  with F set 2^32 above the highest generation in the copy or above the
+  previous floor, whichever is higher, and raises every `claim_fences` row
+  to F. Raising rows alone is not enough: `generation()` answers 0 for a
+  target with no fence row and `_advance()` creates a first fence at 1
+  (`fleet_hub_claims.py`), so a target first claimed after the copy would
+  get generation 1 again, which a holder from the lost hour may still
+  present. Generation allocation therefore becomes `max(current, F) + 1`,
+  for a target with a row and for one without, so the floor covers every
+  fence created later as well as every row the copy held. The floor and
+  the allocation rule land in Python with `fleet backup` (S31), and S7's
+  native claims honor them. The floor is a row of data, so on its own it
+  would leave `user_version` unchanged, and a Python that predates the rule
+  would serve the file and give a target with no row generation 1 again. S31
+  therefore bumps `user_version` (from 47 at this design's base) in the same
+  change. `_refuse_newer_schema` then makes any older Python refuse the
+  file, so a downgrade fails closed instead of ignoring F.
+- Roster and policy revisions. `model_roster_meta.revision` moves up by
+  2^32. The policy gets a new revision 2^32 above the current one that holds
+  the restored document, with the restore as its reason, the way any policy
+  save appends a revision. Each node keeps the highest roster revision it
+  has seen and refuses a lower one as `revision-rollback` (`_write_cache_locked`
+  in `fleet_model_admission.py`). Without the advance, every node that
+  fetched a roster after the copy would refuse launches until the hub's
+  revision climbed past its high-water mark, long after the outage ended.
+  The policy revision travels in every roster envelope as the authority
+  version, nodes record it in their high-water record, and memory decisions
+  bind to it, so a rewound number could name two different documents.
+- Mesh statements. Nodes keep a floor for each signed statement and refuse
+  an older one as `signed_statement_rollback` (`fleet_mesh_trust.py`), and
+  the hub keeps only the newest statement of each kind with its signer's
+  sequence. Signers sign them, so the restore cannot advance them. The
+  runbook has each signer publish its newest membership, manifest and
+  revocation statements again from its own copy, and the hub identity record
+  if it changed after the copy, before clients reconnect. Until a signer
+  does, nodes that imported a newer statement refuse the hub's copy, and a
+  mesh revocation published after the copy is missing from the hub.
+- The operator re-applies every credential revocation, roster change and
+  policy edit made since the copy, from the operator's own record, since the
+  hub's audit rows for that time are lost.
+
+What clients see afterwards: messages acknowledged after the copy are gone,
+and a recipient whose cursor passed them has nothing to re-read. A sender
+that resolves an unknown outcome with `sent_lookup` finds nothing and may
+send again, so a recipient can see a message twice. Every claim live at the
+copy or taken after it stops: a holder from before the copy is refused as
+stale on its next renewal, and a claim taken after the copy is unknown to
+the hub. Those runs stop or fall back as on any claim loss, and a new
+acquire gets a generation above the floor. Until the operator re-applies the
+later roster and policy changes, nodes admit launches under the copy's
+roster, so a model retired after the copy is admitted again for that time.
+Nodes enrolled after the copy get 401 and enroll again. Events nodes flushed
+after the copy are lost, and events still in a spool flush normally.
+
+### Future production move (S32)
+
+A separate gated step, outside the 0.31.0 release gate. It starts only with
+the maintainer's go-ahead and one of two triggers:
+
+- the dogfood hub's deployment runs in S6 and S16b met their targets: `FULL`
+  commit, claim and wake p99 under the synthetic fan-out, and the authority
+  lock bounds with memory writes and embedding active, or
+- the hub volume has a device of its own, such as one of the spare hard
+  disks, in which case S32 repeats both runs on that device and records them
+  before the name moves.
+
+The move:
+
+- The move stops the hub on the LXC hub host, takes a final online backup,
+  starts the hub on the workstation from it, then moves the name. Nothing
+  writes during the copy, so no acknowledged write is lost and no id
   rewinds. Clients spool for those minutes.
+- Nodes keep their hub URL if the private network can move the hub's name to
+  the workstation. If it cannot, each node's hub URL in `fleet.toml` changes
+  once. Either way, the runbook lists every client path (node CLIs and hooks,
+  the connector relays that call the hub for cloud agents, the Grok Bot
+  relay) and probes each one through the workstation before and after the
+  name moves. If the hub's URL changes, its certificate is the one the
+  private network issues for the new name.
+- Node and principal token digests move with `fleet-hub.db`, so no node or
+  principal enrolls again. The admin token and the HMAC key move as the
+  recipe's two secrets.
+- The production embedder can then become the recipe's GPU embedder service,
+  or stay a host service reached through the remote-endpoint contract. S32
+  records the choice.
+
+The LXC container as the rollback target:
+
 - The LXC container stays installed, stopped and disabled for the whole
   rollback window (Q5), with its last database kept as the pre-move backup. A
   stopped container costs only disk.
+- Hourly `fleet backup` copies are shipped from the workstation to storage on
+  the LXC hub host, through a credential that can only write there.
+- Agents on the LXC hub host have passwordless `sudo` (verified read-only on
+  2026-11-03), a known risk owned by an operations cleanup outside this
+  design ([Threat model for an everyday
+  install](#threat-model-for-an-everyday-install)). If it is still in place
+  when S32 runs, the shipped copies are encrypted to a key held off both
+  hosts, a rollback or disaster-recovery hub there runs without
+  `--trust-tailscale-identity`, and the runbook records the residual
+  exposure: encryption protects stored copies only, and agents with root on
+  that server can enter a running rollback hub, read its live database and
+  both secrets, and reach its loopback port. If the cleanup has ended it, S32
+  records that `sudo -n true` from the agent account there fails.
 - Lockstep upgrades: every Brigade upgrade on the workstation upgrades the LXC
   container's pinned install to the same version in the same maintenance
   step, with the hub service left disabled. Python refuses a database with a
@@ -2736,120 +3127,89 @@ The current LXC container as the rollback target:
   never uses the latest scheduled backup, which misses every write since it
   was taken.
 - Disaster recovery, with the workstation lost, is a lossy path and not a
-  rollback. The runbook restores the newest shipped copy into the LXC
-  container. Everything committed after that copy is gone: acknowledged
-  messages, claims and their generations, enrollments and revocations, roster
-  and policy changes, uploaded mesh statements, and the audit rows that
-  recorded them. Before the name moves, the restore tool (part of the planned
-  `fleet backup`) changes the restored copy, and the operator finishes the
-  rest:
-  - Message ids. The `fleet_messages` sequence moves up by 2^32, far beyond
-    what an hour can issue and far below the 64-bit limit, so no recipient
-    cursor skips a new message.
-  - Claims. The tool ends every claim in the copy through the force-release
-    path, which records each holder as retired, so every target is free and a
-    renewal from any holder at copy time is refused as stale. It then writes a
-    recovery floor F into a `recovery` row of the existing `hub_meta` table,
-    with F set 2^32 above the highest generation in the copy or above the
-    previous floor, whichever is higher, and raises every `claim_fences` row
-    to F. Raising rows alone is not enough: `generation()` answers 0 for a
-    target with no fence row and `_advance()` creates a first fence at 1
-    (`fleet_hub_claims.py`), so a target first claimed after the copy would
-    get generation 1 again, which a holder from the lost hour may still
-    present. Generation allocation therefore becomes `max(current, F) + 1`,
-    for a target with a row and for one without, so the floor covers every
-    fence created later as well as every row the copy held. The floor and
-    the allocation rule land in Python with `fleet backup` (S31), the LXC
-    install carries them under the lockstep rule, and S7's native claims
-    honor them. The floor is a row of data, so on its own it would leave
-    `user_version` unchanged, and a Python that predates the rule would serve
-    the file and give a target with no row generation 1 again. S31 therefore
-    bumps `user_version` (from 47 at this design's base) in the same change.
-    `_refuse_newer_schema` then makes any older Python refuse the file, so a
-    downgrade or an install outside the lockstep rule fails closed instead of
-    ignoring F.
-  - Roster and policy revisions. `model_roster_meta.revision` moves up by
-    2^32. The policy gets a new revision 2^32 above the current one that holds
-    the restored document, with the restore as its reason, the way any policy
-    save appends a revision. Each node keeps the highest roster revision it
-    has seen and refuses a lower one as `revision-rollback` (`_write_cache_locked`
-    in `fleet_model_admission.py`). Without the advance, every node that
-    fetched a roster after the copy would refuse launches until the hub's
-    revision climbed past its high-water mark, long after the outage ended.
-    The policy revision travels in every roster envelope as the authority
-    version, nodes record it in their high-water record, and memory decisions
-    bind to it, so a rewound number could name two different documents.
-  - Mesh statements. Nodes keep a floor for each signed statement and refuse
-    an older one as `signed_statement_rollback` (`fleet_mesh_trust.py`), and
-    the hub keeps only the newest statement of each kind with its signer's
-    sequence. Signers sign them, so the restore cannot advance them. The
-    runbook has each signer publish its newest membership, manifest and
-    revocation statements again from its own copy, and the hub identity record
-    if it changed after the copy, before the name moves. Until a signer does,
-    nodes that imported a newer statement refuse the hub's copy, and a mesh
-    revocation published after the copy is missing from the hub.
-  - The operator re-applies every credential revocation, roster change and
-    policy edit made since the copy, from the operator's own record, since the
-    hub's audit rows for that time are lost.
-  - The workstation front's private-network identity is revoked, so a
-    workstation that boots again cannot serve the hub's name as a second hub.
-
-  What clients see afterwards: messages acknowledged after the copy are gone,
-  and a recipient whose cursor passed them has nothing to re-read. A sender
-  that resolves an unknown outcome with `sent_lookup` finds nothing and may
-  send again, so a recipient can see a message twice. Every claim live at the
-  copy or taken after it stops: a holder from before the copy is refused as
-  stale on its next renewal, and a claim taken after the copy is unknown to
-  the hub. Those runs stop or fall back as on any claim loss, and a new
-  acquire gets a generation above the floor. Until the operator re-applies the
-  later roster and policy changes, nodes admit launches under the copy's
-  roster, so a model retired after the copy is admitted again for that time.
-  Nodes enrolled after the copy get 401 and enroll again. Events nodes flushed
-  after the copy are lost, and events still in a spool flush normally.
+  rollback: the runbook restores the newest shipped copy into the LXC
+  container and runs the restore tool ([Restoring from a
+  backup](#restoring-from-a-backup)) before the name moves. It also revokes
+  the workstation front's private-network identity, so a workstation that
+  boots again cannot serve the hub's name as a second hub. Recovery point:
+  at most one hour plus the time to ship the copy.
 - A rollback to the LXC host after memory launched leaves memory routes
   answering 404 there unless the Rust hub and the memory file move back too.
   Clients that hold a replica watermark keep spooling, as in
   [Rollback plan](#rollback-plan).
 
-Embedder default and slices under option b:
+### Threat model for an everyday install
+
+- A single-user machine. The owner's agents run as the owner, so they hold
+  whatever the owner holds. An owner in the `docker` group or with `sudo`
+  gives the same rights to every agent: `docker exec` into the hub container,
+  a read of both secrets and the volume, or a container that joins the hub's
+  namespace. The design does not try to isolate the hub from its owner's own
+  processes there. What the recipe still guarantees holds against other
+  machines and other users: no published port, the holder layout, the
+  identity flag only in that layout, the token on every request, and a
+  backup directory with mode 0700.
+- On the GPU workstation today agent processes run as an account that is in
+  the `docker` group and holds passwordless `sudo` (`id` and `sudo -n true`,
+  2026-11-03). That is the single-user case, and it is accepted for the
+  dogfood hub.
+- Optional hardening for multi-user or shared hosts, documented in the
+  runbook. Membership in the `docker` group is equivalent to root on the
+  host, and passwordless `sudo` is equivalent too: `sudo docker exec`,
+  `sudo nsenter` or a direct read of the volume works whatever the group
+  membership. A host that wants the hub isolated from its agents runs them
+  under a separate unprivileged account: not in the `docker` group, with no
+  `sudo` rule, and unable to act as the operator account or as the account
+  that runs the compose project, which runs under rootful Docker, managed
+  from the operator account. The hub is only as isolated as its host's most
+  privileged agent account. The checks, run from the agent account itself:
+  `sudo -n true` fails, `docker ps` fails, entering the hub's namespace
+  fails, and reads of the volume and the backup directory fail. The agent
+  account's files, credentials and session services move to it, and its
+  Docker-based work needs a rootless Docker daemon for that account, a new
+  package that needs approval, or stops running on that host. S31 runs the
+  checks once from a throwaway unprivileged account, so the documented
+  hardening is known to work. The maintainer's agents keep running as the
+  owner.
+- The LXC hub host. Agents on the server that hosts the LXC container have
+  passwordless `sudo` (verified read-only on 2026-11-03), so they can enter
+  the production container, read its live database, its admin token and its
+  HMAC key, and send requests to its loopback port, and that server's
+  container backups hold the hub file under the same exposure. This is
+  recorded as a known risk. A separate operations cleanup outside this
+  design owns ending it, and that cleanup must keep secret injection and
+  access to every container working when it ends. This design neither
+  depends on that cleanup nor ends it. Where an S32 check depends on it, S32
+  checks the state it finds.
+
+### Embedder default and slices
 
 - D10 keeps its two backends. `hub-cpu` is now `local`, an embedding server on
   the hub's host, reached on loopback or an internal network, on whatever
-  device the host has
+  device the host has. `remote` is an endpoint on another host under the
+  remote-endpoint contract, with `memory embed-worker` as its pull mode
   ([Embedder interface and backends](#embedder-interface-and-backends)).
-- On the workstation, `local` on its GPU with the 8B model becomes the
-  proposed default backend, subject to the S16b rule in
-  [Embedder benchmark and default](#embedder-benchmark-and-default). The 8B
-  model's 141 to 159 ms query p95 in S16a leaves about 40 ms of the 200 ms
-  hybrid target for the lexical scan (under 1 ms) and the dense scan (3 to
-  7 ms). The default mode stays `lexical` until R1 passes.
-- `remote` stays the default for any hub host without a GPU, which includes
-  every hub at the reference allotment.
-- The shipped recipe configures no embedder. Its optional `gpu` profile adds
-  the embedding server.
-- S31 builds the compose recipe for today's Python hub: the holder
-  container, no published port, the front and the hub joining the holder's
-  namespace, the host watchdog timer, the stop grace period, both secrets,
-  the slice example and the `gpu` profile on an internal network. S10 builds
-  on it: it switches the recipe to `fleet serve --engine rust`, moves the
-  watchdog from the host timer into `fleet serve` and sets the 25 s drain. If
-  Q8 picks option a, S10 builds the recipe itself and drops its S31 edge.
-  Upstream mode itself is S3c.
-- S15 builds `local` instead of `hub-cpu`, adds the breaker, and records peak
-  memory at 4,096 dimensions. `remote` and `memory embed-worker` stay for hosts
-  without a GPU.
-- S16b gains the GPU branch of its rule, measured on the GPU workstation with
-  memory writes and a co-tenant model, and waits for S31.
-- S31 is new: the move itself.
+- The production hub uses `remote` against the workstation's GPU with the 8B
+  model, the only model that has passed both private halves of R1, once
+  S16b's `remote` branch holds. Until then, and whenever no model has passed
+  all of R1, the production hub runs in BM25 mode (D30).
+- An everyday install gets its mode from the recipe's setup (D30): the GPU
+  embedder service on a supported GPU, otherwise a configured remote
+  endpoint, otherwise BM25 mode, said plainly.
+- S15 builds `local` and `remote` with the remote-endpoint contract, the
+  breaker and its background probe, the two retrieval modes with their
+  status, and the mode switch, and records peak memory at 4,096 dimensions.
+- S16b measures `remote` from the LXC hub host over the tailnet and `local`
+  on the dogfood hub's GPU, with memory writes and a co-tenant model, and
+  waits for S31.
+- S31 is the dogfood hub. S32 is the gated production move.
 
-Order: S31 moves today's Python hub as a separate step before cutover
-phase 1, so a regression points at the host or at Rust and never at both.
-Phase 0's 48-hour probe baseline is then taken on the workstation. S31
-compares the Python hub's probe latency and commit p99 on both hosts. S31 is
-a recipe, runbook and `fleet backup` PR plus a production operation, the
-move, and its acceptance is recorded on the PR after the hub runs on the
-workstation. S6 and S16b verify against it and S10 builds on it, so their
-merges wait on host maintenance. That coupling is accepted.
+Order: S31 stands up the dogfood hub with today's Python hub. Production's
+cutover runs on the LXC hub host, and phase 0's 48-hour probe baseline is
+taken there. S31 records the dogfood hub's probe latency and `FULL` commit
+p99, and the `fdatasync` probe on both hosts' hub volumes. S6 and S16b verify
+against the dogfood hub and S10 builds on S31's recipe, so their merges wait
+for S31. No production host maintenance is involved.
 
 ## Work in flight
 
@@ -2861,8 +3221,8 @@ one fits and what it needs from this revision.
 | Contract hot-set coverage | merged (#2218) | S1 | Done: 184 drive cases on the Python hub (`cases_total` in `registry/skills/verify-brigade/features/hub-contract.md`), pinning only the per-principal waiter cap. Its sealed cases use random bytes of valid lengths instead of envelopes generated by Python, which works because the hub checks format only (#2005). S1b's tombstone goldens still come from Python's own purge. Expiry, `client_id` window and error-text cases are S1b's |
 | `brigade-hub` proxy crate | merged (#2215) | S3 | Shipped without the proxy contract. The postmerge items are in [Upstream proxy contract](#upstream-proxy-contract) |
 | S3b proxy hardening | open (#2226) at `8bed16452`, changes requested, auto-merge enabled | S3b | CodeRabbit's open Major on its admission keying is being fixed on the PR, and S3c completes that rule whatever it merges with. Closes the managed-loopback cap, the 24-slot proxied cap, 502 and 504, `/ready`, child-death exit, descriptor limits and request-target refusal. Leaves buffered JSON, upstream mode, front admission and the claim-client runs to S3c, restart with backoff and the drain length to S10. Its README forbids a live deployment before upstream mode lands and names S10 for it, which S3c corrects |
-| Embedder benchmark | merged (#2217) | S16a | Done. It set `remote` as the provisional default, since no CPU embedder fits the allotment. Under option b of [Hosting](#hosting), S16b decides between `local` on the workstation's GPU and `remote`, after S17's R1 runs, the S6a harness and S31 |
-| Hub hosting move | proposed (Q8) | S31 | Moves today's Python hub to the GPU workstation in Docker before cutover phase 1, if the maintainer picks option b |
+| Embedder benchmark | merged (#2217) | S16a | Done. It set `remote` as the provisional default, since no CPU embedder fits the allotment, and the hosting decision keeps that default for production. S16b confirms `remote` over the tailnet and `local` on the dogfood hub's GPU, after S17's R1 runs, the S6a harness and S31. Its R1 rows limit setup's model list to the 8B model until another passes R1 (D30) |
+| Hub hosting | decided 2026-11-03 (D28, Q8 closed) | S31, S32 | Production stays on the LXC hub host. S31 stands up the dogfood hub on the GPU workstation from the Compose recipe with today's Python hub. S32, the production move, is gated and outside the release |
 | Connectivity work: Grok Bot memory profile (#2216, merged), memory hits in inbox and digest responses (#2221, merged), the prompt-load scan on #2221's push path and the principal inbox `request_denied` fix (neither landed) | partly merged | first step of S23 and S26 | The terms in [Interim connectivity](#interim-connectivity). #2216 shipped `handoff_write` with the profile. #2221 merged with its `memory_hits` field, which S23 now adopts, and without the prompt-load scan, which a follow-up PR adds |
 | #2187 Tier 0 preflight | merged | local diagnostic | S19c's hub `preflight` action returns the same `brigade.memory-tier0-preflight.v1` report, filled from hub facts. The hub adds the pinned-block check and blocker re-verification inside the apply transaction |
 | #2213 engine rename plan | merged plan | naming | The hub binary is `brigade-hub` with no alias. S10 rebases on the rename's manifest and installer slice (R5) if R5 lands first |
@@ -2889,7 +3249,7 @@ next number.
 | S1 | Merged (#2218). Contract drive: hot-set coverage on the Python hub (claim scopes, leases and fencing, message and question actions, sealed envelopes built from random bytes of valid lengths, `wait_ms` wake and the per-principal waiter cap) | none | New cases pass on the Python hub. Inventory and `COVERED_ROUTES` updated. The drifting-proxy test still finds each injected drift. No case pins the total or per-source waiter cap | S2, S3, S16a, S22a |
 | S1b | Contract drive follow-up: message and question expiry as clients see it (expired messages absent from `list`, `count` and `sent`, a `reply_to` to a purged message reads null, expired questions), the sealed-content lifecycle (with fewer than 32 eligible rows: a sealed message acknowledged 8 days ago and still inside message retention reads as its tombstone in `list`, `sent` and `sent_lookup`, one acknowledged 6 days ago reads sealed, an unacknowledged one stays sealed, and a sealed reply keeps `sealed_reply_to` after its parent expires), the message `client_id` replay window, and the exact text of every refusal path | S1 | Cases pass on the Python hub. A golden error-text table replaces any table derived from constants. Tombstone goldens come from Python's own purge | S2, S3, S29 |
 | S29 | Read-only production profile for the drive, as in [Production read-only probe](#production-read-only-probe): the exact list of audited operations, the authorizer audit and the overdue-row fixture | S1. Verify: S3 | The audit finds no write on the Python hub or on Rust with every family proxied. The whole-database digest is unchanged, with no exception for retention. The mutation test that adds a write to a listed operation fails the audit. A case outside the list stops the run before any request. The runbook names the profile as the only drive run allowed against production | S1b, S3b |
-| S30 | Plan consistency test: `tests/test_v2_plan_consistency.py` reads this document | none | The test fails when a slice in the waves is missing from the slice tables or appears twice, when a build or verify edge points at a slice in the same or a later wave, when a table's dependency cell differs from the dependency list, or when a release-gate slice has a prerequisite, direct or indirect, outside the release gate. Items that are not slices (`#NNNN` pull requests, `connectivity-pr`, `phase-3`) are external prerequisites, and they count as outside the gate unless the release gate lists them under its external prerequisites. The test also extracts every slice id named in each acceptance cell and fails when that slice is neither the row's own slice nor one of its prerequisites, direct or indirect. The release gate's conditional member ("if Q8 picks option b") and the edges marked `(option b)` in the table cells depend on Q8: the test applies every rule twice, once as written and once with that slice, every edge to it and every acceptance mention of it removed, as if Q8 picked option a. Each failure names the slice | everything |
+| S30 | Plan consistency test: `tests/test_v2_plan_consistency.py` reads this document | none | The test fails when a slice in the waves is missing from the slice tables or appears twice, when a build or verify edge points at a slice in the same or a later wave, when a table's dependency cell differs from the dependency list, or when a release-gate slice has a prerequisite, direct or indirect, outside the release gate. Items that are not slices (`#NNNN` pull requests, `connectivity-pr`, `phase-3`) are external prerequisites, and they count as outside the gate unless the release gate lists them under its external prerequisites. The test also extracts every slice id named in each acceptance cell and fails when that slice is neither the row's own slice nor one of its prerequisites, direct or indirect. A slice on the gated line after the waves must have its prerequisites in the waves, and the test fails when a release-gate slice depends on a gated slice, directly or indirectly. Each failure names the slice | everything |
 | S2 | Storage parity drive: one scripted sequence, every table dumped (trigger-maintained ones included), exact values, id mapping, timestamp relations, recomputed digests, mixed-engine and migrated-fixture runs, a defaults run and an events-outbox run. The sequence steps the clock past 7 days after an acknowledgement, so sealed tombstones compare byte for byte | none | Deterministic golden on two runs. Each mutation is caught: a timestamp format, a JSON separator, a generation off by one, an expiry one second late, a wrong digest, a broken id relationship, a tombstone that keeps `recipients` | S1, S3 |
 | S3 | Merged (#2215). `brigade-hub` crate: config and flag parity, conventions layer, admission, native `/health`, everything else proxied, and a Linux CI build | none | The full drive passes with Rust in front of the Python upstream. Flags are rejected or required exactly as `fleet serve` does | S1, S2, S16a, S22a |
 | S3b | Proxy transport hardening, PR #2226: the managed-loopback switch that lifts Python's per-source handler cap for the managed child only, 24 proxied requests in flight, 502 and 504 answers with their deadlines, `GET /ready` probing the upstream, exit on child death, descriptor limits and accept-error backoff, request-target and framing refusal, the header rules, and transport tests with the drive in managed mode | S3 | Every S3b row of the table in [Upstream proxy contract](#upstream-proxy-contract) and its S3b tests pass. The drive still passes with Rust in front of the managed upstream, and the `/policy` and `/audit` quirks survive the proxy. A ninth concurrent slow request through one loopback source is served, and the 25th proxied request gets `503 hub busy` with `Retry-After` | S4a, S4b, S9 |
@@ -2898,15 +3258,16 @@ next number.
 | S4b | Readers and schema: reader pools and queues, the read-transaction cap, the CPU pool, the structural check with triggers and constraints, `required.json`, the Python lockstep test on fresh and migrated fixtures, the `SQLITE_SCHEMA` recheck, the `data_version` check on the writer connection, and the maintenance thread with checkpoints on both files, sweeps scheduled as writer commands, and disk-pressure admission | S3. Verify: S3b | A schema mismatch, a missing trigger included, refuses to start. The lockstep test fails on a Python schema bump and on an added column. Both SQLite builds open every fixture. A pinned reader keeps a truncating checkpoint busy without stalling the writer. A slow query does not hold up other readers beyond its own slot. Rollback to Python with live `-wal` and `-shm` files passes the drive, and `/ready` turns green after it. Reader pool defaults are set from measured query time and resident memory | S3b, S4a, S6a, S9 |
 | S5 | Native registration and authentication: admin, node and principal tokens, `/nodes`, `/message-principals`. Ships in `proxy` mode and flips last in phase 3 | S4a, S4b. Verify: S9, S29 | Drive cases for these routes pass natively. Storage parity matches. A revoked token is refused on the next request. The S29 audit passes with registration native | S6a |
 | S6a | Load harness in `engines/hub/bench/` (development only, not released) with pinned conditions, closed-loop and open-loop modes, and every attempt recorded | S3. Verify: S3b, S3c | Runs against the Python hub and against Rust in proxy mode with upstream mode, three runs each, through one loopback source, on the reference machine and in a 1 vCPU / 512 MB cgroup. The report records machine, allotment, payload, database size, flags, connection mode, run length, warmup, client cores, offered rate, every error with its 502, 503 or 504 reason (the proxied cap's 503s included), latency percentiles, queue depth, batch sizes and checkpoint stalls. One end-to-end run through the operator's TLS proxy is reported and not gated | S5 |
-| S6 | Native heartbeat: `/events` (batches up to 1,000), `/status`, `/sessions` | S5, S6a. Verify: S3c, S9, S29, S31 (option b) | Drive and storage parity pass. Under S6a conditions, at `FULL`: at least 10 times the Python hub's OK single-event writes/s at the same allotment, and at least 4,600/s on the reference machine at 16 to 64 clients with p99 under 250 ms. No refused connections at 256 clients through one loopback source. The mixed run with the Python upstream writing cold routes and claims running is recorded, lock wait included. The S29 audit passes with heartbeat native. Under option b of [Hosting](#hosting), a deployment run on the GPU workstation inside the hub slice, with a synthetic fan-out holding the load average near 170, records `FULL` commit p99, claim p99 and wake p99 against this slice's write target and the claim and wake targets in [Write path](#write-path) and [Long-poll](#long-poll) | S7, S8, S13a |
+| S6 | Native heartbeat: `/events` (batches up to 1,000), `/status`, `/sessions` | S5, S6a. Verify: S3c, S9, S29, S31 | Drive and storage parity pass. Under S6a conditions, at `FULL`: at least 10 times the Python hub's OK single-event writes/s at the same allotment, and at least 4,600/s on the reference machine at 16 to 64 clients with p99 under 250 ms. No refused connections at 256 clients through one loopback source. The mixed run with the Python upstream writing cold routes and claims running is recorded, lock wait included. The S29 audit passes with heartbeat native. A deployment run on the dogfood hub ([Hosting](#the-dogfood-hub-on-the-gpu-workstation)) inside its hub slice, with a synthetic fan-out holding the load average near 170, records `FULL` commit p99, claim p99 and wake p99 against this slice's write target and the claim and wake targets in [Write path](#write-path) and [Long-poll](#long-poll). A miss is recorded, does not fail this slice, and keeps production on the LXC hub host | S7, S8, S13a |
 | S7 | Native claims and owners, plus a claim client that retries a `hub busy` 503 or a 504 with the same lease token within its timeout | S5. Verify: S9, S29 | S1 claim cases pass. A property test with 64 concurrent clients finds no two holders and no repeated generation, also across a VFS power cut. 4,096 queued events do not delay a claim past 50 ms at p99. On a file carrying a recovery floor, native claims allocate `max(current, floor) + 1` for a target with a fence row and for one without, as Python does. The S29 audit passes with claims native | S6, S8, S13a |
 | S8 | Native messages: every action except `events_*`, the `question_*` actions included, with sealed validation, retention, the lifecycle projection and the long-poll protocol | S5, S1b. Verify: S3c, S9, S29 | S1 and S1b cases pass, expiry and the sealed lifecycle included. Default profile: 3,072 idle waiters inside the 512 MB allotment. High-capacity profile: 10,000 idle waiters from 5,000 principals through one loopback source, an HTTPS proxy sharing the hub's network namespace, with resident and kernel socket memory recorded separately. With every waiter slot full, sends, claims and events from new clients through that source still get answers. A non-front source at its waiter cap keeps its reserved connections for other requests. A send wakes its waiter within 50 ms at p99, and within 400 ms after a commit by another process. Through test hooks, a send that commits between an empty re-read and the next wait, on the second and later iterations, after a native wake, an external `data_version` wake and a spurious wake, is returned within those targets. Revocation while waiting, a 3,000-waiter wake storm and client disconnects (slot freed within 1 s) pass. On Rust alone with the purge sweep paused, every projection in [Long-poll](#long-poll) matches Python's goldens, and a backlog of 40 eligible sealed rows returns all 40 as tombstones. The differential JSON fuzz (10,000 bodies) gives the same status and error text on both hubs. The S29 audit passes with messages native | S6, S7, S13a |
 | S9 | Route modes, the shadow comparator and its file, `/metrics`, structured logs | S3, S3b | Comparator tests cover definite, transient, inconclusive, boundary and projection results. An injected mismatch with no commit in between is definite. Rust never writes in shadow mode, and every shadowed route is checked on a Python hub for housekeeping writes. `ops` drive cases cover `/metrics` authentication | S4a, S4b, S6a |
-| S10 | Packaging and operations: the release job for five targets, PR builds for `engines/hub/`, pre-publication acceptance, manifest entry and validators, `setup --component brigade-hub`, `fleet serve --engine rust` with its health watchdog, `brigade-hub` restarting a dead upstream with backoff once a family is native, the 25 s shutdown drain, the container recipe changes from [Hosting](#hosting) on top of S31's recipe under option b, cutover and rollback runbook | S6, S3c, S31 (option b) | Pre-publication acceptance passes on each target. `fleet serve` without `--engine` is unchanged. With heartbeat native, killing the upstream leaves `/events` committing while proxied routes answer 502 and `/ready` answers 503, and the restarted upstream brings `/ready` back to 200. The compose recipe publishes no port, runs the hub and the HTTPS front in the holder container's network namespace and the embedding server on an internal network, and the hub records loopback as the peer for requests through the front. A process on the host, outside the hub's namespace, cannot connect to the hub port. `docker stop` ends in a clean exit inside the grace period. The watchdog restarts a hung Rust hub. After `brigade-hub` is killed and the hub container restarts, a request through the real front succeeds within 60 s. After the holder restarts, the hub and the front exit, join its new namespace, and a request through the front succeeds within 90 s. The hub container never gets a GPU, and the `gpu` profile is optional. Rollback test: stop Rust, start Python on the same files, the drive passes and every row reads | S7, S8 |
+| S10 | Packaging and operations: the release job for five targets, PR builds for `engines/hub/`, pre-publication acceptance, manifest entry and validators, `setup --component brigade-hub`, `fleet serve --engine rust` with its health watchdog, `brigade-hub` restarting a dead upstream with backoff once a family is native, the 25 s shutdown drain, the container recipe changes from [Hosting](#hosting) on top of S31's recipe, cutover and rollback runbook | S6, S3c, S31 | Pre-publication acceptance passes on each target. `fleet serve` without `--engine` is unchanged. With heartbeat native, killing the upstream leaves `/events` committing while proxied routes answer 502 and `/ready` answers 503, and the restarted upstream brings `/ready` back to 200. The compose recipe publishes no port, runs the hub and the HTTPS front in the holder container's network namespace and the embedding server on an internal network, and the hub records loopback as the peer for requests through the front. A process on the host, outside the hub's namespace, cannot connect to the hub port. `docker stop` ends in a clean exit inside the grace period. The watchdog restarts a hung Rust hub. After `brigade-hub` is killed and the hub container restarts, a request through the real front succeeds within 60 s. After the holder restarts, the hub and the front exit, join its new namespace, and a request through the front succeeds within 90 s. The hub container never gets a GPU, and the embedder container runs only under the `gpu` profile that setup writes. Rollback test: stop Rust, start Python on the same files, the drive passes and every row reads | S7, S8 |
 | S11 | Contract v2 (#2207) in both hubs | cutover phase 3, S22a | Goldens move to version 2 and `GET /version` answers. Every client caller from the contract doc checked with `brigade code callers` | S12a |
 | S12a to S12i | Cold families, one PR each: (a) preference and audit, (b) mesh, (c) policy, reads first, (d) models and cloud, (e) the Grok Bot queue, (f) CI with reports and actions, (g) Worklore, (h) findings, (i) webhook delivery with retention sweeps | S9, and that family's drive cases written first | That family's drive cases pass natively. Storage parity matches. Shadow clean for 7 days before native | each other |
 | S28 | Hub work dependency edges and ready view (#2210) | S12g | Blocked-by edges with the local ledger's semantics: open blockers on an ancestor propagate, completion releases dependents, and a cycle is refused. A ready view in the CLI and in the agent tool response lists only claimable work. A claim on blocked work gets 409 with the blocker ids. Local ledger edges sync on import. Additive drive cases. The edges table lands through the Python schema | S12 families |
-| S31 | Hub hosting move to the GPU workstation, if Q8 picks option b of [Hosting](#hosting): the compose recipe with no published port, a holder container that owns the network namespace the hub and the HTTPS front join, and the namespace checks in the watchdog timer and the front's wrapper, the reserved slice, the embedding server under the `gpu` profile on an internal network, both secrets, the separate agent account, the planned `fleet backup` with hourly shipped copies and its restore tool, the claim recovery floor in Python's generation allocation with its `user_version` bump, the boot unit that runs `docker compose up -d` after the Docker service, the move, rollback and disaster-recovery runbook, and the runbook's corrected LXC values, all with today's Python hub | none. Verify: S29 | Host: the maintainer approved each new host package before it was installed. The UPS monitor is installed, and a simulated low-battery event ends in a clean host shutdown and a clean hub exit. The GPU container toolkit is installed, the embedding container starts under the `gpu` profile with the GPU visible, and the hub container has none. The cgroup files read back the reservations: `cpuset.cpus.effective` on the hub slice is its 2 cores, and on the slices that actually run agent work (the user sessions, the agent account's included, and the agent and model-server services) it excludes them. The I/O controls either take effect under a synthetic agent writer or are recorded as latency target only. Access, run from the agent account itself: `sudo -n true` fails, `docker ps` fails, entering the hub's namespace fails, and reads of the volume and the backup directory fail. The agent account is in no `docker` group, has no `sudo` rule, and cannot act as the operator account or the compose project's account. A process on the workstation, outside the hub's namespace, cannot connect to the hub port or the upstream on any address of that namespace, and an identity header it sends gains nothing by any path. Front: a request through the real front with a forged `Tailscale-User-Login` reaches the hub with the front's value or none, the front's node has its SSH server off, and a header echo on a second loopback port in the namespace, run only during the test, records what the front does with a client's own forwarded-for header. Network: requests through the real front arrive from loopback, as on the current LXC hub host, so the Python hub's 8-handler cap still applies fleet-wide until the Rust front's admission (D29) replaces it, and refused connections at the fleet's real concurrency are recorded on both hosts. Every client path passes its probe through the new host. Restart: `docker stop` and a host reboot end in a clean exit, and after the reboot the hub returns and nodes flush their spools. The host reboot and a Docker daemon restart each run at least 3 times, and after each one a request through the real front succeeds within 90 s of the daemon being up, with the hub and the front in the holder's namespace. After the hub process is killed and the hub container restarts, a request through the real front succeeds within 60 s. After the holder restarts, the hub and the front exit, join its new namespace, and a request through the front succeeds within 90 s. Backups: hourly `fleet backup` copies pass `integrity_check` and arrive on the LXC server's storage. Both file sizes and the retention set from them are recorded, and the job refuses a copy that would take the home volume past its free-space floor. The backup directory is in the off-host job, and an agent account's read of it fails. A restored copy passes the full drive in a throwaway container. The maintainer's Q8 route for the LXC server is recorded and checked. Route 2: `sudo -n true` run from the agent account on that server fails. Route 1: copies arrive there encrypted and cannot be read without the off-host key, a planned rollback start there runs without `--trust-tailscale-identity` and passes the drive, and the runbook records the residual exposure: agents with root on that server can enter a running rollback or disaster-recovery hub. Rollback: the LXC install matches the workstation's version, and the planned rollback (fence, final backup, start) passes the drive on a throwaway port without moving the name. Disaster recovery, on a copy: the restore advances the message sequence and the roster and policy revisions, ends every claim and writes the recovery floor, and a Python that predates the floor refuses the restored file for its `user_version`. A second hub started from the same copy stands in for the lost workstation: it claims a target the copy never saw, changes the roster once, and serves a newer membership statement. On the restored hub, that target's first claim gets a generation above the floor, and a renewal with the second hub's generation is refused. A node whose last-known-good roster came from the second hub admits a launch from the restored hub, and a node that imported the second hub's statement accepts the restored hub's after the signer publishes it again. Then the drive passes. The S29 probe latency and `FULL` commit p99 of the Python hub are recorded on both hosts, on the workstation also with a synthetic fan-out holding the load average near 170 | everything |
+| S31 | Dogfood hub on the GPU workstation from the Compose recipe, not production ([The dogfood hub on the GPU workstation](#the-dogfood-hub-on-the-gpu-workstation)): the compose recipe with no published port, a holder container that owns the network namespace the hub and the HTTPS front join, the namespace checks in the watchdog timer and the front's wrapper, the reserved slice, the embedder as a normal service under the `gpu` profile on an internal network, the recipe's setup script that picks the retrieval mode and backend (D30), both secrets, the planned `fleet backup` with hourly copies and its restore tool, the claim recovery floor in Python's generation allocation with its `user_version` bump, the boot unit that runs `docker compose up -d` after the Docker service, the optional agent-account hardening and the mode switch in the runbook, and the runbook's corrected LXC values, all with today's Python hub | none. Verify: S29 | Host: the maintainer approved each new host package before it was installed. The UPS monitor is installed, and a simulated low-battery event ends in a clean host shutdown and a clean hub exit. The GPU container toolkit is installed, the embedder container starts under the `gpu` profile with the GPU visible, and the hub container has none. The cgroup files read back the reservations: `cpuset.cpus.effective` on the hub slice is its 2 cores, and on the slices that actually run agent work (the user sessions and the agent, model-server and production-embedder services) it excludes them. The I/O controls either take effect under a synthetic agent writer or are recorded as latency target only. Setup, run on throwaway projects: with the GPU runtime present it writes the `gpu` profile, the `local` backend and a model that passed R1, or BM25 mode with the reason when no model has passed R1. With no GPU runtime and a remote endpoint given, it probes the endpoint and writes `remote` with no embedder container. With neither, it prints which checks failed, writes BM25 mode, and the embedder container is never created. After each run, status matches [Retrieval modes](#retrieval-modes): BM25 chosen reports `lexical` and `ok` with no warning, and a hybrid project with its embedder stopped reports `degraded`. Removing the embedder with `retrieval = "lexical"` and the profile dropped leaves no embedder container running and search answering, and switching back follows the runbook with search answering throughout. Access: a process on the workstation, outside the hub's namespace and without Docker or `sudo`, cannot connect to the hub port or the upstream on any address of that namespace, and an identity header it sends gains nothing by any path. The documented hardening, run once from a throwaway unprivileged account: `sudo -n true` fails, `docker ps` fails, entering the hub's namespace fails, and reads of the volume and the backup directory fail. Front: a request through the real front with a forged `Tailscale-User-Login` reaches the hub with the front's value or none, the front's node has its SSH server off, and a header echo on a second loopback port in the namespace, run only during the test, records what the front does with a client's own forwarded-for header. Network: requests through the real front arrive from loopback, as on the LXC hub host, so the Python hub's 8-handler cap still applies fleet-wide until the Rust front's admission (D29) replaces it, and refused connections at the fleet's real concurrency, from a load generator, are recorded. Restart: `docker stop` and a host reboot end in a clean exit, and after the reboot the hub returns and the dogfood node flushes its spool. The host reboot and a Docker daemon restart each run at least 3 times, and after each one a request through the real front succeeds within 90 s of the daemon being up, with the hub and the front in the holder's namespace. After the hub process is killed and the hub container restarts, a request through the real front succeeds within 60 s. After the holder restarts, the hub and the front exit, join its new namespace, and a request through the front succeeds within 90 s. Backups: hourly `fleet backup` copies pass `integrity_check`. Both file sizes and the retention set from them are recorded, and the job refuses a copy that would take the home volume past its free-space floor. The backup directory belongs to the compose project's account with mode 0700 and is in the off-host job. A restored copy passes the full drive in a throwaway container. Restore tool, on a copy: the restore advances the message sequence and the roster and policy revisions, ends every claim and writes the recovery floor, and a Python that predates the floor refuses the restored file for its `user_version`. A second hub started from the same copy stands in for writes the copy lost: it claims a target the copy never saw, changes the roster once, and serves a newer membership statement. On the restored hub, that target's first claim gets a generation above the floor, and a renewal with the second hub's generation is refused. A node whose last-known-good roster came from the second hub admits a launch from the restored hub, and a node that imported the second hub's statement accepts the restored hub's after the signer publishes it again. Then the drive passes. Measurements: the S29 probe latency and `FULL` commit p99 of the Python dogfood hub are recorded, also with a synthetic fan-out holding the load average near 170, and the `fdatasync` probe is recorded on both hosts' hub volumes | everything |
+| S32 | Future production move to the GPU workstation, gated and outside the 0.31.0 release ([Future production move (S32)](#future-production-move-s32)): the move, rollback and disaster-recovery runbook, shipped hourly copies, the LXC install's lockstep upgrades and scheduled rehearsals, the client path probes and the name move. It starts only with the maintainer's go-ahead and a trigger: the dogfood hub's deployment runs in S6 and S16b met their targets, or the hub volume has a device of its own | S31. Verify: S6, S16b | The trigger is recorded: the S6 and S16b deployment numbers against their targets, or the device with both runs repeated on it. The maintainer's go-ahead is recorded on the PR. Every client path (node CLIs and hooks, the connector relays, the Grok Bot relay) passes its probe through the workstation before and after the name moves. The move stops the production hub, takes a final online backup and starts the workstation hub from it, and no acknowledged write is lost. Hourly copies arrive on the LXC hub host's storage. If agents still hold passwordless `sudo` on that server, the copies arrive encrypted and cannot be read without the off-host key, a planned rollback start there runs without `--trust-tailscale-identity` and passes the drive, and the runbook records the residual exposure. If the operations cleanup has ended it, `sudo -n true` from the agent account there fails. Rollback: the LXC install matches the workstation's version, a rehearsal restores the newest shipped copy there and passes the drive, and the planned rollback (fence, final backup, start) passes the drive on a throwaway port without moving the name. Disaster recovery: the restore tool's checks from S31 pass on a shipped copy restored into the LXC container, and the runbook revokes the workstation front's private-network identity. The S29 probe latency and `FULL` commit p99 are recorded on both hosts before the name moves | everything |
 
 ### Memory track
 
@@ -2915,12 +3276,12 @@ next number.
 | S13a | Memory store and routes: log, revisions, blobs, compare-and-set on revision, idempotency with the id window, grants, scopes, trust rules, the authority protocol with its arbiter turns and residence bounds, `log_epoch`, the 404 and 503 rules, a scan hook that reports unavailable, and the `memory` drive profile | S4a, S5. Verify: S6a | Drive cases pass. Same id in two scopes, a trust change on identical bytes, a stale update after retire and revival, bytes A then B then A, and a write into a scope the caller cannot write all behave as specified. An admin `put` stores `agent-unreviewed`, and an import without the grant gets 403. Every acceptance item in [Authority across the two files](#authority-across-the-two-files) and [Idempotency](#idempotency) passes. The power-cut test passes on the memory file and across the authority protocol | S6, S7, S8 |
 | S13b | Lexical index and scorer: segmented snapshots, `indexed_seq` and `min_seq`, per-scope statistics, the scorer and tokenizer goldens, R0 | S13a | R0 passes on the public fixture. Every scorer golden passes. Writes during a rebuild, an index failure after commit, and restart replay behave as specified. Rebuild time and peak resident memory at 20,000 synthetic cards are recorded | S6, S7, S8, S18 |
 | S14 | Python client: the planned `memory hub status`, `push`, `pull` and `import`, search fusion and fallback, the replica, the spool, the hub recall log, and Dot and Duet memory tools routed through it | S13b | With the hub stopped, search answers locally and labels it. The sentinel prompt appears nowhere on the hub or the client. A conflicting offline edit becomes a proposal. A 404 from a hub where the workspace holds a replica watermark spools instead of dropping. A changed `log_epoch` resets the watermark. First `sync` prints the card count and needs `--yes`. `off` mode output is byte-identical to today | S15, S19a |
-| S15 | Embedder interface, the `local` and `remote` HTTP backends with the query breaker, embed jobs and `memory embed-worker`, vectors, lineage, segmented dense index. Default stays `lexical` | S13b | An embedder change backfills only missing rows and leaves the old matrix intact. Retiring a card removes exactly its lineage rows, and a vector shared with a card in another scope stays until its last reference goes. A failed embedding keeps the card findable lexically. Endpoints outside the allowlist are refused. A hung embedding server costs one query the 300 ms budget, after which the breaker answers lexically for 30 s. Peak resident memory during a rebuild is recorded at 1,024 and 4,096 dimensions | S14, S19a |
-| S16a | Embedder benchmark measurements. Merged (#2217) | none | Done: the results table at the 1 vCPU / 512 MB allotment and at 2 GB, aggregate numbers only | everything |
-| S16b | Embedder default decision | S16a, S17, S6a. Verify: S31 (option b) | The rule in [Embedder benchmark and default](#embedder-benchmark-and-default) applied to S16a's numbers, S17's R1 per model and an S6a run with embedding active. Under option b the GPU branch is measured on the GPU workstation inside the hub slice with a synthetic fan-out active, a model loaded beside the embedder by other GPU work, and 20 memory writes per second, recording authority-lock wait and residence (p99 and maximum) and claim and revocation commit p99 against the targets in [Authority across the two files](#authority-across-the-two-files). The default mode flips to `hybrid` only if R1 passes | S19b, S20 |
+| S15 | Embedder interface, the `local` and `remote` HTTP backends with the remote-endpoint contract (bearer token from a secret file, the endpoint allowlist, the 250 ms query and 30 s document deadlines, the batching rules, the model digest check and the scan gate on outgoing text), the query breaker with its background probe, embed jobs and `memory embed-worker` for pull mode, vectors, lineage, segmented dense index, and the two retrieval modes of D30 with their status fields, the mode switch and the planned `memory reindex` | S13b, S18 | BM25 mode: with `retrieval = "lexical"` the hub starts no embed scheduler, makes no embedding call and loads no matrix, status reports mode `lexical`, effective `lexical`, state `ok` and no warning, and the private gold set's prompt hit@5 for BM25 mode is reported in aggregate, as #2201 reported 0.42 to 0.69. Hybrid with the endpoint stopped: answers carry `lexical-fallback` with a reason, and status reports `degraded`. A switch from hybrid to BM25 answers the first query after the restart in BM25 mode and keeps every vector. A switch back reuses matching vectors, backfills only the rest, reports `switching` with coverage, answers in BM25 mode until coverage is complete and then in hybrid, and no query fails during either switch. `memory reindex` run twice queues nothing the second time, and `--drop` removes only the named embedder's rows. Remote contract, against a test endpoint: a request without the token is refused, a response with a different model digest is refused and stores nothing, an endpoint outside the allowlist is refused, a fifth concurrent query is answered in fallback at once, no document request starts while a query is in flight, a query timeout during the hub's own document request does not open the breaker, and after a simulated 6.4 s cold load the background probe closes the breaker with no user query waiting past 250 ms. A version with scan state `pending` and a query that matches a blocking guard rule send no text, and with the scanner unavailable no query goes to a non-loopback endpoint. An embedder change backfills only missing rows and leaves the old matrix intact. Retiring a card removes exactly its lineage rows, and a vector shared with a card in another scope stays until its last reference goes. A failed embedding keeps the card findable by BM25. A hung embedding server costs one query the 300 ms budget, after which the breaker answers in BM25 mode for 30 s. Peak resident memory during a rebuild is recorded at 1,024 and 4,096 dimensions | S14, S19a |
+| S16a | Embedder benchmark measurements. Merged (#2217) | none | Done: the results table at the 1 vCPU / 512 MB allotment and at 2 GB, aggregate numbers only. Its findings set two rules revision 7 keeps: no CPU embedder fits the allotment, so setup never picks `local` on CPU, and only the 8B hybrid passed both private halves of R1, so setup offers no other model until it passes R1. Its `remote` rows over loopback are the baseline for the later tailnet run | everything |
+| S16b | Embedder default decision | S16a, S17, S6a. Verify: S31 | The rule in [Embedder benchmark and default](#embedder-benchmark-and-default) applied to S16a's numbers, S17's R1 per model and an S6a run with embedding active. The `remote` branch is measured from a throwaway hub at the reference allotment on the LXC hub host, never the production container, calling the workstation endpoint over the tailnet with a model loaded beside the embedder by other GPU work, a cold load and an eviction injected, and every query answered within the budget. The `local` GPU branch is measured on the dogfood hub inside its hub slice with a synthetic fan-out active, a model loaded beside the embedder, and 20 memory writes per second, recording authority-lock wait and residence (p99 and maximum) and claim and revocation commit p99 against the targets in [Authority across the two files](#authority-across-the-two-files). Setup's model list holds only models that passed R1, and BM25 mode's numbers are reported beside hybrid's. The default mode is `hybrid` only for a model that passed R1 | S19b, S20 |
 | S17 | Hybrid retrieval, lineage collapse and source demotion, the `hub-lexical` and `hub-hybrid` eval adapters, RRF weight tuning, and R1 runs per candidate model | S15 | R1 report attached. Collapse and demotion do not lower hit@5 or MRR on the public fixture. A superseded chain shows once, and an unreviewed card from a scheduled writer sorts after interactive results | S19a, S20 |
 | S18a | Guard engine UTF mode for hub use | #2212 | Parity with Python `re` on the guard's Unicode fixture, with the divergent rules listed. ASCII behavior unchanged | everything |
-| S18 | Content scanning on memory writes and the prompt-load scan | S13a, S18a | A blocking rule refuses with rule ids only. A warning stores `flagged`. Bidi and invisible characters block, and zero-width joiners flag. Role-override text flags and forces Tier 2. With the engine missing, writes store scan state `pending` and every trust raise and push is refused. The prompt-load scan replaces a hit with a placeholder | S13b, S14, S15 |
+| S18 | Content scanning on memory writes and the prompt-load scan | S13a, S18a | A blocking rule refuses with rule ids only. A warning stores `flagged`. Bidi and invisible characters block, and zero-width joiners flag. Role-override text flags and forces Tier 2. With the engine missing, writes store scan state `pending` and every trust raise and push is refused. The prompt-load scan replaces a hit with a placeholder | S13b, S14 |
 | S19a | Proposals on hub memory: `propose` with dry-run validation, `decide`, `rollback`, pinned block checks, all-card atomic apply | S13a, S18 | Invalid proposals are refused at submit with a reason per op. A block changed after `propose` fails closed. A multi-card proposal with one stale base changes no card. A rollback after an intervening edit ends `stale` | S14, S17 |
 | S19b | Tier classifier and the policy `memory` section with digest binding | S19a | Claimed tiers are ignored. Flagged, cross-scope, mixed-trust and newer-human-edit cases are Tier 2. A policy edit invalidates pending decisions | S16b, S20 |
 | S19c | Tier 0 gate engine: the hub `preflight` action, blockers re-verified inside the apply transaction, the invariant tests, and auto-apply refused until S19e | S19b, #2187 | Every invariant in [Reflect](#reflect-proposals-and-promotion-on-hub-memory) that does not need attestation passes, including the Tier 1 mutation test and the test that auto-apply cannot be enabled. No op can target anything but a card block | S20, S26 |
@@ -2958,6 +3319,7 @@ wave 7:  S17  S20  S19b  S23  S24  S25
 wave 8:  S16b  S19c  S26  S21
 wave 9:  S19d  S19e  S27
 after phase 3:  S11, then S12a to S12i one family per PR, S28 after S12g
+gated, outside the release:  S32 after S31, S6 and S16b, with the maintainer's go-ahead
 
 external prerequisites:  #2212 (merged, for S18a)  #2187 (merged, for S19c)
                          connectivity-pr (for S23 and S26): #2216 and #2221 merged,
@@ -2970,10 +3332,12 @@ runs Rust in front of the upstream or reads `/ready`. That added one wave.
 Revision 4 adds S3c in wave 2 and moves S6a to wave 3, so its proxy-mode
 baseline runs with upstream mode and front admission, the configuration
 phase 1 deploys. S6 and S8 verify against S3c for the same reason, and S10
-builds on it. No wave is added. S31 applies only if Q8 picks option b.
-Without it, S6, S10 and S16b drop their S31 edge. Revision 5 adds S10's
-edge: under option b S10 builds on S31's compose recipe instead of building
-a second one, and S10 stays in wave 5.
+builds on it. No wave is added. Revision 5 adds S10's edge: S10 builds on
+S31's compose recipe instead of building a second one, and S10 stays in wave
+5. Revision 7 closes Q8, so S31, now the dogfood hub, is unconditional, and
+the S31 edges of S6, S10 and S16b always hold. S15 gains a build edge on S18
+for the scan gate on outgoing text and stays in wave 6. S32, the gated
+production move, sits after the waves and outside the release gate.
 
 Dependency list, one slice per line, for tooling and review. Build
 prerequisites come first, verification prerequisites after `verify:`. S30
@@ -3001,10 +3365,11 @@ S11: phase-3 S22a
 S12a..S12i: S9
 S28: S12g
 S31: none verify: S29
+S32: S31 verify: S6 S16b
 S13a: S4a S5 verify: S6a
 S13b: S13a
 S14: S13b
-S15: S13b
+S15: S13b S18
 S16a: none
 S16b: S16a S17 S6a verify: S31
 S17: S15
@@ -3030,11 +3395,20 @@ S27: S23 S24 S25 S26
 
 Proposed, and it depends on Q1, Q2 and Q6:
 
-- Hub: S1, S1b, S2, S3, S3b, S3c, S4a, S4b, S5, S6a, S6, S7, S8, S9, S10, S29
-  and S30, with cutover phase 3 complete for at least the heartbeat and claims
-  families. S31 too if Q8 picks option b, done before cutover phase 1.
-- Memory: S13a, S13b, S14, S15, S16a, S16b, S17 (the default stays `lexical`
-  if R1 fails), S18a, S18, S19a, S19b, S19c (hub auto-apply refused) and S20.
+- Hub: S1, S1b, S2, S3, S3b, S3c, S4a, S4b, S5, S6a, S6, S7, S8, S9, S10, S29,
+  S30 and S31, with cutover phase 3 complete for at least the heartbeat and
+  claims families on the production LXC hub host. S31 is the dogfood hub and
+  the Compose recipe everyday users install. Its deployment runs are
+  recorded, and a miss holds production where it is without holding the
+  release. S32, the production move, is not in the release gate.
+- Memory: S13a, S13b, S14, S15, S16a, S16b, S17 (if no model passes R1,
+  setup starts every install in BM25 mode and says why), S18a, S18, S19a,
+  S19b, S19c (hub auto-apply refused) and S20.
+- Retrieval modes (D30): both are release configurations. BM25 mode ships
+  with its acceptance in S15 and S31 (the private gold set's aggregate
+  numbers, its status with no degraded warning, and removal of the embedder).
+  Hybrid ships with R1 and S16b. Setup's three paths and the mode switch in
+  both directions are tested in S31.
 - Connectivity: S22a, S22, and S23 to S26.
 - External prerequisites: #2212 (merged) for S18a, #2187 (merged) for S19c,
   and the connectivity work (`connectivity-pr`) for S23 and S26: #2216 and
@@ -3055,7 +3429,7 @@ Proposed, and it depends on Q1, Q2 and Q6:
 | Behavior the drive does not pin differs between hubs (timestamps, JSON encoding, parser edge cases, side-table and trigger writes) | Rows Python misreads after a rollback. Silent client differences | Storage parity with exact values and mutation tests (S2), differential JSON fuzz (S8), shadow with classified results before every native flip, error text from goldens (S1b) |
 | Group commit at `FULL` misses the throughput target on the hub's storage | Release target missed | S6 measures `FULL` at the allotment. Any `NORMAL` family needs its own maintainer decision and never covers durable families (D3) |
 | A credential revocation or policy edit races a memory commit | A revoked principal writes memory, or a stale policy promotes | Authority lock protocol (D23) and interleaving tests (S13a) |
-| Memory commits hold the hub write lock too long | Claims, revocations and every Python write wait behind memory. One batch in a slow sync holds the lock for that sync, about a second at the workstation's p99 | Memory lock first, prepared work only, batch bounds, alternating turns, a token bucket at 25% with the per-batch worst case stated, residence metrics, a 1 s slow-sync case (S13a), and a workstation run with memory writes (S16b) |
+| Memory commits hold the hub write lock too long | Claims, revocations and every Python write wait behind memory. One batch in a slow sync holds the lock for that sync: under 3 ms at p99 on the production LXC hub host, about a second at the loaded workstation's p99 | Memory lock first, prepared work only, batch bounds, alternating turns, a token bucket at 25% with the per-batch worst case stated, residence metrics, a 1 s slow-sync case (S13a), production staying on the LXC hub host, and a dogfood hub run with memory writes (S16b) before any move (S32) |
 | Python's 32-row sealed purge batch differs from Rust's projection | A shadow difference on hubs with a purge backlog | The difference is recorded on purpose, classified as `projection`, and tested on Rust alone (S8) |
 | Two writers on one file during the rollback window | Writer stalls behind the Python upstream | Proxied families are the low-rate ones. `BEGIN` retries with nothing applied. Durable commands keep their own lane. S6 measures the mix with claims |
 | A Python schema change lands without a Rust update | Rust refuses to start after an upgrade | The lockstep test fails the Python PR, on fresh and migrated fixtures, triggers included. The structural check names what is missing |
@@ -3064,31 +3438,34 @@ Proposed, and it depends on Q1, Q2 and Q6:
 | Pushed memory carries prompt injection between agents | One agent's text steers another | Trust rule (D24), push only reviewed, promoted or imported versions with a clean scan, invisible and bidi characters blocked, role-override text flagged, a second scan at prompt load, `content_trust: "untrusted"`, summaries only within size caps |
 | The scanner is unavailable | Nothing can be promoted or pushed | Fails closed by design, and S18a and S18 are on the release path |
 | Fabricated evidence drives a promotion | A bad card reaches every agent | Hub auto-apply off until attestation (S19e), Tier 0 limits, blast cap, cooldown, compensating rollback |
-| Query text reaches an embedding server | A privacy boundary outside the hub | Loopback or allowlisted private endpoints only. Documented as inside the trust boundary |
+| Query and card text reach an embedding server on another host or a provider | A privacy boundary outside the hub | Loopback, allowlisted private endpoints or an allowlisted HTTPS endpoint the operator names, a bearer token, only normalized query text and normalizer-1 card text, embed jobs only for scanned versions, guard-blocked queries never sent, nothing sent while the scanner is unavailable, and status naming the endpoint's host (D30) |
 | The hub becomes a single point of failure for memory | Agents lose recall when it is down | Local replica and labeled fallback, spooled writes, `off` mode unchanged |
-| Index memory under the 512 MB allotment | Out of memory during an embedder change or a rebuild at 20,000 cards | Measured in S13b, S15 and S16a. Today's corpus is far below the limit. The 8B model's 4,096-dimension matrices need the larger slice of option b at 20,000 cards |
-| A `local` embedder on the hub host starves the writer | Throughput or latency regressions | The S16b decision rule includes a concurrent S6a run, and under option b the embedding server runs in its own container on its own reserved core |
+| Index memory under the 512 MB allotment | Out of memory during an embedder change or a rebuild at 20,000 cards | Measured in S13b, S15 and S16a. Today's corpus is far below the limit: a 4,096-dimension matrix is about 31 MB at 1,891 cards. At 20,000 cards two such matrices pass the allotment, so the runbook raises the production container's memory from S15's measured peaks before the card count gets there |
+| A `local` embedder on the hub host starves the writer | Throughput or latency regressions | The S16b decision rule includes a concurrent S6a run. The production hub's embedder runs on another host, and the recipe's embedder runs in its own container on its own reserved core |
 | A finding is reported twice after a crash | A duplicate external report | Reservations with generations and a report-key search before a retry. At least once is stated, not hidden |
 | New Rust dependencies in a network-facing service | Supply-chain exposure | Small dependency set, no OpenSSL, lockfile reviews, advisory and license checks in CI |
 | Scope: 54 JSON and 37 HTML routes | A full port delays the release | Strangler routing (D5), hot set first, cold families after the release |
-| Agent work on the GPU workstation starves the hub (option b) | Slow commits, claim timeouts, missed wake targets | Reserved cores, memory and I/O on a dedicated slice, OOM ordering, and the S6 deployment run under a synthetic fan-out (D28) |
-| `FULL` sync tail under agent I/O on the workstation | Commit p99 near a second, as measured on a loaded desktop-class machine | The I/O latency target, and I/O weight once S31 configures a controller that enforces it, the deployment runs in S6 and S16b, and a separate device for the volume if a run misses its targets, which means buying one (Q8). `synchronous` stays `FULL` |
-| Workstation reboots and maintenance (option b) | Hub outages follow the workstation's schedule | Suspend off, clean shutdown on the UPS once S31 installs a monitor, spooled events, claim fallback unless required, memory replica, the LXC container kept as the rollback target |
+| Agent work on the GPU workstation starves the dogfood hub, or production after a move | Slow commits, claim timeouts, missed wake targets | Production stays on the LXC hub host. On the dogfood hub: reserved cores, memory and I/O on a dedicated slice, OOM ordering, and the S6 deployment run under a synthetic fan-out, which S32 needs before any move (D28) |
+| `FULL` sync tail under agent I/O on the workstation | Commit p99 near a second, as measured on the loaded workstation | Production stays on the LXC hub host, whose sync p99 was 1.71 and 2.60 ms. On the dogfood hub: the I/O latency target, I/O weight once S31 configures a controller that enforces it, and the deployment runs in S6 and S16b. Before any production move, either those runs meet their targets or the volume gets a device of its own, such as a spare hard disk with a stable tail and a median of several milliseconds that group commit absorbs (S32). `synchronous` stays `FULL` |
+| Workstation reboots and maintenance | Dogfood hub outages, and production hybrid search in BM25 fallback while the workstation embedder is down | Accepted for the dogfood hub, which is not production. Production keeps answering in BM25 mode, reported as degraded, until the embedder returns. Suspend off, clean shutdown on the UPS once S31 installs a monitor, spooled events |
 | Every client arrives from the local HTTPS front's address, on today's LXC hub host and in any container layout | A per-source cap becomes a fleet-wide cap: 129 principals with two polls each would fill a 256-connection source, and later requests from any client would be closed unanswered | D29: per-source caps exempt the front, and per-credential, per-principal, front-wide unauthenticated and browser, and global caps bound it. Tested through one loopback source in S3c and S8 and through the real front in S31 |
 | Junk tokens or one busy credential take every proxied slot | Every other proxied request gets 503, claims fall back to the local lock, events spool, `/ready` reads false | A request counts against a credential only after its digest matches an active credential, three proxied lanes that never borrow, at most 4 proxied slots per credential, `/ready` off the proxied pool, and S3c's junk-token slow-body test |
 | One tailnet peer fills the unauthenticated or browser lane | Enrollment, anonymous requests or dashboard pages wait for everyone | Accepted under the tailnet-only threat model, since credential traffic is untouched. A public front is unsupported without `--trust-forwarded-for` (D29) |
 | A process that shares the hub's network namespace forges an identity header | Operator access to the dashboard and an operator login on action routes | `--trust-tailscale-identity` only where the namespace holds the hub and its front alone: the holder layout, no host networking, no published port, the front's SSH server off. Checked in S10 and S31 |
-| An agent account holds root-equivalent rights on the hub host (`docker` group, passwordless `sudo`) | It reads both secrets and the volume, or joins the hub's namespace | Agents under a separate account with no `docker` group and no `sudo` rule, tested from that account in S31. On the server that hosts the LXC container, the agent account has passwordless `sudo` (verified 2026-11-03), which reaches today's production hub too. Encrypted copies protect only stored copies, so only ending that `sudo` removes the exception. Q8 recommends it, and S31 checks the chosen route |
+| An agent account holds root-equivalent rights on the hub host (`docker` group, passwordless `sudo`) | It reads both secrets and the volume, or joins the hub's namespace | On a single-user machine the owner's agents act as the owner, which the threat model accepts and documents. A separate account with no `docker` group and no `sudo` rule is optional hardening for multi-user or shared hosts, checked once in S31. On the server that hosts the LXC container, the agent account has passwordless `sudo` (verified 2026-11-03), which reaches the production hub: a known risk owned by a separate operations cleanup outside this design, which must keep secret injection and access to every container working. This design does not end it, and S32 checks the state it finds |
 | The hub container restarts and leaves the front in a dead network namespace | The hub is unreachable through the front until someone restarts the front by hand | A holder container that never restarts owns the namespace, joiners exit when it is left with loopback only, and S10 and S31 send a request through the real front after a hub restart and a holder restart |
-| The LXC rollback target goes stale, or a rollback restores an old backup | The restore answers 503 for a newer schema, or ids and generations rewind, acknowledged messages are lost and revocations are undone | Lockstep upgrades and scheduled rehearsals, a planned rollback that fences the workstation and moves a final backup, and a disaster-recovery path with a one-hour RPO that advances the message, roster and policy counters, ends every claim, sets a claim recovery floor that also covers targets first claimed after the copy, and has signers publish mesh statements again (S31) |
-| A new host package on the workstation (UPS monitor, GPU container toolkit, rootless Docker for the agent account) | Unreviewed software on the maintainer's machine | Each needs the maintainer's approval before install, listed in [Hosting](#hosting) and Q8 |
-| Memory on a different host from the hub (option a) | Revocation ordering becomes a cross-host protocol | Not recommended. [Hosting](#hosting) lists what each replacement gives up |
+| A restore from an old backup, or, after S32, a stale LXC rollback target | ids and generations rewind, acknowledged messages are lost and revocations are undone, or the restore answers 503 for a newer schema | Every lossy restore, production's from a container backup included, runs the restore tool (S31): message, roster and policy counters advanced, every claim ended, a claim recovery floor that also covers targets first claimed after the copy, `user_version` bumped, signers publish mesh statements again. After S32: lockstep upgrades, scheduled rehearsals, and a planned rollback that fences the workstation and moves a final backup |
+| A new host package on the workstation (UPS monitor, GPU container toolkit, rootless Docker for an optional agent account) | Unreviewed software on the maintainer's machine | Each needs the maintainer's approval before install, listed in [Hosting](#hosting) |
+| Memory on a different host from the hub (option a) | Revocation ordering becomes a cross-host protocol | Not chosen (D28). Only embedding crosses hosts, and [Hosting](#hosting) lists what each replacement would give up |
+| The workstation embedder is unreachable, evicted by other GPU work or cold-loading | Production hybrid queries miss their deadline | Fail-open to BM25 within the 250 ms deadline, reported as `degraded`, a breaker whose background probe pays the 2.4 to 6.4 s cold load, contention behind the hub's own document request not counted as a failure, and S16b's run with a co-tenant model, a cold load and an eviction |
+| A user cannot tell BM25 chosen on purpose from a broken embedder | Needless alarms, or a fault that looks like a choice | Separate `mode`, `effective` and `state` fields, `degraded` only for a configured embedder that cannot answer, and setup that never writes a hybrid configuration it could not probe (D30, S15, S31) |
+| A mode switch breaks search or mixes vectors | Failed queries, or vectors from two models in one matrix | BM25 answers through every switch, hybrid only after full coverage, vectors kept until an explicit drop, and the model digest in `EmbedderId` (S15) |
 
 ## Open questions
 
-These need the maintainer. Each has a recommendation. Q8 is new in revision 3,
-revision 4 adds its costs, and revision 5 adds the agent account and the
-rollback server's exception.
+These need the maintainer. Each open question has a recommendation. Q8,
+opened in revision 3, was closed by the maintainer's hosting decision on
+2026-11-03 and stays here as a record.
 Q4 from the first draft
 (unreviewed cards are never pushed to other agents) is now a design rule
 (D24), since both reviews agreed with it, so it is not asked again.
@@ -3131,51 +3508,26 @@ Q4 from the first draft
    family after 0.31.0, and land a Python version only if that port has not
    merged by the 0.32.0 cut? Recommended: yes. #2210 asks for one build, in
    Rust, and the Worklore routes stay proxied until their port.
-- **Q8, hosting (D28).** Move the whole hub, memory included, from the
-   current LXC hub host to the GPU workstation, in Docker (option b of
-   [Hosting](#hosting)), as its own step with today's Python hub before
-   cutover phase 1? Recommended: yes. The hub write lock that orders memory
-   commits against revocations (D23) stays inside one process, and local GPU
-   embedding makes the 8B hybrid practical, the only model that passed both
-   private halves of R1. The costs:
-   - Hub outages follow the workstation's reboots and maintenance.
-   - The hub needs reserved cores, memory and I/O there, and agent work moves
-     off 3 of the 8 performance cores.
-   - Agents move to a separate unprivileged account with no `docker` group
-     and no `sudo` rule. Today they run as an account that holds both. Their files, credentials and session services move to the
-     new account. Their Docker-based work (for example the test images agents
-     build locally today) then needs a rootless Docker daemon for that
-     account, a new package that needs approval, or it stops running on the
-     workstation. Rootless Docker for the hub itself is no longer offered,
-     because it cannot hold the CPU and I/O reservations.
-   - The server that hosts the LXC container receives the hourly copies and
-     is the rollback target, and the agent account there has passwordless
-     `sudo` (verified read-only on 2026-11-03). Encrypting the copies to a
-     key held off both hosts protects only the stored copies. A rollback or
-     disaster-recovery hub on that server is reachable by agents with root,
-     who can enter the container, read the live database and both secrets
-     and reach its loopback port, unless their `sudo` ends there. Today's
-     production hub on that server has the same exposure now, before any
-     move, and its container backups hold the hub file. Recommended: end
-     agent `sudo` on that server (route 2 in [Hosting](#hosting)), and do it
-     now, before the move, because that also closes today's exposure.
-     Encrypt the shipped copies either way. Route 1 alone, encrypted copies
-     and a rollback hub without the identity flag, is acceptable only
-     if the maintainer accepts the recorded residual exposure for the
-     rollback and disaster-recovery periods.
-   - New host packages, each needing approval before install: a UPS monitor
-     and the GPU vendor's container toolkit, plus rootless Docker's packages
-     if the agent account keeps its Docker work.
-   - If the S6 or S16b run on the workstation misses its targets, the remedy
-     is a separate device for the hub's volume. No device there is free of
-     agent I/O, so that means buying an NVMe drive and fitting it, which
-     needs a free slot and a maintenance window. This document does not price
-     it. If that purchase is not wanted, the fallback is to keep the hub on
-     the current LXC hub host with the `remote` embedding backend.
+- **Q8, hosting (D28).** Closed 2026-11-03. The maintainer decided:
+   - The production hub stays on the LXC hub host. Its data volume's
+     `fdatasync` p99 was 1.71 and 2.60 ms at load 1.4, against 2.38 and
+     28.52 ms on the GPU workstation at load 7 to 8 and 871 to 928 ms under
+     agent fan-outs, with matching medians near 1 ms.
+   - The embedder runs on the workstation's GPU, and the production hub calls
+     it over the tailnet under the remote-endpoint contract, with fallback to
+     BM25.
+   - A dogfood hub on the workstation runs the Compose recipe as the everyday
+     install path (S31). It is not production.
+   - Production moves only through S32, gated on the dogfood hub's deployment
+     runs meeting their targets or on a device of the hub volume's own.
+   - The separate agent account and the no-`sudo` rule are optional hardening
+     for multi-user or shared hosts.
 
-   Option a, memory alone on the workstation, turns D23 into a cross-host
-   protocol that either lets revocations reach memory late or makes them
-   wait on the workstation.
+   Left for later, none of it a dependency of this design: a UPS for the LXC
+   hub host, a spare hard disk as the hub volume's own device, and the
+   operations cleanup of agent `sudo` on the LXC hub host, which this design
+   does not own. Revision 6's recommendation to end that `sudo` as part of
+   this design is withdrawn.
 
 ## Rollback plan
 
@@ -3200,16 +3552,17 @@ Q4 from the first draft
   never mixes contract versions.
 - After the rollback window, schema authority moves to Rust, and a rollback
   to Python needs a database backup from before the first Rust migration.
-- The host (option b of [Hosting](#hosting)): stop the hub and front
-  containers on the workstation so nothing writes, take a final online backup
-  there, copy it into the stopped container on the current LXC hub host,
-  start the pinned Python hub on it and move the name back. Never start that
-  container on its own stale file or on a scheduled backup, which would
-  rewind message ids and claim generations, lose acknowledged messages and
-  undo revocations. If the workstation is lost, the path is disaster recovery,
-  with a one-hour RPO, counter advances, a claim recovery floor, mesh
-  statements published again, and the client effects listed in
-  [Hosting](#hosting).
+- The host: production stays on the LXC hub host (D28), so 0.31.0 has no host
+  rollback. After S32 moves production, the host rollback is the planned
+  rollback in [Future production move (S32)](#future-production-move-s32):
+  fence the workstation hub, take a final online backup, start the pinned
+  Python hub on it in the LXC container and move the name back. Never start
+  that container on its own stale file or on a scheduled backup. Losing the
+  workstation then is disaster recovery through the restore tool
+  ([Restoring from a backup](#restoring-from-a-backup)).
+- Retrieval mode: setting `retrieval = "lexical"` and restarting returns any
+  hub to BM25 mode in seconds, with vectors kept ([Retrieval
+  modes](#retrieval-modes)).
 
 ## Evidence
 
@@ -3262,6 +3615,13 @@ only commit in the window took 2.6 s, so the rate rounds to 0.
 A direct probe at the same time, 4 KiB writes each followed by `fdatasync`,
 two runs of 6 s: median 1.04 and 1.08 ms, p90 6.90 and 43.76 ms, p99 928 and
 871 ms, maximum 2,843 and 1,316 ms.
+
+The same probe on 2026-11-03 at lighter load, two 6 s runs per host: on the
+LXC hub host's data volume at load 1.4, median 1.01 ms, p99 1.71 and 2.60 ms,
+maximum 23.8 and 26.6 ms. On the GPU workstation at load 7 to 8, median 1.03
+and 1.12 ms, p99 2.38 and 28.52 ms, maximum 4.25 and 38.6 ms. [Why production
+stays on the LXC hub host](#why-production-stays-on-the-lxc-hub-host) reads
+these.
 
 On this machine the tail of the sync latency, not its median, set the `FULL`
 rate: with one client, `FULL` managed about 10 commits per second. With 64 and
@@ -3360,133 +3720,146 @@ where it checked them, and it read #2226 at `8caebd92d`, a head pushed after rev
 four tables says what F found and what revision 6 changed, and the fifth
 table lists F's findings.
 
-| ID | Review | Severity | Finding | Resolution | Sections changed | Revision 3 | Revision 4 | Revision 5 | Revision 6 |
-|---|---|---|---|---|---|---|---|---|---|
-| A-F01 | A | blocker | Card identity and compare-and-set ignored scope and authority state | Fixed: cards keyed by `(scope, card_id)`, compare-and-set on a per-card revision, trust and retirement versioned in `memory_card_revisions`, no scope moves, S13a tests for every case named (D22) | Decisions, Model, Event schema, Storage, S13a | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| A-F02 | A | blocker | Two databases break the atomic authorization check | Fixed: memory commits run under the hub write lock after re-reading credentials and policy (D23). No cross-file atomicity claimed. Multi-card applies are one memory transaction. Interleaving tests | Decisions, Authority across the two files, Reflect, S13a, S19a | Resolved in C. Revision 3 bounds how long the lock is held (C-N3) | Resolved in D. Revision 4 states the hub lock's worst case per batch (D-NM3) | D-NM3 resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) |
-| A-F03 | A | major | The durability test cannot prove D3 | Fixed: `FULL` set at connection open and verified, `kill -9` kept for integrity only, VFS power-cut test with an external ledger and a `NORMAL` control, power cut in the S7 claims property test | Durability, S4a, S7 | Partial in C (C-R2). Revision 3 places cuts by storage operation in seven phases, on both files, in both directory modes | Resolved in D. Revision 4 states that Python's commits sit outside the shim (D-m9) | D-m9 resolved in E | Not re-checked |
-| A-F04 | A | major | Checkpoint control stops at the Rust connection | Fixed: a maintenance connection owns checkpoints and reports results, upstream mode turns off Python auto-checkpoint, capped read transactions, disk-pressure admission, online-backup rule, S4b tests | Checkpoints and disk, Authentication and tokens, S4b, S10 | Resolved in C. Revision 3 runs sweeps on the writers, so each file has one Rust writer | Resolved in D | Not re-checked | Not re-checked |
-| A-F05 | A | major | Admission defaults cannot host 10,000 HTTP/1.1 waiters | Fixed: default profile of 4,096 connections and 3,072 waiters with 1,024 connections kept for other requests, a high-capacity profile of 12,288 and 10,000, open-file and backlog needs, S8 tests at 5,000 principals over 64 sources with memory split out | Goals, Admission and backpressure, Long-poll, S8 | Resolved in C | Partial in D (D-NM2). Revision 4 exempts the front from per-source caps (D29), keeps non-waiting connections per source, and tests through one loopback source | D-NM2 resolved in E. Revision 5 keys credential budgets on validated tokens, splits the proxied slots into lanes and tests junk tokens (E-N1) | Not re-checked. Revision 6 splits the request-body budget by lane and states the admission order (F-N1) |
-| A-F06 | A | major | Queue bounds do not bound memory or latency | Fixed: byte budgets, per-batch command, event, byte and time budgets, bounded reader and CPU queues, a separate memory quota, command deadlines with defined answers, a CPU pool, overload and slow-query tests | Process model, Write path, Read path, Admission, S4a, S4b | Resolved in C. Revision 3 adds memory batch bounds under the hub lock (C-N3) | Resolved in D. Revision 4 states how the byte budgets fit 512 MB (D-m8) | D-m8 resolved in E. Revision 5 has S3c record the cgroup's peak memory under 24 proxied 8 MiB bodies | Not re-checked. Revision 6 caps bodies without a validated credential at 256 KiB and gives validated credentials 61 MiB of the body budget (F-N1) |
-| A-F07 | A | major | Long-poll wake needs a protocol | Fixed: register before read with wake epochs, principal re-check on wake, `data_version` on the writer connection, recipient-filtered external wakes, grouped re-reads, separate targets, race and storm tests | Long-poll, S8 | Partial in C (C-N1). Revision 3 marks the epoch before every read | Resolved in D. Revision 4 places the mark for grouped re-reads (D-m3) | D-m3 resolved in E | Not re-checked |
-| A-F08 | A | major | The proxy has no transport or failure contract | Fixed: route auth ownership, raw bodies, header rules, streaming, timeouts, no retry of writes, 502 and 504 answers, outcome-unknown on reset (D26) | Upstream proxy contract, S3b | Partial in C (C-N2). Revision 3 buffers JSON responses and closes a stream it cannot finish | Resolved in D. Revision 4 waits for buffer budget before streaming (D-m2) | D-m2 resolved in E. Revision 5 reads a proxied long-poll's `wait_ms` from its body (E-n5) | Not re-checked |
-| A-F09 | A | major | Native `/health` can hide a dead upstream | Fixed: `/health` stays liveness, `GET /ready` added, supervisor restarts the upstream, upstream and webhook state in `/metrics` | Upstream proxy contract, Observability, S3b | Resolved in C | Resolved in D, in design. #2226 ships `/ready` and the exit on child death (D-NM4) | Not re-checked. Revision 5 moves `/ready` off the proxied pool (E-N1) | Not re-checked |
-| A-F10 | A | major | The 4,600 writes/s goal has an incomparable baseline | Fixed: the gate is 10 times the Python hub under the same S6a harness and allotment, 4,600 stays a labeled release target, the harness lands first with pinned conditions, TLS reported once | Goals, S6a, S6 | Resolved in C. Revision 3 adds a deployment run on the GPU workstation under option b (D28) | Resolved in D. Revision 4 runs the proxy baseline with upstream mode (S3c, D-NM4) | D-NM4 resolved in E | Not re-checked |
-| A-F11 | A | major | Format-class storage parity discards needed values | Fixed: exact values, id mapping across references, timestamp relations, exact generations, recomputed digests, mixed-engine and migrated runs, mutation tests, and a field-specific shadow comparator | Schema, migrations and data compatibility, Route ownership, S2, S9 | Resolved in C. Revision 3 adds the `projection` comparator result (C-N4) | Resolved in D | Not re-checked | Not re-checked |
-| A-F12 | A | major | The production read-only gate does not exist | Fixed: S29 builds a fail-closed read-only profile, and the full drive runs only on a copy of production | Cutover, S29 | Partial in C (C-R1). Revision 3 lists only operations an authorizer audit proves pure, with no retention exception | Resolved in D. Revision 4 audits Rust with signals taken at execution and pauses sweeps (D-m1) | D-m1 resolved in E | Not re-checked |
-| A-F13 | A | major | Snapshot publication, rebuild and shared vectors are underspecified | Fixed: segmented immutable index, `indexed_seq` and `min_seq`, background rebuild with tail replay, head revalidation before push, reference-checked vector deletion, failure and restart rules, peak memory recorded | Index structures, Storage, S13b, S15 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| A-F14 | A | major | R0 parity conflicts with the scorer | Fixed: scorer semantics copied from `memory_bm25.py`, ties on the `cards/<card_id>.md` string, per-scope visible-corpus statistics, listed goldens, no FTS5 | Lexical scoring, Retrieval pipeline, S13b | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| A-F15 | A | major | Reflect evidence is counted but not resolved | Fixed: namespaced evidence ids, attestation with credential-counted sources, freshness and revocation (S19e), eval records bound to index and policy revisions, hub auto-apply off until then (D25) | Reflect, Eval gates, S19e, Q6 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| A-F16 | A | major | Findings lack one-report semantics | Fixed: atomic reservations with lease and generation, a report key, at-least-once stated, reassignment rule, two-session and crash tests | Duty registry and findings ledger, S22 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| A-F17 | A | major | Dependencies and release criteria omit work | Fixed: S16 split into S16a and S16b, S18 required for trust raises and push, S12 named S12a to S12i, #2210 as S28, S4 and S13 split, pre-publication acceptance, dependency list | Build plan, Release gate, Packaging and distribution | Partial in C (C-R4). Revision 3 aligns the release fallback with D24 and splits build and verify prerequisites, checked by S30 | Partial in D (D-NM4, D-m6). Revision 4 adds S3c, moves the native-writes test to S10, records merged slices, lists external prerequisites, and has S30 check acceptance cells | D-NM4 and D-m6 resolved in E. Revision 5 adds S10's edge on S31, the conditional-gate rule in S30 and the connectivity prerequisites (E-n6, E-n9) | Not re-checked |
-| A-F18 | A | major | Idempotency and compaction lack persistence rules | Fixed: `memory_idempotency` checked before compare-and-set, 30-day retention tied to spool age, required ids, `AUTOINCREMENT` `seq`, `log_epoch`, compaction invariants and the 410 cursor rule | Idempotency, Log retention and compaction, S13a, S14 | Partial in C (C-R3). Revision 3 adds per-action replay rules and an id time window | Resolved in D. Revision 4 says what a client does with an expired id (D-m4) | D-m4 resolved in E | Not re-checked |
-| A-F19 | A | minor | Migration numbering and schema checks age badly | Fixed: Rust migrations start at Python's last version plus one, the check covers triggers, constraints and defaults, the lockstep test uses migrated fixtures and both SQLite builds | Schema, migrations and data compatibility, S4b | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| A-F20 | A | minor | #2207 still says Rust targets v2 from the start | Stands here: D20 (decided 2026-11-03) keeps Rust on v1 through phase 3, so the issue's plan line needs to change, which is flagged under Work in flight. The error-text part is fixed: every refusal path gets a golden in S1b | Wire contract, Work in flight, S1b | Not re-checked. Still stands | Not re-checked. Still stands | Not re-checked. Still stands | Not re-checked, and it still stands |
-| A-F21 | A | minor | The packaging matrix is not a hub matrix | Fixed: S10 names the workflow, manifest, validator and install changes, five-target PR builds, both toolchains, pre-publication acceptance, rustls and toml chosen, PCRE2 UTF as a capability | Packaging and distribution, S10 | Not re-checked. Revision 3 adds the container recipe changes to S10 | Not re-checked. Revision 4 changes S10's recipe to the sidecar layout (D-NM1) | Not re-checked. Revision 5 adds the holder container to the recipe (E-N2) | Not re-checked. Revision 6 adds a boot unit that starts the compose project after the Docker service (F-m2) |
-| B-B1 | B | blocker | D3 and Q2 misstate the durability baseline | Fixed: baseline stated, `FULL` on every commit of both files, marked as changing D2, cost measured with group commit, Q2 now asks whether to keep today's durability | Decisions, Durability, Evidence, Q2 | Resolved in C. `FULL` stays on the UPS-backed workstation too (D28) | Resolved in D | Not re-checked | Not re-checked |
-| B-B2 | B | blocker | Shadow reads cannot run because Python's `list` writes | Fixed: Python answers with its housekeeping, Rust reads afterwards on a `query_only` reader and never writes, the route table names the housekeeping routes, native reads keep expiry visible without writing | Route ownership, Long-poll, S1b, S8, S9 | Resolved in C. Revision 3 tests native projections without Python's purge (C-N4) | Resolved in D | Not re-checked | Not re-checked |
-| B-B3 | B | blocker | The phase 3 gate names a drive mode that does not exist | Fixed with A-F12: S29, and the full drive only on a production copy | Cutover, S29 | Partial in C (C-R1). Fixed with A-F12 | Resolved in D. Fixed with A-F12 | D-m1 resolved in E. Fixed with A-F12 | Not re-checked |
-| B-M1 | B | major | Memory `seq` can be reassigned after a crash | Fixed: memory commits at `FULL`, `log_epoch` returned on log, status and writes, clients reset on a change | Durability, Schema, Local memory and the hub | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M2 | B | major | `kill -9` cannot detect the D3 failure | Fixed with A-F03 | Durability, S4a | Partial in C (C-R2). Fixed with A-F03 | Resolved in D. Fixed with A-F03 | D-m9 resolved in E. Fixed with A-F03 | Not re-checked |
-| B-M3 | B | major | `required.json` ignores the 15 triggers | Fixed: triggers by name and SQL, constraints and defaults checked, storage parity dumps trigger-maintained tables, the write path names the triggers Rust relies on | Write path, Schema, S2, S4b | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M4 | B | major | Trust for a scan-clean `put` is unspecified | Fixed: only `decide`, policy apply and `import` raise trust, each with a clean scan, the scan never raises trust (D24), S13a drive cases, S23 push test | Trust, grants and scan state, S13a, S23 | Resolved in C. Revision 3 makes the release fallback obey the same rule (C-R4) | Resolved in D | Not re-checked | Not re-checked |
-| B-M5 | B | major | Group commit ignores whole-transaction rollback | Fixed: autocommit check after every command, one re-apply, all-fail on a second abort, COMMIT failure path, `SQLITE_FULL` test | Write path, S4a | Resolved in C. Revision 3 writes the restart branch into the pseudocode | Resolved in D | Not re-checked | Not re-checked |
-| B-M6 | B | major | A Python write lock fails a whole Rust batch | Fixed: `BEGIN` busy retried with nothing applied, lock wait in `/metrics`, claims in the S6 mix, a 3 s lock test in S4a | Write path, Observability, S4a, S6 | Resolved in C. Revision 3 adds alternating write turns for the memory writer (C-N3) | Resolved in D. Revision 4 bounds what waits behind one memory batch (D-NM3) | D-NM3 resolved in E | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) |
-| B-M7 | B | major | New 503s on `/claims` read as refusals | Fixed: durable lane, 504 instead of 503 for durable commands, 502 and 504 for upstream failures, S7 claim client retries with the same lease token | Write path, Admission, Upstream proxy contract, S7 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M8 | B | major | #2210 is missing | Fixed: S28 and D27, compaction invariants recorded, recall-log retention, event payloads hold hashes only | Log retention and compaction, S28, Q7 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M9 | B | major | S19 is several PRs and assumes #1856 exists | Fixed: D15 states what main has, S19 split into S19a to S19e, release takes S19a to S19c with auto-apply off | Decisions, Reflect, Build plan, Release gate | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M10 | B | major | S22 collides with the module size ratchet | Fixed: S22a adds a route seam, findings live in new modules, S11 and S28 reuse the seam | Duty registry and findings ledger, S22a, S22, S11 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M11 | B | major | A 404 cannot tell "no memory" from "memory down" | Fixed: 404 only when memory is not configured, 503 otherwise, clients spool on 503 and on 404 when they hold a replica watermark (D21) | Routes, Local memory and the hub, Rollback plan | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M12 | B | major | Registration never flips in the cutover | Fixed: registration flips last in phase 3, and S5 ships in `proxy` mode | Route ownership, Cutover, S5 | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M13 | B | major | The comparator ignores byte-budgeted pages, and the owners budget is uncited | Fixed: boundary results for budgeted pages, both budgets cited, golden size tests | Route ownership, Schema, migrations and data compatibility | Resolved in C | Resolved in D | Not re-checked | Not re-checked |
-| B-M14 | B | major | Upstream death is undefined | Fixed with A-F08 and A-F09 | Upstream proxy contract, S3b | Partial in C (C-N2). Fixed with A-F08 | Resolved in D, in design. #2226 ships the 502 and 504 answers (D-NM4) | Not re-checked. Revision 5 records #2226's review state (E-n5) | Not re-checked. Revision 6 records #2226 at `8caebd92d` and its request-body order (F-N1) |
-| B-m1 | B | minor | S1 must not pin the raised waiter caps | Fixed: S1 pins only the per-principal cap, noted for the S1 PR | Wire contract, Work in flight, S1 | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m2 | B | minor | Python runs DDL at every start | Fixed: recheck on `SQLITE_SCHEMA` and upstream restart, lockstep covers added columns | Schema, migrations and data compatibility, S4b | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m3 | B | minor | Checkpoint control is partial in the window | Fixed: stated, and upstream mode closes the gap | Checkpoints and disk | Not re-checked | Not re-checked. Upstream mode moves to S3c | Not re-checked | Not re-checked |
-| B-m4 | B | minor | Waiters must re-check the principal on wake | Fixed | Long-poll | Not re-checked. Revision 3 rewrites the wake loop (C-N1) | Not re-checked. Revision 4 places the mark for grouped re-reads (D-m3) | Not re-checked | Not re-checked |
-| B-m5 | B | minor | Event payload bytes versus blobs | Fixed: events hold hashes only | Event schema, Storage | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m6 | B | minor | Idempotency key scope and retention unstated | Fixed: `(principal, client_event_id)`, 30 days, replay rules, message `client_id` window pinned in S1b | Idempotency, S1b | Not re-checked. Revision 3 adds the id window (C-R3) | Not re-checked. Revision 4 adds the client's handling of an expired id (D-m4) | Not re-checked | Not re-checked |
-| B-m7 | B | minor | Recall-log and findings HMAC keys should differ | Fixed: domain-separated keys | Local memory and the hub, Duty registry and findings ledger | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m8 | B | minor | `/findings` authentication unspecified | Fixed: node tokens and principals with a `findings` grant | Duty registry and findings ledger | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m9 | B | minor | The 480 KiB owners budget is uncited | Fixed: `JSON_RESPONSE_BUDGET_BYTES` in `src/brigade/fleet_owners.py` | Route ownership, Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m10 | B | minor | "75 tables" is 76 with `sqlite_sequence` | Fixed | Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m11 | B | minor | Sealed cases conflict with a hub-agnostic drive | Fixed: golden envelopes generated once by Python and checked in with their keys | Sealed messages, S1 | Not re-checked | Not re-checked | Not re-checked. Revision 5 corrects the sealed cases: #2218 used random bytes of valid lengths (E-n10) | Not re-checked |
-| B-m12 | B | minor | S1 and S2 run the hub with different flags | Fixed: S2 runs with defaults and separately with the outbox | Schema, migrations and data compatibility, S2 | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m13 | B | minor | Phase 1 has no phase 0 baseline | Fixed: 48 hours of the S29 probe plus spool depth before phase 1 | Cutover | Not re-checked. Revision 3 takes the baseline on the host phase 1 uses | Not re-checked | Not re-checked | Not re-checked |
-| B-m14 | B | minor | Connector push needs grants nobody holds | Fixed: `grant` action, and the grant step is in S23 and S26 acceptance | Trust, grants and scan state, S23, S26 | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-m15 | B | minor | The hub's scan rule set is unspecified | Fixed: bundled default rules only, version pinned, repository allowlists do not apply, a second scan at prompt load | Content scanning | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C1 | B | contradiction | Q2 called `NORMAL` the first decision while the shipped hub runs `FULL` | Fixed with B-B1 | Decisions D2 and D3, Q2 | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C2 | B | contradiction | Shadow required purity that messages reads lack | Fixed with B-B2 | Route ownership | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C3 | B | contradiction | The phase 3 gate named a missing drive mode | Fixed with B-B3 | Cutover | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C4 | B | contradiction | D15 "Decided" against no tier code on main | Fixed with B-M9 | Decisions, Reflect | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C5 | B | contradiction | Registration native in S5 but never flipped | Fixed with B-M12 | Cutover | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C6 | B | contradiction | Event payload bytes against blob deduplication | Fixed with B-m5 | Event schema, Storage | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C7 | B | contradiction | 75 tables against 76 | Fixed with B-m10 | Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
-| B-C8 | B | contradiction | "Clients change nothing" against the connectivity slices | Fixed: goal 1 is scoped to the cutover and names S23 to S26 | Goals | Not re-checked | Not re-checked | Not re-checked | Not re-checked |
+Revision 7 (2026-11-03) answers no review. It records two maintainer
+decisions: hosting (D28, closing Q8) and retrieval modes (D30). The Revision 7
+column of all five tables says where a decision changes an earlier
+resolution, and the sixth table records the decisions themselves. Neither
+has been reviewed yet.
+
+| ID | Review | Severity | Finding | Resolution | Sections changed | Revision 3 | Revision 4 | Revision 5 | Revision 6 | Revision 7 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| A-F01 | A | blocker | Card identity and compare-and-set ignored scope and authority state | Fixed: cards keyed by `(scope, card_id)`, compare-and-set on a per-card revision, trust and retirement versioned in `memory_card_revisions`, no scope moves, S13a tests for every case named (D22) | Decisions, Model, Event schema, Storage, S13a | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F02 | A | blocker | Two databases break the atomic authorization check | Fixed: memory commits run under the hub write lock after re-reading credentials and policy (D23). No cross-file atomicity claimed. Multi-card applies are one memory transaction. Interleaving tests | Decisions, Authority across the two files, Reflect, S13a, S19a | Resolved in C. Revision 3 bounds how long the lock is held (C-N3) | Resolved in D. Revision 4 states the hub lock's worst case per batch (D-NM3) | D-NM3 resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) | No change |
+| A-F03 | A | major | The durability test cannot prove D3 | Fixed: `FULL` set at connection open and verified, `kill -9` kept for integrity only, VFS power-cut test with an external ledger and a `NORMAL` control, power cut in the S7 claims property test | Durability, S4a, S7 | Partial in C (C-R2). Revision 3 places cuts by storage operation in seven phases, on both files, in both directory modes | Resolved in D. Revision 4 states that Python's commits sit outside the shim (D-m9) | D-m9 resolved in E | Not re-checked | No change |
+| A-F04 | A | major | Checkpoint control stops at the Rust connection | Fixed: a maintenance connection owns checkpoints and reports results, upstream mode turns off Python auto-checkpoint, capped read transactions, disk-pressure admission, online-backup rule, S4b tests | Checkpoints and disk, Authentication and tokens, S4b, S10 | Resolved in C. Revision 3 runs sweeps on the writers, so each file has one Rust writer | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F05 | A | major | Admission defaults cannot host 10,000 HTTP/1.1 waiters | Fixed: default profile of 4,096 connections and 3,072 waiters with 1,024 connections kept for other requests, a high-capacity profile of 12,288 and 10,000, open-file and backlog needs, S8 tests at 5,000 principals over 64 sources with memory split out | Goals, Admission and backpressure, Long-poll, S8 | Resolved in C | Partial in D (D-NM2). Revision 4 exempts the front from per-source caps (D29), keeps non-waiting connections per source, and tests through one loopback source | D-NM2 resolved in E. Revision 5 keys credential budgets on validated tokens, splits the proxied slots into lanes and tests junk tokens (E-N1) | Not re-checked. Revision 6 splits the request-body budget by lane and states the admission order (F-N1) | No change |
+| A-F06 | A | major | Queue bounds do not bound memory or latency | Fixed: byte budgets, per-batch command, event, byte and time budgets, bounded reader and CPU queues, a separate memory quota, command deadlines with defined answers, a CPU pool, overload and slow-query tests | Process model, Write path, Read path, Admission, S4a, S4b | Resolved in C. Revision 3 adds memory batch bounds under the hub lock (C-N3) | Resolved in D. Revision 4 states how the byte budgets fit 512 MB (D-m8) | D-m8 resolved in E. Revision 5 has S3c record the cgroup's peak memory under 24 proxied 8 MiB bodies | Not re-checked. Revision 6 caps bodies without a validated credential at 256 KiB and gives validated credentials 61 MiB of the body budget (F-N1) | No change |
+| A-F07 | A | major | Long-poll wake needs a protocol | Fixed: register before read with wake epochs, principal re-check on wake, `data_version` on the writer connection, recipient-filtered external wakes, grouped re-reads, separate targets, race and storm tests | Long-poll, S8 | Partial in C (C-N1). Revision 3 marks the epoch before every read | Resolved in D. Revision 4 places the mark for grouped re-reads (D-m3) | D-m3 resolved in E | Not re-checked | No change |
+| A-F08 | A | major | The proxy has no transport or failure contract | Fixed: route auth ownership, raw bodies, header rules, streaming, timeouts, no retry of writes, 502 and 504 answers, outcome-unknown on reset (D26) | Upstream proxy contract, S3b | Partial in C (C-N2). Revision 3 buffers JSON responses and closes a stream it cannot finish | Resolved in D. Revision 4 waits for buffer budget before streaming (D-m2) | D-m2 resolved in E. Revision 5 reads a proxied long-poll's `wait_ms` from its body (E-n5) | Not re-checked | No change |
+| A-F09 | A | major | Native `/health` can hide a dead upstream | Fixed: `/health` stays liveness, `GET /ready` added, supervisor restarts the upstream, upstream and webhook state in `/metrics` | Upstream proxy contract, Observability, S3b | Resolved in C | Resolved in D, in design. #2226 ships `/ready` and the exit on child death (D-NM4) | Not re-checked. Revision 5 moves `/ready` off the proxied pool (E-N1) | Not re-checked | No change |
+| A-F10 | A | major | The 4,600 writes/s goal has an incomparable baseline | Fixed: the gate is 10 times the Python hub under the same S6a harness and allotment, 4,600 stays a labeled release target, the harness lands first with pinned conditions, TLS reported once | Goals, S6a, S6 | Resolved in C. Revision 3 adds a deployment run on the GPU workstation under option b (D28) | Resolved in D. Revision 4 runs the proxy baseline with upstream mode (S3c, D-NM4) | D-NM4 resolved in E | Not re-checked | Revision 7 runs the deployment run on the dogfood hub, where a miss holds production in place instead of failing S6 (D28) |
+| A-F11 | A | major | Format-class storage parity discards needed values | Fixed: exact values, id mapping across references, timestamp relations, exact generations, recomputed digests, mixed-engine and migrated runs, mutation tests, and a field-specific shadow comparator | Schema, migrations and data compatibility, Route ownership, S2, S9 | Resolved in C. Revision 3 adds the `projection` comparator result (C-N4) | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F12 | A | major | The production read-only gate does not exist | Fixed: S29 builds a fail-closed read-only profile, and the full drive runs only on a copy of production | Cutover, S29 | Partial in C (C-R1). Revision 3 lists only operations an authorizer audit proves pure, with no retention exception | Resolved in D. Revision 4 audits Rust with signals taken at execution and pauses sweeps (D-m1) | D-m1 resolved in E | Not re-checked | No change |
+| A-F13 | A | major | Snapshot publication, rebuild and shared vectors are underspecified | Fixed: segmented immutable index, `indexed_seq` and `min_seq`, background rebuild with tail replay, head revalidation before push, reference-checked vector deletion, failure and restart rules, peak memory recorded | Index structures, Storage, S13b, S15 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F14 | A | major | R0 parity conflicts with the scorer | Fixed: scorer semantics copied from `memory_bm25.py`, ties on the `cards/<card_id>.md` string, per-scope visible-corpus statistics, listed goldens, no FTS5 | Lexical scoring, Retrieval pipeline, S13b | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F15 | A | major | Reflect evidence is counted but not resolved | Fixed: namespaced evidence ids, attestation with credential-counted sources, freshness and revocation (S19e), eval records bound to index and policy revisions, hub auto-apply off until then (D25) | Reflect, Eval gates, S19e, Q6 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F16 | A | major | Findings lack one-report semantics | Fixed: atomic reservations with lease and generation, a report key, at-least-once stated, reassignment rule, two-session and crash tests | Duty registry and findings ledger, S22 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| A-F17 | A | major | Dependencies and release criteria omit work | Fixed: S16 split into S16a and S16b, S18 required for trust raises and push, S12 named S12a to S12i, #2210 as S28, S4 and S13 split, pre-publication acceptance, dependency list | Build plan, Release gate, Packaging and distribution | Partial in C (C-R4). Revision 3 aligns the release fallback with D24 and splits build and verify prerequisites, checked by S30 | Partial in D (D-NM4, D-m6). Revision 4 adds S3c, moves the native-writes test to S10, records merged slices, lists external prerequisites, and has S30 check acceptance cells | D-NM4 and D-m6 resolved in E. Revision 5 adds S10's edge on S31, the conditional-gate rule in S30 and the connectivity prerequisites (E-n6, E-n9) | Not re-checked | No change to the finding. Revision 7 adds S32 outside the release gate and S15's build edge on S18 |
+| A-F18 | A | major | Idempotency and compaction lack persistence rules | Fixed: `memory_idempotency` checked before compare-and-set, 30-day retention tied to spool age, required ids, `AUTOINCREMENT` `seq`, `log_epoch`, compaction invariants and the 410 cursor rule | Idempotency, Log retention and compaction, S13a, S14 | Partial in C (C-R3). Revision 3 adds per-action replay rules and an id time window | Resolved in D. Revision 4 says what a client does with an expired id (D-m4) | D-m4 resolved in E | Not re-checked | No change |
+| A-F19 | A | minor | Migration numbering and schema checks age badly | Fixed: Rust migrations start at Python's last version plus one, the check covers triggers, constraints and defaults, the lockstep test uses migrated fixtures and both SQLite builds | Schema, migrations and data compatibility, S4b | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| A-F20 | A | minor | #2207 still says Rust targets v2 from the start | Stands here: D20 (decided 2026-11-03) keeps Rust on v1 through phase 3, so the issue's plan line needs to change, which is flagged under Work in flight. The error-text part is fixed: every refusal path gets a golden in S1b | Wire contract, Work in flight, S1b | Not re-checked. Still stands | Not re-checked. Still stands | Not re-checked. Still stands | Not re-checked, and it still stands | No change |
+| A-F21 | A | minor | The packaging matrix is not a hub matrix | Fixed: S10 names the workflow, manifest, validator and install changes, five-target PR builds, both toolchains, pre-publication acceptance, rustls and toml chosen, PCRE2 UTF as a capability | Packaging and distribution, S10 | Not re-checked. Revision 3 adds the container recipe changes to S10 | Not re-checked. Revision 4 changes S10's recipe to the sidecar layout (D-NM1) | Not re-checked. Revision 5 adds the holder container to the recipe (E-N2) | Not re-checked. Revision 6 adds a boot unit that starts the compose project after the Docker service (F-m2) | No change to the finding. Revision 7 makes the embedder a normal recipe service under the `gpu` profile that setup writes (D30) |
+| B-B1 | B | blocker | D3 and Q2 misstate the durability baseline | Fixed: baseline stated, `FULL` on every commit of both files, marked as changing D2, cost measured with group commit, Q2 now asks whether to keep today's durability | Decisions, Durability, Evidence, Q2 | Resolved in C. `FULL` stays on the UPS-backed workstation too (D28) | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-B2 | B | blocker | Shadow reads cannot run because Python's `list` writes | Fixed: Python answers with its housekeeping, Rust reads afterwards on a `query_only` reader and never writes, the route table names the housekeeping routes, native reads keep expiry visible without writing | Route ownership, Long-poll, S1b, S8, S9 | Resolved in C. Revision 3 tests native projections without Python's purge (C-N4) | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-B3 | B | blocker | The phase 3 gate names a drive mode that does not exist | Fixed with A-F12: S29, and the full drive only on a production copy | Cutover, S29 | Partial in C (C-R1). Fixed with A-F12 | Resolved in D. Fixed with A-F12 | D-m1 resolved in E. Fixed with A-F12 | Not re-checked | No change |
+| B-M1 | B | major | Memory `seq` can be reassigned after a crash | Fixed: memory commits at `FULL`, `log_epoch` returned on log, status and writes, clients reset on a change | Durability, Schema, Local memory and the hub | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M2 | B | major | `kill -9` cannot detect the D3 failure | Fixed with A-F03 | Durability, S4a | Partial in C (C-R2). Fixed with A-F03 | Resolved in D. Fixed with A-F03 | D-m9 resolved in E. Fixed with A-F03 | Not re-checked | No change |
+| B-M3 | B | major | `required.json` ignores the 15 triggers | Fixed: triggers by name and SQL, constraints and defaults checked, storage parity dumps trigger-maintained tables, the write path names the triggers Rust relies on | Write path, Schema, S2, S4b | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M4 | B | major | Trust for a scan-clean `put` is unspecified | Fixed: only `decide`, policy apply and `import` raise trust, each with a clean scan, the scan never raises trust (D24), S13a drive cases, S23 push test | Trust, grants and scan state, S13a, S23 | Resolved in C. Revision 3 makes the release fallback obey the same rule (C-R4) | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M5 | B | major | Group commit ignores whole-transaction rollback | Fixed: autocommit check after every command, one re-apply, all-fail on a second abort, COMMIT failure path, `SQLITE_FULL` test | Write path, S4a | Resolved in C. Revision 3 writes the restart branch into the pseudocode | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M6 | B | major | A Python write lock fails a whole Rust batch | Fixed: `BEGIN` busy retried with nothing applied, lock wait in `/metrics`, claims in the S6 mix, a 3 s lock test in S4a | Write path, Observability, S4a, S6 | Resolved in C. Revision 3 adds alternating write turns for the memory writer (C-N3) | Resolved in D. Revision 4 bounds what waits behind one memory batch (D-NM3) | D-NM3 resolved in E | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) | No change |
+| B-M7 | B | major | New 503s on `/claims` read as refusals | Fixed: durable lane, 504 instead of 503 for durable commands, 502 and 504 for upstream failures, S7 claim client retries with the same lease token | Write path, Admission, Upstream proxy contract, S7 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M8 | B | major | #2210 is missing | Fixed: S28 and D27, compaction invariants recorded, recall-log retention, event payloads hold hashes only | Log retention and compaction, S28, Q7 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M9 | B | major | S19 is several PRs and assumes #1856 exists | Fixed: D15 states what main has, S19 split into S19a to S19e, release takes S19a to S19c with auto-apply off | Decisions, Reflect, Build plan, Release gate | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M10 | B | major | S22 collides with the module size ratchet | Fixed: S22a adds a route seam, findings live in new modules, S11 and S28 reuse the seam | Duty registry and findings ledger, S22a, S22, S11 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M11 | B | major | A 404 cannot tell "no memory" from "memory down" | Fixed: 404 only when memory is not configured, 503 otherwise, clients spool on 503 and on 404 when they hold a replica watermark (D21) | Routes, Local memory and the hub, Rollback plan | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M12 | B | major | Registration never flips in the cutover | Fixed: registration flips last in phase 3, and S5 ships in `proxy` mode | Route ownership, Cutover, S5 | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M13 | B | major | The comparator ignores byte-budgeted pages, and the owners budget is uncited | Fixed: boundary results for budgeted pages, both budgets cited, golden size tests | Route ownership, Schema, migrations and data compatibility | Resolved in C | Resolved in D | Not re-checked | Not re-checked | No change |
+| B-M14 | B | major | Upstream death is undefined | Fixed with A-F08 and A-F09 | Upstream proxy contract, S3b | Partial in C (C-N2). Fixed with A-F08 | Resolved in D, in design. #2226 ships the 502 and 504 answers (D-NM4) | Not re-checked. Revision 5 records #2226's review state (E-n5) | Not re-checked. Revision 6 records #2226 at `8caebd92d` and its request-body order (F-N1) | No change |
+| B-m1 | B | minor | S1 must not pin the raised waiter caps | Fixed: S1 pins only the per-principal cap, noted for the S1 PR | Wire contract, Work in flight, S1 | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m2 | B | minor | Python runs DDL at every start | Fixed: recheck on `SQLITE_SCHEMA` and upstream restart, lockstep covers added columns | Schema, migrations and data compatibility, S4b | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m3 | B | minor | Checkpoint control is partial in the window | Fixed: stated, and upstream mode closes the gap | Checkpoints and disk | Not re-checked | Not re-checked. Upstream mode moves to S3c | Not re-checked | Not re-checked | No change |
+| B-m4 | B | minor | Waiters must re-check the principal on wake | Fixed | Long-poll | Not re-checked. Revision 3 rewrites the wake loop (C-N1) | Not re-checked. Revision 4 places the mark for grouped re-reads (D-m3) | Not re-checked | Not re-checked | No change |
+| B-m5 | B | minor | Event payload bytes versus blobs | Fixed: events hold hashes only | Event schema, Storage | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m6 | B | minor | Idempotency key scope and retention unstated | Fixed: `(principal, client_event_id)`, 30 days, replay rules, message `client_id` window pinned in S1b | Idempotency, S1b | Not re-checked. Revision 3 adds the id window (C-R3) | Not re-checked. Revision 4 adds the client's handling of an expired id (D-m4) | Not re-checked | Not re-checked | No change |
+| B-m7 | B | minor | Recall-log and findings HMAC keys should differ | Fixed: domain-separated keys | Local memory and the hub, Duty registry and findings ledger | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m8 | B | minor | `/findings` authentication unspecified | Fixed: node tokens and principals with a `findings` grant | Duty registry and findings ledger | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m9 | B | minor | The 480 KiB owners budget is uncited | Fixed: `JSON_RESPONSE_BUDGET_BYTES` in `src/brigade/fleet_owners.py` | Route ownership, Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m10 | B | minor | "75 tables" is 76 with `sqlite_sequence` | Fixed | Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m11 | B | minor | Sealed cases conflict with a hub-agnostic drive | Fixed: golden envelopes generated once by Python and checked in with their keys | Sealed messages, S1 | Not re-checked | Not re-checked | Not re-checked. Revision 5 corrects the sealed cases: #2218 used random bytes of valid lengths (E-n10) | Not re-checked | No change |
+| B-m12 | B | minor | S1 and S2 run the hub with different flags | Fixed: S2 runs with defaults and separately with the outbox | Schema, migrations and data compatibility, S2 | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m13 | B | minor | Phase 1 has no phase 0 baseline | Fixed: 48 hours of the S29 probe plus spool depth before phase 1 | Cutover | Not re-checked. Revision 3 takes the baseline on the host phase 1 uses | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m14 | B | minor | Connector push needs grants nobody holds | Fixed: `grant` action, and the grant step is in S23 and S26 acceptance | Trust, grants and scan state, S23, S26 | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-m15 | B | minor | The hub's scan rule set is unspecified | Fixed: bundled default rules only, version pinned, repository allowlists do not apply, a second scan at prompt load | Content scanning | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C1 | B | contradiction | Q2 called `NORMAL` the first decision while the shipped hub runs `FULL` | Fixed with B-B1 | Decisions D2 and D3, Q2 | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C2 | B | contradiction | Shadow required purity that messages reads lack | Fixed with B-B2 | Route ownership | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C3 | B | contradiction | The phase 3 gate named a missing drive mode | Fixed with B-B3 | Cutover | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C4 | B | contradiction | D15 "Decided" against no tier code on main | Fixed with B-M9 | Decisions, Reflect | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C5 | B | contradiction | Registration native in S5 but never flipped | Fixed with B-M12 | Cutover | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C6 | B | contradiction | Event payload bytes against blob deduplication | Fixed with B-m5 | Event schema, Storage | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C7 | B | contradiction | 75 tables against 76 | Fixed with B-m10 | Schema, migrations and data compatibility | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
+| B-C8 | B | contradiction | "Clients change nothing" against the connectivity slices | Fixed: goal 1 is scoped to the cutover and names S23 to S26 | Goals | Not re-checked | Not re-checked | Not re-checked | Not re-checked | No change |
 
 ### Re-check of revision 2
 
-| ID | Severity | Finding | Revision 3 resolution | Sections changed | Revision 4 | Revision 5 | Revision 6 |
-|---|---|---|---|---|---|---|---|
-| C-R1 | blocker, carries A-F12 and B-B3 | S29 runs the write-capable `list` and exempts retention writes, so it is not read-only | S29 is an exact list of operations, each kept only while a SQLite authorizer records no write on Python and on Rust in every route mode. `list`, `sent`, `sent_lookup`, `ack`, `who`, `claims`, the question actions, `GET /policy/inventory` and the browser routes are excluded with their reasons. The fixture holds every kind of overdue row, and the whole-database digest must not change, with no exception. A mutation test proves the audit sees a write | Production read-only probe, Route ownership, S29, S5 to S8 | Resolved in D. Revision 4 changes the audit's mechanics for Rust (D-m1) | D-m1 resolved in E | Not re-checked |
-| C-R2 | major, carries A-F03 and B-M2 | The power-cut test cuts only after a commit returns | Cuts by storage operation in seven phases (apply, before sync, inside sync, passive checkpoint, truncating checkpoint, file growth, recovery), stated filesystem semantics for torn and reordered sectors, truncates and directory entries, both files and the authority protocol, fencing, id and idempotency assertions, an external ledger outside the shim, and the `NORMAL` control kept | Durability, S4a, S13a | Resolved in D. Revision 4 states the shim's scope (D-m9) | D-m9 resolved in E | Not re-checked |
-| C-R3 | major, carries A-F18 | Replay after a record expires relies on compare-and-set that most actions lack, and some routes omit `client_event_id` | `client_event_id` on every write action, a time-ordered id refused outside a 29-day window, records kept 30 days after commit, a per-action replay table, the spool cut at 28 days, and post-retention tests for a card put, a handoff, a grant, a capture and a proposal | Idempotency, Routes, Local memory and the hub, S13a | Resolved in D. Revision 4 adds the client's handling of an expired id (D-m4) | D-m4 resolved in E | Not re-checked |
-| C-R4 | major, carries A-F17 | The release fallback lets a principal's own unscanned writes be pushed, and acceptance relies on slices it does not depend on | The fallback ships search-only with nothing pushed to anyone. Slices list build and verify prerequisites, S4a, S4b, S6a and S9 now follow S3b, S8 and the other native slices follow S9 and S29, and S30 checks the list against the waves, the tables and the release gate | Release gate, Trust filter, Build plan | Partial in D (D-NM4, D-m6). As A-F17 | D-NM4 and D-m6 resolved in E. As A-F17 | Not re-checked |
-| C-N1 | major | Later long-poll iterations record the epoch after reading and can lose a wake | The epoch is marked before every read, as Python's loop does. S8 tests a send between an empty re-read and the next wait on later iterations and after native, external and spurious wakes | Long-poll, S8 | Resolved in D. Revision 4 places the mark for grouped re-reads (D-m3) | D-m3 resolved in E | Not re-checked |
-| C-N2 | major | A streamed response cannot become a 502 or 504 once its headers are sent | JSON responses up to 8 MiB are buffered, so failures before the first byte still answer 502 or 504. After headers, the connection closes without a second status and with `Content-Length` kept. Each client's handling is stated, with required-claim mode for global exclusion. S3b tests both sides of the first byte | Upstream proxy contract, S3b | Resolved in D. Revision 4 adds a bounded wait for buffer budget (D-m2) | D-m2 resolved in E | Not re-checked |
-| C-N3 | major | The authority protocol bounds acquiring the hub lock but not holding it | Memory lock first, prepared work only under the hub lock, batch bounds, alternating turns with a 25% duty cap, residence metrics, sweeps run on the writers, one function holding both locks with a structural test, and targets for sustained writes, a busy checkpoint and slow storage | Authority across the two files, D23, Process model, Log retention, Storage, S4a, S13a | Resolved on quiet storage in D (D-NM3). Revision 4 adds a token bucket with a per-batch worst case, a 1 s case and a workstation run | D-NM3 resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) |
-| C-N4 | major | Native reads omit the sealed-content purge, and shadow-after-Python hides it | Native reads project tombstones for every eligible row, write commands keep Python's 32-row batch, the batch difference is recorded, the comparator has a `projection` result, and S1b, S2 and S8 test the lifecycle, S8 on Rust alone with the sweep paused | Long-poll, Route ownership, Goals, S1b, S2, S8, S9 | Resolved in D. Revision 4 names the projection exception in the non-goals and D20 (D-m5) | D-m5 resolved in E | Not re-checked |
+| ID | Severity | Finding | Revision 3 resolution | Sections changed | Revision 4 | Revision 5 | Revision 6 | Revision 7 |
+|---|---|---|---|---|---|---|---|---|
+| C-R1 | blocker, carries A-F12 and B-B3 | S29 runs the write-capable `list` and exempts retention writes, so it is not read-only | S29 is an exact list of operations, each kept only while a SQLite authorizer records no write on Python and on Rust in every route mode. `list`, `sent`, `sent_lookup`, `ack`, `who`, `claims`, the question actions, `GET /policy/inventory` and the browser routes are excluded with their reasons. The fixture holds every kind of overdue row, and the whole-database digest must not change, with no exception. A mutation test proves the audit sees a write | Production read-only probe, Route ownership, S29, S5 to S8 | Resolved in D. Revision 4 changes the audit's mechanics for Rust (D-m1) | D-m1 resolved in E | Not re-checked | No change |
+| C-R2 | major, carries A-F03 and B-M2 | The power-cut test cuts only after a commit returns | Cuts by storage operation in seven phases (apply, before sync, inside sync, passive checkpoint, truncating checkpoint, file growth, recovery), stated filesystem semantics for torn and reordered sectors, truncates and directory entries, both files and the authority protocol, fencing, id and idempotency assertions, an external ledger outside the shim, and the `NORMAL` control kept | Durability, S4a, S13a | Resolved in D. Revision 4 states the shim's scope (D-m9) | D-m9 resolved in E | Not re-checked | No change |
+| C-R3 | major, carries A-F18 | Replay after a record expires relies on compare-and-set that most actions lack, and some routes omit `client_event_id` | `client_event_id` on every write action, a time-ordered id refused outside a 29-day window, records kept 30 days after commit, a per-action replay table, the spool cut at 28 days, and post-retention tests for a card put, a handoff, a grant, a capture and a proposal | Idempotency, Routes, Local memory and the hub, S13a | Resolved in D. Revision 4 adds the client's handling of an expired id (D-m4) | D-m4 resolved in E | Not re-checked | No change |
+| C-R4 | major, carries A-F17 | The release fallback lets a principal's own unscanned writes be pushed, and acceptance relies on slices it does not depend on | The fallback ships search-only with nothing pushed to anyone. Slices list build and verify prerequisites, S4a, S4b, S6a and S9 now follow S3b, S8 and the other native slices follow S9 and S29, and S30 checks the list against the waves, the tables and the release gate | Release gate, Trust filter, Build plan | Partial in D (D-NM4, D-m6). As A-F17 | D-NM4 and D-m6 resolved in E. As A-F17 | Not re-checked | No change |
+| C-N1 | major | Later long-poll iterations record the epoch after reading and can lose a wake | The epoch is marked before every read, as Python's loop does. S8 tests a send between an empty re-read and the next wait on later iterations and after native, external and spurious wakes | Long-poll, S8 | Resolved in D. Revision 4 places the mark for grouped re-reads (D-m3) | D-m3 resolved in E | Not re-checked | No change |
+| C-N2 | major | A streamed response cannot become a 502 or 504 once its headers are sent | JSON responses up to 8 MiB are buffered, so failures before the first byte still answer 502 or 504. After headers, the connection closes without a second status and with `Content-Length` kept. Each client's handling is stated, with required-claim mode for global exclusion. S3b tests both sides of the first byte | Upstream proxy contract, S3b | Resolved in D. Revision 4 adds a bounded wait for buffer budget (D-m2) | D-m2 resolved in E | Not re-checked | No change |
+| C-N3 | major | The authority protocol bounds acquiring the hub lock but not holding it | Memory lock first, prepared work only under the hub lock, batch bounds, alternating turns with a 25% duty cap, residence metrics, sweeps run on the writers, one function holding both locks with a structural test, and targets for sustained writes, a busy checkpoint and slow storage | Authority across the two files, D23, Process model, Log retention, Storage, S4a, S13a | Resolved on quiet storage in D (D-NM3). Revision 4 adds a token bucket with a per-batch worst case, a 1 s case and a workstation run | D-NM3 resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked. Revision 6 adds a batch that spans the whole window to the window bound (F-m4) | No change. Revision 7 records the production host's sync p99 of 1.71 and 2.60 ms beside the workstation's (D28) |
+| C-N4 | major | Native reads omit the sealed-content purge, and shadow-after-Python hides it | Native reads project tombstones for every eligible row, write commands keep Python's 32-row batch, the batch difference is recorded, the comparator has a `projection` result, and S1b, S2 and S8 test the lifecycle, S8 on Rust alone with the sweep paused | Long-poll, Route ownership, Goals, S1b, S2, S8, S9 | Resolved in D. Revision 4 names the projection exception in the non-goals and D20 (D-m5) | D-m5 resolved in E | Not re-checked | No change |
 
 ### Re-check of revision 3
 
-| ID | Severity | Finding | Revision 4 resolution | Sections changed | Revision 5 | Revision 6 |
-|---|---|---|---|---|---|---|
-| D-NM1 | major | Host networking puts the hub's trusted loopback port on a multi-tenant agent host, where any process can forge the identity header, and the agent user's `docker` group membership is root-equivalent | No host networking. The HTTPS front runs as a sidecar in the hub container's network namespace, no hub port is published, and the embedding server is on an internal compose network. `--trust-tailscale-identity` only where the namespace holds the hub and its front alone. Agent users leave the `docker` group, or the hub runs under rootless Docker as a dedicated user. S10 and S31 check that a non-root local process cannot reach the hub port or forge identity | D28, Authentication and tokens, Packaging and distribution, Hosting, S10, S31, Risks, Q8 | Partial in E (E-N3): S31 never tested passwordless `sudo`, and the sidecar loses its network when the hub restarts (E-N2). Revision 5 moves agents to a separate account tested from that account, and adds the holder container | Not re-checked. Its residual E-N3 is resolved in F |
-| D-NM2 | major | Behind the loopback front the whole fleet is one source, so the 256-per-source cap and Python's 8-handler cap are fleet-wide caps, and S8's 64 loopback addresses hide it | D29: a loopback peer behind a loopback bind is the front, exempt from per-source caps and bounded by per-credential, per-principal, front-wide unauthenticated and global caps. A front-supplied address only under `--trust-forwarded-for`, after S31 shows the front overwrites it. Non-waiting connections kept per source as well as globally. S3c, S8 and S6 test through one loopback source, and S31 through the real front. The port-mapping reasoning and the Risks row are corrected | Decisions, Admission and backpressure, Authentication and tokens, Hosting, S3c, S6, S6a, S8, S31, Risks | Resolved in E for the collapse. E-N1 finds the replacement bounds defective, and revision 5 validates tokens before keying and splits the proxied slots into lanes | Not re-checked. Its residual E-N1 is partial in F (F-N1) |
-| D-NM3 | major | The 25% hub-lock share is not a bound when one memory sync can take most of a second on the recommended host | A token bucket at 250 ms per second, the per-batch worst case stated (10 ms of apply time plus one sync, about 1 s at the workstation's p99 and 2.8 s at its maximum), what waits behind one slow batch, a 1 s injected-sync case with claim and revocation outcomes, and memory writes with residence in S16b's workstation run | Authority across the two files, Hosting, S16b, Risks | Resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked |
-| D-NM4 | major | Wave-2 acceptance runs in front of an unfixed Python, S3b's tests need a native write family, and the plan ignores that S3 merged | S3 (#2215), S1 (#2218), #2216 and #2187 recorded as merged. #2226's diff is read into a table of what S3b closes and what is left. New S3c takes upstream mode, the per-start key, JSON buffering, front admission and the claim-client runs, and S6a, S6, S8 and S10 depend on it. The native-writes test moves to S10. S30 parses slice ids in acceptance cells | Upstream proxy contract, Interim connectivity, Work in flight, Build plan, Order and lanes, Release gate | Resolved in E. Revision 5 records #2226's review state and README pointers (E-n5) | Not re-checked |
-| D-NM5 | major | The LXC rollback target goes stale on schema, and a rollback from a daily backup loses up to a day of writes | Lockstep upgrades of the LXC install, a monthly rehearsal and one after every schema change, hourly backups shipped to the LXC server, a one-hour RPO for disaster recovery with the counter advance and client effects stated, and a planned rollback with an RPO of zero (Codex-1) | Hosting, Rollback plan, S31, Risks | Resolved in E. Revision 5 adds the roster and policy advances, the claim recovery floor and the mesh steps to disaster recovery (E-N4, Codex-2) | Not re-checked. Codex-2 is resolved in F, and revision 6 guards the floor with a `user_version` bump (F-m3) |
-| D-NM6 | major | The UPS monitor, GPU container toolkit, effective I/O controls and agent-slice reservations D28 relies on are unverified and absent from S31 | Each is an S31 acceptance check. The UPS monitor and the GPU container toolkit are listed as new host packages that need the maintainer's approval. The I/O row says weights are not enforced today, the CPU row names the real slices and core split, and Q8 names the separate-device fallback and its cost | Hosting, S31, Risks, Q8 | Resolved in E. Revision 5 drops the rootless hub, which cannot hold the reservations (E-n2) | Not re-checked |
-| D-m1 | minor | The S29 authorizer fires at prepare, Rust caches write statements, and the purge sweep changes rows under the digest | Execution-time signals for Rust, a trace that fails on `BEGIN IMMEDIATE`, and sweeps paused during the audit | Production read-only probe | Resolved in E | Not re-checked |
-| D-m2 | minor | A full proxy buffer budget streams JSON under load | A bounded 1 s wait for budget before streaming | Upstream proxy contract | Resolved in E | Not re-checked |
-| D-m3 | minor | The mark for grouped re-reads must precede the grouped query | Stated at step 2 and at the wake sources | Long-poll | Resolved in E | Not re-checked |
-| D-m4 | minor | A client receiving `memory_client_event_expired` has no stated action | The entry becomes a local proposal and is never resent under a fresh id | Idempotency, Local memory and the hub | Resolved in E | Not re-checked |
-| D-m5 | minor | The non-goal and D20 still say no v1 wire change during the cutover | Both name the sealed-projection exception | Goals and non-goals, D20 | Resolved in E | Not re-checked |
-| D-m6 | minor | S30 fails on, or silently ignores, prerequisites outside the slices (#2187, the connectivity PR) | External prerequisites listed under the waves and in the release gate, and S30 counts them as outside the gate unless listed. #2187 has since merged | Order and lanes, Release gate, S30 | Resolved in E. Revision 5 adds the `request_denied` fix and the #2221 scan to the gate's externals (E-n9) | Not re-checked |
-| D-m7 | minor | The LXC description omits swap and the root disk, and swap has drifted from the runbook | 256 MB of swap and an 8 GB root disk recorded, the runbook's 512 MB and 4 GB noted as drift for S31 to correct, and the reference allotment under option b stated as a cgroup | Hosting | Resolved in E | Not re-checked |
-| D-m8 | minor | Body, writer-queue and proxy byte budgets may overlap the 512 MB allotment | The budgets do not overlap, share one 128 MiB pool in the default profile, and S4a and S8 measure the whole cgroup, the upstream included | Admission and backpressure | Resolved in E. Its residual, Python's memory under 24 proxied 8 MiB bodies, was unmeasured, so S3c now records it | Not re-checked. Revision 6 records peak memory with the credential body share full, replacing the 24-body case (F-N1) |
-| D-m9 | minor | Python commits cannot run under the Rust shim | Stated: mixed-writer power cuts rest on Python's own `FULL`, and the manual VM reset is the only check for both writers | Durability | Resolved in E | Not re-checked |
-| D-m10 | minor | Backup handling on the workstation is asserted, not checked | S31 checks the backup directory's owner, that agent users cannot read it, and that the off-host job includes it | Hosting, S31 | Resolved in E for the workstation. The shipped copies sit outside the rule (E-n7), which revision 5 records as a Q8 exception | Not re-checked. Its residual E-n7 is partial in F (F-N2) |
-| Codex-1 | P1, Codex review of revision 3 | The LXC rollback restores the latest scheduled backup, which rewinds ids and generations, loses acknowledged messages and can undo revocations | A planned rollback fences the workstation hub, takes a final online backup and starts the LXC hub on it, as the move does. Losing the workstation is disaster recovery, a lossy path with a one-hour RPO, counter advances, revocations re-applied, the workstation's front identity revoked, and the client effects stated | Hosting, Rollback plan, S31 | Resolved in E. Codex-2 extends the fence advance to targets first claimed after the copy | Not re-checked. Codex-2 is resolved in F |
+| ID | Severity | Finding | Revision 4 resolution | Sections changed | Revision 5 | Revision 6 | Revision 7 |
+|---|---|---|---|---|---|---|---|
+| D-NM1 | major | Host networking puts the hub's trusted loopback port on a multi-tenant agent host, where any process can forge the identity header, and the agent user's `docker` group membership is root-equivalent | No host networking. The HTTPS front runs as a sidecar in the hub container's network namespace, no hub port is published, and the embedding server is on an internal compose network. `--trust-tailscale-identity` only where the namespace holds the hub and its front alone. Agent users leave the `docker` group, or the hub runs under rootless Docker as a dedicated user. S10 and S31 check that a non-root local process cannot reach the hub port or forge identity | D28, Authentication and tokens, Packaging and distribution, Hosting, S10, S31, Risks, Q8 | Partial in E (E-N3): S31 never tested passwordless `sudo`, and the sidecar loses its network when the hub restarts (E-N2). Revision 5 moves agents to a separate account tested from that account, and adds the holder container | Not re-checked. Its residual E-N3 is resolved in F | No change to the layout, which is the recipe's for the dogfood hub. Revision 7 makes the separate agent account optional hardening (D28) |
+| D-NM2 | major | Behind the loopback front the whole fleet is one source, so the 256-per-source cap and Python's 8-handler cap are fleet-wide caps, and S8's 64 loopback addresses hide it | D29: a loopback peer behind a loopback bind is the front, exempt from per-source caps and bounded by per-credential, per-principal, front-wide unauthenticated and global caps. A front-supplied address only under `--trust-forwarded-for`, after S31 shows the front overwrites it. Non-waiting connections kept per source as well as globally. S3c, S8 and S6 test through one loopback source, and S31 through the real front. The port-mapping reasoning and the Risks row are corrected | Decisions, Admission and backpressure, Authentication and tokens, Hosting, S3c, S6, S6a, S8, S31, Risks | Resolved in E for the collapse. E-N1 finds the replacement bounds defective, and revision 5 validates tokens before keying and splits the proxied slots into lanes | Not re-checked. Its residual E-N1 is partial in F (F-N1) | No change |
+| D-NM3 | major | The 25% hub-lock share is not a bound when one memory sync can take most of a second on the recommended host | A token bucket at 250 ms per second, the per-batch worst case stated (10 ms of apply time plus one sync, about 1 s at the workstation's p99 and 2.8 s at its maximum), what waits behind one slow batch, a 1 s injected-sync case with claim and revocation outcomes, and memory writes with residence in S16b's workstation run | Authority across the two files, Hosting, S16b, Risks | Resolved in E. Revision 5 corrects the window bound (E-n1) | Not re-checked | No change to the bound. Production stays where sync p99 was under 3 ms, and the workstation case applies to the dogfood hub and S32 (D28) |
+| D-NM4 | major | Wave-2 acceptance runs in front of an unfixed Python, S3b's tests need a native write family, and the plan ignores that S3 merged | S3 (#2215), S1 (#2218), #2216 and #2187 recorded as merged. #2226's diff is read into a table of what S3b closes and what is left. New S3c takes upstream mode, the per-start key, JSON buffering, front admission and the claim-client runs, and S6a, S6, S8 and S10 depend on it. The native-writes test moves to S10. S30 parses slice ids in acceptance cells | Upstream proxy contract, Interim connectivity, Work in flight, Build plan, Order and lanes, Release gate | Resolved in E. Revision 5 records #2226's review state and README pointers (E-n5) | Not re-checked | No change |
+| D-NM5 | major | The LXC rollback target goes stale on schema, and a rollback from a daily backup loses up to a day of writes | Lockstep upgrades of the LXC install, a monthly rehearsal and one after every schema change, hourly backups shipped to the LXC server, a one-hour RPO for disaster recovery with the counter advance and client effects stated, and a planned rollback with an RPO of zero (Codex-1) | Hosting, Rollback plan, S31, Risks | Resolved in E. Revision 5 adds the roster and policy advances, the claim recovery floor and the mesh steps to disaster recovery (E-N4, Codex-2) | Not re-checked. Codex-2 is resolved in F, and revision 6 guards the floor with a `user_version` bump (F-m3) | Revision 7 moves the LXC rollback target, lockstep upgrades and rehearsals to S32, since production does not move in 0.31.0 (D28) |
+| D-NM6 | major | The UPS monitor, GPU container toolkit, effective I/O controls and agent-slice reservations D28 relies on are unverified and absent from S31 | Each is an S31 acceptance check. The UPS monitor and the GPU container toolkit are listed as new host packages that need the maintainer's approval. The I/O row says weights are not enforced today, the CPU row names the real slices and core split, and Q8 names the separate-device fallback and its cost | Hosting, S31, Risks, Q8 | Resolved in E. Revision 5 drops the rootless hub, which cannot hold the reservations (E-n2) | Not re-checked | No change. The checks stay in S31 for the dogfood hub (D28) |
+| D-m1 | minor | The S29 authorizer fires at prepare, Rust caches write statements, and the purge sweep changes rows under the digest | Execution-time signals for Rust, a trace that fails on `BEGIN IMMEDIATE`, and sweeps paused during the audit | Production read-only probe | Resolved in E | Not re-checked | No change |
+| D-m2 | minor | A full proxy buffer budget streams JSON under load | A bounded 1 s wait for budget before streaming | Upstream proxy contract | Resolved in E | Not re-checked | No change |
+| D-m3 | minor | The mark for grouped re-reads must precede the grouped query | Stated at step 2 and at the wake sources | Long-poll | Resolved in E | Not re-checked | No change |
+| D-m4 | minor | A client receiving `memory_client_event_expired` has no stated action | The entry becomes a local proposal and is never resent under a fresh id | Idempotency, Local memory and the hub | Resolved in E | Not re-checked | No change |
+| D-m5 | minor | The non-goal and D20 still say no v1 wire change during the cutover | Both name the sealed-projection exception | Goals and non-goals, D20 | Resolved in E | Not re-checked | No change |
+| D-m6 | minor | S30 fails on, or silently ignores, prerequisites outside the slices (#2187, the connectivity PR) | External prerequisites listed under the waves and in the release gate, and S30 counts them as outside the gate unless listed. #2187 has since merged | Order and lanes, Release gate, S30 | Resolved in E. Revision 5 adds the `request_denied` fix and the #2221 scan to the gate's externals (E-n9) | Not re-checked | No change |
+| D-m7 | minor | The LXC description omits swap and the root disk, and swap has drifted from the runbook | 256 MB of swap and an 8 GB root disk recorded, the runbook's 512 MB and 4 GB noted as drift for S31 to correct, and the reference allotment under option b stated as a cgroup | Hosting | Resolved in E | Not re-checked | Revision 7 drops the cgroup note, since production keeps the reference allotment, and S31 still corrects the runbook (D28) |
+| D-m8 | minor | Body, writer-queue and proxy byte budgets may overlap the 512 MB allotment | The budgets do not overlap, share one 128 MiB pool in the default profile, and S4a and S8 measure the whole cgroup, the upstream included | Admission and backpressure | Resolved in E. Its residual, Python's memory under 24 proxied 8 MiB bodies, was unmeasured, so S3c now records it | Not re-checked. Revision 6 records peak memory with the credential body share full, replacing the 24-body case (F-N1) | No change |
+| D-m9 | minor | Python commits cannot run under the Rust shim | Stated: mixed-writer power cuts rest on Python's own `FULL`, and the manual VM reset is the only check for both writers | Durability | Resolved in E | Not re-checked | No change |
+| D-m10 | minor | Backup handling on the workstation is asserted, not checked | S31 checks the backup directory's owner, that agent users cannot read it, and that the off-host job includes it | Hosting, S31 | Resolved in E for the workstation. The shipped copies sit outside the rule (E-n7), which revision 5 records as a Q8 exception | Not re-checked. Its residual E-n7 is partial in F (F-N2) | Revision 7 applies the backup checks to the dogfood hub. The agent-account read check moves to the optional hardening (D28) |
+| Codex-1 | P1, Codex review of revision 3 | The LXC rollback restores the latest scheduled backup, which rewinds ids and generations, loses acknowledged messages and can undo revocations | A planned rollback fences the workstation hub, takes a final online backup and starts the LXC hub on it, as the move does. Losing the workstation is disaster recovery, a lossy path with a one-hour RPO, counter advances, revocations re-applied, the workstation's front identity revoked, and the client effects stated | Hosting, Rollback plan, S31 | Resolved in E. Codex-2 extends the fence advance to targets first claimed after the copy | Not re-checked. Codex-2 is resolved in F | Revision 7 moves the planned rollback to S32 (D28) |
 
 ### Re-check of revision 4
 
-| ID | Severity | Finding | Revision 5 resolution | Sections changed | Revision 6 |
-|---|---|---|---|---|---|
-| E-N1 | major | D29's caps do not bound one client: #2226 keys any `Authorization` value as a credential with a cap above the 24-slot proxied pool, so junk tokens with slow bodies hold every slot, browser routes share the unauthenticated budget, and a public front would admit anyone | A request counts against a credential only after its token digest matches an active credential, and junk tokens share the unauthenticated budget. The proxied slots form three lanes, 16 for credentials at most 4 each, 4 for browser routes and 4 for the rest. `/ready` leaves the proxied pool, and native routes authenticate before reading bodies. The tailnet-only threat model is stated, and a public front is unsupported without `--trust-forwarded-for`. The S3b table records #2226's keying and its fix in progress, and S3c adds the junk-token slow-body test | D29, Admission and backpressure, Upstream proxy contract, Work in flight, S3c, Risks | Partial in F (F-N1): proxied slots are bounded, but the 64 MiB request-body budget is shared by every lane, and #2226 at `8caebd92d` reserves it before any credential check. Revision 6 splits the budget by lane, caps bodies without a validated credential at 256 KiB, states the admission order and stalls 8 MiB bodies in S3c's test |
-| E-N2 | major | The front sidecar loses its network whenever the hub container restarts, because it keeps the namespace it joined | A holder container that never restarts owns the namespace, and the hub and the front join it. Each joiner exits when the namespace has only loopback, and the front's wrapper also exits when the hub port refuses. S10 and S31 send a request through the real front after a hub restart and after a holder restart | D28, Packaging and distribution, Hosting, S10, S31, Risks | Resolved in F. Revision 6 adds the start order after a daemon restart or boot (F-m2) |
-| E-N3 | major | The isolation option b needs ignores the agent account's passwordless `sudo`, S31 never tests it, and Q8 omits the cost | Agents run under a separate account with no `docker` group, no `sudo` rule and no way to act as the operator or compose account. S31 tests each right from that account. Q8 lists the account move and what happens to agents' Docker work | D28, Hosting, S31, Risks, Q8 | Resolved in F |
-| E-N4 | major | Disaster recovery skips the roster revision nodes enforce against rollback, and leaves out mesh statements and live claims | The restore advances `model_roster_meta.revision`, appends a policy revision 2^32 higher, and ends every claim. Signers publish their mesh statements again, and the roster and claim effects are listed. S31 tests a node holding a newer last-known-good roster and one holding a newer mesh statement | Hosting, Rollback plan, S31, Risks | Resolved in F |
-| E-n1 | minor | The token-bucket window bound misses a batch that starts in the window and ends inside it | The bound is 250 ms plus 0.25 W plus the whole residence of the last batch to start in the window, with the reason and a worked case | Authority across the two files | Resolved in F, with one edge left (F-m4), which revision 6 adds |
-| E-n2 | minor | Rootless Docker cannot hold the reservations: no `cpuset` or `io` delegation, the agent exclusion on `user.slice`, lingering and the toolkit's rootless setup | The rootless hub option is dropped. The hub slice sits outside `user.slice`, and S31 reads `cpuset.cpus.effective` | Hosting, S31, Q8 | Resolved in F |
-| E-n3 | minor | Under rootful Docker a host process can reach the embedding server on its internal network | The claim is withdrawn and the exposure stated. S31 checks the hub port and the upstream on every address of the hub's namespace | Hosting, S31 | Resolved in F |
-| E-n4 | minor | #2221 skips the prompt-load scan | #2221 has since merged without it. A follow-up PR adds the scan and is part of `connectivity-pr`, so S23, S26 and the release wait for it. S23 adopts #2221's `memory_hits` field | Connectivity, Interim connectivity, Work in flight, Order and lanes, Release gate, S23 | Resolved in F |
-| E-n5 | minor | #2226 drift: its README points at S10, `wait_ms` is read only from the query string, and "queued for merge" omits changes requested | The S3b table records the README pointers, the query-only `wait_ms` and the review state. S3c reads `wait_ms` from the body and updates the README | Upstream proxy contract, Work in flight, S3c | Resolved in F at the head it cites. Revision 6 records the new head `8caebd92d` (F-N1) |
-| E-n6 | minor | S10 and S31 both build the same recipe with no edge between them | Under option b S10 builds on S31's recipe through a build edge. Under option a it builds the recipe itself, and S30 checks both cases | Hosting, S10, S30, Order and lanes | Resolved in F |
-| E-n7 | minor | The access and confidentiality rules stop at the workstation, while agents with `sudo` reach the shipped copies and the LXC rollback host | The rule is applied to that server, where it fails, so the doc records an exception, with encrypted copies or an end to agent `sudo` there as the ways out, in Q8 and S31 | Hosting, S31, Risks, Q8 | Partial in F (F-N2): the agent account's passwordless `sudo` on that server is now verified, and encrypted copies do not protect a running rollback or disaster-recovery hub. Revision 6 records the fact, recommends ending that `sudo`, and splits S31's check by route |
-| E-n8 | minor | The front's header handling is never tested, and an SSH session into the front would sit in the hub's namespace | S31 sends a forged identity header through the real front, records what the front does with a client's forwarded-for header, and checks that the front's SSH server is off. `--trust-forwarded-for` takes the last address and ships only on S31's result | Admission and backpressure, Hosting, S31 | Resolved in F |
-| E-n9 | minor | The release gate omits the `request_denied` fix that S26's tests need | It is part of `connectivity-pr` in the waves and the release gate, with the #2221 scan | Interim connectivity, Order and lanes, Release gate | Resolved in F |
-| E-n10 | minor | S1's row still says golden envelopes, and the 184 count was unchecked | S1's row and the sealed-messages section say random bytes of valid lengths, and the count cites the drive's recorded `cases_total` | Sealed messages, Work in flight, S1 | Resolved in F |
-| E-n11 | minor | Backup retention on an unnamed volume could push the hub under its disk-pressure threshold | The backup directory is on the home volume, apart from the root filesystem that holds Docker's data root. Free space on both is recorded, retention is set from measured file sizes, and the copy job keeps a free-space floor | Hosting, S31 | Resolved in F |
-| Codex-2 | P2, Codex review of revision 4 | Advancing existing `claim_fences` rows does not fence a target first claimed after the copy, because `generation()` answers 0 for a target with no row and `_advance()` starts it at 1 | A recovery floor in `hub_meta` and generation allocation `max(current, floor) + 1` for every target, with every claim in the copy ended. S7 honors the floor, and S31 tests a target first claimed on a second hub started from the copy | Hosting, S7, S31, Risks | Resolved in F. Revision 6 guards the floor with a `user_version` bump (F-m3) |
+| ID | Severity | Finding | Revision 5 resolution | Sections changed | Revision 6 | Revision 7 |
+|---|---|---|---|---|---|---|
+| E-N1 | major | D29's caps do not bound one client: #2226 keys any `Authorization` value as a credential with a cap above the 24-slot proxied pool, so junk tokens with slow bodies hold every slot, browser routes share the unauthenticated budget, and a public front would admit anyone | A request counts against a credential only after its token digest matches an active credential, and junk tokens share the unauthenticated budget. The proxied slots form three lanes, 16 for credentials at most 4 each, 4 for browser routes and 4 for the rest. `/ready` leaves the proxied pool, and native routes authenticate before reading bodies. The tailnet-only threat model is stated, and a public front is unsupported without `--trust-forwarded-for`. The S3b table records #2226's keying and its fix in progress, and S3c adds the junk-token slow-body test | D29, Admission and backpressure, Upstream proxy contract, Work in flight, S3c, Risks | Partial in F (F-N1): proxied slots are bounded, but the 64 MiB request-body budget is shared by every lane, and #2226 at `8caebd92d` reserves it before any credential check. Revision 6 splits the budget by lane, caps bodies without a validated credential at 256 KiB, states the admission order and stalls 8 MiB bodies in S3c's test | No change |
+| E-N2 | major | The front sidecar loses its network whenever the hub container restarts, because it keeps the namespace it joined | A holder container that never restarts owns the namespace, and the hub and the front join it. Each joiner exits when the namespace has only loopback, and the front's wrapper also exits when the hub port refuses. S10 and S31 send a request through the real front after a hub restart and after a holder restart | D28, Packaging and distribution, Hosting, S10, S31, Risks | Resolved in F. Revision 6 adds the start order after a daemon restart or boot (F-m2) | No change |
+| E-N3 | major | The isolation option b needs ignores the agent account's passwordless `sudo`, S31 never tests it, and Q8 omits the cost | Agents run under a separate account with no `docker` group, no `sudo` rule and no way to act as the operator or compose account. S31 tests each right from that account. Q8 lists the account move and what happens to agents' Docker work | D28, Hosting, S31, Risks, Q8 | Resolved in F | Superseded by the maintainer's decision: the separate account is optional hardening for multi-user or shared hosts, checked once from a throwaway account in S31 (D28) |
+| E-N4 | major | Disaster recovery skips the roster revision nodes enforce against rollback, and leaves out mesh statements and live claims | The restore advances `model_roster_meta.revision`, appends a policy revision 2^32 higher, and ends every claim. Signers publish their mesh statements again, and the roster and claim effects are listed. S31 tests a node holding a newer last-known-good roster and one holding a newer mesh statement | Hosting, Rollback plan, S31, Risks | Resolved in F | No change. Revision 7 applies the restore tool to every lossy restore, production's included |
+| E-n1 | minor | The token-bucket window bound misses a batch that starts in the window and ends inside it | The bound is 250 ms plus 0.25 W plus the whole residence of the last batch to start in the window, with the reason and a worked case | Authority across the two files | Resolved in F, with one edge left (F-m4), which revision 6 adds | No change |
+| E-n2 | minor | Rootless Docker cannot hold the reservations: no `cpuset` or `io` delegation, the agent exclusion on `user.slice`, lingering and the toolkit's rootless setup | The rootless hub option is dropped. The hub slice sits outside `user.slice`, and S31 reads `cpuset.cpus.effective` | Hosting, S31, Q8 | Resolved in F | No change |
+| E-n3 | minor | Under rootful Docker a host process can reach the embedding server on its internal network | The claim is withdrawn and the exposure stated. S31 checks the hub port and the upstream on every address of the hub's namespace | Hosting, S31 | Resolved in F | No change |
+| E-n4 | minor | #2221 skips the prompt-load scan | #2221 has since merged without it. A follow-up PR adds the scan and is part of `connectivity-pr`, so S23, S26 and the release wait for it. S23 adopts #2221's `memory_hits` field | Connectivity, Interim connectivity, Work in flight, Order and lanes, Release gate, S23 | Resolved in F | No change |
+| E-n5 | minor | #2226 drift: its README points at S10, `wait_ms` is read only from the query string, and "queued for merge" omits changes requested | The S3b table records the README pointers, the query-only `wait_ms` and the review state. S3c reads `wait_ms` from the body and updates the README | Upstream proxy contract, Work in flight, S3c | Resolved in F at the head it cites. Revision 6 records the new head `8caebd92d` (F-N1) | No change |
+| E-n6 | minor | S10 and S31 both build the same recipe with no edge between them | Under option b S10 builds on S31's recipe through a build edge. Under option a it builds the recipe itself, and S30 checks both cases | Hosting, S10, S30, Order and lanes | Resolved in F | Revision 7 makes S31 unconditional, so S10's edge always holds |
+| E-n7 | minor | The access and confidentiality rules stop at the workstation, while agents with `sudo` reach the shipped copies and the LXC rollback host | The rule is applied to that server, where it fails, so the doc records an exception, with encrypted copies or an end to agent `sudo` there as the ways out, in Q8 and S31 | Hosting, S31, Risks, Q8 | Partial in F (F-N2): the agent account's passwordless `sudo` on that server is now verified, and encrypted copies do not protect a running rollback or disaster-recovery hub. Revision 6 records the fact, recommends ending that `sudo`, and splits S31's check by route | Revision 7 moves the shipped copies to S32. The LXC host exception is a known risk owned by an operations cleanup outside this design (D28) |
+| E-n8 | minor | The front's header handling is never tested, and an SSH session into the front would sit in the hub's namespace | S31 sends a forged identity header through the real front, records what the front does with a client's forwarded-for header, and checks that the front's SSH server is off. `--trust-forwarded-for` takes the last address and ships only on S31's result | Admission and backpressure, Hosting, S31 | Resolved in F | No change |
+| E-n9 | minor | The release gate omits the `request_denied` fix that S26's tests need | It is part of `connectivity-pr` in the waves and the release gate, with the #2221 scan | Interim connectivity, Order and lanes, Release gate | Resolved in F | No change |
+| E-n10 | minor | S1's row still says golden envelopes, and the 184 count was unchecked | S1's row and the sealed-messages section say random bytes of valid lengths, and the count cites the drive's recorded `cases_total` | Sealed messages, Work in flight, S1 | Resolved in F | No change |
+| E-n11 | minor | Backup retention on an unnamed volume could push the hub under its disk-pressure threshold | The backup directory is on the home volume, apart from the root filesystem that holds Docker's data root. Free space on both is recorded, retention is set from measured file sizes, and the copy job keeps a free-space floor | Hosting, S31 | Resolved in F | No change |
+| Codex-2 | P2, Codex review of revision 4 | Advancing existing `claim_fences` rows does not fence a target first claimed after the copy, because `generation()` answers 0 for a target with no row and `_advance()` starts it at 1 | A recovery floor in `hub_meta` and generation allocation `max(current, floor) + 1` for every target, with every claim in the copy ended. S7 honors the floor, and S31 tests a target first claimed on a second hub started from the copy | Hosting, S7, S31, Risks | Resolved in F. Revision 6 guards the floor with a `user_version` bump (F-m3) | No change. Revision 7 applies the floor to every lossy restore |
 
 ### Re-check of revision 5
 
-| ID | Severity | Finding | Revision 6 resolution | Sections changed |
-|---|---|---|---|---|
-| F-N1 | major | The 64 MiB request-body budget is shared by every lane, so 4 unauthenticated and 4 browser requests that each declare 8 MiB and stall hold all of it, and every body-carrying request under a valid token waits 1 s and gets 503. #2226 at `8caebd92d` reserves the budget before any credential or lane check, and S3c's junk-token test used tiny bodies | Validated credentials keep 61 MiB, at most 16 MiB each, and the unauthenticated and browser shares are 2 MiB and 1 MiB. A body without a validated credential is buffered only up to 256 KiB, and a larger one is forwarded without its bytes, because Python answers such requests from their headers. The admission order is stated step by step, the S3b table records #2226's order and what S3c changes, and S3c's test stalls 8 MiB declared bodies while a valid claim is granted within 2.5 s | Admission and backpressure, Upstream proxy contract, S3c |
-| F-N2 | major | Encrypting the shipped copies does not remove the LXC host exception, because a rollback or disaster-recovery hub on that server is reachable by agents with root, S31 tests the wrong condition, and the identity-flag example names a dedicated LXC container | The agent account's passwordless `sudo` on that server is recorded as verified on 2026-11-03. The route list says encryption protects stored copies only, today's production hub has the same exposure, and Q8 recommends ending agent `sudo` there now. S31's check is split by route, and the identity-flag example holds only where no agent account has root on the container's host | Authentication and tokens, Hosting, S31, Risks, Q8 |
-| F-m1 | minor | The credential lookup's failure path and statement reset are unstated | A failed or timed-out lookup answers `503 hub busy` with reason `credential-lookup` and does not fall into the unauthenticated lane. The statement is reset after its one step, so no read transaction pins the WAL. S3c tests a lookup held past 2 s | Admission and backpressure, Upstream proxy contract, S3c |
-| F-m2 | minor | After a daemon restart or host boot, a joiner started before the holder fails to start, and one reboot can pass by luck | A boot unit after the Docker service runs `docker compose up -d`, which starts the holder first, and runs again after every daemon restart. S31 repeats the host reboot and the daemon restart at least 3 times each | Hosting, S31 |
-| F-m3 | minor | The recovery floor is data, so `user_version` does not change and an older Python ignores it | S31 bumps `user_version` with the floor, so `_refuse_newer_schema` makes an older Python refuse the file. S31's disaster-recovery check confirms it | Hosting, S31 |
-| F-m4 | minor | The window bound has no last batch when one batch that started earlier covers the whole window | The bound counts the batch running at the window's start when none starts in it, which allows in-window residence of W | Authority across the two files |
+| ID | Severity | Finding | Revision 6 resolution | Sections changed | Revision 7 |
+|---|---|---|---|---|---|
+| F-N1 | major | The 64 MiB request-body budget is shared by every lane, so 4 unauthenticated and 4 browser requests that each declare 8 MiB and stall hold all of it, and every body-carrying request under a valid token waits 1 s and gets 503. #2226 at `8caebd92d` reserves the budget before any credential or lane check, and S3c's junk-token test used tiny bodies | Validated credentials keep 61 MiB, at most 16 MiB each, and the unauthenticated and browser shares are 2 MiB and 1 MiB. A body without a validated credential is buffered only up to 256 KiB, and a larger one is forwarded without its bytes, because Python answers such requests from their headers. The admission order is stated step by step, the S3b table records #2226's order and what S3c changes, and S3c's test stalls 8 MiB declared bodies while a valid claim is granted within 2.5 s | Admission and backpressure, Upstream proxy contract, S3c | No change |
+| F-N2 | major | Encrypting the shipped copies does not remove the LXC host exception, because a rollback or disaster-recovery hub on that server is reachable by agents with root, S31 tests the wrong condition, and the identity-flag example names a dedicated LXC container | The agent account's passwordless `sudo` on that server is recorded as verified on 2026-11-03. The route list says encryption protects stored copies only, today's production hub has the same exposure, and Q8 recommends ending agent `sudo` there now. S31's check is split by route, and the identity-flag example holds only where no agent account has root on the container's host | Authentication and tokens, Hosting, S31, Risks, Q8 | Superseded in part by the maintainer's decision: ending agent `sudo` on the LXC hub host is withdrawn from this design and owned by an operations cleanup, and the encrypted-copy checks move to S32, where they apply only while that `sudo` remains (D28) |
+| F-m1 | minor | The credential lookup's failure path and statement reset are unstated | A failed or timed-out lookup answers `503 hub busy` with reason `credential-lookup` and does not fall into the unauthenticated lane. The statement is reset after its one step, so no read transaction pins the WAL. S3c tests a lookup held past 2 s | Admission and backpressure, Upstream proxy contract, S3c | No change |
+| F-m2 | minor | After a daemon restart or host boot, a joiner started before the holder fails to start, and one reboot can pass by luck | A boot unit after the Docker service runs `docker compose up -d`, which starts the holder first, and runs again after every daemon restart. S31 repeats the host reboot and the daemon restart at least 3 times each | Hosting, S31 | No change. The boot unit is the dogfood hub's (D28) |
+| F-m3 | minor | The recovery floor is data, so `user_version` does not change and an older Python ignores it | S31 bumps `user_version` with the floor, so `_refuse_newer_schema` makes an older Python refuse the file. S31's disaster-recovery check confirms it | Hosting, S31 | No change |
+| F-m4 | minor | The window bound has no last batch when one batch that started earlier covers the whole window | The bound counts the batch running at the window's start when none starts in it, which allows in-window residence of W | Authority across the two files | No change |
+
+### Maintainer decisions in revision 7
+
+| ID | Decision | What revision 7 changed | Sections changed |
+|---|---|---|---|
+| M-1 | Hosting, 2026-11-03 (D28, Q8 closed): production stays on the LXC hub host, the embedder runs on the GPU workstation and production calls it over the tailnet, a dogfood hub on the workstation runs the Compose recipe and is not production, a production move is a separate gated step, and the separate agent account is optional hardening | D28 Decided with the `fdatasync` evidence. Hosting rewritten: the remote-endpoint contract, the dogfood hub, a general restore section, the gated move and the everyday threat model. S31 becomes the dogfood hub, S32 is new and outside the gate, the LXC host `sudo` exposure is a known risk owned by an operations cleanup outside this design, and the recommendation to end it here is withdrawn | Introduction, Decisions, Authentication and tokens, Packaging, Cutover, Authority across the two files, Hosting, Work in flight, S6, S10, S16b, S30, S31, S32, Order and lanes, Release gate, Risks, Q8, Rollback plan, Evidence |
+| M-2 | Retrieval modes, 2026-11-03 (D30): `hybrid` is the install default where setup finds an embedder whose model passed R1, BM25 mode is first-class with its own acceptance and status, one setting removes the embedder, the chosen mode stays apart from the runtime fallback, serverless edge hosting of the hub is out of scope, and a remote embedding service on any provider is supported once its model passes R1 | New Retrieval modes section with setup, status, switching and scope. The remote backend calls an endpoint under one contract, with the pull worker kept for unreachable hosts. S15 gains BM25 mode, status, switch and contract acceptance and an edge on S18. S16a, S16b and S31 record the setup and model rules. The release gate lists both modes | Goals and non-goals, Decisions, Retrieval pipeline, Eval gates, Embedder interface and backends, Retrieval modes, Embedder benchmark and default, Hosting, S15, S16a, S16b, S18, S31, Release gate, Risks, Rollback plan |
