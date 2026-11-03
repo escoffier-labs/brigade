@@ -12,6 +12,13 @@ import pytest
 from tests._coverage_env import isolated_coverage_env
 from tests._coverage_sidecar_guard import QUARANTINE_PREFIX, quarantine_unreadable_sidecars
 
+# The crash needs a file the owner cannot write: root ignores the mode, and
+# Windows has no os.geteuid, so evaluate it only on POSIX.
+requires_unprivileged_posix = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0,
+    reason="needs a non-root POSIX user so SQLite honors the read-only mode that reproduces the crash",
+)
+
 ROOT = Path(__file__).resolve().parents[1]
 INNER_TIMEOUT_SECONDS = 120
 
@@ -121,14 +128,14 @@ def _inner_session(tmp_path: Path, *, guard: bool) -> subprocess.CompletedProces
     )
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only mode that reproduces the crash")
+@requires_unprivileged_posix
 def test_unreadable_sidecar_aborts_the_combine_without_the_guard(tmp_path):
     result = _inner_session(tmp_path, guard=False)
     assert result.returncode == 3, result.stdout + result.stderr
     assert "attempt to write a readonly database" in result.stdout + result.stderr
 
 
-@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores the read-only mode that reproduces the crash")
+@requires_unprivileged_posix
 def test_guard_keeps_the_session_alive_and_names_the_file(tmp_path):
     result = _inner_session(tmp_path, guard=True)
     output = result.stdout + result.stderr
