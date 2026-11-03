@@ -26,37 +26,33 @@ use crate::store::{
 /// Each binary takes its identity from the basename of `argv[0]`, with `.exe` stripped. A legacy
 /// name selects the legacy identity; any other name, including a renamed copy, selects the
 /// canonical one. Identity sets the program name for clap (version banner, usage and help) and the
-/// MCP `serverInfo.name`.
+/// MCP `serverInfo.name`. A legacy entry point writes nothing extra on stderr: Brigade still runs
+/// it until R5 installs the canonical executables, so the deprecation line lands in R5
+/// (docs/phase-engine-rename.md).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
     /// Program name for the version banner, usage and help text.
     pub program: &'static str,
     /// MCP `serverInfo.name`.
     pub server_name: &'static str,
-    /// Canonical program that replaces this entry point, for legacy identities.
-    pub replacement: Option<&'static str>,
 }
 
 pub const CLI_IDENTITY: Identity = Identity {
     program: "brigade-code-graph",
     server_name: "brigade-code-graph",
-    replacement: None,
 };
 pub const MCP_IDENTITY: Identity = Identity {
     program: "brigade-code-graph-mcp",
     server_name: "brigade-code-graph",
-    replacement: None,
 };
 // Legacy entry points, accepted for the rename window (v0.31, v0.32).
 const LEGACY_CLI_IDENTITY: Identity = Identity {
     program: "graphtrail",
     server_name: "graphtrail",
-    replacement: Some(CLI_IDENTITY.program),
 };
 const LEGACY_MCP_IDENTITY: Identity = Identity {
     program: "graphtrail-mcp",
     server_name: "graphtrail",
-    replacement: Some(MCP_IDENTITY.program),
 };
 
 impl Identity {
@@ -83,24 +79,6 @@ impl Identity {
             canonical
         }
     }
-
-    /// The one-line stderr notice a legacy entry point prints, or `None` for canonical ones.
-    pub fn deprecation_notice(&self) -> Option<String> {
-        self.replacement.map(|replacement| {
-            format!(
-                "warning: {} is deprecated and will be removed in {}; use {replacement}",
-                self.program,
-                crate::store::env::LEGACY_REMOVAL_RELEASE
-            )
-        })
-    }
-
-    /// Print the deprecation notice on stderr for a legacy entry point. Stdout stays clean.
-    pub fn warn_if_legacy(&self) {
-        if let Some(notice) = self.deprecation_notice() {
-            eprintln!("{notice}");
-        }
-    }
 }
 
 /// Parse the process arguments under the identity of the invoked entry point.
@@ -109,7 +87,6 @@ pub fn parse_invoked() -> Cli {
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let identity = Identity::cli(args.first().map(std::ffi::OsString::as_os_str));
-    identity.warn_if_legacy();
     let command = Cli::command()
         .name(identity.program)
         .bin_name(identity.program)

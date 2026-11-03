@@ -21,7 +21,6 @@ use graphtrail::store::db_path;
 
 pub(crate) fn main() -> Result<()> {
     let identity = Identity::mcp(std::env::args_os().next().as_deref());
-    identity.warn_if_legacy();
     let default_db = db_path(explicit_db(), Path::new(""))?;
     let stdin = io::stdin();
     let stdout = io::stdout();

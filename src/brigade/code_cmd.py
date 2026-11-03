@@ -35,8 +35,8 @@ _LONG_OPERATION_TIMEOUT_ENVS = {
 # The engine's usage text names its own binary (canonical or legacy entry point);
 # the branded surface should point users back at the command they actually typed.
 _ENGINE_USAGE_LINE = re.compile(r"(?m)^(\s*)Usage: (?:brigade-code-graph|graphtrail)(?![\w-])")
-# A legacy entry point announces its own deprecation on stderr. The user typed
-# `brigade code`, not the engine's name, so the notice is not theirs to act on.
+# From R5 on, a legacy entry point announces its own deprecation on stderr. The user
+# typed `brigade code`, not the engine's name, so the notice is not theirs to act on.
 _ENGINE_DEPRECATION_LINE = re.compile(
     r"(?m)^warning: \S+ is deprecated and will be removed in v\S+; use brigade-code-graph\n"
 )

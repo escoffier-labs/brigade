@@ -1199,16 +1199,12 @@ fn canonical_and_legacy_mcp_process_contracts() {
     let legacy_env_warning = format!(
         "warning: {LEGACY_DB_ENV} is deprecated and will be removed in v0.33.0; set BRIGADE_CODE_GRAPH_DB instead\n"
     );
-    for (binary, server_name, notice) in [
-        (
-            env!("CARGO_BIN_EXE_graphtrail-mcp"),
-            "graphtrail",
-            "warning: graphtrail-mcp is deprecated and will be removed in v0.33.0; use brigade-code-graph-mcp\n",
-        ),
+    // Neither entry point prints a deprecation line until R5; only the legacy variable warns.
+    for (binary, server_name) in [
+        (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
         (
             env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
             "brigade-code-graph",
-            "",
         ),
     ] {
         for (args, env_var, env_db) in [
@@ -1251,9 +1247,9 @@ fn canonical_and_legacy_mcp_process_contracts() {
             // An explicit --db wins, so the legacy variable is never read and never warns.
             let explicit = args.first().is_some_and(|arg| arg.starts_with("--db"));
             let expected_stderr = if env_var == LEGACY_DB_ENV && !explicit {
-                format!("{notice}{legacy_env_warning}")
+                legacy_env_warning.clone()
             } else {
-                notice.to_string()
+                String::new()
             };
             let mut child = command
                 .stdin(Stdio::piped())

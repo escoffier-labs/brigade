@@ -21,9 +21,6 @@ fn legacy_engine() -> &'static str {
     env!("CARGO_BIN_EXE_graphtrail")
 }
 
-const LEGACY_CLI_NOTICE: &str =
-    "warning: graphtrail is deprecated and will be removed in v0.33.0; use brigade-code-graph\n";
-
 fn index_dirs_absent(root: &Path) -> bool {
     !root.join(".graphtrail").exists() && !root.join(".brigade").exists()
 }
@@ -753,9 +750,11 @@ fn context_help_lists_join_layer_flags() {
 fn canonical_and_legacy_cli_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
-    for (binary, name, notice) in [
-        (legacy_engine(), "graphtrail", LEGACY_CLI_NOTICE),
-        (engine(), "brigade-code-graph", ""),
+    // Neither entry point writes extra stderr: the legacy deprecation line lands in R5
+    // (docs/phase-engine-rename.md, "Entry point identity").
+    for (binary, name) in [
+        (legacy_engine(), "graphtrail"),
+        (engine(), "brigade-code-graph"),
     ] {
         let invoke = |args: &[&str]| {
             Command::new(binary)
@@ -771,7 +770,7 @@ fn canonical_and_legacy_cli_contracts() {
         assert!(text.contains("--db <PATH>"), "{text}");
         assert!(text.contains("sync"), "{text}");
         assert!(text.contains(&format!("Usage: {name} ")), "{text}");
-        assert_eq!(String::from_utf8_lossy(&help.stderr), notice, "{help:?}");
+        assert!(help.stderr.is_empty(), "{help:?}");
 
         let version = invoke(&["--version"]);
         assert_eq!(version.status.code(), Some(0));
@@ -779,7 +778,7 @@ fn canonical_and_legacy_cli_contracts() {
             String::from_utf8_lossy(&version.stdout),
             format!("{name} {}\n", env!("CARGO_PKG_VERSION"))
         );
-        assert_eq!(String::from_utf8_lossy(&version.stderr), notice);
+        assert!(version.stderr.is_empty(), "{version:?}");
 
         for args in [
             vec!["--unknown-option"],
@@ -790,7 +789,7 @@ fn canonical_and_legacy_cli_contracts() {
             assert_eq!(error.status.code(), Some(2), "{error:?}");
             assert!(error.stdout.is_empty(), "{error:?}");
             let stderr = String::from_utf8_lossy(&error.stderr);
-            assert!(stderr.starts_with(notice), "{error:?}");
+            assert!(stderr.starts_with("error:"), "{error:?}");
             assert!(stderr.contains("error:"), "{error:?}");
         }
         let stats = invoke(&["--db", db.to_str().unwrap(), "stats", "--json"]);
@@ -811,9 +810,9 @@ fn canonical_and_legacy_cli_contracts() {
 fn argv0_selects_the_entry_point_identity() {
     use std::os::unix::process::CommandExt;
 
-    for (argv0, banner, notice) in [
-        ("/opt/tools/code-graph-copy", "brigade-code-graph", ""),
-        ("/opt/tools/GraphTrail.EXE", "graphtrail", LEGACY_CLI_NOTICE),
+    for (argv0, banner) in [
+        ("/opt/tools/code-graph-copy", "brigade-code-graph"),
+        ("/opt/tools/GraphTrail.EXE", "graphtrail"),
     ] {
         let output = Command::new(legacy_engine())
             .arg0(argv0)
@@ -825,7 +824,7 @@ fn argv0_selects_the_entry_point_identity() {
             String::from_utf8_lossy(&output.stdout),
             format!("{banner} {}\n", env!("CARGO_PKG_VERSION"))
         );
-        assert_eq!(String::from_utf8_lossy(&output.stderr), notice);
+        assert!(output.stderr.is_empty(), "{output:?}");
     }
 }
 
