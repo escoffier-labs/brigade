@@ -731,8 +731,9 @@ def test_unreadable_user_record_keeps_rails_on(tmp_path: Path, content: str) -> 
 
 def test_user_record_inside_the_target_is_ignored(tmp_path: Path, monkeypatch) -> None:
     repo = _wired(tmp_path)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(repo / "config-home"))
-    set_home(monkeypatch, repo)
+    # The config root is platform-specific (XDG on Linux, LOCALAPPDATA on Windows),
+    # so point it at the repository directly.
+    monkeypatch.setattr(work_mode.component_paths, "config_root", lambda: repo / "config-home")
     record = work_mode.rails_record_path()
     assert record is not None
     record.parent.mkdir(parents=True)
@@ -761,7 +762,7 @@ def test_user_record_inside_an_enclosing_checkout_is_ignored(tmp_path: Path, mon
     settings.mkdir()
     config_home = tmp_path / "config-home"
     _symlink(config_home, settings, directory=True)
-    monkeypatch.setenv("XDG_CONFIG_HOME", str(config_home))
+    monkeypatch.setattr(work_mode.component_paths, "config_root", lambda: config_home)
     record = work_mode.rails_record_path()
     assert record is not None
     record.parent.mkdir(parents=True)
