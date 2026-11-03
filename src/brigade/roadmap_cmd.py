@@ -51,7 +51,10 @@ COMMAND_ALIASES: tuple[tuple[str, str], ...] = (
     ("brigade hermes-fragments", "brigade harness fragments"),
     ("brigade import", "brigade work import"),
 )
-COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = (("brigade run-cloud", "brigade run cloud"),)
+COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = (
+    ("brigade run-cloud", "brigade run cloud"),
+    ("brigade receipts export miseledger", "brigade receipts export evidence"),
+)
 ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
 ROADMAP_VERSION_HEADLINE_RE = re.compile(r"\*\*v(\d+)\.(\d+)\.(?:x|\d+) on main\*\*")
 PROJECT_VERSION_RE = re.compile(r"^v?(\d+)\.(\d+)")

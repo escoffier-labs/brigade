@@ -118,8 +118,8 @@ old spelling stays forever and is pinned by a test.
 | `installed.json` keys | legacy ids | canonical ids | Same as manifest keys | v0.31, v0.32 | v0.33 (legacy state treated as absent) |
 | Release assets | `graphtrail-<platform>` and others | `brigade-code-graph-<platform>` and others | Dual-publish (already built) | v0.31, v0.32 | v0.33 stops building them |
 | Published releases up to v0.32 | asset names, checksums, attestations | unchanged | Frozen (never re-published or re-signed) | forever | never |
-| Binary env overrides | `GRAPHTRAIL_BIN`, `GRAPHTRAIL_MCP_BIN`, `MISELEDGER_BIN` | `BRIGADE_CODE_GRAPH_BIN`, `BRIGADE_CODE_GRAPH_MCP_BIN`, `BRIGADE_EVIDENCE_BIN` | Dual-read, warning on legacy use | v0.31, v0.32 | v0.33 |
-| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read, warning on legacy use | v0.31, v0.32 | v0.33 |
+| Binary env overrides | `GRAPHTRAIL_BIN`, `GRAPHTRAIL_MCP_BIN`, `MISELEDGER_BIN` | `BRIGADE_CODE_GRAPH_BIN`, `BRIGADE_CODE_GRAPH_MCP_BIN`, `BRIGADE_EVIDENCE_BIN` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
+| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
 | Legacy install fallbacks | `.cargo/bin/graphtrail*`, `.local/bin/miseledger` under the home directory | none | Dual-accept (resolver fallback) | v0.31, v0.32 | v0.33 |
 | Code graph index | `<repo>/.graphtrail/graphtrail.db` | `<repo>/.brigade/code-graph/code-graph.db` | Legacy read in place | v0.31, v0.32 | v0.33 (index is rebuildable) |
 | Evidence data, config, cache dirs | `<data>/miseledger/`, `<config>/miseledger/`, `<cache>/miseledger/` | `<data>/brigade/evidence/`, `<config>/brigade/evidence/`, `<cache>/brigade/evidence/` | Legacy read in place | v0.31, v0.32, then see open question 1 | gated on data migration |
@@ -135,7 +135,7 @@ old spelling stays forever and is pinned by a test.
 | Code graph output sentinels | `__graphtrail_limit_truncated__`, `__graphtrail_truncated_<dir>__` | unchanged | Frozen (machine-matched ids in query output) | forever | never |
 | DOT export graph name | `digraph graphtrail` | `digraph code_graph` | Migrate (cosmetic label) | none | v0.31 |
 | CLI flags and subcommands | `receipts export miseledger`, `work import --from-miseledger`, `work verify run --graphtrail-timeout` | `receipts export evidence`, `--from-evidence`, `--code-graph-timeout` | Dual-accept (hidden alias, warning) | v0.31, v0.32 | v0.33 |
-| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read, warning on legacy use | v0.31, v0.32 | v0.33 |
+| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
 | Station ids and manifests | station `graphtrail`, `miseledger` in `station.json` and `managed-snapshot.json` | `brigade-code-graph`, `brigade-evidence` | Dual-accept (legacy id resolves as an alias) | v0.31, v0.32 | v0.33 |
 | Rust package and crate | package and lib `graphtrail` | `brigade-code-graph` / `brigade_code_graph` | Migrate (in-repo only) | none | v0.31 |
 | Go module path | `github.com/escoffier-labs/miseledger` | `github.com/escoffier-labs/brigade/engines/evidence-ledger` | Migrate (all packages are under `internal/`) | none | v0.31 |
@@ -270,6 +270,13 @@ redirected native stderr becomes a terminating `NativeCommandError`. So the
 deprecation line ships in R5, not in the engine identity slices. Until then
 the legacy entry point's stderr stays byte-identical to v0.30.
 
+The same rule covers every other legacy name. The legacy environment
+variables in the class table (both engine variables and the `*_BIN`
+overrides), the legacy config key and the hidden CLI aliases print nothing on stderr until
+R5. R2 shipped a stderr warning for the two engine variables, and R4 removed
+it. Conflicting old and new values are still refused. Until R5, `brigade
+doctor` reports legacy use instead.
+
 ## Slices
 
 Dependency order:
@@ -342,7 +349,8 @@ waits for R2, R3 and R4. R6 is last.
 - Behavior: entry point identity sets clap's name at runtime, along with the
   banner and `serverInfo.name`. `BRIGADE_CODE_GRAPH_DB` and
   `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` are read first. The legacy variables
-  still work with a stderr warning, and conflicting values are refused.
+  still work, and conflicting values are refused. R2 printed a stderr warning
+  for them. R4 removed it, and it returns in R5 with the entry point notice.
   Storage defaults follow the resolution rule. The walker skips both
   `.graphtrail/` and `.brigade/code-graph/`. The ignore check covers the new
   directory. Tool descriptions name the new default path. The DOT graph name
@@ -455,12 +463,38 @@ waits for R2, R3 and R4. R6 is last.
   update (for example `mcp__graphtrail__*` to `mcp__brigade-code-graph__*`).
   A new `--rename-legacy-servers` flag does the key rename now. Entries the user
   wrote themselves are never renamed.
-- Warnings: one stderr line per process per legacy name, at INFO level in
-  v0.31 and WARN level in v0.32 doctor output.
+- Warnings: no stderr line in R4, for the reason given under
+  [Entry point identity](#entry-point-identity). The one stderr line per
+  process per legacy name moves to R5. Doctor reports legacy use now: INFO for
+  a legacy environment variable or config key in v0.31 (WARN in v0.32), WARN
+  for conflicting old and new variables, and WARN with both paths and their
+  modification times when both index or both evidence layouts exist.
+- As built:
+  - `brigade mcp sync` projects only the catalog in `.brigade/mcp.json`, which
+    Brigade writes but does not seed with engine servers. A catalog entry
+    under a legacy engine key keeps that key, and the sync output carries the
+    rename note. With `--rename-legacy-servers --write`, the catalog key is
+    renamed in the same projection transaction as the provider writes, and the
+    pristine provider entries Brigade owns under the old key are removed.
+    Edited or unowned provider entries are left alone. The flag refuses
+    `--name`. The catalog entry's command is not rewritten: the catalog is the
+    operator's text, and before R5 the canonical executables are not installed.
+  - The Cursor user installer writes canonical keys for new entries and keeps
+    the legacy keys it already owns, with commands resolved canonical name
+    first. Its pre-setup fallback stays the bare legacy name until R5. It
+    prints the rename notice on stdout, never stderr.
+  - Station ids in `managed.py`, both engine `station.json` files and the
+    snapshot are canonical. The snapshot records for the two engines are
+    copied from the in-tree `station.json` files with `kind: in-tree`
+    provenance. `managed.resolve` accepts the legacy ids through
+    `COMPONENT_FAMILIES`.
+  - The legacy `receipts export` spelling is listed as deprecated in
+    `docs/command-inventory.md`.
 - Tests:
   - Every switched call site runs with legacy-only, canonical-only and both
     layouts, parametrized from the shared fixture.
-  - Legacy CLI aliases work, stay out of `--help`, and warn.
+  - Legacy CLI aliases work, stay out of `--help`, and print nothing on
+    stderr until R5.
   - JSON outputs carry both keys with equal values.
   - Station lookup works by either id.
   - MCP sync keeps owned legacy keys, renames them with the flag, and leaves
@@ -506,7 +540,12 @@ waits for R2, R3 and R4. R6 is last.
 - Deprecation line: this slice turns on the legacy entry point's one stderr
   line, because it is the first slice where Brigade itself no longer invokes
   the legacy name. The Windows acceptance helper already treats stderr as
-  diagnostics and fails only on the exit code.
+  diagnostics and fails only on the exit code. The stderr notices for legacy
+  environment variables, the legacy config key and the legacy CLI aliases
+  land in the same slice. Before turning them on, move the in-repo callers
+  that still use legacy spellings, for example the legacy `receipts export`
+  spelling in `scripts/windows-native-acceptance.ps1`, or the notices reach
+  the same PowerShell 5.1 callers.
 - Tests:
   - A manifest with canonical keys round-trips.
   - A legacy-keyed v0.30 manifest and state still load, and a mixed-key

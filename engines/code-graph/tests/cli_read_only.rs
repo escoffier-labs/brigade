@@ -948,7 +948,7 @@ fn canonical_index_wins_when_both_exist() {
 }
 
 #[test]
-fn database_variables_dual_read_with_warning_and_refuse_conflicts() {
+fn database_variables_dual_read_silently_and_refuse_conflicts() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
     let other = tempfile::tempdir().unwrap();
@@ -970,12 +970,10 @@ fn database_variables_dual_read_with_warning_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
+    // The legacy variable works and prints nothing until R5 (docs/phase-engine-rename.md).
     let legacy = stats(&[("GRAPHTRAIL_DB", db)]);
     assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr),
-        "warning: GRAPHTRAIL_DB is deprecated and will be removed in v0.33.0; set BRIGADE_CODE_GRAPH_DB instead\n"
-    );
+    assert!(legacy.stderr.is_empty(), "{legacy:?}");
     let value: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
     assert_eq!(value["symbols"], 2, "{value}");
 
@@ -994,7 +992,7 @@ fn database_variables_dual_read_with_warning_and_refuse_conflicts() {
 }
 
 #[test]
-fn unsafe_root_variables_dual_read_with_warning_and_refuse_conflicts() {
+fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
     let home = tempfile::tempdir().unwrap();
     write_app(home.path());
     let sync = |vars: &[(&str, &str)]| {
@@ -1025,12 +1023,10 @@ fn unsafe_root_variables_dual_read_with_warning_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
+    // The legacy variable works and prints nothing until R5 (docs/phase-engine-rename.md).
     let legacy = sync(&[("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "1")]);
     assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr),
-        "warning: GRAPHTRAIL_ALLOW_UNSAFE_ROOT is deprecated and will be removed in v0.33.0; set BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT instead\n"
-    );
+    assert!(legacy.stderr.is_empty(), "{legacy:?}");
 
     let conflict = sync(&[
         ("BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT", "1"),

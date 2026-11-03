@@ -1196,10 +1196,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "invalid json\n"
     );
     const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
-    let legacy_env_warning = format!(
-        "warning: {LEGACY_DB_ENV} is deprecated and will be removed in v0.33.0; set BRIGADE_CODE_GRAPH_DB instead\n"
-    );
-    // Neither entry point prints a deprecation line until R5; only the legacy variable warns.
+    // Neither entry point nor the legacy variable prints a deprecation line until R5.
     for (binary, server_name) in [
         (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
         (
@@ -1244,13 +1241,6 @@ fn canonical_and_legacy_mcp_process_contracts() {
             if let Some(path) = env_db {
                 command.env(env_var, path);
             }
-            // An explicit --db wins, so the legacy variable is never read and never warns.
-            let explicit = args.first().is_some_and(|arg| arg.starts_with("--db"));
-            let expected_stderr = if env_var == LEGACY_DB_ENV && !explicit {
-                legacy_env_warning.clone()
-            } else {
-                String::new()
-            };
             let mut child = command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -1265,11 +1255,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
                 .unwrap();
             let output = child.wait_with_output().unwrap();
             assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stderr),
-                expected_stderr,
-                "{output:?}"
-            );
+            assert!(output.stderr.is_empty(), "{output:?}");
             let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
                 .unwrap()
                 .lines()

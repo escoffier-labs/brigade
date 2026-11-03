@@ -13,7 +13,7 @@ import pytest
 
 from brigade import cli
 from brigade import fleet_client
-from brigade import graphtrail_delta
+from brigade import code_graph_delta
 from brigade import localio
 from brigade import receipts_cmd
 from brigade import work_cmd
@@ -1824,7 +1824,7 @@ def _derace_graphtrail_sync_timing(monkeypatch, graphtrail_bin: Path, *, time_ou
     startup alone can exceed it), so sync invocations of the fake binary run
     with no timeout. The ``time_out_sync_call``-th sync instead raises
     ``TimeoutExpired`` without starting a process, driving the real timeout
-    handling in ``graphtrail_delta._run_graphtrail`` deterministically.
+    handling in ``code_graph_delta._run_graphtrail`` deterministically.
     """
     real_run = subprocess.run
     sync_calls = {"count": 0}
@@ -2006,7 +2006,7 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
     assert sidecar["edge_churn"] == 1
     assert sidecar["snapshot_deleted"] is True
     assert not Path(sidecar["before_snapshot_path"]).exists()
-    assert not (run_dir / "graphtrail-after.db").exists()
+    assert not (run_dir / "code-graph-after.db").exists()
     assert sidecar["attestations"]["before_snapshot_sha256"]
     after_sha = sidecar["attestations"]["after_snapshot_sha256"]
     assert isinstance(after_sha, str) and len(after_sha) == 64
@@ -2051,7 +2051,7 @@ def test_work_verify_compact_delta_emits_exportable_code_references(tmp_path, ca
 
 
 def test_code_reference_compaction_sorts_valid_nodes_and_counts_malformed_candidates_out():
-    compact = graphtrail_delta._compact(
+    compact = code_graph_delta._compact(
         {
             "status": "ok",
             "ok": True,
@@ -2135,7 +2135,7 @@ def test_code_reference_compaction_counts_only_valid_candidates_before_the_cap()
         for number in range(1, 22)
     ]
 
-    compact = graphtrail_delta._compact({"status": "ok", "ok": True, "added_nodes": list(reversed(valid_nodes))})
+    compact = code_graph_delta._compact({"status": "ok", "ok": True, "added_nodes": list(reversed(valid_nodes))})
 
     assert len(compact["code_reference_nodes"]) == 20
     assert compact["code_reference_nodes_total"] == 21
@@ -2178,7 +2178,7 @@ def test_code_reference_compaction_trusts_only_exact_declared_candidate_metadata
     if malformed:
         nodes.append({"change_kind": "added", "kind": "function", "qualified_name": "", "file_path": "pkg/mod.py"})
 
-    compact = graphtrail_delta._compact(
+    compact = code_graph_delta._compact(
         {
             "status": "ok",
             "ok": True,
@@ -2226,8 +2226,8 @@ def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(t
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
-    real_capture_before = graphtrail_delta.capture_before
-    real_capture_after = graphtrail_delta.capture_after_and_diff
+    real_capture_before = code_graph_delta.capture_before
+    real_capture_after = code_graph_delta.capture_after_and_diff
 
     def spy_before(target, run_dir, **kwargs):
         recorded.append(("before", kwargs.get("timeout")))
@@ -2237,8 +2237,8 @@ def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(t
         recorded.append(("after", kwargs.get("timeout")))
         return real_capture_after(target, run_dir, before, **kwargs)
 
-    monkeypatch.setattr(graphtrail_delta, "capture_before", spy_before)
-    monkeypatch.setattr(graphtrail_delta, "capture_after_and_diff", spy_after)
+    monkeypatch.setattr(code_graph_delta, "capture_before", spy_before)
+    monkeypatch.setattr(code_graph_delta, "capture_after_and_diff", spy_after)
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     capsys.readouterr()
@@ -2252,8 +2252,8 @@ def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, cap
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
-    real_capture_before = graphtrail_delta.capture_before
-    real_capture_after = graphtrail_delta.capture_after_and_diff
+    real_capture_before = code_graph_delta.capture_before
+    real_capture_after = code_graph_delta.capture_after_and_diff
 
     def spy_before(target, run_dir, **kwargs):
         recorded.append(("before", kwargs.get("timeout")))
@@ -2263,14 +2263,14 @@ def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, cap
         recorded.append(("after", kwargs.get("timeout")))
         return real_capture_after(target, run_dir, before, **kwargs)
 
-    monkeypatch.setattr(graphtrail_delta, "capture_before", spy_before)
-    monkeypatch.setattr(graphtrail_delta, "capture_after_and_diff", spy_after)
+    monkeypatch.setattr(code_graph_delta, "capture_before", spy_before)
+    monkeypatch.setattr(code_graph_delta, "capture_after_and_diff", spy_after)
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=45,
+            code_graph_timeout=45,
             json_output=True,
         )
         == 0
@@ -2305,7 +2305,7 @@ def test_work_verify_graphtrail_delta_timeout_evidence_and_verify_exit_unchanged
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
+            code_graph_timeout=0.05,
             json_output=True,
         )
         == 0
@@ -2345,7 +2345,7 @@ def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_t
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
+            code_graph_timeout=0.05,
             json_output=True,
         )
         == 0
@@ -2392,18 +2392,18 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
 
     # Isolate the post-sync deadline from the unrelated SQLite backup deadline.
     # test_backup_sqlite_honors_timeout covers backup timeout enforcement.
-    real_backup = graphtrail_delta._backup_sqlite
+    real_backup = code_graph_delta._backup_sqlite
 
     def backup_without_timeout(source, destination, *, timeout=None):
         real_backup(source, destination, timeout=None)
 
-    monkeypatch.setattr(graphtrail_delta, "_backup_sqlite", backup_without_timeout)
+    monkeypatch.setattr(code_graph_delta, "_backup_sqlite", backup_without_timeout)
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
+            code_graph_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -2433,13 +2433,13 @@ def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_ove
     rc = work_cmd.verify_run(
         target=tmp_path,
         commands=["python3 -c \"print('ok')\""],
-        graphtrail_timeout=bad_timeout,
+        code_graph_timeout=bad_timeout,
     )
     err = capsys.readouterr().err
 
     assert rc == 2
     assert "error:" in err
-    assert "--graphtrail-timeout must be a positive number" in err
+    assert "--code-graph-timeout must be a positive number" in err
     assert "Traceback" not in err
     assert _count_verify_run_dirs(tmp_path) == 0
 
@@ -2453,13 +2453,13 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
     def timeout_backup(*args, **kwargs):
         raise TimeoutError("timeout after 0.05s")
 
-    monkeypatch.setattr(graphtrail_delta, "_backup_sqlite", timeout_backup)
+    monkeypatch.setattr(code_graph_delta, "_backup_sqlite", timeout_backup)
 
     assert (
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=0.05,
+            code_graph_timeout=0.05,
             json_output=True,
         )
         == 0
@@ -2480,14 +2480,14 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     _seed_graphtrail_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
-    real_run = graphtrail_delta._run_graphtrail
+    real_run = code_graph_delta._run_graphtrail
     sync_calls = {"count": 0}
 
     def timeout_first_sync(binary, db_path, command, *extra, timeout, json_output=False, stage=None, cwd=None):
         if command == "sync":
             sync_calls["count"] += 1
             if sync_calls["count"] == 1:
-                return graphtrail_delta._command_result(
+                return code_graph_delta._command_result(
                     argv=[binary, "--db", str(db_path), command, *extra],
                     returncode=124,
                     stdout="",
@@ -2508,7 +2508,7 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             cwd=cwd,
         )
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", timeout_first_sync)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", timeout_first_sync)
 
     assert (
         work_cmd.verify_run(
@@ -2543,7 +2543,7 @@ def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            graphtrail_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
+            code_graph_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -2731,7 +2731,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
             "commands": ["python3 -m pytest -q"],
             "manifest_id": None,
             "timeout": 900,
-            "graphtrail_timeout": 45,
+            "code_graph_timeout": 45,
             "json_output": True,
             "capture": None,
             "capture_kind": "skill",
@@ -2864,7 +2864,7 @@ def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
                 "commands": ["python3 -m pytest -q"],
                 "manifest_id": None,
                 "timeout": 12,
-                "graphtrail_timeout": None,
+                "code_graph_timeout": None,
                 "json_output": True,
                 "capture": None,
                 "capture_kind": "skill",
@@ -3933,20 +3933,20 @@ def verify_signal_probe(tmp_path):
             [
                 "import json, os, signal, sys, threading, time",
                 "from pathlib import Path",
-                "from brigade import fleet_client, graphtrail_delta, outcome_cmd, localio",
+                "from brigade import fleet_client, code_graph_delta, outcome_cmd, localio",
                 "from brigade.work_cmd import verification as v",
                 f"target = Path({str(tmp_path)!r})",
                 "events = []",
                 "fleet_client.report_event = lambda event, **kw: events.append(event) or True",
                 "def before(target, run_dir, **kw):",
-                "    snapshot = run_dir / graphtrail_delta.SNAPSHOT_NAME",
+                "    snapshot = run_dir / code_graph_delta.SNAPSHOT_NAME",
                 "    snapshot.write_text('snapshot')",
                 "    return {'ok': True, 'before_snapshot_path': str(snapshot)}",
                 "def after(*args, **kw):",
                 "    (target / 'after-called').touch()",
                 "    return {'status': 'unavailable'}",
-                "graphtrail_delta.capture_before = before",
-                "graphtrail_delta.capture_after_and_diff = after",
+                "code_graph_delta.capture_before = before",
+                "code_graph_delta.capture_after_and_diff = after",
                 _VERIFY_SIGNAL_IDENTITY_SOURCE,
                 "owner = identity(os.getpid())",
                 f"child_source = 'OWNER = ' + repr(owner) + '\\n' + {_VERIFY_SIGNAL_CHILD_SOURCE!r} + {child!r}",
@@ -4334,7 +4334,7 @@ def test_verify_run_owned_signal_cancellation(verify_signal_probe, tmp_path, sig
     assert receipt["commands"][0]["status"] == "interrupted"
     assert receipt["code_graph_delta"]["status"] == "unavailable"
     assert not (tmp_path / "after-called").exists()
-    assert not (Path(receipt["path"]) / graphtrail_delta.SNAPSHOT_NAME).exists()
+    assert not (Path(receipt["path"]) / code_graph_delta.SNAPSHOT_NAME).exists()
     assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
     assert result["signals"] == [0]
     assert result["events"][0]["exit_status"] == 130
@@ -5268,13 +5268,13 @@ def test_verify_run_sigint_skips_optional_graph_without_repeat(verify_signal_pro
         global graph_calls
         graph_calls += 1
         (target / 'graph-called').touch()
-        (run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME).write_text('partial')
-        (run_dir / graphtrail_delta.SIDECAR_NAME).write_text('untrusted partial sidecar')
+        (run_dir / code_graph_delta.SNAPSHOT_AFTER_NAME).write_text('partial')
+        (run_dir / code_graph_delta.SIDECAR_NAME).write_text('untrusted partial sidecar')
         if {first_path!r} == 'graph' and graph_calls == 1:
             os.kill(os.getpid(), signal.SIGINT)
         time.sleep(5)
         return {{'status': 'complete'}}
-    graphtrail_delta.capture_after_and_diff = slow_after
+    code_graph_delta.capture_after_and_diff = slow_after
     """
     invocation = """
     try:
@@ -5300,10 +5300,10 @@ def test_verify_run_sigint_skips_optional_graph_without_repeat(verify_signal_pro
     assert receipt["code_graph_delta"]["status"] == "unavailable"
     assert "canceled" in receipt["code_graph_delta"]["summary"]
     run_dir = Path(receipt["path"])
-    assert not (run_dir / graphtrail_delta.SNAPSHOT_NAME).exists()
-    assert not (run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME).exists()
+    assert not (run_dir / code_graph_delta.SNAPSHOT_NAME).exists()
+    assert not (run_dir / code_graph_delta.SNAPSHOT_AFTER_NAME).exists()
     assert "sidecar_path" not in receipt["code_graph_delta"]
-    assert graphtrail_delta.SIDECAR_NAME not in receipt["digests"]["logs"]
+    assert code_graph_delta.SIDECAR_NAME not in receipt["digests"]["logs"]
     digest = receipt["digests"]["receipt_sha256"]
     assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
     assert result["signals"] == [0]
@@ -5358,7 +5358,7 @@ def test_verify_run_final_command_sigint_skips_graph(verify_signal_probe, tmp_pa
     assert receipt["status"] == "canceled"
     assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
     assert receipt["code_graph_delta"]["status"] == "unavailable"
-    assert not (Path(receipt["path"]) / graphtrail_delta.SNAPSHOT_NAME).exists()
+    assert not (Path(receipt["path"]) / code_graph_delta.SNAPSHOT_NAME).exists()
     assert len(receipt["commands"]) == 1
     command = receipt["commands"][0]
     assert command["status"] == "completed" and command["exit_code"] == 0
@@ -5430,7 +5430,7 @@ def test_verify_run_repeat_during_actual_slow_child_cleanup_keeps_evidence(
         time.sleep(5)
         (target / 'after-called').touch()
         return {{'status': 'complete'}}
-    graphtrail_delta.capture_after_and_diff = slow_after
+    code_graph_delta.capture_after_and_diff = slow_after
     """
     invocation = """
     try:

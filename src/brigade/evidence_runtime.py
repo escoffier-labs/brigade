@@ -403,7 +403,7 @@ def register_memory_facade_extensions(evidence_sub: Any = None) -> None:
 def resolve_miseledger(env: dict[str, str] | None = None) -> str | None:
     """Resolve the configured MiseLedger engine binary, or None when missing."""
 
-    return component_bins.resolve("miseledger", env=env)
+    return component_bins.resolve("brigade-evidence", env=env)
 
 
 # Either entry point identity may print the banner (docs/phase-engine-rename.md,

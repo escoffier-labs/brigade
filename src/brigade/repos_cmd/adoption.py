@@ -363,13 +363,11 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
     mcp_current = (
         executable_error is None
         and isinstance(live_servers, dict)
-        and all(live_servers.get(name) == expected_servers[name] for name in cursor_user_cmd.MANAGED_MCP_NAMES)
+        and all(live_servers.get(name) == expected for name, expected in expected_servers.items())
     )
     if not mcp_current:
         missing_names = [
-            name
-            for name in cursor_user_cmd.MANAGED_MCP_NAMES
-            if not isinstance(live_servers, dict) or name not in live_servers
+            name for name in expected_servers if not isinstance(live_servers, dict) or name not in live_servers
         ]
         missing = missing or bool(missing_names)
         stale = stale or bool(isinstance(live_servers, dict) and any(name in live_servers for name in expected_servers))

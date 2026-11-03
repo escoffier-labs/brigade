@@ -744,7 +744,7 @@ def _build_status_payload(
         payload["next_commands"] = [
             _STATUS_RETRY_COMMAND,
             "brigade evidence doctor",
-            "brigade receipts export miseledger --target . --new-only --import",
+            "brigade receipts export evidence --target . --new-only --import",
         ]
         return payload
 
@@ -832,7 +832,7 @@ def _build_status_payload(
 
     payload["next_commands"] = [
         "brigade evidence crawl plan",
-        "brigade receipts export miseledger --target . --new-only --import",
+        "brigade receipts export evidence --target . --new-only --import",
         "brigade operator checkup --target .",
     ]
     if payload["health"] in ("fail", "incomplete", "unwired"):
@@ -842,7 +842,7 @@ def _build_status_payload(
         ]
     elif not cursor.is_file():
         payload["next_commands"] = [
-            "brigade receipts export miseledger --target . --new-only --import",
+            "brigade receipts export evidence --target . --new-only --import",
             "brigade evidence crawl plan",
             "brigade operator checkup --target .",
         ]
@@ -1077,7 +1077,7 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
         "next_commands": [
             "Review the commands below, then run them yourself.",
             "brigade evidence doctor",
-            "brigade receipts export miseledger --target . --new-only --import",
+            "brigade receipts export evidence --target . --new-only --import",
         ],
         "docs": {
             "product": "https://brigade.tools/evidence-memory",
@@ -1102,7 +1102,7 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
         "export_cursor_present": cursor.is_file(),
         "export_cursor_path": str(cursor),
         "commands": [
-            ["brigade", "receipts", "export", "miseledger", "--target", str(target), "--new-only", "--import"],
+            ["brigade", "receipts", "export", "evidence", "--target", str(target), "--new-only", "--import"],
             ["brigade", "operator", "checkup", "--target", str(target)],
         ],
         "manual_steps": [
@@ -1116,7 +1116,7 @@ def export_plan_payload(*, target: Path) -> dict[str, Any]:
             "Fail-open: a missing engine skips import and still writes JSONL when requested.",
         ],
         "next_commands": [
-            "brigade receipts export miseledger --target . --new-only --import",
+            "brigade receipts export evidence --target . --new-only --import",
             "brigade evidence doctor",
             "brigade outcome rank --target .",
         ],

@@ -14,8 +14,8 @@ from typing import Any
 
 from . import code_references, component_bins, engine_paths
 
-SNAPSHOT_NAME = "graphtrail-before.db"
-SNAPSHOT_AFTER_NAME = "graphtrail-after.db"
+SNAPSHOT_NAME = "code-graph-before.db"
+SNAPSHOT_AFTER_NAME = "code-graph-after.db"
 SIDECAR_NAME = "graph-delta.json"
 CHANGED_SYMBOL_LIMIT = 20
 CODE_REFERENCE_NODE_LIMIT = 20
@@ -282,7 +282,7 @@ def _compact_summary(delta: dict[str, Any] | None) -> str:
 
 
 def _graphtrail_bin() -> str | None:
-    return component_bins.resolve("graphtrail")
+    return component_bins.resolve("brigade-code-graph")
 
 
 def _run_graphtrail(

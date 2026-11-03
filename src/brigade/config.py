@@ -16,7 +16,11 @@ WORKSPACE_DIRNAME = ".brigade"
 LEGACY_WORKSPACE_DIRNAMES = (".solo-mise",)
 CONFIG_REL_PATH = f"{WORKSPACE_DIRNAME}/config.json"
 SUPPORTED_VERSIONS = (1,)
-DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS = 10.0
+DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 10.0
+CODE_GRAPH_DELTA_TIMEOUT_KEY = "code_graph_delta_timeout_seconds"
+# Legacy key read through v0.32 when the canonical key is absent; the writer
+# never emits it (docs/phase-engine-rename.md, R4).
+LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY = "graphtrail_delta_timeout_seconds"
 CAPTURE_BEFORE_RETRY_MODES = ("warn", "block", "off")
 DEFAULT_CAPTURE_BEFORE_RETRY = "warn"
 DEFAULT_VERIFY_RUNS_KEEP = 50
@@ -33,7 +37,7 @@ DEFAULT_WORK_MODE = "enforced"
 class Config:
     version: int
     selection: Selection
-    graphtrail_delta_timeout_seconds: float = DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS
+    code_graph_delta_timeout_seconds: float = DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
     capture_before_retry: str = DEFAULT_CAPTURE_BEFORE_RETRY
     verify_runs_keep: int = DEFAULT_VERIFY_RUNS_KEEP
     verify_archive_enabled: bool = DEFAULT_VERIFY_ARCHIVE_ENABLED
@@ -58,12 +62,12 @@ def validate_run_record(value: Any) -> str:
     return value
 
 
-def validate_graphtrail_delta_timeout(value: Any) -> float:
+def validate_code_graph_delta_timeout(value: Any, *, key: str = CODE_GRAPH_DELTA_TIMEOUT_KEY) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError("graphtrail_delta_timeout_seconds must be a positive number")
+        raise ValueError(f"{key} must be a positive number")
     timeout = float(value)
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError("graphtrail_delta_timeout_seconds must be a positive number")
+        raise ValueError(f"{key} must be a positive number")
     return timeout
 
 
@@ -83,16 +87,31 @@ def resolve_capture_before_retry(target: Path) -> str:
     return DEFAULT_CAPTURE_BEFORE_RETRY
 
 
-def resolve_graphtrail_delta_timeout(target: Path, cli_override: float | None = None) -> float:
+def resolve_code_graph_delta_timeout(target: Path, cli_override: float | None = None) -> float:
     if cli_override is not None:
         try:
-            return validate_graphtrail_delta_timeout(cli_override)
+            return validate_code_graph_delta_timeout(cli_override)
         except ValueError:
-            raise ValueError("--graphtrail-timeout must be a positive number") from None
+            raise ValueError("--code-graph-timeout must be a positive number") from None
     cfg = load_config(target)
     if cfg is not None:
-        return cfg.graphtrail_delta_timeout_seconds
-    return DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS
+        return cfg.code_graph_delta_timeout_seconds
+    return DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+
+
+def legacy_config_keys(target: Path) -> list[tuple[str, str]]:
+    """Return ``(legacy, canonical)`` for renamed keys the target config still uses.
+
+    Doctor reports them; loading never prints (the stderr notices land in R5).
+    """
+    path = config_path(target)
+    try:
+        data = json.loads(path.read_text()) if path.is_file() else None
+    except (OSError, ValueError):
+        return []
+    if isinstance(data, dict) and LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
+        return [(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY)]
+    return []
 
 
 def validate_verify_runs_keep(value: Any) -> int:
@@ -161,7 +180,7 @@ def config_path(target: Path) -> Path:
 
 def write_config(target: Path, cfg: Config) -> None:
     cfg.selection.validate()
-    graphtrail_timeout = validate_graphtrail_delta_timeout(cfg.graphtrail_delta_timeout_seconds)
+    code_graph_timeout = validate_code_graph_delta_timeout(cfg.code_graph_delta_timeout_seconds)
     path = config_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
@@ -174,8 +193,8 @@ def write_config(target: Path, cfg: Config) -> None:
     run_record = validate_run_record(cfg.run_record)
     if run_record != "metadata-only":
         payload["run"] = {"record": run_record}
-    if graphtrail_timeout != DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS:
-        payload["graphtrail_delta_timeout_seconds"] = graphtrail_timeout
+    if code_graph_timeout != DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS:
+        payload[CODE_GRAPH_DELTA_TIMEOUT_KEY] = code_graph_timeout
     capture_before_retry = validate_capture_before_retry(cfg.capture_before_retry)
     if capture_before_retry != DEFAULT_CAPTURE_BEFORE_RETRY:
         payload["capture_before_retry"] = capture_before_retry
@@ -232,8 +251,13 @@ def load_config(target: Path) -> Optional[Config]:
         includes=list(data.get("includes", [])),
     )
     sel.validate()
-    timeout_raw = data.get("graphtrail_delta_timeout_seconds", DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS)
-    timeout = validate_graphtrail_delta_timeout(timeout_raw)
+    # The canonical key wins; the legacy key is read only when it is absent.
+    timeout_key = (
+        CODE_GRAPH_DELTA_TIMEOUT_KEY if CODE_GRAPH_DELTA_TIMEOUT_KEY in data else LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY
+    )
+    timeout = validate_code_graph_delta_timeout(
+        data.get(timeout_key, DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS), key=timeout_key
+    )
     capture_before_retry = validate_capture_before_retry(data.get("capture_before_retry", DEFAULT_CAPTURE_BEFORE_RETRY))
     verify_runs_keep = validate_verify_runs_keep(data.get("verify_runs_keep", DEFAULT_VERIFY_RUNS_KEEP))
     verify_archive_enabled = validate_verify_archive_enabled(
@@ -262,7 +286,7 @@ def load_config(target: Path) -> Optional[Config]:
     return Config(
         version=version,
         selection=sel,
-        graphtrail_delta_timeout_seconds=timeout,
+        code_graph_delta_timeout_seconds=timeout,
         capture_before_retry=capture_before_retry,
         verify_runs_keep=verify_runs_keep,
         verify_archive_enabled=verify_archive_enabled,

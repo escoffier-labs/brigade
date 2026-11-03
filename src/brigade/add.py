@@ -78,7 +78,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print("  brigade evidence crawl plan")
         print("  brigade evidence doctor")
         print("  brigade evidence export plan")
-        print("  brigade receipts export miseledger --target . --new-only --import")
+        print("  brigade receipts export evidence --target . --new-only --import")
         print("  brigade operator checkup --target .")
         print(
             "Brigade does not crawl sessions or import the ledger from add; "

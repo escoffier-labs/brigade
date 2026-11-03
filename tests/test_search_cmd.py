@@ -29,7 +29,9 @@ def test_search_status_ok_with_graphtrail(monkeypatch, tmp_path):
 
     monkeypatch.setattr(search_cmd.proc, "which", which)
     monkeypatch.setattr(
-        search_cmd.component_bins, "resolve", lambda name, **kw: f"/x/{name}" if name == "graphtrail" else None
+        search_cmd.component_bins,
+        "resolve",
+        lambda name, **kw: "/x/graphtrail" if name == "brigade-code-graph" else None,
     )
 
     def fake_run(args, **kw):
@@ -44,6 +46,9 @@ def test_search_status_ok_with_graphtrail(monkeypatch, tmp_path):
     assert payload["installed"] is True
     assert payload["health"] == "ok"
     assert payload["tools"]["graphtrail"]["db_present"] is True
+    # Canonical and legacy keys carry equal values through v0.32.
+    tools = payload["tools"]
+    assert tools[search_cmd.CODE_GRAPH_TOOL] == tools[search_cmd.LEGACY_CODE_GRAPH_TOOL]
     assert any("sync plan" in cmd for cmd in payload["next_commands"])
 
 
@@ -53,7 +58,9 @@ def test_search_status_unwired_without_db(monkeypatch, tmp_path):
 
     monkeypatch.setattr(search_cmd.proc, "which", which)
     monkeypatch.setattr(
-        search_cmd.component_bins, "resolve", lambda name, **kw: f"/x/{name}" if name == "graphtrail" else None
+        search_cmd.component_bins,
+        "resolve",
+        lambda name, **kw: "/x/graphtrail" if name == "brigade-code-graph" else None,
     )
     monkeypatch.setattr(
         search_cmd.proc,

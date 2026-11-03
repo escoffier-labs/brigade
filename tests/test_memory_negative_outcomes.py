@@ -31,11 +31,11 @@ def failed_card(tmp_path, monkeypatch):
     path = card(tmp_path, "cache", body="Keep the cache warm. [[linked]]")
     card(tmp_path, "linked", body="Keep linked state.")
     monkeypatch.setattr(verify_mod.helpers, "_now", lambda: datetime(2026, 10, 20, 12, tzinfo=timezone.utc))
-    monkeypatch.setattr(verify_mod.graphtrail_delta, "capture_before", lambda *_a, **_k: None)
+    monkeypatch.setattr(verify_mod.code_graph_delta, "capture_before", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        verify_mod.graphtrail_delta,
+        verify_mod.code_graph_delta,
         "capture_after_and_diff",
-        lambda *_a, **_k: verify_mod.graphtrail_delta._status("disabled", "graph disabled in test"),
+        lambda *_a, **_k: verify_mod.code_graph_delta._status("disabled", "graph disabled in test"),
     )
     verify_manifest.write_workspace_manifest(
         tmp_path,

@@ -101,6 +101,11 @@ def load_snapshot(path: Path | None = None) -> dict[str, Any]:
                 or not isinstance(source.get("observed_revision"), str)
             ):
                 raise ValueError("managed snapshot lifecycle assertion provenance is invalid")
+        # Engines that ship inside this repository record the tracked manifest path.
+        if source.get("kind") == "in-tree" and (
+            not isinstance(source.get("repository"), str) or not isinstance(source.get("path"), str)
+        ):
+            raise ValueError("managed snapshot in-tree provenance is invalid")
         name = manifest.get("name")
         if not isinstance(name, str) or not name or name in names:
             raise ValueError(f"managed snapshot duplicate or invalid name: {name!r}")

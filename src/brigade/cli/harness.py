@@ -154,6 +154,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Install Brigade's cursor projection for this explicitly selected vendor surface.",
     )
     install.add_argument(
+        "--rename-legacy-servers",
+        action="store_true",
+        help="Rename Brigade-owned legacy engine MCP server keys to their canonical names.",
+    )
+    install.add_argument(
         "--projection-only",
         action="store_true",
         help="Allow a runtime-absent surface to receive Brigade projections without claiming a native runtime.",
@@ -221,7 +226,9 @@ def dispatch(args) -> int:
             if args.surface:
                 surface = SurfaceRecord.resolve_known(args.surface)
                 ensure_surface_installable(surface, projection_only=args.projection_only)
-            return cursor_user_cmd.install(write=args.write, json_output=args.json)
+            return cursor_user_cmd.install(
+                write=args.write, json_output=args.json, rename_legacy_servers=args.rename_legacy_servers
+            )
         except ValueError as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

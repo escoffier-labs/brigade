@@ -18,7 +18,7 @@ from .budgets import (
     BOOTSTRAP_BUDGETS,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import localio
+from . import config, engine_paths, localio
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -1073,6 +1073,11 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
     checks: List[ScopedCheckResult] = []
     for status, name, detail in component_report.doctor_checks():
         checks.append(_operator_check(status, name, detail))
+    checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
+    checks.extend(
+        _scoped_check(INFO, "legacy config key", f"{key} is read until v0.33.0; rewrite it as {replacement}")
+        for key, replacement in config.legacy_config_keys(ctx.target)
+    )
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
         if station.doctor is not None:

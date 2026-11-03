@@ -10,7 +10,11 @@ from typing import Any
 from . import __version__, component_bins, harness_profiles, localio
 
 STATE_VERSION = 1
-MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
+# Engine MCP server keys: (canonical, legacy). New entries use the canonical key.
+# A legacy key Brigade already owns is kept, with its command repointed, until the
+# operator passes --rename-legacy-servers; v0.33 renames by default
+# (docs/phase-engine-rename.md, R4). Entries the user wrote are never renamed.
+_ENGINE_SERVER_KEYS = (("brigade-code-graph", "graphtrail"), ("brigade-evidence", "miseledger"))
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
 # https://cursor.com/docs/hooks#hook-events (retrieved 2026-10-22)
 _SUPPORTED_HOOK_EVENTS = frozenset(
@@ -71,27 +75,50 @@ def _coowned_json_text(payload: object) -> str:
     return json.dumps(payload, indent=2, sort_keys=False) + "\n"
 
 
-def _mcp_servers() -> dict[str, dict[str, Any]]:
-    # Engine servers resolve to the managed absolute path from `brigade setup`
-    # so the generated config does not depend on Cursor's spawn-time PATH. The
-    # bare name is kept only as a pre-setup fallback.
-    def _absolute(name: str) -> str:
-        resolved = component_bins.resolve_argv([name])[0]
-        return str(Path(resolved).expanduser().resolve()) if resolved != name else name
+def _engine_server_keys(state: dict[str, Any], *, rename_legacy: bool = False) -> dict[str, str]:
+    """Map each canonical engine key to the key Brigade writes for it."""
+    owned = state.get("mcp", {})
+    return {
+        canonical: legacy if legacy in owned and not rename_legacy else canonical
+        for canonical, legacy in _ENGINE_SERVER_KEYS
+    }
 
+
+def _mcp_servers(state: dict[str, Any] | None = None, *, rename_legacy: bool = False) -> dict[str, dict[str, Any]]:
+    # Engine servers resolve to the managed absolute path from `brigade setup`,
+    # canonical executable first, so the generated config does not depend on
+    # Cursor's spawn-time PATH. The bare legacy name is kept only as a pre-setup
+    # fallback until R5 installs canonical executables.
+    def _absolute(name: str, fallback: str) -> str:
+        resolved = component_bins.resolve_argv([name])[0]
+        return str(Path(resolved).expanduser().resolve()) if resolved != name else fallback
+
+    keys = _engine_server_keys(_load_state(_cursor_root()) if state is None else state, rename_legacy=rename_legacy)
     return {
         "brigade": {
             "command": "brigade",
             "args": ["memory", "serve-mcp", "--stdio", "--target", "."],
             "timeout": 60,
         },
-        "graphtrail": {"command": _absolute("graphtrail-mcp")},
-        "miseledger": {
-            "command": _absolute("miseledger"),
+        keys["brigade-code-graph"]: {"command": _absolute("brigade-code-graph-mcp", "graphtrail-mcp")},
+        keys["brigade-evidence"]: {
+            "command": _absolute("brigade-evidence", "miseledger"),
             "args": ["mcp"],
             "timeout": 60,
         },
     }
+
+
+def _legacy_server_notices(state: dict[str, Any], *, rename_legacy: bool) -> list[str]:
+    if rename_legacy:
+        return []
+    return [
+        f"kept Brigade-owned MCP server key '{legacy}'; its canonical key is '{canonical}'. "
+        f"Rename it with --rename-legacy-servers, then update tool permissions from "
+        f"mcp__{legacy}__* to mcp__{canonical}__*"
+        for canonical, legacy in _ENGINE_SERVER_KEYS
+        if legacy in state.get("mcp", {})
+    ]
 
 
 def _plugin_manifest() -> str:
@@ -125,7 +152,7 @@ def _hook_text() -> str:
     return "#!/bin/sh\n" + _MANAGED_HOOK_COMMAND + "\n"
 
 
-def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
+def _desired_files(root: Path, servers: dict[str, dict[str, Any]] | None = None) -> dict[Path, tuple[str, bool, str]]:
     package = Path(__file__).parent / "templates" / "skills" / "brigade-work"
     plugin = root / "plugins" / "local" / "brigade-loop"
     skill = root / "skills" / "brigade-work"
@@ -134,7 +161,7 @@ def _desired_files(root: Path) -> dict[Path, tuple[str, bool, str]]:
         plugin / "rules" / "brigade-loop.mdc": (_rule_text(), False, "rule"),
         root / "hooks" / "brigade-session-start": (_hook_text(), True, "hook"),
         root / "brigade" / "mcp.json": (
-            _json_text({"version": 1, "servers": _mcp_servers()}),
+            _json_text({"version": 1, "servers": _mcp_servers() if servers is None else servers}),
             False,
             "mcp-catalog",
         ),
@@ -435,7 +462,9 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
     return [_plan_hook_event(hooks, state, event, path) for event in _MANAGED_HOOK_EVENTS], doc, None
 
 
-def _plan_mcp(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
+def _plan_mcp(
+    root: Path, state: dict[str, Any], *, rename_legacy: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any] | None, str | None]:
     path = root / "mcp.json"
     doc, error = _read_json_object(path)
     if doc is None:
@@ -455,7 +484,24 @@ def _plan_mcp(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]], 
             detail,
         )
     items: list[dict[str, Any]] = []
-    for name, desired in _mcp_servers().items():
+    if rename_legacy:
+        for canonical, legacy in _ENGINE_SERVER_KEYS:
+            fingerprint = state["mcp"].get(legacy)
+            if fingerprint is None or legacy not in servers:
+                continue
+            item = {"surface": "mcp-config", "path": str(path), "name": legacy}
+            if canonical in servers and canonical not in state["mcp"]:
+                item.update(
+                    status="conflict", action="preserve", detail=f"'{canonical}' already exists and is not Brigade's"
+                )
+            elif _digest_value(servers[legacy]) == fingerprint:
+                item.update(status="renamed", action="remove")
+            else:
+                item.update(
+                    status="conflict", action="preserve", detail="owned legacy server was edited; left in place"
+                )
+            items.append(item)
+    for name, desired in _mcp_servers(state, rename_legacy=rename_legacy).items():
         desired_fp = _digest_value(desired)
         live = servers.get(name)
         if live == desired:
@@ -493,21 +539,24 @@ def _emit(payload: dict[str, Any], *, json_output: bool, rc: int) -> int:
         for item in payload.get("items", []):
             name = f" [{item['name']}]" if item.get("name") else ""
             print(f"- {item['status']}: {item['path']}{name}")
+        for notice in payload.get("notices", []):
+            print(f"note: {notice}")
         if payload.get("reload_required"):
             print("next: reload Cursor windows")
     return rc
 
 
-def install(*, write: bool = False, json_output: bool = False) -> int:
+def install(*, write: bool = False, json_output: bool = False, rename_legacy_servers: bool = False) -> int:
     root = _cursor_root()
     state = _load_state(root)
-    desired_files = _desired_files(root)
+    desired_servers = _mcp_servers(state, rename_legacy=rename_legacy_servers)
+    desired_files = _desired_files(root, desired_servers)
     items = [
         _file_item(root, path, text, executable, surface, state)
         for path, (text, executable, surface) in desired_files.items()
     ]
     hook_items, hooks_doc, _ = _plan_hook(root, state)
-    mcp_items, mcp_doc, _ = _plan_mcp(root, state)
+    mcp_items, mcp_doc, _ = _plan_mcp(root, state, rename_legacy=rename_legacy_servers)
     items.extend([*hook_items, *mcp_items])
     state_error = state.get("_read_error")
     if state_error:
@@ -574,13 +623,16 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
         if mcp_doc is not None:
             servers = mcp_doc.setdefault("mcpServers", {})
             changed = False
-            desired_servers = _mcp_servers()
             for item in mcp_items:
                 if item["status"] == "conflict":
                     if item.get("name") in state["mcp"]:
                         next_state["mcp"][item["name"]] = state["mcp"][item["name"]]
                     continue
                 name = item["name"]
+                if item["action"] == "remove":
+                    servers.pop(name, None)
+                    changed = True
+                    continue
                 if item["action"] in {"create", "update"}:
                     servers[name] = desired_servers[name]
                     changed = True
@@ -610,6 +662,7 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
         "files_written": files_written,
         "items": _public(items),
         "conflicts": _public(conflicts),
+        "notices": _legacy_server_notices(state, rename_legacy=rename_legacy_servers),
     }
     return _emit(payload, json_output=json_output, rc=1 if conflicts else 0)
 
@@ -798,7 +851,7 @@ def doctor(*, json_output: bool = False) -> int:
         ),
     ]
     expected_servers = _mcp_servers()
-    for name in MANAGED_MCP_NAMES:
+    for name in expected_servers:
         checks.append(
             _check(
                 f"mcp-{name}",

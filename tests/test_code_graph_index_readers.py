@@ -16,7 +16,7 @@ from typing import Any
 
 import pytest
 
-from brigade import code_export, component_bins, context_cmd, engine_paths, graphtrail_delta, proc, search_cmd
+from brigade import code_export, component_bins, context_cmd, engine_paths, code_graph_delta, proc, search_cmd
 from brigade.aboyeur import briefs
 from brigade.claude_hooks import dependencies
 from brigade.operator_cmd import lifecycle
@@ -233,7 +233,7 @@ def test_an_index_outside_the_repo_still_syncs_the_repo(tmp_path, monkeypatch):
 
     assert engine_paths.code_graph_repo_root(custom) is None
     assert dependencies._dependents(repo, "api.py") == (None, "sync_failed")
-    graphtrail_delta.capture_before(repo, tmp_path / "run")
+    code_graph_delta.capture_before(repo, tmp_path / "run")
 
     calls = [json.loads(line) for line in log.read_text().splitlines()]
     assert [call["argv"][2] for call in calls] == ["sync", "sync"]

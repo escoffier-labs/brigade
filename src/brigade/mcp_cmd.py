@@ -17,7 +17,7 @@ import math
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +192,36 @@ def _is_code_graph_server(server: CanonicalServer) -> bool:
     if command.endswith(".exe"):
         command = command[: -len(".exe")]
     return server.name.lower() in _CODE_GRAPH_NAMES or command in _CODE_GRAPH_NAMES
+
+
+# Legacy engine server keys and their canonical keys. Sync keeps a legacy key and
+# prints a rename hint; --rename-legacy-servers renames the catalog key and removes
+# the pristine projections Brigade owns under the old key. v0.33 renames by default
+# (docs/phase-engine-rename.md, R4). Provider entries Brigade does not own are never
+# touched.
+LEGACY_SERVER_KEYS = {
+    legacy: canonical
+    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items()
+    if not canonical.endswith("-mcp")
+}
+
+
+def _legacy_server_renames(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new not in servers}
+
+
+def _legacy_server_note(old: str, new: str) -> str:
+    return (
+        f"note: server '{old}' uses a legacy key; its canonical key is '{new}'. Rename it with "
+        f"`brigade mcp sync --rename-legacy-servers --write`, then update tool permissions from "
+        f"mcp__{old}__* to mcp__{new}__*"
+    )
+
+
+def _renamed_catalog_bytes(path: Path, renames: dict[str, str]) -> bytes:
+    doc = json.loads(path.read_text())
+    doc["servers"] = {renames.get(key, key): value for key, value in doc["servers"].items()}
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _without_repo_code_graph_db_pin(target: Path, args: tuple[str, ...]) -> tuple[str, ...]:
@@ -482,6 +512,7 @@ def _plan_for_harness(
     prune: bool,
     adopt: bool,
     name_filter: str | None = None,
+    prune_names: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     adapter = ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, target)
@@ -498,6 +529,7 @@ def _plan_for_harness(
             prune=prune,
             adopt=adopt,
             name_filter=name_filter,
+            prune_names=prune_names,
             read_error=exc,
         )
     return _plan_from_inputs(
@@ -510,6 +542,7 @@ def _plan_for_harness(
         prune=prune,
         adopt=adopt,
         name_filter=name_filter,
+        prune_names=prune_names,
     )
 
 
@@ -525,6 +558,7 @@ def _plan_from_inputs(
     adopt: bool = False,
     name_filter: str | None = None,
     read_error: OSError | None = None,
+    prune_names: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Compare explicit inputs without loading native config or ownership state."""
     adapter = ADAPTERS[harness]
@@ -685,7 +719,7 @@ def _plan_from_inputs(
                     detail="removed from canonical but edited in place; left untouched",
                 )
             )
-        elif prune:
+        elif prune or name in prune_names:
             items.append(_item(harness, rel, name, "orphan", "remove", None, None))
         else:
             items.append(
@@ -1206,10 +1240,14 @@ def build_sync_plan(
     allow_global_stdio: bool = False,
     interactive: bool | None = None,
     json_output: bool = False,
+    rename_legacy_servers: bool = False,
 ) -> McpSyncPlan:
     target = target.expanduser().resolve()
     servers, errors, _ = load_canonical(target)
     notes: list[str] = []
+    renames = _legacy_server_renames(servers) if not errors else {}
+    if rename_legacy_servers and name is not None:
+        errors = ["--rename-legacy-servers cannot be combined with --name"]
     if errors:
         return McpSyncPlan(
             target=target,
@@ -1226,9 +1264,31 @@ def build_sync_plan(
             errors=errors,
         )
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
+    prune_names: frozenset[str] = frozenset()
+    if rename_legacy_servers and renames:
+        servers = {
+            renames.get(key, key): replace(server, name=renames.get(key, key)) for key, server in servers.items()
+        }
+        prune_names = frozenset(renames)
+    else:
+        renames = {}
+        notes.extend(_legacy_server_note(old, new) for old, new in _legacy_server_renames(servers).items())
     state = copy.deepcopy(_load_state(target))
     planned = [
-        (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
+        (
+            h,
+            _plan_for_harness(
+                target,
+                h,
+                servers,
+                state,
+                force=force,
+                prune=prune,
+                adopt=adopt,
+                name_filter=name,
+                prune_names=prune_names,
+            ),
+        )
         for h in harnesses
     ]
     exposures = _user_stdio_exposures(planned, target)
@@ -1374,6 +1434,16 @@ def build_sync_plan(
 
     canon = canonical_path(target)
     source_digest = localio.file_sha256(canon) if canon.is_file() else "missing"
+    if renames and not plan_errors:
+        # The catalog rename commits or rolls back with the provider writes.
+        catalog_mutation = _mutation_for_path(
+            dest=canon,
+            display_path=CANONICAL_REL,
+            before=_file_bytes(canon),
+            after=_renamed_catalog_bytes(canon, renames),
+        )
+        if catalog_mutation is not None:
+            mutations.append(catalog_mutation)
     projection_plan = (
         projection.build_plan(
             operation_id=f"mcp-{uuid.uuid4().hex}",
@@ -1452,6 +1522,7 @@ def sync(
     verify_timeout: float | None = None,
     json_output: bool = False,
     inject_failure: str | None = None,
+    rename_legacy_servers: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if verify_runtime and not write:
@@ -1472,6 +1543,7 @@ def sync(
         allow_global_stdio=allow_global_stdio,
         interactive=interactive,
         json_output=json_output,
+        rename_legacy_servers=rename_legacy_servers,
     )
     if planned.errors:
         return _emit_fidelity(

@@ -317,7 +317,7 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     import os
     import shutil
 
-    from brigade import component_bins, managed
+    from brigade import component_bins, component_manifest, managed
 
     # Point the managed-component data root at a temp dir so nothing in the
     # suite (component_bins.managed_path, doctor's components check) reads the
@@ -339,7 +339,11 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
 
     def bare_host_resolve(name, *, env=None):
         environment = env if env is not None else os.environ
-        if environment.get(component_bins.ENV_OVERRIDES.get(name, "")):
+        # Callers ask for canonical names; a test may still seed the legacy
+        # override or a legacy-named binary, so match the whole family the
+        # way the real resolver does (canonical name first).
+        names = component_manifest.family_names(name)
+        if any(environment.get(component_bins.ENV_OVERRIDES.get(alias, "")) for alias in names):
             return real_resolve(name, env=env)
         current_path = os.environ.get("PATH", "")
         if current_path != baseline_path:
@@ -349,7 +353,10 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
             test_path = os.pathsep.join(
                 entry for entry in current_path.split(os.pathsep) if entry and entry not in baseline_entries
             )
-            return shutil.which(name, path=test_path) if test_path else None
+            for alias in names if test_path else ():
+                found = shutil.which(alias, path=test_path)
+                if found:
+                    return found
         return None
 
     monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)

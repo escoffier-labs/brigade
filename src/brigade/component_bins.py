@@ -1,12 +1,17 @@
 """Resolve executables for the native components ``brigade setup`` manages.
 
-Every consumer of a managed engine (GraphTrail, MiseLedger, sessionfind) goes
+Every consumer of a managed engine (code graph, evidence, sessionfind) goes
 through :func:`resolve` so one resolution order applies everywhere:
 
-1. an explicit env override (``GRAPHTRAIL_BIN``, ``MISELEDGER_BIN``, ...);
+1. an explicit env override (``BRIGADE_CODE_GRAPH_BIN``, ``BRIGADE_EVIDENCE_BIN``,
+   ...; the legacy variable names are read too and conflicting values refused);
 2. the managed install recorded in ``installed.json`` under the user data root;
-3. ``PATH``;
+3. ``PATH``, where each directory is searched for the canonical executable name
+   before the legacy one (docs/phase-engine-rename.md, R4);
 4. a legacy standalone location kept for machines mid-migration.
+
+Legacy names print no deprecation line here. The stderr notices for legacy
+entry points and legacy environment variables land together in R5.
 
 Config generators use the same resolver so emitted configs (Cursor MCP
 servers, station wiring) carry the managed absolute path instead of a bare
@@ -113,10 +118,11 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
         if found:
             return found
     else:
+        # ``family_names`` lists the canonical name first, so a directory that
+        # holds both executables yields the canonical one whatever was requested.
         path_value = search_path if search_path is not None else os.environ.get("PATH", os.defpath)
-        candidates = (name, *(alias for alias in names if alias != name))
         for directory in path_value.split(os.pathsep) if path_value else ():
-            for alias in candidates:
+            for alias in names:
                 found = shutil.which(alias, path=directory or os.curdir)
                 if found:
                     return found

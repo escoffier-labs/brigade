@@ -114,7 +114,7 @@ def test_cursor_user_install_merges_all_surfaces_and_is_idempotent(tmp_path, mon
     mcp = json.loads((cursor / "mcp.json").read_text())
     assert mcp["settings"] == {"keep": True}
     assert mcp["mcpServers"]["foreign"] == {"command": "keep-server"}
-    assert {"brigade", "graphtrail", "miseledger"} <= set(mcp["mcpServers"])
+    assert {"brigade", "brigade-code-graph", "brigade-evidence"} <= set(mcp["mcpServers"])
     assert (cursor / "brigade" / "mcp.json").is_file()
     assert not (tmp_path / ".brigade").exists()
     assert not (cursor / "memory-handoffs").exists()
@@ -140,8 +140,8 @@ def test_cursor_user_doctor_checks_rule_skill_hook_and_mcp(tmp_path, monkeypatch
     assert checks["skill-current"]["status"] == "OK"
     assert checks["session-hook"]["status"] == "OK"
     assert checks["mcp-brigade"]["status"] == "OK"
-    assert checks["mcp-graphtrail"]["status"] == "OK"
-    assert checks["mcp-miseledger"]["status"] == "OK"
+    assert checks["mcp-brigade-code-graph"]["status"] == "OK"
+    assert checks["mcp-brigade-evidence"]["status"] == "OK"
 
 
 def test_cursor_user_uninstall_removes_only_managed_files_and_blocks(tmp_path, monkeypatch, capsys):
@@ -178,17 +178,17 @@ def test_cursor_user_uninstall_preserves_user_edited_managed_mcp_entry(tmp_path,
     capsys.readouterr()
     mcp_path = cursor / "mcp.json"
     mcp = json.loads(mcp_path.read_text())
-    mcp["mcpServers"]["graphtrail"] = {"command": "user-custom-graph"}
+    mcp["mcpServers"]["brigade-code-graph"] = {"command": "user-custom-graph"}
     mcp_path.write_text(json.dumps(mcp))
 
     assert cli.main(["harness", "uninstall", "cursor", "--scope", "user", "--write", "--json"]) == 1
     payload = json.loads(capsys.readouterr().out)
 
-    assert any(item["path"] == str(mcp_path) and item["name"] == "graphtrail" for item in payload["conflicts"])
+    assert any(item["path"] == str(mcp_path) and item["name"] == "brigade-code-graph" for item in payload["conflicts"])
     live = json.loads(mcp_path.read_text())
-    assert live["mcpServers"]["graphtrail"] == {"command": "user-custom-graph"}
+    assert live["mcpServers"]["brigade-code-graph"] == {"command": "user-custom-graph"}
     assert "brigade" not in live["mcpServers"]
-    assert "miseledger" not in live["mcpServers"]
+    assert "brigade-evidence" not in live["mcpServers"]
 
 
 def test_cursor_user_install_preserves_managed_name_collisions(tmp_path, monkeypatch, capsys):
@@ -204,8 +204,8 @@ def test_cursor_user_install_preserves_managed_name_collisions(tmp_path, monkeyp
     assert any(item.get("name") == "brigade" and item["status"] == "conflict" for item in payload["items"])
     live = json.loads((cursor / "mcp.json").read_text())
     assert live["mcpServers"]["brigade"] == foreign
-    assert "graphtrail" in live["mcpServers"]
-    assert "miseledger" in live["mcpServers"]
+    assert "brigade-code-graph" in live["mcpServers"]
+    assert "brigade-evidence" in live["mcpServers"]
 
 
 def test_cursor_user_install_rejects_malformed_coowned_json(tmp_path, monkeypatch, capsys):
@@ -349,13 +349,13 @@ def test_cursor_user_unreadable_mcp_config_preserves_ownership_for_later_uninsta
     assert cli.main(install) == 1
     capsys.readouterr()
     state = json.loads(state_path.read_text())
-    assert set(state["mcp"]) == {"brigade", "graphtrail", "miseledger"}
+    assert set(state["mcp"]) == {"brigade", "brigade-code-graph", "brigade-evidence"}
 
     mcp_path.write_bytes(valid_mcp)
     assert cli.main(["harness", "uninstall", "cursor", "--scope", "user", "--write", "--json"]) == 0
     capsys.readouterr()
     live = json.loads(mcp_path.read_text())
-    assert not {"brigade", "graphtrail", "miseledger"} & set(live["mcpServers"])
+    assert not {"brigade", "brigade-code-graph", "brigade-evidence"} & set(live["mcpServers"])
 
 
 def test_cursor_user_uninstall_reload_requires_an_actual_change(tmp_path, monkeypatch, capsys):
