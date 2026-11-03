@@ -1145,6 +1145,137 @@ def cmd_guard_parity(args: argparse.Namespace) -> int:
     )
 
 
+def load_hub_contract():
+    """Import the sibling `hub_contract` module however this helper was started."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import hub_contract
+
+    return hub_contract
+
+
+def hub_contract_workdir(args: argparse.Namespace, root: Path, *, dry_run: bool) -> Path:
+    """The directory a launched hub keeps its database, token file, and log in.
+
+    With `--target` it is a fresh directory under `<target>/hub-contract/`.
+    Without one the helper makes a new directory under `<state-root>/targets`
+    and records it first, so `cleanup` reclaims it even when the hub fails.
+    """
+    if args.target:
+        target = guard_target(Path(args.target), root)
+        if not target.is_dir():
+            raise HelperError(f"target {target} is not an existing directory; create one with new-target first")
+        parent = target / "hub-contract"
+        if parent.is_symlink() or (parent.exists() and not parent.is_dir()):
+            raise HelperError(f"refusing to write through {parent}: it is a symlink or not a directory")
+        if dry_run:
+            return parent / "<stamp>"
+        parent.mkdir(mode=0o700, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix=f"{now_stamp()}-", dir=parent))
+    if dry_run:
+        return root / "targets" / "<stamp>-hub-contract"
+    work = Path(tempfile.mkdtemp(prefix=f"{now_stamp()}-hub-contract-", dir=root / "targets"))
+    record_target(root, work)
+    return work
+
+
+def cmd_hub_contract(args: argparse.Namespace) -> int:
+    """Drive a Fleet Hub over HTTP and compare it to the recorded wire contract."""
+    hc = load_hub_contract()
+    root = state_root(args)
+    brigade = brigade_args(args)
+    if args.hub_url and args.hub_cmd:
+        raise HelperError("pass --hub-cmd or --hub-url, not both")
+    external = args.hub_url is not None
+    try:
+        url = hc.guard_hub_url(args.hub_url) if external else None
+    except hc.ContractError as exc:
+        raise HelperError(str(exc)) from exc
+    template = args.hub_cmd or hc.DEFAULT_HUB_CMD
+    if args.dry_run:
+        work = None if external else hub_contract_workdir(args, root, dry_run=True)
+        would_launch = None
+        if not external:
+            values = {
+                "host": hc.LOOPBACK,
+                "port": "<port>",
+                "state_dir": str(work),
+                "db": f"{work}/hub.db",
+                "token_file": f"{work}/admin-token",
+            }
+            try:
+                would_launch = hc.expand_command(template, brigade=brigade, values=values)
+            except hc.ContractError as exc:
+                raise HelperError(str(exc)) from exc
+        return emit(
+            {
+                "action": "hub-contract",
+                "ok": True,
+                "dry_run": True,
+                "contract_version": hc.CONTRACT_VERSION,
+                "mode": "external" if external else "launched",
+                "hub_url": url,
+                "would_launch": would_launch,
+                "would_create": str(work) if work else None,
+                "covered_routes": list(hc.COVERED_ROUTES),
+            }
+        )
+    startup_timeout = float(args.startup_timeout)
+    if not (0 < startup_timeout < float("inf")):
+        raise HelperError(f"--startup-timeout must be a positive, finite number of seconds, not {args.startup_timeout}")
+    admin_token = os.environ.get(args.admin_token_env, "").strip() if external else None
+    work = None if external else hub_contract_workdir(args, root, dry_run=False)
+    try:
+        hub, result = hc.drive(
+            brigade=brigade,
+            state_dir=work,
+            hub_cmd=template,
+            hub_url=args.hub_url,
+            admin_token=admin_token,
+            startup_timeout=startup_timeout,
+        )
+    except hc.ContractError as exc:
+        raise HelperError(str(exc)) from exc
+    capture = record_capture(
+        root,
+        "hub-contract",
+        {
+            "name": "hub-contract",
+            "contract_version": hc.CONTRACT_VERSION,
+            "hub_url": hub.url,
+            "argv": hub.argv,
+            "exchanges": result["exchanges"],
+            "mismatches": result["mismatches"],
+            "hub_log_tail": hc.log_tail(hub.log) if hub.log else None,
+        },
+    )
+    mismatches = result["mismatches"]
+    ok = not mismatches
+    return emit(
+        {
+            "action": "hub-contract",
+            "ok": ok,
+            "dry_run": False,
+            "contract_version": hc.CONTRACT_VERSION,
+            "hub": {
+                "mode": hub.mode,
+                "url": hub.url,
+                "argv": hub.argv,
+                "state_dir": str(hub.state_dir) if hub.state_dir else None,
+                "log": str(hub.log) if hub.log else None,
+            },
+            "cases_total": len(result["cases"]),
+            "cases_failed": sum(1 for case in result["cases"] if not case["ok"]),
+            "covered_routes": result["covered_routes"],
+            "mismatches": mismatches,
+            "cases": result["cases"],
+            "capture": str(capture),
+        },
+        0 if ok else 3,
+    )
+
+
 # ------------------------------------------------------------------ audit
 #
 # `audit` compares the feature map (features/*.md headers plus the known-gap
@@ -1778,6 +1909,24 @@ def build_parser() -> argparse.ArgumentParser:
     add_target(p)
     add_dry_run(p, "Report the commands without writing the fixture.")
     p.set_defaults(func=cmd_guard_parity)
+
+    p = sub.add_parser("hub-contract", help="Drive a Fleet Hub over HTTP against the recorded wire contract.")
+    p.add_argument("--target", default=None, help="Temp target to hold the hub state (default: a new one).")
+    p.add_argument(
+        "--hub-cmd",
+        default=None,
+        help="Hub launch template with {port}, plus optional {brigade}, {host}, {state_dir}, {db}, {token_file} "
+        "(default: the in-repo Python hub).",
+    )
+    p.add_argument("--hub-url", default=None, help="Drive an already running hub instead (loopback origin only).")
+    p.add_argument(
+        "--admin-token-env",
+        default="BRIGADE_HUB_CONTRACT_ADMIN_TOKEN",
+        help="Env var holding the admin token for --hub-url.",
+    )
+    p.add_argument("--startup-timeout", type=float, default=30.0, help="Seconds to wait for /health.")
+    add_dry_run(p, "Report the hub command and covered routes without starting anything.")
+    p.set_defaults(func=cmd_hub_contract)
 
     p = sub.add_parser("audit", help="Read-only: compare the feature map against the live CLI command tree.")
     p.add_argument("--features-dir", default=None, help="Feature map to audit (default: this skill's features/).")

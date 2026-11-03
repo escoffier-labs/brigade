@@ -62,6 +62,7 @@ var (
 	evidenceBundleIDPattern  = regexp.MustCompile(`^[0-9a-f]{24}$`)
 	evidenceCacheFilePattern = regexp.MustCompile(`^[0-9a-f]{24}\.json$`)
 	contentHashPattern       = regexp.MustCompile(`^(?:sha256:)?[0-9a-f]{64}$`)
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	resourceURIPrefix        = "miseledger://evidence/"
 )
 
@@ -226,6 +227,7 @@ func evidenceItemStubID(serverID string) string {
 	if sid := sanitizeStubID(serverID); sid != "" {
 		return sid
 	}
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	sum := sha256.Sum256([]byte("miseledger.evidence.stub.id.v1\x00" + serverID))
 	return hex.EncodeToString(sum[:])[:24]
 }
