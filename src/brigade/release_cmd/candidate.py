@@ -102,12 +102,27 @@ def _changelog_fragment_bullets(path: Path) -> list[str]:
         if fragment.name == "README.md" or not fragment.is_file():
             continue
         try:
-            bullets.extend(
-                line.strip() for line in fragment.read_text(encoding="utf-8").splitlines() if line.startswith("- ")
-            )
+            text = fragment.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
+        bullets.extend(_fragment_entries(text))
     return bullets
+
+
+def _fragment_entries(text: str) -> list[str]:
+    """Fragment entries as single lines: a ``- `` bullet plus its indented continuations.
+
+    Matches the entry boundaries ``scripts/changelog_fragments.py`` uses when it
+    assembles fragments, so candidate notes carry the same text as the changelog.
+    """
+    entries: list[str] = []
+    for raw in text.splitlines():
+        line = raw.rstrip()
+        if line.startswith("- "):
+            entries.append(line.strip())
+        elif line and line[0] in " \t" and entries:
+            entries[-1] = f"{entries[-1]} {line.strip()}"
+    return entries
 
 
 def _changelog_unreleased_with_redactions(path: Path) -> tuple[list[str], dict[str, Any]]:

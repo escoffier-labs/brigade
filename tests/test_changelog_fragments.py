@@ -308,3 +308,18 @@ def test_fragment_edits_after_a_candidate_mark_its_docs_stale(tmp_path) -> None:
     fragment.unlink()
     os.utime(fragments, (built + 10, built + 10))
     assert candidate_audit_ops._candidate_docs_changed_after_build(candidate) == ["changelog.d"]
+
+
+def test_candidate_notes_keep_wrapped_fragment_continuations(tmp_path) -> None:
+    from brigade.release_cmd import candidate
+
+    fragments = tmp_path / "changelog.d"
+    fragments.mkdir()
+    (fragments / "2231.md").write_text(
+        "- The connection now retries\n  only when the server explicitly requests it.\n- A second entry.\n",
+        encoding="utf-8",
+    )
+    assert candidate._changelog_fragment_bullets(tmp_path) == [
+        "- The connection now retries only when the server explicitly requests it.",
+        "- A second entry.",
+    ]

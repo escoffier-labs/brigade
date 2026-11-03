@@ -485,7 +485,7 @@ def test_release_candidate_notes_include_unassembled_changelog_fragments(tmp_pat
 
     items, redactions = release_cmd.candidate._changelog_unreleased_with_redactions(tmp_path)
 
-    assert items == ["Assembled entry.", "Fragment entry one.", "Fragment entry two."]
+    assert items == ["Assembled entry.", "Fragment entry one. wrapped continuation.", "Fragment entry two."]
     assert redactions["count"] == 0
 
 
