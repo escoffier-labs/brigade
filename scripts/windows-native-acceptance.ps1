@@ -1191,9 +1191,19 @@ try {
         }
         # Each entry point reports its own server name.
         $expectedName = if ($mcpName -eq "graphtrail-mcp") { "graphtrail" } else { "brigade-code-graph" }
-        $serverName = (($mcpText -split "`r?`n")[0] | ConvertFrom-Json).result.serverInfo.name
+        # Read the initialize reply by id rather than assuming it is the first line.
+        $serverName = $null
+        foreach ($line in ($mcpText -split "`r?`n")) {
+            $trimmed = $line.Trim()
+            if (-not $trimmed.StartsWith("{")) { continue }
+            try { $message = $trimmed | ConvertFrom-Json } catch { continue }
+            if ($message.id -eq 1 -and $null -ne $message.result) {
+                $serverName = $message.result.serverInfo.name
+                break
+            }
+        }
         if ($serverName -ne $expectedName) {
-            throw "$mcpName serverInfo.name is '$serverName', expected '$expectedName'"
+            throw "$mcpName serverInfo.name is '$serverName', expected '$expectedName'; output: $mcpText"
         }
     }
     & $sessionfindExe --help | Out-Null
