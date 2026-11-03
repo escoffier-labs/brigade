@@ -140,7 +140,9 @@ brigade work rails off --target .   # prints what stops being checked
 brigade work rails on --target .
 ```
 
-Turning rails off makes Brigade's pre-push hook skip its scans. You lose the check that stops secrets, credentials, private hostnames, and private paths from leaving the machine, including the history scan of commits that a clean tip would hide. Guard policies and baselines stay untouched, so `rails on` restores the same checks. Only an untracked `.brigade/config.json` can turn rails off. If git tracks that file, or it arrives through a symlink, a submodule, or a nested repository, the rails stay on and doctor reports why. That way a committed setting cannot disable leak checks for everyone who pushes from a clone. Enforced mode with rails off is allowed, for a private repo that wants receipts and never publishes.
+Turning rails off makes Brigade's pre-push hook skip its scans. You lose the check that stops secrets, credentials, private hostnames, and private paths from leaving the machine, including the history scan of commits that a clean tip would hide. Guard policies and baselines stay untouched, so `rails on` restores the same checks.
+
+The rails-off choice is per user and per repository. `brigade work rails off` records it in your own Brigade config directory, outside every repository (`$XDG_CONFIG_HOME/brigade/work-rails.json` on Linux, `~/Library/Application Support/brigade/` on macOS, `%LOCALAPPDATA%\brigade\` on Windows). The record names the repository by its real path, with symlinks resolved and, on Windows and macOS, case folded. It turns rails off for that exact path only, never for a parent, a sibling, or another clone. Run it from the repository root, because the pre-push hook checks the root. Nothing inside a repository can turn the rails off, so a pushed commit cannot disable leak checks for anyone who clones it. A `work.rails` key in `.brigade/config.json`, which earlier builds wrote, is ignored. `brigade doctor` and `brigade work rails show` warn when one is present. Enforced mode with rails off is allowed, for a private repo that wants receipts and never publishes.
 
 ## Success Check
 

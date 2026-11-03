@@ -58,15 +58,31 @@ def _settings_events(target: Path) -> dict[str, list]:
     return json.loads((target / ".claude" / "settings.json").read_text())["hooks"]
 
 
-def test_config_round_trips_mode_and_rails_and_omits_defaults(tmp_path: Path) -> None:
+def _set_repo_rails_off(config_file: Path) -> None:
+    """Plant ``work.rails: "off"`` in a repository config, as earlier builds of #2233 wrote it."""
+    data = json.loads(config_file.read_text(encoding="utf-8"))
+    data.setdefault("work", {})["rails"] = "off"
+    config_file.write_text(json.dumps(data), encoding="utf-8")
+
+
+def _rails_off_config(target: Path) -> Path:
+    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    config.write_config(target, config.Config(version=1, selection=selection))
+    path = target / config.CONFIG_REL_PATH
+    _set_repo_rails_off(path)
+    return path
+
+
+def test_config_round_trips_mode_and_never_writes_rails(tmp_path: Path) -> None:
     target = tmp_path / "t"
     selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     config.write_config(target, config.Config(version=1, selection=selection))
     assert "work" not in json.loads(config.config_path(target).read_text())
-    config.write_config(target, config.Config(version=1, selection=selection, work_mode="yolo", safety_rails=False))
-    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "yolo", "rails": "off"}
+    config.write_config(target, config.Config(version=1, selection=selection, work_mode="yolo"))
+    assert json.loads(config.config_path(target).read_text())["work"] == {"mode": "yolo"}
     loaded = config.load_config(target)
-    assert loaded is not None and (loaded.work_mode, loaded.safety_rails) == ("yolo", False)
+    assert loaded is not None and loaded.work_mode == "yolo"
+    assert not hasattr(loaded, "safety_rails")
 
 
 def test_invalid_settings_fail_safe_in_hook_readers(tmp_path: Path) -> None:
@@ -272,12 +288,13 @@ def test_adoption_reports_yolo_and_never_bypassed(tmp_path: Path, capsys) -> Non
     assert classify.classify(repo)["state"] == "yolo"
 
 
-def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
-    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target, _path=None: False)
     _set_mode(target, "yolo", capsys)
+    before = (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8")
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     capsys.readouterr()
+    assert (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8") == before
     checks = {name: (status, detail) for status, name, detail in work_mode.doctor_checks(target)}
     assert checks["work mode"][0] == "INFO" and checks["work mode"][1].startswith("yolo")
     assert checks["safety rails"][0] == "WARN" and "secrets" in checks["safety rails"][1]
@@ -287,9 +304,8 @@ def test_doctor_and_status_show_mode_and_rails(tmp_path: Path, monkeypatch, caps
     assert json.loads(capsys.readouterr().out)["work"] == {"mode": "yolo", "rails": "off"}
 
 
-def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, monkeypatch, capsys) -> None:
+def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
-    monkeypatch.setattr(work_mode, "_config_is_tracked", lambda _target, _path=None: False)
     assert cli.main(["work", "rails", "check", "--target", str(target)]) == 0
     assert cli.main(["work", "rails", "off", "--target", str(target)]) == 0
     first = capsys.readouterr().err
@@ -307,12 +323,29 @@ def test_rails_are_independent_of_mode_and_warn_once(tmp_path: Path, monkeypatch
 def test_committed_rails_off_cannot_disable_scanning(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
-    assert work_mode.set_rails(target, "off") is None
-    assert work_mode.rails_enabled(target) is False
+    _set_repo_rails_off(target / config.CONFIG_REL_PATH)
+    assert work_mode.rails_enabled(target) is True
     subprocess.run(["git", "add", "-f", ".brigade/config.json"], cwd=target, check=True)
     assert work_mode.rails_enabled(target) is True
-    status, _, detail = work_mode.doctor_checks(target)[1]
-    assert status == "WARN" and "git tracks .brigade/config.json" in detail
+    rows = {name: (status, detail) for status, name, detail in work_mode.doctor_checks(target)}
+    assert rows["work.rails"][0] == "WARN" and "ignored" in rows["work.rails"][1]
+    assert rows["safety rails"][1].startswith("on:")
+    assert cli.main(["work", "rails", "show", "--target", str(target)]) == 0
+    shown = capsys.readouterr()
+    assert "safety rails: on" in shown.out and "is ignored" in shown.err
+
+
+def test_rails_off_never_writes_the_repository(tmp_path: Path, capsys) -> None:
+    target = _wired(tmp_path)
+    before = (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8")
+    capsys.readouterr()
+    assert cli.main(["work", "rails", "off", "--target", str(target), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    record = work_mode.rails_record_path()
+    assert record is not None and payload["rails_record"] == str(record)
+    assert not work_mode._inside(record, target)
+    assert (target / config.CONFIG_REL_PATH).read_text(encoding="utf-8") == before
+    assert json.loads(record.read_text(encoding="utf-8"))["rails_off"].keys() == {work_mode.repository_key(target)}
 
 
 def test_committed_legacy_config_cannot_disable_scanning(tmp_path: Path) -> None:
@@ -322,8 +355,8 @@ def test_committed_legacy_config_cannot_disable_scanning(tmp_path: Path) -> None
     (legacy / "config.json").write_text(json.dumps({"version": 1, "work": {"rails": "off"}}), encoding="utf-8")
     subprocess.run(["git", "init", "-q"], cwd=target, check=True)
     assert not (target / config.CONFIG_REL_PATH).exists()
-    assert work_mode.rails_off_requested(target) is True
-    assert work_mode.rails_enabled(target) is False
+    assert work_mode.rails_enabled(target) is True
+    assert work_mode.repo_rails_setting(target) == legacy / "config.json"
     subprocess.run(["git", "add", "-f", str(legacy / "config.json")], cwd=target, check=True)
     assert work_mode.rails_enabled(target) is True
 
@@ -335,9 +368,6 @@ def test_non_string_rails_values_fail_safe(tmp_path: Path, value, capsys) -> Non
     data = json.loads(path.read_text(encoding="utf-8"))
     data.setdefault("work", {})["rails"] = value
     path.write_text(json.dumps(data), encoding="utf-8")
-    with pytest.raises(ValueError):
-        config.validate_safety_rails(value)
-    assert work_mode.rails_off_requested(target) is False
     assert work_mode.rails_enabled(target) is True
     assert work_mode.summary(target)["rails"] == "on"
     cli.main(["work", "rails", "show", "--target", str(target)])
@@ -351,7 +381,7 @@ def test_invalid_work_mode_keeps_enforcement_in_hooks(tmp_path: Path) -> None:
     data.setdefault("work", {})["mode"] = "typo"
     path.write_text(json.dumps(data), encoding="utf-8")
     loaded = config.load_config(target)
-    assert loaded is not None and loaded.work_mode == "enforced" and loaded.safety_rails is True
+    assert loaded is not None and loaded.work_mode == "enforced"
     assert work_mode.resolve_mode(target) == "enforced"
     assert any(row[0] == "WARN" and row[1] == "work.mode" for row in work_mode.doctor_checks(target))
 
@@ -399,7 +429,7 @@ def _git_env(home: Path, shim_dir: Path) -> dict[str, str]:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shim for the checkout's brigade CLI")
-def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path) -> None:
+def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path, monkeypatch) -> None:
     shim_dir = tmp_path / "bin"
     shim_dir.mkdir()
     shim = shim_dir / "brigade"
@@ -408,6 +438,9 @@ def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path) -> Non
     repo = tmp_path / "repo"
     repo.mkdir()
     env = _git_env(tmp_path, shim_dir)
+    # The hook's `brigade` and this process must read the same per-user rails record.
+    monkeypatch.setenv("HOME", env["HOME"])
+    monkeypatch.setenv("XDG_CONFIG_HOME", env["XDG_CONFIG_HOME"])
 
     def git(*args: str) -> str:
         return subprocess.run(
@@ -440,6 +473,12 @@ def test_pre_push_honors_rails_switch_with_planted_secret(tmp_path: Path) -> Non
     blocked = push_hook()
     assert blocked.returncode == 1, blocked.stdout + blocked.stderr
     assert "BLOCKED" in blocked.stderr
+
+    # A rails-off value inside the repository is ignored: the push still blocks.
+    _set_repo_rails_off(repo / config.CONFIG_REL_PATH)
+    still_blocked = push_hook()
+    assert still_blocked.returncode == 1, still_blocked.stdout + still_blocked.stderr
+    assert "BLOCKED" in still_blocked.stderr
 
     assert work_mode.set_rails(repo, "off") is None
     allowed = push_hook()
@@ -484,7 +523,6 @@ def test_unsupported_config_version_cannot_turn_rails_off(tmp_path: Path) -> Non
     data = json.loads(path.read_text(encoding="utf-8"))
     data.update({"version": 99, "work": {"mode": "yolo", "rails": "off"}})
     path.write_text(json.dumps(data), encoding="utf-8")
-    assert work_mode.rails_off_requested(target) is False
     assert work_mode.rails_enabled(target) is True
     assert work_mode.resolve_mode(target) == "enforced"
 
@@ -532,10 +570,8 @@ def _symlink(link: Path, target: Path | str, *, directory: bool = False) -> None
 def _git_repo_with_rails_off_settings(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "shared-settings").mkdir(parents=True)
-    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
-    config.write_config(repo, config.Config(version=1, selection=selection, safety_rails=False))
     shared = repo / "shared-settings" / "config.json"
-    (repo / config.CONFIG_REL_PATH).replace(shared)
+    _rails_off_config(repo).replace(shared)
     (repo / ".brigade").rmdir()
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
     return repo
@@ -545,7 +581,6 @@ def test_tracked_brigade_symlink_cannot_disable_rails(tmp_path: Path) -> None:
     repo = _git_repo_with_rails_off_settings(tmp_path)
     _symlink(repo / ".brigade", "shared-settings", directory=True)
     subprocess.run(["git", "add", ".brigade", "shared-settings/config.json"], cwd=repo, check=True)
-    assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
 
@@ -554,7 +589,6 @@ def test_symlinked_config_file_cannot_disable_rails(tmp_path: Path) -> None:
     (repo / ".brigade").mkdir()
     # Path() gives native separators: Windows does not resolve "/" in a relative link.
     _symlink(repo / config.CONFIG_REL_PATH, Path("..", "shared-settings", "config.json"))
-    assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
 
@@ -564,14 +598,15 @@ def test_config_resolving_outside_target_cannot_disable_rails(tmp_path: Path) ->
     outside.mkdir()
     (repo / "shared-settings" / "config.json").replace(outside / "config.json")
     _symlink(repo / ".brigade", outside, directory=True)
-    assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
 
-def test_plain_untracked_config_still_turns_rails_off(tmp_path: Path) -> None:
+def test_plain_untracked_repo_config_no_longer_turns_rails_off(tmp_path: Path) -> None:
     repo = _git_repo_with_rails_off_settings(tmp_path)
     (repo / ".brigade").mkdir()
     (repo / "shared-settings" / "config.json").replace(repo / config.CONFIG_REL_PATH)
+    assert work_mode.rails_enabled(repo) is True
+    assert work_mode.set_rails(repo, "off") is None
     assert work_mode.rails_enabled(repo) is False
 
 
@@ -583,9 +618,7 @@ def _git_c(cwd: Path, *args: str) -> None:
 def _rails_off_settings_repo(path: Path) -> Path:
     """A standalone repository whose committed config.json sets rails off."""
     path.mkdir(parents=True)
-    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
-    config.write_config(path, config.Config(version=1, selection=selection, safety_rails=False))
-    (path / config.CONFIG_REL_PATH).replace(path / "config.json")
+    _rails_off_config(path).replace(path / "config.json")
     (path / ".brigade").rmdir()
     _git_c(path, "init", "-q")
     _git_c(path, "add", "config.json")
@@ -602,7 +635,6 @@ def test_committed_brigade_submodule_cannot_disable_rails(tmp_path: Path) -> Non
     _git_c(repo, "commit", "-q", "-m", "add settings submodule")
     clone = tmp_path / "clone"
     _git_c(tmp_path, "clone", "-q", "--recurse-submodules", str(repo), str(clone))
-    assert work_mode.rails_off_requested(clone) is True
     assert work_mode.rails_enabled(clone) is True
 
 
@@ -614,7 +646,6 @@ def test_gitlink_ancestor_cannot_disable_rails_without_nested_git(tmp_path: Path
     _git_c(repo, "init", "-q")
     _git_c(repo, "update-index", "--add", "--cacheinfo", f"160000,{head.stdout.strip()},.brigade")
     (settings / "config.json").replace(repo / config.CONFIG_REL_PATH)
-    assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
 
@@ -624,14 +655,98 @@ def test_nested_independent_repo_config_cannot_disable_rails(tmp_path: Path) -> 
     _git_c(repo, "init", "-q")
     # The nested repository's own committed config.json is .brigade/config.json here.
     _rails_off_settings_repo(repo / ".brigade")
-    assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
 
-def test_tracked_sibling_under_brigade_still_allows_local_rails_off(tmp_path: Path) -> None:
-    repo = _git_repo_with_rails_off_settings(tmp_path)
-    (repo / ".brigade").mkdir()
-    (repo / "shared-settings" / "config.json").replace(repo / config.CONFIG_REL_PATH)
-    (repo / ".brigade" / "runbook.json").write_text("{}\n")
-    _git_c(repo, "add", ".brigade/runbook.json")
+def test_committed_nested_bare_repository_cannot_disable_rails(tmp_path: Path) -> None:
+    """Codex review 4457092224: committed files that Git discovers as a nested bare repository."""
+    repo = tmp_path / "repo"
+    nested = repo / "nested"
+    for sub in ("objects", "refs"):
+        (nested / sub).mkdir(parents=True)
+        (nested / sub / ".keep").write_text("", encoding="utf-8")
+    (nested / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (nested / "config").write_text("[core]\n\trepositoryformatversion = 0\n\tbare = true\n", encoding="utf-8")
+    (nested / ".brigade").mkdir()
+    _rails_off_config(nested)
+    _git_c(repo, "init", "-q")
+    _git_c(repo, "add", "-f", ".")
+    _git_c(repo, "commit", "-q", "-m", "nested bare layout")
+    clone = tmp_path / "clone"
+    _git_c(tmp_path, "clone", "-q", str(repo), str(clone))
+    assert work_mode.rails_enabled(clone / "nested") is True
+    assert work_mode.rails_enabled(clone) is True
+
+
+def test_user_record_turns_rails_off_for_exact_canonical_path(tmp_path: Path) -> None:
+    parent = tmp_path / "parent"
+    repo = _wired(parent, name="repo")
+    sibling = _wired(parent, name="sibling")
+    child = repo / "src"
+    child.mkdir()
+    assert work_mode.set_rails(repo, "off") is None
     assert work_mode.rails_enabled(repo) is False
+    for other in (sibling, parent, child, tmp_path / "parent" / "repo-2"):
+        assert work_mode.rails_enabled(other) is True, other
+    alias = tmp_path / "alias"
+    _symlink(alias, repo, directory=True)
+    assert work_mode.repository_key(alias) == work_mode.repository_key(repo)
+    assert work_mode.rails_enabled(alias) is False
+    assert work_mode.set_rails(alias, "on") is None
+    assert work_mode.rails_enabled(repo) is True
+    record = work_mode.rails_record_path()
+    assert record is not None and json.loads(record.read_text(encoding="utf-8"))["rails_off"] == {}
+
+
+def test_symlinked_target_writes_the_real_repository_record(tmp_path: Path) -> None:
+    repo = _wired(tmp_path)
+    alias = tmp_path / "alias"
+    _symlink(alias, repo, directory=True)
+    assert work_mode.set_rails(alias, "off") is None
+    assert work_mode.rails_enabled(repo) is False
+
+
+def test_repository_key_folds_case_only_on_case_insensitive_platforms(tmp_path: Path, monkeypatch) -> None:
+    upper, lower = tmp_path / "Repo", tmp_path / "repo"
+    monkeypatch.setattr(work_mode, "_case_insensitive_paths", lambda: True)
+    assert work_mode.repository_key(upper) == work_mode.repository_key(lower)
+    monkeypatch.setattr(work_mode, "_case_insensitive_paths", lambda: False)
+    assert work_mode.repository_key(upper) != work_mode.repository_key(lower)
+
+
+@pytest.mark.parametrize(
+    "content", ["not json", "[]", '{"version": 2, "rails_off": {}}', '{"version": 1, "rails_off": []}']
+)
+def test_unreadable_user_record_keeps_rails_on(tmp_path: Path, content: str) -> None:
+    repo = _wired(tmp_path)
+    assert work_mode.set_rails(repo, "off") is None
+    record = work_mode.rails_record_path()
+    assert record is not None
+    if content.startswith('{"version": 2'):
+        content = json.dumps({"version": 2, "rails_off": {work_mode.repository_key(repo): {}}})
+    record.write_text(content, encoding="utf-8")
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_user_record_inside_the_target_is_ignored(tmp_path: Path, monkeypatch) -> None:
+    repo = _wired(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(repo / "config-home"))
+    monkeypatch.setenv("HOME", str(repo))
+    record = work_mode.rails_record_path()
+    assert record is not None
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"version": 1, "rails_off": {work_mode.repository_key(repo): {}}}), encoding="utf-8")
+    assert work_mode.rails_enabled(repo) is True
+    assert work_mode.set_rails(repo, "off") is not None
+
+
+def test_rails_off_for_a_subdirectory_warns_about_the_hook_root(tmp_path: Path, capsys) -> None:
+    repo = _wired(tmp_path)
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    sub = repo / "pkg"
+    (sub / ".brigade").mkdir(parents=True)
+    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    config.write_config(sub, config.Config(version=1, selection=selection))
+    assert cli.main(["work", "rails", "off", "--target", str(sub)]) == 0
+    assert "the pre-push hook checks the repository root" in capsys.readouterr().err
+    assert work_mode.rails_enabled(repo) is True

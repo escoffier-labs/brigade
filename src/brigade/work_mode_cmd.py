@@ -60,18 +60,20 @@ def mode_command(*, target: Path, action: str, mode: str | None = None, json_out
 
 
 def rails_command(*, target: Path, action: str, json_output: bool = False) -> int:
+    """Read or write the per-user rails record for ``target``; nothing in the repository is consulted."""
     target = target.expanduser().resolve()
     if action == "check":
         return 0 if work_mode.rails_enabled(target) else work_mode.RAILS_OFF_EXIT
+    ignored = work_mode.ignored_repo_rails_note(target)
+    if ignored is not None:
+        print(f"warning: {ignored}", file=sys.stderr)
     if action in work_mode.RAILS_STATES:
         was_on = work_mode.rails_enabled(target)
         error = work_mode.set_rails(target, action)
         if error is not None:
             print(f"error: {error}", file=sys.stderr)
             return 2
-        if action == "off" and work_mode.rails_enabled(target):
-            print(f"warning: safety rails stay {work_mode.TRACKED_CONFIG_NOTE}", file=sys.stderr)
-        elif action == "off" and was_on:
+        if action == "off" and was_on:
             print(work_mode.RAILS_OFF_WARNING.format(target=target), file=sys.stderr)
             if work_mode.pre_push_hook_gated(target) is False:
                 print(
@@ -79,6 +81,16 @@ def rails_command(*, target: Path, action: str, json_output: bool = False) -> in
                     "refreshed from the current Brigade template",
                     file=sys.stderr,
                 )
+        top = work_mode.hook_root_mismatch(target) if action == "off" else None
+        if top is not None:
+            print(
+                f"warning: rails are off only for {target}; the pre-push hook checks the repository root {top}, "
+                f"so run `brigade work rails off --target {top}` to skip its scans",
+                file=sys.stderr,
+            )
     payload: dict[str, object] = {"target": str(target), **work_mode.summary(target)}
+    record = work_mode.rails_record_path()
+    if record is not None:
+        payload["rails_record"] = str(record)
     _emit(payload, json_output=json_output)
     return 0

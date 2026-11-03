@@ -23,10 +23,10 @@ DEFAULT_VERIFY_RUNS_KEEP = 50
 DEFAULT_VERIFY_ARCHIVE_ENABLED = True
 DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
-# Work-loop enforcement mode and the independent safety-rails switch (#2233).
+# Work-loop enforcement mode (#2233). Safety rails are not a repository setting:
+# their opt-out lives in a per-user record outside the repo (see work_mode).
 WORK_MODES = ("enforced", "yolo")
 DEFAULT_WORK_MODE = "enforced"
-DEFAULT_SAFETY_RAILS = True
 
 
 @dataclass
@@ -44,19 +44,12 @@ class Config:
     memory_recall_target: str | None = None
     run_record: str = "metadata-only"
     work_mode: str = DEFAULT_WORK_MODE
-    safety_rails: bool = DEFAULT_SAFETY_RAILS
 
 
 def validate_work_mode(value: Any) -> str:
     if not isinstance(value, str) or value not in WORK_MODES:
         raise ValueError(f"work.mode must be one of: {', '.join(WORK_MODES)}")
     return value
-
-
-def validate_safety_rails(value: Any) -> bool:
-    if not isinstance(value, str) or value not in {"on", "off"}:
-        raise ValueError("work.rails must be on or off")
-    return value == "on"
 
 
 def validate_run_record(value: Any) -> str:
@@ -204,8 +197,6 @@ def write_config(target: Path, cfg: Config) -> None:
     work: dict[str, str] = {}
     if validate_work_mode(cfg.work_mode) != DEFAULT_WORK_MODE:
         work["mode"] = cfg.work_mode
-    if cfg.safety_rails is not DEFAULT_SAFETY_RAILS:
-        work["rails"] = "on" if cfg.safety_rails else "off"
     if work:
         payload["work"] = work
     # Write a sibling temp file and rename it over the config so a failed write
@@ -257,9 +248,10 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
-    # Invalid optional work settings fall back to the enforced, rails-on defaults
-    # instead of failing the whole config: a failed load reads as "not wired" to
-    # hook target discovery, which would drop enforcement. Doctor reports them.
+    # An invalid optional work mode falls back to enforced instead of failing the
+    # whole config: a failed load reads as "not wired" to hook target discovery,
+    # which would drop enforcement. Doctor reports it. An in-repo work.rails is
+    # never read here; work_mode reports it as ignored.
     work = data.get("work", {})
     if not isinstance(work, dict):
         work = {}
@@ -267,10 +259,6 @@ def load_config(target: Path) -> Optional[Config]:
         work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
     except ValueError:
         work_mode = DEFAULT_WORK_MODE
-    try:
-        safety_rails = validate_safety_rails(work.get("rails", "on"))
-    except ValueError:
-        safety_rails = DEFAULT_SAFETY_RAILS
     return Config(
         version=version,
         selection=sel,
@@ -283,5 +271,4 @@ def load_config(target: Path) -> Optional[Config]:
         memory_recall_target=memory_recall_target,
         run_record=run_record,
         work_mode=work_mode,
-        safety_rails=safety_rails,
     )
