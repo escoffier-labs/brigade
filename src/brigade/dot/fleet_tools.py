@@ -355,7 +355,7 @@ class FleetTools:
             "runtime_mode": "full-access",
             "interaction_mode": "default",
             "initiator_kind": "agent",
-            "initiator_label": "dot",
+            "initiator_label": "duet" if self.runtime.schema == "brigade.duet.runtime.v1" else "dot",
         }
         for key, value in (("seat", seat), ("workload", workload), ("override_reason", override_reason)):
             if value:

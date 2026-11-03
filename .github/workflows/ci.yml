@@ -694,6 +694,7 @@ jobs:
       - component-manifest-provenance
       - content-guard
       - repo-metadata
+      - changelog-fragments
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
@@ -716,7 +717,7 @@ jobs:
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
               "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
-              "content-guard", "repo-metadata", "install-from-source",
+              "content-guard", "repo-metadata", "changelog-fragments", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
               "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
           }
@@ -885,6 +886,42 @@ jobs:
           BRIGADE_EXTRAS: "1"
       - name: Template Audit
         run: brigade security template-audit --target . --json
+
+  changelog-fragments:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      # Runs on docs-only diffs too: a CHANGELOG.md edit alone classifies as
+      # documentation, and it is exactly what the guard below rejects.
+      - name: Validate changelog fragments
+        run: python3 scripts/changelog_fragments.py check
+      - name: Reject CHANGELOG.md edits outside a release commit
+        if: ${{ github.event_name != 'push' }}
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.merge_group.base_sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Compare with the base tip GitHub merged into, as the lint job does.
+            if [ "$(git rev-parse HEAD^2 2>/dev/null)" != "$PR_HEAD_SHA" ]; then
+              echo "::error::HEAD is not the pull request test merge"
+              exit 1
+            fi
+            base=$(git rev-parse HEAD^1)
+          else
+            base=$EVENT_BASE_SHA
+            if [ -z "$base" ]; then
+              echo "::error::merge group base SHA is missing"
+              exit 1
+            fi
+            git fetch --no-tags --depth=1 origin "$base"
+          fi
+          python3 scripts/changelog_fragments.py guard --base "$base"
 
   install-from-source:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}

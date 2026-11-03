@@ -1,8 +1,20 @@
-use pcre2::bytes::RegexBuilder;
+use pcre2::bytes::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
+use std::ffi::c_void;
 use std::io;
 
 const PROTOCOL: u32 = 1;
+
+/// `ascii` is the #2212 contract and stays the default, so a request without
+/// `mode` is answered exactly as before. `utf` turns on PCRE2 UTF and UCP so
+/// `\d`, `\s`, `\w`, `\b` and caseless matching use Unicode properties.
+#[derive(Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum Mode {
+    #[default]
+    Ascii,
+    Utf,
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -16,6 +28,8 @@ struct Rule {
 #[serde(deny_unknown_fields)]
 struct Request {
     protocol: u32,
+    #[serde(default)]
+    mode: Mode,
     text: String,
     rules: Vec<Rule>,
 }
@@ -35,19 +49,79 @@ struct Matches {
 }
 
 #[derive(Serialize)]
+struct Engine {
+    pcre2_version: String,
+    unicode_version: String,
+}
+
+#[derive(Serialize)]
 struct Response {
     protocol: u32,
+    /// Reported in UTF mode only, so ASCII responses keep their exact bytes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    engine: Option<Engine>,
     rules: Vec<Matches>,
+}
+
+/// Read a string from the linked library, not the compile-time header, so a
+/// system PCRE2 reports its own version.
+fn pcre2_config_string(what: u32) -> Result<String, Box<dyn std::error::Error>> {
+    let mut buffer = [0u8; 64];
+    // SAFETY: both options write a NUL-terminated string of at most 24 code
+    // units and return its length including the NUL, or a negative error.
+    let used = unsafe { pcre2_sys::pcre2_config_8(what, buffer.as_mut_ptr() as *mut c_void) };
+    if used <= 0 || used as usize > buffer.len() {
+        return Err("PCRE2 config unavailable".into());
+    }
+    Ok(std::str::from_utf8(&buffer[..used as usize - 1])?.to_owned())
+}
+
+fn engine() -> Result<Engine, Box<dyn std::error::Error>> {
+    Ok(Engine {
+        pcre2_version: pcre2_config_string(pcre2_sys::PCRE2_CONFIG_VERSION)?,
+        unicode_version: pcre2_config_string(pcre2_sys::PCRE2_CONFIG_UNICODE_VERSION)?,
+    })
+}
+
+/// UTF mode spans in both units. Offsets advance monotonically, so character
+/// offsets are counted once across the subject. An empty match is refused:
+/// PCRE2 iteration would step one byte into a multibyte character, and no
+/// default rule can match empty.
+fn utf_spans(regex: &Regex, text: &str) -> Result<Vec<Span>, Box<dyn std::error::Error>> {
+    let mut spans = Vec::new();
+    let (mut position, mut counted_byte, mut counted_chars) = (0, 0, 0);
+    while position <= text.len() {
+        let Some(found) = regex.find_at(text.as_bytes(), position)? else {
+            break;
+        };
+        if found.start() == found.end() {
+            return Err("empty match in UTF mode".into());
+        }
+        let start = counted_chars + text[counted_byte..found.start()].chars().count();
+        let end = start + text[found.start()..found.end()].chars().count();
+        spans.push(Span {
+            byte_start: found.start(),
+            byte_end: found.end(),
+            start,
+            end,
+        });
+        (position, counted_byte, counted_chars) = (found.end(), found.end(), end);
+    }
+    Ok(spans)
 }
 
 fn scan(request: Request) -> Result<Response, Box<dyn std::error::Error>> {
     if request.protocol != PROTOCOL {
         return Err("unsupported guard protocol".into());
     }
-    // Python owns Unicode matching. ASCII has identical byte/character units.
-    if !request.text.is_ascii() {
-        return Err("Unicode requires Python matching".into());
+    let utf = request.mode == Mode::Utf;
+    // ASCII mode keeps #2212's contract: Python owns non-ASCII subjects there,
+    // and byte and character offsets coincide.
+    if !utf && !request.text.is_ascii() {
+        return Err("Unicode requires UTF mode or Python matching".into());
     }
+    // Reported so a caller can compare PCRE2's Unicode database with its own.
+    let engine = if utf { Some(engine()?) } else { None };
     let mut rules = Vec::new();
     for rule in request.rules {
         // Python flags: IGNORECASE=2, MULTILINE=8, DOTALL=16, UNICODE=32,
@@ -55,13 +129,25 @@ fn scan(request: Request) -> Result<Response, Box<dyn std::error::Error>> {
         if rule.flags & !(2 | 8 | 16 | 32 | 64 | 256) != 0 || !rule.pattern.is_ascii() {
             return Err("unsupported Python regex flags or pattern".into());
         }
+        // Python's ASCII flag restricts classes and case folding together.
+        // UCP off alone would keep Unicode case folding, so UTF mode refuses it.
+        if utf && rule.flags & 256 != 0 {
+            return Err("ASCII flag is unsupported in UTF mode".into());
+        }
         let regex = RegexBuilder::new()
             .caseless(rule.flags & 2 != 0)
             .multi_line(rule.flags & 8 != 0)
             .dotall(rule.flags & 16 != 0)
             .extended(rule.flags & 64 != 0)
+            .utf(utf)
+            .ucp(utf)
             .jit(true)
             .build(&rule.pattern)?;
+        if utf {
+            let spans = utf_spans(&regex, &request.text)?;
+            rules.push(Matches { id: rule.id, spans });
+            continue;
+        }
         let mut spans = Vec::new();
         for found in regex.find_iter(request.text.as_bytes()) {
             let found = found?;
@@ -78,6 +164,7 @@ fn scan(request: Request) -> Result<Response, Box<dyn std::error::Error>> {
     }
     Ok(Response {
         protocol: PROTOCOL,
+        engine,
         rules,
     })
 }
@@ -104,6 +191,7 @@ mod tests {
     fn lookbehind_named_backreference_and_conditional() {
         let result = scan(Request {
             protocol: PROTOCOL,
+            mode: Mode::Ascii,
             text: "'abc' abc".into(),
             rules: vec![Rule {
                 id: "custom".into(),
@@ -123,11 +211,69 @@ mod tests {
             assert!(
                 scan(Request {
                     protocol,
+                    mode: Mode::Ascii,
                     text: text.into(),
                     rules: vec![]
                 })
                 .is_err()
             );
+        }
+    }
+
+    fn request(json: &str) -> Request {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn ascii_requests_and_responses_keep_the_2212_shape() {
+        let rules = r#"[{"id":"lh","pattern":"local\\w+","flags":2}]"#;
+        let implicit = format!(r#"{{"protocol":1,"text":"a LOCALhost b","rules":{rules}}}"#);
+        let explicit =
+            format!(r#"{{"protocol":1,"mode":"ascii","text":"a LOCALhost b","rules":{rules}}}"#);
+        let implicit = serde_json::to_string(&scan(request(&implicit)).unwrap()).unwrap();
+        let explicit = serde_json::to_string(&scan(request(&explicit)).unwrap()).unwrap();
+        assert_eq!(implicit, explicit);
+        assert_eq!(
+            implicit,
+            r#"{"protocol":1,"rules":[{"id":"lh","spans":[{"byte_start":2,"byte_end":11,"start":2,"end":11}]}]}"#
+        );
+        let unknown = r#"{"protocol":1,"mode":"latin1","text":"a","rules":[]}"#;
+        assert!(serde_json::from_str::<Request>(unknown).is_err());
+    }
+
+    #[test]
+    fn utf_mode_counts_characters_and_uses_unicode_classes() {
+        // \w and \d follow Unicode properties; astral characters are one
+        // character but four bytes.
+        let result = scan(request(
+            r#"{"protocol":1,"mode":"utf","text":"😀 é1 λ٣ x","rules":[{"id":"w","pattern":"\\w+","flags":0},{"id":"d","pattern":"\\d","flags":0}]}"#,
+        ))
+        .unwrap();
+        let words: Vec<_> = result.rules[0]
+            .spans
+            .iter()
+            .map(|s| (s.start, s.end, s.byte_start, s.byte_end))
+            .collect();
+        assert_eq!(words, vec![(2, 4, 5, 8), (5, 7, 9, 13), (8, 9, 14, 15)]);
+        let digits: Vec<_> = result.rules[1]
+            .spans
+            .iter()
+            .map(|s| (s.start, s.end))
+            .collect();
+        assert_eq!(digits, vec![(3, 4), (6, 7)]);
+        let engine = result.engine.unwrap();
+        assert!(engine.pcre2_version.starts_with("10."));
+        assert_eq!(engine.unicode_version.split('.').count(), 3);
+    }
+
+    #[test]
+    fn utf_mode_refuses_empty_matches_and_the_ascii_flag() {
+        for rule in [
+            r#"{"id":"e","pattern":"x*","flags":0}"#,
+            r#"{"id":"a","pattern":"x","flags":256}"#,
+        ] {
+            let json = format!(r#"{{"protocol":1,"mode":"utf","text":"é x","rules":[{rule}]}}"#);
+            assert!(scan(request(&json)).is_err());
         }
     }
 }

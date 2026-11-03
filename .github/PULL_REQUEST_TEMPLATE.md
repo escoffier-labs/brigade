@@ -21,7 +21,7 @@ Closes #
 
 - [ ] `pytest -q` passes locally
 - [ ] Added or updated tests covering the change
-- [ ] Updated the `Unreleased` section of `CHANGELOG.md` for any user-visible effect (entries describe effects, not commit subjects)
+- [ ] Added a `changelog.d/<pr-number-or-slug>.md` fragment for any user-visible effect (entries describe effects, not commit subjects). Do not edit `CHANGELOG.md`; CI rejects it outside a release commit
 - [ ] No personal details, hostnames, IPs, account names, tokens, or unredacted absolute paths in code, templates, tests, or this PR (the `content-guard` CI job will fail otherwise)
 - [ ] No new runtime dependencies (Brigade is zero-runtime-dep on purpose)
 - [ ] Conventional commit messages, no AI co-authorship trailers

@@ -6,9 +6,12 @@ import secrets
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import fleet_admin_stats as stats, fleet_admin_stats_page as page, fleet_hub
+
+if TYPE_CHECKING:
+    from .fleet_hub_routes import HubContext, RouteTable
 
 
 def serve(handler: Any, db_path: Path, query: str) -> None:
@@ -56,3 +59,8 @@ def post(handler: Any, db_path: Path, query: str) -> None:
         handler._send_json(400, {"error": "invalid aggregate snapshot"})
     except (sqlite3.Error, fleet_hub.FleetHubError):
         handler._send_json(503, {"error": "stats store unavailable"})
+
+
+def register_routes(routes: RouteTable, hub: HubContext) -> None:
+    routes.add("GET", lambda request, _path, query: serve(request, hub.db_path, query), paths=("/deck/stats",))
+    routes.add("POST", lambda request, _path, query: post(request, hub.db_path, query), paths=("/stats",))

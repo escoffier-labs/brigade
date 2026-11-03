@@ -18,6 +18,7 @@ exact helper calls (`Driving it with control-brigade`), and what bites
 | Handoff inbox lint | [handoff-lint.md](handoff-lint.md) | `handoff-lint` |
 | Guard scan and redact parity | [guard-parity.md](guard-parity.md) | `guard-parity` |
 | Fleet Hub wire contract | [hub-contract.md](hub-contract.md) | `hub-contract` |
+| Fleet Hub storage parity | [storage-parity.md](storage-parity.md) | `storage-parity` |
 | Run plan preview | [run-dry-run.md](run-dry-run.md) | none yet (paused) |
 
 Each file opens with a status header: `active`, `paused` (with a reason and
@@ -46,8 +47,8 @@ Helper drives still missing a feature file, and worth adding when a change
 lands there: `brigade memory`, `brigade security`, `brigade outcome`,
 `brigade evidence`, `brigade code`, `brigade skills`, `brigade daily`.
 `brigade guard scan` / `redact` have the parity drive above, and the Fleet Hub
-HTTP contract behind `brigade fleet` has the `hub-contract` drive; `brigade
-scrub`, the other `guard` verbs, and the `brigade fleet` CLI itself have
+HTTP contract behind `brigade fleet` has the `hub-contract` drive, and the
+rows it stores have the `storage-parity` drive; `brigade scrub`, the other `guard` verbs, and the `brigade fleet` CLI itself have
 checkout test selectors only. Add a helper feature file with the same four H2s rather than stretching
 an existing one.
 
