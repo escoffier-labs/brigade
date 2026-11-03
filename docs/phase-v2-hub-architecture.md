@@ -2186,7 +2186,7 @@ one fits and what it needs from this revision.
 | Connectivity PR: read-only Grok Bot memory profile, principal inbox `request_denied` fix, bounded memory hits in digest and inbox responses | in flight | first step of S23 and S26 | The terms in [Interim connectivity](#interim-connectivity): S23's field names and bounds, `content_trust: "untrusted"`, a prompt-load scan, and the profile defined as S26's memory profile without `handoff_write` |
 | #2187 Tier 0 preflight | draft | local diagnostic | S19c's hub `preflight` action returns the same `brigade.memory-tier0-preflight.v1` report, filled from hub facts. The hub adds the pinned-block check and blocker re-verification inside the apply transaction |
 | #2213 engine rename plan | merged plan | naming | The hub binary is `brigade-hub` with no alias. S10 rebases on the rename's manifest and installer slice (R5) if R5 lands first |
-| #2212 native PCRE2 guard | open, ASCII only | the engine D16 names | S18a adds a UTF mode with parity tests for hub use. The guard's own behavior stays as #2212 ships it |
+| #2212 native PCRE2 guard | merged, ASCII only | the engine D16 names | It sends only ASCII text scanned with the default rules to PCRE2 and everything else to Python `re`. S18a adds a UTF mode with parity tests for hub use. The guard's own behavior stays as #2212 ships it |
 | #2210 hub work edges | open | S28 | Built in Rust after the Worklore family port, with a Python version only if that port slips (D27, Q7). Its compaction invariants are in [Log retention and compaction](#log-retention-and-compaction) |
 | #2207 contract v2 | open | S11 | Its plan line about Rust targeting v2 from the start needs to match D20 |
 
@@ -2266,7 +2266,7 @@ Waves, where every slice in a wave has all of its build and verify
 prerequisites in earlier waves:
 
 ```text
-wave 0 (some in flight): S1  S2  S3  S16a (merged)  S22a  S30  S18a (after #2212)  connectivity PR
+wave 0 (some in flight): S1  S2  S3  S16a (merged)  S22a  S30  S18a (#2212 merged)  connectivity PR
 wave 1:                  S1b  S29  S3b  S22
 wave 2:                  S4a  S4b  S6a  S9  S31
 wave 3:                  S5
