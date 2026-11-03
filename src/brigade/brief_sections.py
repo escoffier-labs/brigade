@@ -51,6 +51,10 @@ _SESSION_CLOSE_ITEMS: tuple[str, ...] = (
     "Outcome recorded? (`brigade outcome capture <skill-or-card-id> --run-id latest`)",
     "Memory Handoff written when durable knowledge was produced?",
 )
+# Yolo mode (#2233) keeps handoffs available on request and drops verification wording.
+_YOLO_SESSION_CLOSE_ITEMS: tuple[str, ...] = (
+    "Memory Handoff written if this work produced durable knowledge? (optional in yolo mode)",
+)
 
 
 def normalize_profile(value: str | None, *, default: str = DEFAULT_PROFILE) -> str:
@@ -87,9 +91,9 @@ def profiles_for_depth(profile: str) -> tuple[str, ...]:
     return FULL_SECTIONS
 
 
-def session_close_items() -> tuple[str, ...]:
+def session_close_items(*, mode: str = "enforced") -> tuple[str, ...]:
     """Checklist items that lead the live brief and the full static profile."""
-    return _SESSION_CLOSE_ITEMS
+    return _YOLO_SESSION_CLOSE_ITEMS if mode == "yolo" else _SESSION_CLOSE_ITEMS
 
 
 def render_session_close_section(*, heading: str = "## Session close") -> str:
@@ -179,8 +183,13 @@ def render_static_instruction(profile: str = DEFAULT_PROFILE) -> str:
     return render_sections(profiles_for_depth(profile))
 
 
-def render_brief_session_close_lines() -> list[str]:
+def render_brief_session_close_lines(*, mode: str = "enforced") -> list[str]:
     """Lines printed at the top of live ``brigade work brief`` text output."""
     lines = ["session_close:"]
-    lines.extend(f"  - [ ] {item}" for item in _SESSION_CLOSE_ITEMS)
+    lines.extend(f"  - [ ] {item}" for item in session_close_items(mode=mode))
+    if mode == "yolo":
+        lines.append(
+            "work_mode: yolo (verification is not enforced; "
+            "`brigade work verify run` still works by hand and records a receipt)"
+        )
     return lines

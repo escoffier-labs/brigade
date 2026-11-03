@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
@@ -22,6 +23,10 @@ DEFAULT_VERIFY_RUNS_KEEP = 50
 DEFAULT_VERIFY_ARCHIVE_ENABLED = True
 DEFAULT_VERIFY_ARCHIVE_DIR = ".brigade/work/verify-archive"
 DEFAULT_RUN_LOCK_WAIT_SECONDS = 0.0
+# Work-loop enforcement mode (#2233). Safety rails are not a repository setting:
+# their opt-out lives in a per-user record outside the repo (see work_mode).
+WORK_MODES = ("enforced", "yolo")
+DEFAULT_WORK_MODE = "enforced"
 
 
 @dataclass
@@ -38,6 +43,13 @@ class Config:
     # Absent on repo installs until the operator sets an explicit path.
     memory_recall_target: str | None = None
     run_record: str = "metadata-only"
+    work_mode: str = DEFAULT_WORK_MODE
+
+
+def validate_work_mode(value: Any) -> str:
+    if not isinstance(value, str) or value not in WORK_MODES:
+        raise ValueError(f"work.mode must be one of: {', '.join(WORK_MODES)}")
+    return value
 
 
 def validate_run_record(value: Any) -> str:
@@ -182,7 +194,21 @@ def write_config(target: Path, cfg: Config) -> None:
     memory_recall_target = validate_memory_recall_target(cfg.memory_recall_target)
     if memory_recall_target is not None:
         payload["memory_recall_target"] = memory_recall_target
-    path.write_text(json.dumps(payload, indent=2) + "\n")
+    work: dict[str, str] = {}
+    if validate_work_mode(cfg.work_mode) != DEFAULT_WORK_MODE:
+        work["mode"] = cfg.work_mode
+    if work:
+        payload["work"] = work
+    # Write a sibling temp file and rename it over the config so a failed write
+    # (full disk, interrupt) never leaves a truncated config behind.
+    destination = Path(os.path.realpath(path))
+    temp = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(payload, indent=2) + "\n")
+        os.replace(temp, destination)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def load_config(target: Path) -> Optional[Config]:
@@ -222,6 +248,17 @@ def load_config(target: Path) -> Optional[Config]:
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
     run_record = validate_run_record(run.get("record", "metadata-only"))
+    # An invalid optional work mode falls back to enforced instead of failing the
+    # whole config: a failed load reads as "not wired" to hook target discovery,
+    # which would drop enforcement. Doctor reports it. An in-repo work.rails is
+    # never read here; work_mode reports it as ignored.
+    work = data.get("work", {})
+    if not isinstance(work, dict):
+        work = {}
+    try:
+        work_mode = validate_work_mode(work.get("mode", DEFAULT_WORK_MODE))
+    except ValueError:
+        work_mode = DEFAULT_WORK_MODE
     return Config(
         version=version,
         selection=sel,
@@ -233,4 +270,5 @@ def load_config(target: Path) -> Optional[Config]:
         run_lock_wait_seconds=run_lock_wait_seconds,
         memory_recall_target=memory_recall_target,
         run_record=run_record,
+        work_mode=work_mode,
     )
