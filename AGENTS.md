@@ -50,7 +50,7 @@ The focused gate runs only named selectors, without coverage or full-gate slots.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
-`install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
+`changelog-fragments`, `install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
 The local `./scripts/verify` gate is the full coverage gate. Do not treat it
 as a replacement for those CI-only release and public-repo checks.
 
@@ -91,6 +91,10 @@ Format: trigger, then the rule, then what to do instead.
 - Adding a runtime dependency, or a new top-level harness, depth, or include:
   needs a conversation first. Open an issue per `CONTRIBUTING.md` instead of
   landing it directly.
+- A change has a user-visible effect: never edit `CHANGELOG.md`; the
+  `changelog-fragments` CI job rejects it outside a release commit. Add
+  `changelog.d/<pr-number-or-slug>.md` holding `- ` bullets (see
+  `changelog.d/README.md`) and run `python3 scripts/changelog_fragments.py check`.
 - Bumping the version: update `pyproject.toml`, `src/brigade/__init__.py`, and
   every template `_brigade_version` field together. `./scripts/verify` checks
   the sync.

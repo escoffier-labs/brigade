@@ -62,11 +62,13 @@ After applying the required repository label, use `@coderabbitai review` for an 
 
 ## Changelog
 
-User-visible PRs append a bullet under the root `CHANGELOG.md` `## [Unreleased]` (effects, not commit subjects). `.gitattributes` marks `/CHANGELOG.md merge=union` so sibling PRs that each add their own Unreleased line combine instead of conflicting. Nested `CHANGELOG.md` files are not marked.
+Pull requests do not edit `CHANGELOG.md`. A PR with a user-visible effect adds one fragment, `changelog.d/<pr-number-or-slug>.md`, holding one or more `- ` bullets that describe effects, not commit subjects. A PR with no user-visible effect needs no fragment. The format is in [`changelog.d/README.md`](changelog.d/README.md), and `python3 scripts/changelog_fragments.py check` validates it locally.
 
-The union driver applies to local merges and rebases only. GitHub does not read `.gitattributes` merge drivers when it computes pull-request mergeability, so sibling Unreleased appends still show as `CONFLICTING` on github.com even though they merge clean locally. Rebase the branch on `main` locally, let the union driver combine the bullets, and force-push. The pull request then reports `MERGEABLE`.
+The `changelog-fragments` CI job runs that check and fails a PR that edits `CHANGELOG.md` unless the diff is a release commit, one that adds a `## [X.Y.Z] - YYYY-MM-DD` heading. GitHub does not read `.gitattributes` merge drivers when it computes pull-request mergeability, so every PR that appended to the shared `## [Unreleased]` hunk showed as `CONFLICTING` once a sibling landed. Separate fragment files remove that shared hunk.
 
-Union is safe for that append-only Unreleased list when each entry is its own line. When two branches edit the same line or adjacent lines of an existing bullet, union keeps both versions or interleaves wrapped lines and does not conflict. Treat that clean merge as a rewrite to re-read. A human must reconcile.
+An older branch that still has its entry in `CHANGELOG.md` moves that entry into a fragment and restores the file (`git checkout origin/main -- CHANGELOG.md`). `.gitattributes` keeps `/CHANGELOG.md merge=union` so a local merge of such a branch still combines cleanly, but the CI guard is what enforces the fragment rule. Nested `CHANGELOG.md` files are not marked.
+
+The release cut runs `python3 scripts/changelog_fragments.py assemble` to append the fragments to `## [Unreleased]` and delete them, then rolls the changelog and bumps the version in the same commit. Corrections to an entry that already reached `CHANGELOG.md` are made in that commit.
 
 ## Command-path deprecations
 
