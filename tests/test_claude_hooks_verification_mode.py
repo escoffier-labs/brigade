@@ -75,15 +75,16 @@ def test_plain_check_follows_the_starting_directory(repos) -> None:
     assert _denied(_bash("PreToolUse", repos["enforced"], "pytest -q"))
 
 
-def test_unresolvable_target_stays_enforced(repos) -> None:
+def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
     for command in (
         "cd $REPO_DIR && pytest -q",
         f"cd {repos['plain']} && pytest -q",
         f"(cd {repos['yolo']} && pytest -q)",
         f"cd {repos['yolo']} || true; pytest -q",
     ):
+        # An enforced start stays enforced, and a yolo start is not newly denied.
         assert _denied(_bash("PreToolUse", repos["enforced"], command)), command
-        assert _denied(_bash("PreToolUse", repos["yolo"], command)), command
+        assert not _denied(_bash("PreToolUse", repos["yolo"], command)), command
 
 
 def test_post_failure_follows_the_verification_target(repos) -> None:

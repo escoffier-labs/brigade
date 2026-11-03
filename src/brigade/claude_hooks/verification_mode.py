@@ -4,7 +4,9 @@ Write attribution observes several roots for one Bash call, so the hook runs
 once per root. Verification enforcement must not depend on which root is being
 handled: it follows the directory each check actually runs in, after any
 ``cd``. Mode resolution still goes through ``work_mode``; this module only
-finds the execution directories. Anything it cannot place stays enforced.
+finds the execution directories. A check whose directory it cannot place, or
+that runs outside any wired repository, keeps the handled root's mode, which is
+how every check was judged before.
 """
 
 from __future__ import annotations
@@ -83,25 +85,24 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
 
 
 def verification_in_yolo(command: object, cwd: object, root: Path) -> bool:
-    """True only when every verification in ``command`` runs inside a yolo repository.
+    """True only when every verification in ``command`` is governed by yolo mode.
 
     ``cwd`` is the tool call's working directory, and ``root`` stands in for it
-    when absent. A verification that stays in an unwired start directory
-    inherits ``root``'s mode, as before. An enforced, unwired, or unresolvable
-    execution directory keeps enforcement.
+    when absent. A verification that runs in a wired repository follows that
+    repository's mode. One whose directory cannot be placed, or that runs
+    outside every wired repository, follows ``root``'s mode, as before #2235.
+    So an enforced workspace stays enforced for a dynamic ``cd``, and a yolo
+    repository is not newly denied for one.
     """
     if not isinstance(command, str) or not command.strip():
         return False
+    root_yolo = work_mode.is_yolo(root)
     start = Path(cwd) if isinstance(cwd, str) and cwd else root
     cwds = verifier_cwds(command, start)
     if not cwds:
-        return False
+        return root_yolo
     for path in cwds:
-        if path is None:
-            return False
-        wired = resolve_wired_target(str(path))
-        if wired is None and path == start:
-            wired = root
-        if wired is None or not work_mode.is_yolo(wired):
+        wired = resolve_wired_target(str(path)) if path is not None else None
+        if not (work_mode.is_yolo(wired) if wired is not None else root_yolo):
             return False
     return True
