@@ -548,6 +548,13 @@ def test_quality_missing_projection_rows_are_unavailable_without_wish_vocab(tmp_
     assert report["scope_leakage"]["available"] is False
 
 
+def _rebaseline(search, before):
+    """Re-read the baseline after a test-made card edit; the same cards must still match."""
+    rebased = search("juniper maple cedar", 10)
+    assert {card_id for card_id, _ in rebased} == {card_id for card_id, _ in before}
+    return rebased
+
+
 @pytest.mark.skipif(not SAFE_DIRECTORY_CAPABILITY, reason="safe directory descriptors unavailable")
 @pytest.mark.parametrize("workflow", ["accepted", "rejected", "stale", "contradictory", "cross-scope"])
 def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
@@ -566,6 +573,9 @@ def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
         path = tmp_path / LOSER
         path.write_text(path.read_text().replace("---\n", "---\nscope: another-task\n", 1))
         raw_before[LOSER] = path.read_bytes()
+        # BM25 length normalization moves scores when a card grows, so the
+        # refused workflow is measured against the deliberately edited corpus.
+        before = _rebaseline(search, before)
     if workflow in ("cross-scope", "contradictory"):
         with pytest.raises(api.ProposalError):
             api.create_payload(
@@ -601,6 +611,7 @@ def test_reviewed_proposal_actual_current_retrieval(tmp_path, workflow):
             path = tmp_path / SURVIVOR
             path.write_bytes(raw_before[SURVIVOR] + b"\nMetadata-free later source edit.\n")
             raw_before[SURVIVOR] = path.read_bytes()
+            before = _rebaseline(search, before)
         if workflow == "accepted":
             assert (
                 api.apply_payload(target=tmp_path, proposal_id=proposal["id"], digest=proposal["digest"])["status"]

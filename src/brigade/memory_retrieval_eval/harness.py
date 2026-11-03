@@ -19,7 +19,8 @@ from .metrics import aggregate_scores, ceiling_for_queries, score_query
 
 DEFAULT_FIXTURE_ROOT = default_fixture_root()
 DEFAULT_K = 5
-KNOWN_ADAPTERS = frozenset({"current", "grep", "semantic"})
+KNOWN_ADAPTERS = frozenset({"current", "bm25", "substring", "grep", "semantic"})
+DEFAULT_ADAPTERS = ("current", "bm25", "substring", "grep", "semantic")
 
 
 def run_eval(
@@ -30,8 +31,9 @@ def run_eval(
 ) -> dict[str, Any]:
     """Run the retrieval eval and return a JSON-serializable report.
 
-    Adapters ``current`` and ``grep`` always run offline. ``semantic`` is
-    included when available; otherwise it is reported as skipped.
+    Adapters ``current`` (production BM25 search), ``bm25``, ``substring``
+    (the pre-#2196 scorer, as a baseline), and ``grep`` always run offline.
+    ``semantic`` is included when available; otherwise it is reported as skipped.
     """
     root = (fixture_root or DEFAULT_FIXTURE_ROOT).expanduser().resolve()
     queries_path = root / "queries.json"
@@ -49,7 +51,7 @@ def run_eval(
         raise ValueError("fixture gold validation failed:\n- " + "\n- ".join(problems))
     queries = resolve_gold_aliases(cards, queries)
 
-    wanted = adapters or ["current", "grep", "semantic"]
+    wanted = adapters or list(DEFAULT_ADAPTERS)
     unknown = [name for name in wanted if name not in KNOWN_ADAPTERS]
     if unknown:
         raise ValueError(f"unknown adapters: {', '.join(unknown)}")

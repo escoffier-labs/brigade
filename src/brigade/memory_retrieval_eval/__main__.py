@@ -24,8 +24,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--k", type=int, default=None, help="Override Precision/Recall@K (default: queries.json k).")
     parser.add_argument(
         "--adapters",
-        default="current,grep,semantic",
-        help="Comma-separated adapters to run (default: current,grep,semantic).",
+        default="current,bm25,substring,grep,semantic",
+        help="Comma-separated adapters to run (default: current,bm25,substring,grep,semantic).",
     )
     parser.add_argument("--json", action="store_true", help="Print the full JSON report.")
     args = parser.parse_args(argv)

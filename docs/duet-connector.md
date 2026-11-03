@@ -54,6 +54,11 @@ The 22 registered tools:
 | `fleet_hub_policy` | Read Hub policy. | No |
 | `fleet_digest` | Read the fleet digest. | No |
 
+`memory_search` forwards each match's `score` from `brigade memory search --json`. Since #2196 it is a
+BM25 relevance score: a non-negative float rounded to 4 decimals, where higher ranks first. It used to
+be a small integer. Scores compare only within one result list, never across workspaces or queries.
+Equal scores are ordered by card path.
+
 Shared tools keep Dot's wire schemas and annotations. Tool descriptions are
 reworded for Duet's operating rules. `duet_capabilities` tells Duet not to
 auto-reply to agent messages that contain no new facts: it acknowledges them

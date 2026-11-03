@@ -26,7 +26,12 @@ def test_memory_search_ranks_title_over_body(tmp_path: Path):
     _card(tmp_path, "beta.md", "Other", "mentions restic once in the body")
     payload = memory_cmd.search_cards_payload(tmp_path, "restic")
     assert payload["match_count"] == 2
-    assert payload["matches"][0]["path"].endswith("alpha.md")  # title match outranks body
+    # BM25 has no heading boost (#2196). A title word still counts in the title
+    # field and again in the card text, so alpha has three hits of the term
+    # against beta's single body mention and strictly outranks it.
+    first, second = payload["matches"]
+    assert first["path"].endswith("alpha.md")
+    assert first["score"] > second["score"] > 0
 
 
 def test_memory_search_cli_json(tmp_path: Path, capsys):

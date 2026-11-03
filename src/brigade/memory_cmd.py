@@ -14,7 +14,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import mcp_server, runbook_cmd, toml_compat as tomllib, work_cmd
+from . import mcp_server, memory_bm25, runbook_cmd, toml_compat as tomllib, work_cmd
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
@@ -1812,13 +1812,18 @@ def _record_search_log(
     """Append one search event; fail-open so logging never breaks search."""
     if not _should_log_search(query):
         return
-    path = _search_log_path(target)
     entry = {
         "ts": ts or _utc_iso(),
         "query": _normalize_search_query(query),
         "card_ids": _search_log_card_ids(matches if isinstance(matches, list) else []),
         "card_aliases": _search_log_aliases(matches if isinstance(matches, list) else []),
     }
+    _append_search_log_entry(target, entry)
+
+
+def _append_search_log_entry(target: Path, entry: dict[str, Any]) -> None:
+    """Append one entry to the capped rolling log; fail-open on I/O errors."""
+    path = _search_log_path(target)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         existing = _read_jsonl_dicts(path)
@@ -1857,22 +1862,12 @@ def search_cards_payload(
     target = target.expanduser().resolve()
     if config is None:
         config = load_config(target) or MemoryCareConfig()
-    terms = [term for term in query.lower().split() if term]
+    # BM25 over one field per card, rebuilt per call (no cache, no index file).
+    # Scores are floats rounded to 4 decimals; ties break by path.
+    cards = [fields for path in _iter_cards(target, config) if (fields := _card_search_fields(path, target))]
     matches: list[dict[str, Any]] = []
-    for path in _iter_cards(target, config):
-        fields = _card_search_fields(path, target)
-        if not fields:
-            continue
-        heading = f"{fields['title']} {' '.join(fields['tags'])} {fields['summary']}".lower()
-        body = fields["body"].lower()
-        score = 0
-        for term in terms:
-            if term in heading:
-                score += 3
-            elif term in body:
-                score += 1
-        if not terms or score == 0:
-            continue
+    for index, score in memory_bm25.rank([memory_bm25.card_text(fields) for fields in cards], query):
+        fields = cards[index]
         matches.append(
             {
                 "path": fields["rel"],
@@ -1907,7 +1902,7 @@ def search(*, target: Path, query: str, limit: int = 20, json_output: bool = Fal
         return 0
     print(f"memory search: {payload['query']} ({payload['match_count']} match(es))")
     for match in payload["matches"]:
-        print(f"- {match['path']}  [{match['score']}]  {match['title']}")
+        print(f"- {match['path']}  [{match['score']:.2f}]  {match['title']}")
     return 0
 
 
