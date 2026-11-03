@@ -218,7 +218,9 @@ def test_accepted_aliases_and_duplicates_retain_one_evidence_identity(tmp_path, 
     path = setup(tmp_path)
     cache = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    bundle = cache / "miseledger/evidence/example.json"
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    bundle = cache / "brigade/evidence/evidence/example.json"
     bundle.parent.mkdir(parents=True)
     bundle.write_text("{}\n")
     canonical, alias = "miseledger:example", "miseledger://evidence/example"

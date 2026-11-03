@@ -15,7 +15,7 @@ from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from . import memory_bm25, toml_compat as tomllib
+from . import engine_paths, memory_bm25, toml_compat as tomllib
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection
@@ -476,10 +476,12 @@ def _miseledger_evidence_id(ref: str) -> str | None:
 def _miseledger_evidence_path(bundle_id: str) -> Path | None:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", bundle_id):
         return None
-    cache_home = Path.home() / ".cache"
-    if raw := os.environ.get("XDG_CACHE_HOME"):
-        cache_home = Path(raw)
-    return cache_home / "miseledger" / "evidence" / f"{bundle_id}.json"
+    # The engine writes bundles to <cache>/evidence in whichever layout it resolved
+    # (docs/phase-engine-rename.md, "Resolution rule"); engine_paths mirrors that choice.
+    environment = dict(os.environ)
+    if not environment.get("HOME"):
+        environment["HOME"] = str(Path.home())
+    return engine_paths.evidence_dirs(env=environment).cache_dir / "evidence" / f"{bundle_id}.json"
 
 
 def _tracked_evidence_ref_missing(target: Path, ref: str) -> str | None:

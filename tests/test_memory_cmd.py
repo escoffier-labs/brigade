@@ -336,10 +336,12 @@ def test_memory_care_scan_flags_missing_evidence_refs(tmp_path, monkeypatch, cap
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cache_home = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     receipt = tmp_path / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json"
     receipt.parent.mkdir(parents=True)
     receipt.write_text(json.dumps({"status": "completed"}))
-    bundle = cache_home / "miseledger" / "evidence" / "bundle-ok.json"
+    bundle = cache_home / "brigade" / "evidence" / "evidence" / "bundle-ok.json"
     bundle.parent.mkdir(parents=True)
     bundle.write_text(json.dumps({"id": "bundle-ok"}))
     cards = tmp_path / "memory" / "cards"
@@ -1289,11 +1291,13 @@ def test_memory_care_status_archive_candidates_include_age_reviewed_and_evidence
     monkeypatch.setattr(memory_cmd, "_today", lambda: date(2026, 5, 28))
     cache_home = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     _write_archive_candidate_care_config(tmp_path, stale_after_days=30)
     receipt = tmp_path / ".brigade" / "work" / "verify-runs" / "verify-one" / "receipt.json"
     receipt.parent.mkdir(parents=True)
     receipt.write_text(json.dumps({"status": "completed"}))
-    bundle = cache_home / "miseledger" / "evidence" / "bundle-ok.json"
+    bundle = cache_home / "brigade" / "evidence" / "evidence" / "bundle-ok.json"
     bundle.parent.mkdir(parents=True)
     bundle.write_text(json.dumps({"id": "bundle-ok"}))
     cards = tmp_path / "memory" / "cards"

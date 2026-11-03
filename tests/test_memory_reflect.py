@@ -596,8 +596,10 @@ def test_exact_reinforcement_is_already_cited(tmp_path, capsys, new_outcome):
 )
 def test_only_evidence_items_resolve_without_size_limit(tmp_path, capsys, monkeypatch, reference, valid):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     if reference.startswith("miseledger:"):
-        evidence = tmp_path / "cache/miseledger/evidence/example.json"
+        evidence = tmp_path / "cache/brigade/evidence/evidence/example.json"
     else:
         evidence = tmp_path / reference.removeprefix("receipt:")
     evidence.parent.mkdir(parents=True, exist_ok=True)
@@ -875,7 +877,9 @@ def test_evidence_aliases_have_one_canonical_proof_id(tmp_path, capsys, monkeypa
     card(tmp_path, "right")
     if bundle:
         monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-        evidence(tmp_path, "cache/miseledger/evidence/example.json")
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        evidence(tmp_path, "cache/brigade/evidence/evidence/example.json")
         canonical = "miseledger:example"
         refs = [canonical, "miseledger://evidence/example", canonical + "#step-2"]
     else:
