@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import component_bins, engine_paths, graphtrail_delta
+from brigade import component_bins, engine_paths, code_graph_delta
 
 
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
@@ -15,10 +15,10 @@ def test_capture_before_propagates_process_signals(monkeypatch, tmp_path, signal
     def raise_signal():
         raise signal_type()
 
-    monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", raise_signal)
+    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", raise_signal)
 
     with pytest.raises(signal_type):
-        graphtrail_delta.capture_before(tmp_path, tmp_path / "run")
+        code_graph_delta.capture_before(tmp_path, tmp_path / "run")
 
 
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
@@ -30,12 +30,12 @@ def test_capture_after_and_diff_propagates_process_signals(monkeypatch, tmp_path
         "ok": True,
         "binary": "engine",
         "db_path": str(engine_paths.code_graph_db_paths(tmp_path)[1]),
-        "before_snapshot_path": str(tmp_path / "run" / graphtrail_delta.SNAPSHOT_NAME),
+        "before_snapshot_path": str(tmp_path / "run" / code_graph_delta.SNAPSHOT_NAME),
     }
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", raise_signal)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", raise_signal)
 
     with pytest.raises(signal_type):
-        graphtrail_delta.capture_after_and_diff(tmp_path, tmp_path / "run", before)
+        code_graph_delta.capture_after_and_diff(tmp_path, tmp_path / "run", before)
 
 
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
@@ -45,7 +45,7 @@ def test_compact_summary_propagates_process_signals(signal_type):
             raise signal_type()
 
     with pytest.raises(signal_type):
-        graphtrail_delta._compact_summary(SignalMapping())
+        code_graph_delta._compact_summary(SignalMapping())
 
 
 def test_backup_sqlite_honors_timeout(tmp_path):
@@ -60,7 +60,7 @@ def test_backup_sqlite_honors_timeout(tmp_path):
 
     started = time.monotonic()
     with pytest.raises(TimeoutError, match="timeout after"):
-        graphtrail_delta._backup_sqlite(src, dst, timeout=0.001)
+        code_graph_delta._backup_sqlite(src, dst, timeout=0.001)
     assert time.monotonic() - started < 0.5
     assert not dst.exists()
 
@@ -69,9 +69,9 @@ def test_capture_before_still_fails_open_for_regular_exceptions(monkeypatch, tmp
     def fail():
         raise OSError("graph unavailable")
 
-    monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", fail)
+    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", fail)
 
-    result = graphtrail_delta.capture_before(Path(tmp_path), tmp_path / "run")
+    result = code_graph_delta.capture_before(Path(tmp_path), tmp_path / "run")
 
     assert result["status"] == "capture_failed"
     assert "OSError: graph unavailable" in result["summary"]
@@ -98,7 +98,7 @@ def test_capture_before_indexes_a_fresh_repo_at_the_canonical_path(monkeypatch, 
     monkeypatch.delenv(engine_paths.LEGACY_CODE_GRAPH_DB_ENV, raising=False)
     monkeypatch.chdir(tmp_path)
 
-    result = graphtrail_delta.capture_before(repo, tmp_path / "run")
+    result = code_graph_delta.capture_before(repo, tmp_path / "run")
 
     canonical, legacy = engine_paths.code_graph_db_paths(repo)
     assert result["status"] == "captured"

@@ -2363,7 +2363,7 @@ aboyeur.evidence_brief_mod.evidence_brief = lambda *args, **kwargs: aboyeur.Evid
 def blocked_capture(target, run_dir):
     Path({str(ready_path)!r}).write_text("ready")
     time.sleep(60)
-aboyeur.graphtrail_delta.capture_before = blocked_capture
+aboyeur.code_graph_delta.capture_before = blocked_capture
 raise SystemExit(cli.main([
     "run", "blocked baseline", "--cwd", {str(repo)!r},
     "--output-dir", {str(output_dir)!r}, "--worker", "coder",

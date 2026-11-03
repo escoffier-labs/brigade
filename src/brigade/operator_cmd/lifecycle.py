@@ -998,7 +998,8 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
 
     station = search_cmd.status_payload(target)
     tools = station.get("tools") if isinstance(station.get("tools"), dict) else {}
-    graphtrail = tools.get("graphtrail") if isinstance(tools.get("graphtrail"), dict) else {}
+    graphtrail = tools.get(search_cmd.CODE_GRAPH_TOOL)
+    graphtrail = graphtrail if isinstance(graphtrail, dict) else {}
     latest = verification._latest_verify_receipt(target)
     delta = latest.get("code_graph_delta") if isinstance(latest, dict) else None
     delta = delta if isinstance(delta, dict) else {}
@@ -1019,12 +1020,6 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
             else f"GraphTrail evidence has {issue_count} issue(s)"
         ),
         "issue_count": issue_count,
-        "graphtrail": {
-            "installed": graphtrail.get("installed"),
-            "db_present": graphtrail.get("db_present"),
-            "health": graphtrail.get("health"),
-            "summary": graphtrail.get("summary"),
-        },
         "latest_receipt": latest.get("run_id") if isinstance(latest, dict) else None,
         "code_graph_delta": delta or None,
         "next_command": (
@@ -1034,6 +1029,13 @@ def _checkup_graph(*, target: Path, json_output: bool = False) -> int:
         )
         if not ready
         else None,
+    }
+    # Canonical and legacy keys carry equal values through v0.32 (docs/phase-engine-rename.md, R4).
+    payload["code_graph"] = payload["graphtrail"] = {
+        "installed": graphtrail.get("installed"),
+        "db_present": graphtrail.get("db_present"),
+        "health": graphtrail.get("health"),
+        "summary": graphtrail.get("summary"),
     }
     _print_checkup_surface(payload, json_output=json_output)
     return 0 if ready else 1
@@ -1067,21 +1069,22 @@ def _checkup_ledger(*, target: Path, json_output: bool = False) -> int:
             else f"MiseLedger import health has {issue_count} issue(s)"
         ),
         "issue_count": issue_count,
-        "miseledger": {
-            "installed": station.get("installed"),
-            "health": station.get("health"),
-            "summary": station.get("summary"),
-            "export_cursor_present": station.get("export_cursor_present"),
-        },
         "work_receipt_count": len(receipts),
         "pending_work_receipt_count": len(pending_hashes),
         "next_command": (
             "brigade evidence doctor --target ."
             if not station_ready
-            else "brigade receipts export miseledger --target . --new-only --import"
+            else "brigade receipts export evidence --target . --new-only --import"
         )
         if not ready
         else None,
+    }
+    # Canonical and legacy keys carry equal values through v0.32 (docs/phase-engine-rename.md, R4).
+    payload["evidence"] = payload["miseledger"] = {
+        "installed": station.get("installed"),
+        "health": station.get("health"),
+        "summary": station.get("summary"),
+        "export_cursor_present": station.get("export_cursor_present"),
     }
     _print_checkup_surface(payload, json_output=json_output)
     return 0 if ready else 1

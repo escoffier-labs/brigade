@@ -17,7 +17,7 @@ import math
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -192,6 +192,75 @@ def _is_code_graph_server(server: CanonicalServer) -> bool:
     if command.endswith(".exe"):
         command = command[: -len(".exe")]
     return server.name.lower() in _CODE_GRAPH_NAMES or command in _CODE_GRAPH_NAMES
+
+
+# Legacy engine server keys and their canonical keys. Sync keeps a legacy key and
+# prints a rename hint; --rename-legacy-servers renames the catalog key and removes
+# the pristine projections Brigade owns under the old key. v0.33 renames by default
+# (docs/phase-engine-rename.md, R4). Provider entries Brigade does not own are never
+# touched.
+LEGACY_SERVER_KEYS = {
+    legacy: canonical
+    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items()
+    if not canonical.endswith("-mcp")
+}
+
+
+def _legacy_server_renames(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new not in servers}
+
+
+def _legacy_key_collisions(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    """Legacy keys whose canonical key is also a catalog entry, so neither can be renamed."""
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if old in servers and new in servers}
+
+
+def _legacy_collision_note(old: str, new: str) -> str:
+    return (
+        f"note: the catalog has both '{old}' and its canonical key '{new}', so '{old}' cannot be renamed. "
+        f"Remove one of them from {CANONICAL_REL}, then sync again"
+    )
+
+
+def _legacy_leftovers(servers: dict[str, CanonicalServer]) -> dict[str, str]:
+    """Legacy keys whose canonical key is already in the catalog.
+
+    A provider entry Brigade still owns under one of these keys is what a rename left
+    behind in a harness the rename did not cover. Cleanup is derived from the catalog
+    and ownership state, so each harness can be renamed in its own run.
+    """
+    return {old: new for old, new in LEGACY_SERVER_KEYS.items() if new in servers and old not in servers}
+
+
+def _renamed_servers(servers: dict[str, CanonicalServer], renames: dict[str, str]) -> dict[str, CanonicalServer]:
+    return {renames.get(key, key): replace(server, name=renames.get(key, key)) for key, server in servers.items()}
+
+
+def _blocked_legacy_cleanup(
+    planned: list[tuple[str, list[dict[str, Any]]]], leftovers: dict[str, str]
+) -> dict[str, set[str]]:
+    """Per harness, the legacy keys whose canonical replacement this sync cannot install."""
+    blocked: dict[str, set[str]] = {}
+    for harness_name, items in planned:
+        conflicted = {item["server"] for item in items if item["action"] == "conflict"}
+        names = {old for old, new in leftovers.items() if new in conflicted}
+        if names:
+            blocked[harness_name] = names
+    return blocked
+
+
+def _legacy_server_note(old: str, new: str) -> str:
+    return (
+        f"note: server '{old}' uses a legacy key; its canonical key is '{new}'. Rename it with "
+        f"`brigade mcp sync --rename-legacy-servers --write`, then update tool permissions from "
+        f"mcp__{old}__* to mcp__{new}__*"
+    )
+
+
+def _renamed_catalog_bytes(path: Path, renames: dict[str, str]) -> bytes:
+    doc = json.loads(path.read_text())
+    doc["servers"] = {renames.get(key, key): value for key, value in doc["servers"].items()}
+    return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _without_repo_code_graph_db_pin(target: Path, args: tuple[str, ...]) -> tuple[str, ...]:
@@ -482,6 +551,7 @@ def _plan_for_harness(
     prune: bool,
     adopt: bool,
     name_filter: str | None = None,
+    prune_names: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     adapter = ADAPTERS[harness]
     path = mcp_adapters.resolve_path(adapter, target)
@@ -498,6 +568,7 @@ def _plan_for_harness(
             prune=prune,
             adopt=adopt,
             name_filter=name_filter,
+            prune_names=prune_names,
             read_error=exc,
         )
     return _plan_from_inputs(
@@ -510,6 +581,7 @@ def _plan_for_harness(
         prune=prune,
         adopt=adopt,
         name_filter=name_filter,
+        prune_names=prune_names,
     )
 
 
@@ -525,6 +597,7 @@ def _plan_from_inputs(
     adopt: bool = False,
     name_filter: str | None = None,
     read_error: OSError | None = None,
+    prune_names: frozenset[str] = frozenset(),
 ) -> list[dict[str, Any]]:
     """Compare explicit inputs without loading native config or ownership state."""
     adapter = ADAPTERS[harness]
@@ -558,15 +631,17 @@ def _plan_from_inputs(
     items: list[dict[str, Any]] = []
     rel = adapter.path
     assessments: dict[str, dict[str, Any]] = {}
+    sources = _rename_sources(prune_names, desired, live, owned)
 
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue
-        context = {"scope": scope, "live": live.get(name, {}), "native_keys": {}}
+        source = sources.get(name, name)
+        context = {"scope": scope, "live": live.get(source, {}), "native_keys": {}}
         try:
             location = _opencode_location(harness, text, name)
             context["location"] = location
-            native_record = _native_record(harness, live.get(name, {}), owned.get(name), server)
+            native_record = _native_record(harness, live.get(source, {}), owned.get(source), server)
             context["native_keys"] = native_record.get(
                 "native_auth_keys", native_record.get("opencode_native_keys", {})
             )
@@ -574,7 +649,7 @@ def _plan_from_inputs(
                 target,
                 harness,
                 server,
-                ProjectionContext(live.get(name, {}), owned.get(name), location),
+                ProjectionContext(live.get(source, {}), owned.get(source), location),
             )
             assessments[name] = mcp_fidelity.evaluate(server, harness, projected=provider_dict, **context)
             blocking = sorted({f["reason"] for f in assessments[name]["fields"] if f["blocking"]})
@@ -618,6 +693,8 @@ def _plan_from_inputs(
         record = owned.get(name)
         if name not in live:
             items.append(_item(harness, rel, name, "missing", "create", canon_fp, desired_fp))
+            if source != name:
+                items[-1]["_source"] = source
             continue
         live_fp = localio.stable_hash(live[name])
         if record is None:
@@ -685,7 +762,7 @@ def _plan_from_inputs(
                     detail="removed from canonical but edited in place; left untouched",
                 )
             )
-        elif prune:
+        elif prune or name in prune_names:
             items.append(_item(harness, rel, name, "orphan", "remove", None, None))
         else:
             items.append(
@@ -701,6 +778,24 @@ def _plan_from_inputs(
         server = servers.get(item["server"])
         item["transport"] = server.transport if server is not None else None
     return items
+
+
+def _rename_sources(
+    prune_names: frozenset[str], desired: dict[str, Any], live: dict[str, Any], owned: dict[str, Any]
+) -> dict[str, str]:
+    """Map a canonical key to the owned legacy entry it replaces in this harness.
+
+    The canonical entry inherits that entry's provider-native settings and ownership
+    provenance (not its layout location), so a rename keeps adopted native auth (for
+    example a Codex ``bearer_token_env_var``). Only Codex and OpenCode adapters
+    keep such settings; the others project the catalog entry as written.
+    """
+    sources: dict[str, str] = {}
+    for old in prune_names:
+        new = LEGACY_SERVER_KEYS.get(old)
+        if new in desired and new not in live and new not in owned and old in live and old in owned:
+            sources[new] = old
+    return sources
 
 
 def _item(harness, file, server, status, action, canon_fp, proj_fp, *, detail="", reconciled=False) -> dict[str, Any]:
@@ -1137,6 +1232,9 @@ class McpSyncPlan:
     destination_files: list[str]
     errors: list[str] = field(default_factory=list)
     native_write_paths: list[Path] = field(default_factory=list)
+    # Legacy keys a requested rename could not move because the catalog also has
+    # the canonical key; sync exits 1 for them, as it does for other conflicts.
+    rename_collisions: list[str] = field(default_factory=list)
     fidelity: dict[str, Any] = field(default_factory=lambda: mcp_fidelity.build_report([], []))
 
 
@@ -1206,10 +1304,14 @@ def build_sync_plan(
     allow_global_stdio: bool = False,
     interactive: bool | None = None,
     json_output: bool = False,
+    rename_legacy_servers: bool = False,
 ) -> McpSyncPlan:
     target = target.expanduser().resolve()
     servers, errors, _ = load_canonical(target)
     notes: list[str] = []
+    renames = _legacy_server_renames(servers) if not errors else {}
+    if rename_legacy_servers and name is not None:
+        errors = ["--rename-legacy-servers cannot be combined with --name"]
     if errors:
         return McpSyncPlan(
             target=target,
@@ -1227,10 +1329,85 @@ def build_sync_plan(
         )
     harnesses, notes = active_targets(target, harness=harness, user_scope=user_scope)
     state = copy.deepcopy(_load_state(target))
-    planned = [
-        (h, _plan_for_harness(target, h, servers, state, force=force, prune=prune, adopt=adopt, name_filter=name))
-        for h in harnesses
-    ]
+    collisions = _legacy_key_collisions(servers)
+    notes.extend(_legacy_collision_note(old, new) for old, new in collisions.items())
+    if not rename_legacy_servers:
+        renames = {}
+        notes.extend(_legacy_server_note(old, new) for old, new in _legacy_server_renames(servers).items())
+
+    def _plan_all(
+        catalog_renames: dict[str, str], blocked: dict[str, set[str]]
+    ) -> tuple[dict[str, CanonicalServer], dict[str, str], list[tuple[str, list[dict[str, Any]]]]]:
+        planning = _renamed_servers(servers, catalog_renames)
+        leftovers = _legacy_leftovers(planning) if rename_legacy_servers else {}
+        return (
+            planning,
+            leftovers,
+            [
+                (
+                    h,
+                    _plan_for_harness(
+                        target,
+                        h,
+                        planning,
+                        state,
+                        force=force,
+                        prune=prune,
+                        adopt=adopt,
+                        name_filter=name,
+                        prune_names=frozenset(leftovers) - blocked.get(h, set()),
+                    ),
+                )
+                for h in harnesses
+            ],
+        )
+
+    planning_servers, leftovers, planned = _plan_all(renames, {})
+    # A legacy projection is removed, and the catalog key renamed, only where the
+    # canonical replacement installs. A conflict on the canonical key keeps the
+    # working legacy entry and, for a catalog rename, keeps the catalog key too.
+    blocked = _blocked_legacy_cleanup(planned, leftovers)
+    if blocked:
+        held = {old for names in blocked.values() for old in names if old in renames}
+        first_pass = dict(planned)
+        renames = {old: new for old, new in renames.items() if old not in held}
+        planning_servers, leftovers, planned = _plan_all(renames, blocked)
+        for h, items in planned:
+            for old in sorted(blocked.get(h, set())):
+                new = LEGACY_SERVER_KEYS[old]
+                reasons = "; ".join(
+                    item["detail"] or item["status"]
+                    for item in first_pass[h]
+                    if item["server"] == new and item["action"] == "conflict"
+                )
+                if old in held:
+                    # The canonical key is not in the catalog after the hold, so the
+                    # replanned items no longer mention it; carry its conflict forward.
+                    items.extend(
+                        {key: value for key, value in item.items() if key != "_fidelity"}
+                        for item in first_pass[h]
+                        if item["server"] == new and item["action"] == "conflict"
+                    )
+                    notes.append(
+                        f"note: kept server '{old}': its canonical key '{new}' cannot be installed in {h} "
+                        f"({reasons}); the catalog key and the {h} entry were left unchanged"
+                    )
+                else:
+                    notes.append(
+                        f"note: kept the {h} entry '{old}': its canonical key '{new}' cannot be installed "
+                        f"there ({reasons})"
+                    )
+    servers = planning_servers
+    if not rename_legacy_servers:
+        leftover_keys = _legacy_leftovers(servers)
+        notes.extend(
+            f"note: {h} still has Brigade's '{item['server']}' entry; the catalog key is now "
+            f"'{leftover_keys[item['server']]}'. Replace it with "
+            f"`brigade mcp sync --rename-legacy-servers --write --harness {h}`"
+            for h, items in planned
+            for item in items
+            if item["server"] in leftover_keys and item["status"] == "orphan"
+        )
     exposures = _user_stdio_exposures(planned, target)
     gated: set[str] = set()
     gate_error: str | None = None
@@ -1257,6 +1434,16 @@ def build_sync_plan(
                     gate_declined = True
                     notes.append("user-scoped stdio destinations skipped: not confirmed at the prompt")
 
+    if gated and renames:
+        # A refused stdio write installs no replacement, so the rename cannot complete:
+        # keep the catalog key and every legacy projection, and plan a plain sync.
+        notes.extend(
+            f"kept server '{old}': rename to '{new}' needs the user-scoped stdio write, which was not acknowledged"
+            for old, new in sorted(renames.items())
+        )
+        renames = {}
+        planning_servers, leftovers, planned = _plan_all(renames, {})
+        servers = planning_servers
     all_items: list[dict[str, Any]] = []
     mutations: list[Any] = []
     native_write_paths: list[Path] = []
@@ -1279,6 +1466,9 @@ def build_sync_plan(
         existing = path.read_text() if path.is_file() else None
         live = adapter.read_file(existing)
         owner_map = desired_state.get("ownership", {}).get(h, {}).get(adapter.path)
+        # Records as planned: a renamed entry reads its legacy source's record even
+        # after this loop pops the legacy key from owner_map.
+        planned_owned = state.get("ownership", {}).get(h, {}).get(adapter.path, {})
         to_write: dict[str, dict[str, Any]] = {}
         to_remove: set[str] = set()
         changed = False
@@ -1288,20 +1478,23 @@ def build_sync_plan(
             if action in ("create", "update"):
                 if owner_map is None:
                     owner_map = desired_state.setdefault("ownership", {}).setdefault(h, {}).setdefault(adapter.path, {})
+                source = item.get("_source")
+                source_live = live.get(source or server_name, {})
+                source_record = planned_owned.get(source) if source else owner_map.get(server_name)
                 to_write[server_name] = _project_server(
                     target,
                     h,
                     servers[server_name],
                     ProjectionContext(
-                        live.get(server_name, {}),
-                        owner_map.get(server_name),
+                        source_live,
+                        source_record,
                         _opencode_location(h, existing, server_name),
                     ),
                 )
                 owner_map[server_name] = {
                     "canonical_fingerprint": item["_canon_fp"],
                     "projected_fingerprint": item["_proj_fp"],
-                    **_native_record(h, live.get(server_name, {}), owner_map.get(server_name), servers[server_name]),
+                    **_native_record(h, source_live, source_record, servers[server_name]),
                 }
                 changed = True
             elif action == "remove":
@@ -1374,6 +1567,16 @@ def build_sync_plan(
 
     canon = canonical_path(target)
     source_digest = localio.file_sha256(canon) if canon.is_file() else "missing"
+    if renames and not plan_errors:
+        # The catalog rename commits or rolls back with the provider writes.
+        catalog_mutation = _mutation_for_path(
+            dest=canon,
+            display_path=CANONICAL_REL,
+            before=_file_bytes(canon),
+            after=_renamed_catalog_bytes(canon, renames),
+        )
+        if catalog_mutation is not None:
+            mutations.append(catalog_mutation)
     projection_plan = (
         projection.build_plan(
             operation_id=f"mcp-{uuid.uuid4().hex}",
@@ -1400,6 +1603,7 @@ def build_sync_plan(
         errors=plan_errors,
         native_write_paths=native_write_paths,
         fidelity=_fidelity_report(all_items, servers, harnesses, name_filter=name),
+        rename_collisions=sorted(collisions) if rename_legacy_servers else [],
     )
 
 
@@ -1452,6 +1656,7 @@ def sync(
     verify_timeout: float | None = None,
     json_output: bool = False,
     inject_failure: str | None = None,
+    rename_legacy_servers: bool = False,
 ) -> int:
     target = target.expanduser().resolve()
     if verify_runtime and not write:
@@ -1472,6 +1677,7 @@ def sync(
         allow_global_stdio=allow_global_stdio,
         interactive=interactive,
         json_output=json_output,
+        rename_legacy_servers=rename_legacy_servers,
     )
     if planned.errors:
         return _emit_fidelity(
@@ -1622,7 +1828,9 @@ def sync(
     if write and verify_runtime and payload.get("verification"):
         lines.append(f"verification receipt: {payload['verification']['receipt_path']}")
     lines += planned.notes
-    rc = 1 if counts["conflict"] else 0
+    if planned.rename_collisions:
+        payload["rename_collisions"] = planned.rename_collisions
+    rc = 1 if counts["conflict"] or planned.rename_collisions else 0
     if verify_rc != 0:
         rc = verify_rc
     if planned.gate_error:

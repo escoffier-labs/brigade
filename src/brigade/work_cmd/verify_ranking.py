@@ -84,7 +84,7 @@ def rank_verification_candidates(
     """
     target = target.expanduser().resolve()
     changed = collect_changed_files(target, files)
-    binary = component_bins.resolve("graphtrail")
+    binary = component_bins.resolve("brigade-code-graph")
     if binary is None:
         return degraded_ranking(reason="graphtrail binary not found", changed_files=changed)
     try:

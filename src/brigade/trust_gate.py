@@ -665,7 +665,7 @@ def notify_miseledger_trust(
 ) -> None:
     from . import authority_broker, component_bins
 
-    binary = component_bins.resolve("miseledger")
+    binary = component_bins.resolve("brigade-evidence")
     if binary is None:
         raise TrustReviewError("miseledger binary is not available")
     secret = authority_broker.new_capability_secret()

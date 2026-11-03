@@ -299,7 +299,7 @@ def _files_only(footprint: dict[str, Any] | None) -> frozenset[str]:
 
 
 def _graphtrail_availability(target: Path) -> tuple[bool, str | None, str | None, Path | None]:
-    binary = component_bins.resolve("graphtrail")
+    binary = component_bins.resolve("brigade-code-graph")
     if binary is None:
         return False, "graphtrail binary not found", None, None
     try:

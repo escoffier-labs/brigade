@@ -162,11 +162,11 @@ def _run_manifest_verify(
     monkeypatch: pytest.MonkeyPatch,
     start_session: bool = True,
 ) -> dict:
-    monkeypatch.setattr(verify_mod.graphtrail_delta, "capture_before", lambda *_a, **_k: None)
+    monkeypatch.setattr(verify_mod.code_graph_delta, "capture_before", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        verify_mod.graphtrail_delta,
+        verify_mod.code_graph_delta,
         "capture_after_and_diff",
-        lambda *_a, **_k: verify_mod.graphtrail_delta._status("disabled", "graph disabled in test"),
+        lambda *_a, **_k: verify_mod.code_graph_delta._status("disabled", "graph disabled in test"),
     )
     if start_session:
         assert work_cmd.start(target=tmp_path, title="verify-trial") == 0
@@ -238,11 +238,11 @@ def test_resolve_manifest_rejects_untracked_workspace_manifest(scoreable_target)
 
 
 def test_adhoc_verify_receipt_is_unattributed(scoreable_target, monkeypatch):
-    monkeypatch.setattr(verify_mod.graphtrail_delta, "capture_before", lambda *_a, **_k: None)
+    monkeypatch.setattr(verify_mod.code_graph_delta, "capture_before", lambda *_a, **_k: None)
     monkeypatch.setattr(
-        verify_mod.graphtrail_delta,
+        verify_mod.code_graph_delta,
         "capture_after_and_diff",
-        lambda *_a, **_k: verify_mod.graphtrail_delta._status("disabled", "graph disabled in test"),
+        lambda *_a, **_k: verify_mod.code_graph_delta._status("disabled", "graph disabled in test"),
     )
     import io
     from contextlib import redirect_stdout

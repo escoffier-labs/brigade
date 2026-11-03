@@ -936,10 +936,22 @@ def test_agentpantry_doctor_accepts_multi_digit_above_floor(monkeypatch):
 
 
 def test_evidence_tools_attach_to_evidence_station():
-    t = managed.resolve("miseledger")
+    t = managed.resolve("brigade-evidence")
     assert t is not None and t.station == "evidence"
     names = {t.name for t in managed.for_station("evidence")}
-    assert names == {"miseledger"}
+    assert names == {"brigade-evidence"}
+
+
+def test_legacy_station_ids_resolve_as_aliases():
+    # Legacy ids keep working through v0.32 (docs/phase-engine-rename.md, R4).
+    for legacy, canonical in managed.component_manifest.COMPONENT_FAMILIES.items():
+        tool = managed.resolve(legacy)
+        if canonical.endswith("-mcp"):
+            assert tool is None
+            continue
+        assert tool is not None and tool is managed.resolve(canonical)
+        assert tool.name == tool.command == canonical
+        assert all(surface.command[0] == canonical for surface in tool.surfaces)
 
 
 def test_evidence_install_uses_verified_brigade_setup():
@@ -952,19 +964,21 @@ def test_search_tools_attach_to_search_station():
         t = managed.resolve(name)
         assert t is not None and t.station == "search", name
     names = {t.name for t in managed.for_station("search")}
-    assert names == {"code-search-api", "code-search-mcp", "graphtrail"}
+    assert names == {"code-search-api", "code-search-mcp", "brigade-code-graph"}
 
 
 def test_graphtrail_doctor_reports_missing_db(monkeypatch, tmp_path):
     t = managed.resolve("graphtrail")
     assert t is not None
     monkeypatch.setattr(
-        managed.component_bins, "resolve", lambda name, **kw: "/usr/bin/graphtrail" if name == "graphtrail" else None
+        managed.component_bins,
+        "resolve",
+        lambda name, **kw: "/usr/bin/graphtrail" if name == "brigade-code-graph" else None,
     )
     ctx = DoctorContext(target=tmp_path, selection=None, harnesses=[])
     results = t.doctor(ctx)
     assert results[0][0] == "WARN"
-    assert "graphtrail sync" in results[0][2]
+    assert "brigade code sync" in results[0][2]
 
 
 def test_search_install_args_keep_npm_scope_distinction():
@@ -1093,19 +1107,19 @@ def test_miseledger_declares_bounded_evidence_contract():
     t = managed.resolve("miseledger")
     surfaces = {surface.kind: surface for surface in t.surfaces}
     doctor = surfaces["doctor-json"]
-    assert doctor.command == ("miseledger", "doctor", "--json")
+    assert doctor.command == ("brigade-evidence", "doctor", "--json")
     assert doctor.read_only is False
     assert doctor.timeout_seconds == 120.0
-    assert doctor.probe == ("miseledger", "doctor", "--help")
+    assert doctor.probe == ("brigade-evidence", "doctor", "--help")
     assert doctor.probe_contains == ("--json", "--mcp", "--archive")
     evidence = surfaces["brief-markdown"]
-    assert evidence.command == ("miseledger", "evidence", "<task>", "--markdown", "--limit", "5")
+    assert evidence.command == ("brigade-evidence", "evidence", "<task>", "--markdown", "--limit", "5")
     assert evidence.read_only is False
     assert evidence.timeout_seconds == 10.0
     assert evidence.max_chars == 4000
-    assert evidence.probe == ("miseledger", "evidence", "--help")
+    assert evidence.probe == ("brigade-evidence", "evidence", "--help")
     assert evidence.probe_contains == ("--markdown", "--limit")
-    assert surfaces["verify-exit"].command == ("miseledger", "version")
+    assert surfaces["verify-exit"].command == ("brigade-evidence", "version")
 
 
 def test_usage_tracker_declares_no_write_bounded_summary_contract():
@@ -1238,16 +1252,16 @@ def test_graphtrail_declares_verified_brigade_install_and_bounded_context_contra
     assert t.install_args == ["brigade", "setup"]
     surfaces = {surface.kind: surface for surface in t.surfaces}
     context = surfaces["brief-markdown"]
-    assert context.command == ("graphtrail", "context", "<task>", "--markdown")
+    assert context.command == ("brigade-code-graph", "context", "<task>", "--markdown")
     assert context.timeout_seconds == 10.0
     assert context.max_chars == 4000
-    assert context.probe == ("graphtrail", "context", "--help")
+    assert context.probe == ("brigade-code-graph", "context", "--help")
     assert context.probe_contains == ("--markdown",)
     doctor = surfaces["doctor-json"]
-    assert doctor.command == ("graphtrail", "doctor", "--json")
-    assert doctor.probe == ("graphtrail", "doctor", "--help")
+    assert doctor.command == ("brigade-code-graph", "doctor", "--json")
+    assert doctor.probe == ("brigade-code-graph", "doctor", "--help")
     assert doctor.probe_contains == ("--json",)
-    assert surfaces["verify-exit"].command == ("graphtrail", "--version")
+    assert surfaces["verify-exit"].command == ("brigade-code-graph", "--version")
 
 
 def test_standalone_content_guard_is_not_a_managed_install():

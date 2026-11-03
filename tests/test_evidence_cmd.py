@@ -100,7 +100,7 @@ def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
     assert payload["installed"] is True
     assert payload["health"] == "ok"
     assert "items=12" in payload["summary"]
-    assert any("receipts export miseledger" in cmd for cmd in payload["next_commands"])
+    assert any("receipts export evidence" in cmd for cmd in payload["next_commands"])
 
 
 def test_evidence_summary_status_skips_doctor(monkeypatch, tmp_path):
@@ -343,7 +343,7 @@ def test_crawl_plan_write_creates_files(tmp_path):
 def test_export_plan_points_at_receipts_export(tmp_path):
     payload = evidence_cmd.export_plan_payload(target=tmp_path)
     commands = [" ".join(cmd) for cmd in payload["commands"]]
-    assert any("receipts export miseledger" in cmd for cmd in commands)
+    assert any("receipts export evidence" in cmd for cmd in commands)
     assert payload["export_cursor_present"] is False
 
 

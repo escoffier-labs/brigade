@@ -182,7 +182,7 @@ def _freshness_snapshot(
 def _graphtrail_bin() -> str | None:
     """Resolve the graphtrail binary: $GRAPHTRAIL_BIN, then the managed install
     from ``brigade setup``, then PATH, then the legacy ~/.cargo/bin location."""
-    return component_bins.resolve("graphtrail")
+    return component_bins.resolve("brigade-code-graph")
 
 
 def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> dict[str, Any] | None:

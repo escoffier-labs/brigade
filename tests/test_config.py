@@ -36,19 +36,19 @@ def test_write_then_load_round_trip(tmp_path):
     assert loaded.selection.includes == ["publisher"]
 
 
-def test_write_then_load_round_trip_preserves_graphtrail_delta_timeout_seconds(tmp_path):
+def test_write_then_load_round_trip_preserves_code_graph_delta_timeout_seconds(tmp_path):
     sel = Selection(
         depth="workspace",
         harnesses=["claude", "codex", "openclaw"],
         owner="openclaw",
         includes=["publisher"],
     )
-    cfg = Config(version=1, selection=sel, graphtrail_delta_timeout_seconds=25)
+    cfg = Config(version=1, selection=sel, code_graph_delta_timeout_seconds=25)
     write_config(tmp_path, cfg)
 
     loaded = load_config(tmp_path)
     assert loaded is not None
-    assert loaded.graphtrail_delta_timeout_seconds == 25.0
+    assert loaded.code_graph_delta_timeout_seconds == 25.0
 
 
 def test_write_creates_parent_dir(tmp_path):
@@ -98,15 +98,15 @@ def test_load_config_reads_legacy_solo_mise_dir(tmp_path):
     assert cfg.selection.harnesses == ["claude"]
 
 
-def test_load_config_defaults_graphtrail_delta_timeout_seconds(tmp_path):
+def test_load_config_defaults_code_graph_delta_timeout_seconds(tmp_path):
     sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
     write_config(tmp_path, Config(version=1, selection=sel))
     loaded = load_config(tmp_path)
     assert loaded is not None
-    assert loaded.graphtrail_delta_timeout_seconds == 10.0
+    assert loaded.code_graph_delta_timeout_seconds == 10.0
 
 
-def test_load_config_reads_graphtrail_delta_timeout_seconds(tmp_path):
+def test_load_config_reads_legacy_graphtrail_delta_timeout_seconds(tmp_path):
     path = tmp_path / ".brigade" / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -124,11 +124,11 @@ def test_load_config_reads_graphtrail_delta_timeout_seconds(tmp_path):
     )
     loaded = load_config(tmp_path)
     assert loaded is not None
-    assert loaded.graphtrail_delta_timeout_seconds == 25.0
+    assert loaded.code_graph_delta_timeout_seconds == 25.0
 
 
 @pytest.mark.parametrize("value", [0, -1, "slow"])
-def test_load_config_rejects_invalid_graphtrail_delta_timeout_seconds(tmp_path, value):
+def test_load_config_rejects_invalid_legacy_graphtrail_delta_timeout_seconds(tmp_path, value):
     path = tmp_path / ".brigade" / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(
@@ -350,3 +350,37 @@ def test_load_config_rejects_invalid_memory_recall_target(tmp_path, value):
     _write_config_json(tmp_path, memory_recall_target=value)
     with pytest.raises(ValueError, match="memory_recall_target must be a non-empty string"):
         load_config(tmp_path)
+
+
+def _write_raw_config(tmp_path, **keys):
+    path = tmp_path / ".brigade" / "config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude", "includes": [], **keys}
+    path.write_text(json.dumps(payload) + "\n")
+    return path
+
+
+def test_code_graph_delta_timeout_canonical_key_wins_and_writer_drops_legacy_key(tmp_path):
+    from brigade import config
+
+    legacy = config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY
+    path = _write_raw_config(tmp_path, **{config.CODE_GRAPH_DELTA_TIMEOUT_KEY: 30, legacy: 5})
+    loaded = load_config(tmp_path)
+    assert loaded is not None and loaded.code_graph_delta_timeout_seconds == 30.0
+    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, True)]
+
+    write_config(tmp_path, loaded)
+    written = json.loads(path.read_text())
+    assert written[config.CODE_GRAPH_DELTA_TIMEOUT_KEY] == 30.0
+    assert legacy not in written
+    assert config.legacy_config_keys(tmp_path) == []
+
+
+def test_code_graph_delta_timeout_errors_name_the_key_in_use(tmp_path):
+    from brigade import config
+
+    _write_raw_config(tmp_path, **{config.CODE_GRAPH_DELTA_TIMEOUT_KEY: 0})
+    with pytest.raises(ValueError, match="code_graph_delta_timeout_seconds must be a positive number"):
+        load_config(tmp_path)
+    with pytest.raises(ValueError, match="--code-graph-timeout must be a positive number"):
+        config.resolve_code_graph_delta_timeout(tmp_path, 0)

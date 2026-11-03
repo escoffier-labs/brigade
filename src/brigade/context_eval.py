@@ -65,7 +65,7 @@ def extract_brief_files(brief_text: str) -> list[str]:
         return []
 
 
-# Keys read from the graph-delta sidecar that graphtrail_delta writes. A contract
+# Keys read from the graph-delta sidecar that code_graph_delta writes. A contract
 # test keeps this tuple in step with the writer (#1644).
 DELTA_SIDECAR_KEYS = ("code_reference_nodes", "code_reference_nodes_truncated")
 _LEGACY_NODE_KEYS = ("added_nodes", "removed_nodes", "changed_nodes")
@@ -81,7 +81,7 @@ def _load_delta_payload(delta_sidecar_path_or_dict: str | Path | dict[str, Any])
 def extract_delta_files(delta_sidecar_path_or_dict: str | Path | dict[str, Any]) -> list[str]:
     """Extract changed file paths from a GraphTrail delta sidecar or payload.
 
-    Reads ``code_reference_nodes`` (what ``graphtrail_delta`` writes) and falls
+    Reads ``code_reference_nodes`` (what ``code_graph_delta`` writes) and falls
     back to the legacy ``added/removed/changed_nodes`` keys for older sidecars.
     """
     try:

@@ -149,11 +149,13 @@ def test_deprecated_inventory_paths_are_machine_readable_and_parse():
 
     assert deprecated
     assert {item["path"] for item in deprecated} == set(inventory_paths)
-    assert all(item["path"].startswith("brigade run-cloud") for item in deprecated)
-    assert all(item["replacement"] == item["path"].replace("run-cloud", "run cloud", 1) for item in deprecated)
+    assert {path.split()[1] for path in inventory_paths} == {"run-cloud", "receipts"}
+    # A deprecated path names the same replacement the alias table folds it into.
+    assert all(item["replacement"] == roadmap_cmd._apply_command_alias(item["path"]) for item in deprecated)
+    assert all(item["replacement"] != item["path"] for item in deprecated)
 
     parser = cli._build_parser()
-    for path in inventory_paths:
+    for path in [*inventory_paths, *(item["replacement"] for item in deprecated)]:
         with pytest.raises(SystemExit) as exc:
             parser.parse_args([*path.removeprefix("brigade ").split(), "--help"])
         assert exc.value.code == 0

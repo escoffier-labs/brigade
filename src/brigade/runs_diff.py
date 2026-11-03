@@ -12,7 +12,7 @@ import sys
 from pathlib import Path
 from typing import Any, Mapping
 
-from . import graphtrail_delta, runs_cmd
+from . import code_graph_delta, runs_cmd
 
 RUN_DIFF_SCHEMA = "brigade.run-diff.v1"
 
@@ -457,7 +457,7 @@ def _graphtrail_section(left_dir: Path, right_dir: Path) -> dict[str, object]:
 
 
 def _graphtrail_source(run_dir: Path) -> Mapping[str, Any] | None | object:
-    sidecar_path = run_dir / graphtrail_delta.SIDECAR_NAME
+    sidecar_path = run_dir / code_graph_delta.SIDECAR_NAME
     try:
         sidecar = runs_cmd._read_json(sidecar_path)
     except ValueError:

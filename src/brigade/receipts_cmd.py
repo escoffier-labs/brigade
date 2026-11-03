@@ -1496,7 +1496,7 @@ def _import_miseledger_file(
     """
     if failed_on_error is None:
         failed_on_error = strict
-    binary = component_bins.resolve("miseledger")
+    binary = component_bins.resolve("brigade-evidence")
     if binary is None:
         if failed_on_error and strict:
             print(

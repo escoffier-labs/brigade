@@ -193,7 +193,7 @@ def _dispatch_impl(args) -> int:
                     target=args.target,
                     manifest_id=args.verify_manifest_id,
                     timeout=args.timeout,
-                    graphtrail_timeout=args.graphtrail_timeout,
+                    code_graph_timeout=args.code_graph_timeout,
                     json_output=args.json,
                     capture=args.capture,
                     capture_kind=args.capture_kind,
@@ -218,7 +218,7 @@ def _dispatch_impl(args) -> int:
                 commands=commands,
                 manifest_id=None,
                 timeout=args.timeout,
-                graphtrail_timeout=args.graphtrail_timeout,
+                code_graph_timeout=args.code_graph_timeout,
                 json_output=args.json,
                 capture=args.capture,
                 capture_kind=args.capture_kind,
@@ -852,12 +852,12 @@ def _dispatch_impl(args) -> int:
                 metadata=args.metadata,
             )
         if args.import_command == "context":
-            if args.from_miseledger is not None:
+            if args.from_evidence is not None:
                 if args.text or args.from_file is not None:
-                    args._brigade_parser.error("--from-miseledger cannot be combined with text or --from-file")
+                    args._brigade_parser.error("--from-evidence cannot be combined with text or --from-file")
                 return work_cmd.import_context_from_miseledger(
                     target=args.target,
-                    query=args.from_miseledger,
+                    query=args.from_evidence,
                     limit=args.limit,
                     json_output=args.json,
                 )

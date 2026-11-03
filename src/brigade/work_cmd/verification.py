@@ -20,7 +20,7 @@ from .. import (
     causal_receipt,
     config,
     generated_patch_quarantine,
-    graphtrail_delta,
+    code_graph_delta,
     localio,
     receipt_json,
     receipt_schema,
@@ -36,11 +36,11 @@ from .verify_scoreability import _print_graph_impact, _print_scoreability_notice
 
 
 def _cancel_verify_graph(receipt: dict[str, Any], run_dir: Path) -> None:
-    receipt["code_graph_delta"] = graphtrail_delta._status(
+    receipt["code_graph_delta"] = code_graph_delta._status(
         "unavailable", "code graph delta unavailable: verification canceled"
     )
-    graphtrail_delta._delete_snapshot(run_dir / graphtrail_delta.SNAPSHOT_NAME)
-    graphtrail_delta._delete_snapshot(run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME)
+    code_graph_delta._delete_snapshot(run_dir / code_graph_delta.SNAPSHOT_NAME)
+    code_graph_delta._delete_snapshot(run_dir / code_graph_delta.SNAPSHOT_AFTER_NAME)
 
 
 def _verification_is_windows() -> bool:
@@ -1543,7 +1543,7 @@ def _run_verify_commands(
     commands: list[str | list[str]],
     timeout: int,
     *,
-    graphtrail_timeout: float,
+    code_graph_timeout: float,
     manifest: verify_manifest.VerifyManifest | None = None,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -1578,7 +1578,7 @@ def _run_verify_commands(
         _stamp_harness_session(receipt)
         _stamp_outcome_capture(receipt, capture, capture_kind)
         try:
-            graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
+            graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
         except KeyboardInterrupt:
             canceled = True
             rc = verify_runtime._VERIFY_CANCELED_RC
@@ -1671,8 +1671,8 @@ def _run_verify_commands(
             rc = verify_runtime._VERIFY_CANCELED_RC
             _cancel_verify_graph(receipt, run_dir)
         else:
-            receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+            receipt["code_graph_delta"] = code_graph_delta.capture_after_and_diff(
+                target, run_dir, graph_delta_before, timeout=code_graph_timeout
             )
     except KeyboardInterrupt:
         if receipt is None:
@@ -1968,7 +1968,7 @@ def verify_run(
     commands: list[str | list[str]] | None = None,
     manifest_id: str | None = None,
     timeout: int = 900,
-    graphtrail_timeout: float | None = None,
+    code_graph_timeout: float | None = None,
     json_output: bool = False,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -1996,7 +1996,7 @@ def verify_run(
         )
         return 2
     try:
-        effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
+        effective_code_graph_timeout = config.resolve_code_graph_delta_timeout(target, code_graph_timeout)
     except ValueError as exc:
         verify_runtime._print_verify_console(f"error: {exc}", file=sys.stderr)
         return 2
@@ -2041,7 +2041,7 @@ def verify_run(
                     target,
                     planned,
                     timeout,
-                    graphtrail_timeout=effective_graphtrail_timeout,
+                    code_graph_timeout=effective_code_graph_timeout,
                     manifest=manifest,
                     capture=capture,
                     capture_kind=capture_kind,

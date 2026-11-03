@@ -117,6 +117,8 @@ def build_gitignore_block(selection: Selection) -> str:
             ".brigade/tools/",
             ".brigade/chat-memory-sweeps/",
             ".brigade/work/",
+            "# The code graph index is derived from source and rebuilt by `brigade code sync`.",
+            ".brigade/code-graph/",
             "# .brigade/mcp.json is the shared canonical MCP server catalog: keep it tracked.",
             "!.brigade/mcp.json",
             ".brigade/mcp/",

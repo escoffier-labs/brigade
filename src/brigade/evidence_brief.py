@@ -43,7 +43,7 @@ class EvidenceBrief:
 
 
 def _miseledger_bin() -> str | None:
-    return component_bins.resolve("miseledger")
+    return component_bins.resolve("brigade-evidence")
 
 
 def _query(cwd: Path, task: str) -> str:

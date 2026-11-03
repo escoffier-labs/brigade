@@ -1,17 +1,18 @@
 //! Renamed environment variables (docs/phase-engine-rename.md, "Resolution rule").
 //!
-//! The canonical variable is read first. The legacy variable still works for the rename window
-//! and prints one stderr warning per process. Both set to different values is refused, which
-//! matches Brigade's `component_bins` and `engine_paths` helpers. An empty value counts as unset.
+//! The canonical variable is read first. The legacy variable still works for the rename window,
+//! v0.31 and v0.32. Both set to different values is refused, which matches Brigade's
+//! `component_bins` and `engine_paths` helpers. An empty value counts as unset.
+//!
+//! Reading a legacy variable prints nothing. Its stderr deprecation line lands in R5 together
+//! with the legacy entry point notice: Brigade's callers and Windows PowerShell 5.1 callers that
+//! run with `$ErrorActionPreference = 'Stop'` treat any native stderr as an error, so stderr stays
+//! unchanged until Brigade no longer depends on legacy names. `brigade doctor` reports the
+//! legacy variable instead.
 
-use std::collections::HashSet;
 use std::ffi::OsString;
-use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, bail};
-
-/// Release that removes the legacy names.
-pub const LEGACY_REMOVAL_RELEASE: &str = "v0.33.0";
 
 /// A renamed variable's value, and the legacy name when only that one was set.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -44,32 +45,10 @@ pub fn read_renamed_with(
     }
 }
 
-/// Read a renamed variable from the process environment, warning once when the legacy name is
-/// the one in effect.
+/// Read a renamed variable from the process environment. Never prints (see the module notes).
 pub fn read_renamed(canonical: &'static str, legacy: &'static str) -> Result<Option<OsString>> {
     let found = read_renamed_with(canonical, legacy, |name| std::env::var_os(name))?;
-    if let Some(RenamedValue {
-        legacy: Some(name), ..
-    }) = &found
-    {
-        warn_once(name, canonical);
-    }
     Ok(found.map(|found| found.value))
-}
-
-fn warn_once(legacy: &'static str, canonical: &'static str) {
-    static WARNED: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
-    let first = WARNED
-        .get_or_init(|| Mutex::new(HashSet::new()))
-        .lock()
-        .map(|mut warned| warned.insert(legacy))
-        .unwrap_or(true);
-    if first {
-        eprintln!(
-            "warning: {legacy} is deprecated and will be removed in {LEGACY_REMOVAL_RELEASE}; \
-             set {canonical} instead"
-        );
-    }
 }
 
 #[cfg(test)]

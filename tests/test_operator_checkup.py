@@ -364,7 +364,7 @@ def test_operator_checkup_graph_requires_live_db_and_fresh_delta(monkeypatch, tm
         "brigade.search_cmd.status_payload",
         lambda target: {
             "tools": {
-                "graphtrail": {
+                "brigade-code-graph": {
                     "installed": True,
                     "db_present": True,
                     "health": "ok",
@@ -386,13 +386,14 @@ def test_operator_checkup_graph_requires_live_db_and_fresh_delta(monkeypatch, tm
 
     assert rc == 0
     assert payload["graphtrail"]["health"] == "ok"
+    assert payload["code_graph"] == payload["graphtrail"]
     assert payload["code_graph_delta"]["changed_symbol_count"] == 2
 
 
 def test_operator_checkup_graph_missing_delta_requests_new_verification(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "brigade.search_cmd.status_payload",
-        lambda target: {"tools": {"graphtrail": {"installed": True, "db_present": True, "health": "ok"}}},
+        lambda target: {"tools": {"brigade-code-graph": {"installed": True, "db_present": True, "health": "ok"}}},
     )
     monkeypatch.setattr(
         "brigade.work_cmd.verification._latest_verify_receipt",
@@ -409,7 +410,7 @@ def test_operator_checkup_graph_missing_delta_requests_new_verification(monkeypa
 def test_operator_checkup_graph_stale_delta_requests_new_verification(monkeypatch, tmp_path, capsys):
     monkeypatch.setattr(
         "brigade.search_cmd.status_payload",
-        lambda target: {"tools": {"graphtrail": {"installed": True, "db_present": True, "health": "ok"}}},
+        lambda target: {"tools": {"brigade-code-graph": {"installed": True, "db_present": True, "health": "ok"}}},
     )
     monkeypatch.setattr(
         "brigade.work_cmd.verification._latest_verify_receipt",
@@ -448,7 +449,7 @@ def test_operator_checkup_ledger_reports_pending_work_receipt_imports(monkeypatc
 
     assert rc == 1
     assert payload["pending_work_receipt_count"] == 1
-    assert payload["next_command"] == "brigade receipts export miseledger --target . --new-only --import"
+    assert payload["next_command"] == "brigade receipts export evidence --target . --new-only --import"
 
 
 def test_operator_checkup_ledger_treats_empty_work_receipts_as_no_import_backlog(monkeypatch, tmp_path, capsys):

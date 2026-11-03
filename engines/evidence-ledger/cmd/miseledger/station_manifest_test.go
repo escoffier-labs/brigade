@@ -44,14 +44,14 @@ func TestBrigadeStationManifestMatchesMiseLedgerCLI(t *testing.T) {
 		t.Fatalf("parse station.json: %v", err)
 	}
 
-	if manifest.Schema != "brigade.station.v1" || manifest.Name != "miseledger" || manifest.Station != "evidence" || manifest.Lifecycle != "active" {
+	if manifest.Schema != "brigade.station.v1" || manifest.Name != "brigade-evidence" || manifest.Station != "evidence" || manifest.Lifecycle != "active" {
 		t.Fatalf("unexpected station identity: %#v", manifest)
 	}
 	if len(manifest.Tools) != 1 {
 		t.Fatalf("tools = %d, want 1", len(manifest.Tools))
 	}
 	tool := manifest.Tools[0]
-	if tool.Name != "miseledger" || tool.Kind != "executable" || tool.Command != "miseledger" {
+	if tool.Name != "brigade-evidence" || tool.Kind != "executable" || tool.Command != "brigade-evidence" {
 		t.Fatalf("unexpected tool identity: %#v", tool)
 	}
 	wantInstall := []string{"brigade", "setup"}
@@ -61,17 +61,17 @@ func TestBrigadeStationManifestMatchesMiseLedgerCLI(t *testing.T) {
 
 	wantSurfaces := []stationSurface{
 		{
-			Kind: "doctor-json", Command: []string{"miseledger", "doctor", "--json"},
+			Kind: "doctor-json", Command: []string{"brigade-evidence", "doctor", "--json"},
 			ReadOnly: false, TimeoutSeconds: 120,
-			Probe: []string{"miseledger", "doctor", "--help"}, ProbeContains: []string{"--json", "--mcp", "--archive"},
+			Probe: []string{"brigade-evidence", "doctor", "--help"}, ProbeContains: []string{"--json", "--mcp", "--archive"},
 		},
 		{
-			Kind: "brief-markdown", Command: []string{"miseledger", "evidence", "<task>", "--markdown", "--limit", "5"},
+			Kind: "brief-markdown", Command: []string{"brigade-evidence", "evidence", "<task>", "--markdown", "--limit", "5"},
 			ReadOnly: false, TimeoutSeconds: 10, MaxChars: 4000,
-			Probe: []string{"miseledger", "evidence", "--help"}, ProbeContains: []string{"--markdown", "--limit"},
+			Probe: []string{"brigade-evidence", "evidence", "--help"}, ProbeContains: []string{"--markdown", "--limit"},
 		},
 		{
-			Kind: "verify-exit", Command: []string{"miseledger", "version"},
+			Kind: "verify-exit", Command: []string{"brigade-evidence", "version"},
 			ReadOnly: true, TimeoutSeconds: 10,
 		},
 	}
@@ -80,7 +80,7 @@ func TestBrigadeStationManifestMatchesMiseLedgerCLI(t *testing.T) {
 	}
 
 	for _, surface := range tool.Surfaces {
-		if reflect.DeepEqual(surface.Command, []string{"miseledger", "export", "markdown"}) {
+		if reflect.DeepEqual(surface.Command, []string{"brigade-evidence", "export", "markdown"}) {
 			t.Fatal("bulk Markdown export must not be advertised as a bounded brief surface")
 		}
 	}

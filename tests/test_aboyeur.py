@@ -1752,12 +1752,12 @@ def test_run_dry_run_records_code_graph_delta_skip_without_graphtrail(monkeypatc
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_before",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
@@ -2593,7 +2593,7 @@ def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, e
         "dispatch",
         lambda *args, **kwargs: [aboyeur.WorkerResult(worker="coder", task="implement", text="done", ok=True)],
     )
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda *args, **kwargs: {})
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda *args, **kwargs: {})
 
     def interrupt_after_dispatch(*args, **kwargs):  # noqa: ARG001
         receipt = json.loads((output_dir / "run.json").read_text())
@@ -2605,7 +2605,7 @@ def test_post_dispatch_escape_clears_worker_phase_owner(monkeypatch, tmp_path, e
             signal.raise_signal(signal.SIGTERM)
         raise KeyboardInterrupt
 
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", interrupt_after_dispatch)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", interrupt_after_dispatch)
 
     expected_kind = "signal" if escape == "sigterm" else "keyboard-interrupt"
     expected_exception = SystemExit if escape == "sigterm" else KeyboardInterrupt
@@ -3549,12 +3549,12 @@ def test_read_only_mode_skips_code_graph_delta_without_graphtrail(monkeypatch, t
 
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_before",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("no graphtrail sync")),
     )
@@ -4074,8 +4074,8 @@ def test_run_writes_code_graph_delta_to_artifacts_and_synthesis(monkeypatch, tmp
     _commit_all(run_cwd)
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", fake_capture_before)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", fake_capture_before)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=run_cwd, output_dir=output_dir) == 0
 
@@ -4143,8 +4143,8 @@ def test_run_writes_context_eval_when_brief_and_delta_sidecar_overlap(monkeypatc
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 
@@ -4191,8 +4191,8 @@ def test_run_omits_context_eval_without_brief(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert (
         run_aboyeur_guarded(
@@ -4230,9 +4230,9 @@ def test_run_omits_context_eval_when_delta_failed(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
     monkeypatch.setattr(
-        aboyeur.graphtrail_delta,
+        aboyeur.code_graph_delta,
         "capture_after_and_diff",
         lambda target, run_dir, before: {"status": "sync_failed", "ok": False, "summary": "failed"},
     )
@@ -4269,8 +4269,8 @@ def test_run_omits_context_eval_when_delta_has_no_files(monkeypatch, tmp_path):
 
     output_dir = tmp_path / "run"
     monkeypatch.setattr(aboyeur.agents, "run_agent", fake_run_agent)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_before", lambda target, run_dir: before_payload)
-    monkeypatch.setattr(aboyeur.graphtrail_delta, "capture_after_and_diff", fake_capture_after)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_before", lambda target, run_dir: before_payload)
+    monkeypatch.setattr(aboyeur.code_graph_delta, "capture_after_and_diff", fake_capture_after)
 
     assert run_aboyeur_guarded("build feature", _roster(), cwd=tmp_path, output_dir=output_dir, code_graph=brief) == 0
 

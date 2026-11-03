@@ -22,8 +22,9 @@ live only in this module.
 from __future__ import annotations
 
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
@@ -43,6 +44,13 @@ LEGACY_EVIDENCE_LEAF = Path("miseledger")
 LEGACY_EVIDENCE_DB_NAME = "miseledger.db"
 EVIDENCE_MAC_KEY_NAME = "evidence-bundle-mac.key"
 EVIDENCE_CONFIG_NAME = "config.toml"
+CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV = "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT"
+LEGACY_CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV = "GRAPHTRAIL_ALLOW_UNSAFE_ROOT"
+LEGACY_REMOVAL_RELEASE = "v0.33.0"
+
+# A doctor row: (status, name, detail, scope). Status and scope use the doctor
+# module's string values; this module does not import doctor.
+Finding = tuple[str, str, str, str]
 
 
 @dataclass(frozen=True)
@@ -152,6 +160,20 @@ def _evidence_set(
     )
 
 
+def _evidence_roots(environment: Mapping[str, str]) -> tuple[Path, Path, Path]:
+    return (
+        _root(environment, "XDG_DATA_HOME", ".local", "share"),
+        _root(environment, "XDG_CONFIG_HOME", ".config"),
+        _root(environment, "XDG_CACHE_HOME", ".cache"),
+    )
+
+
+def _evidence_layout_dirs(roots: tuple[Path, Path, Path], leaf: Path) -> list[Path]:
+    """The data and config directories that make a layout exist."""
+    data_root, config_root, _ = roots
+    return [path for path in (data_root / leaf, config_root / leaf) if path.is_dir()]
+
+
 def evidence_dirs(*, env: Mapping[str, str] | None = None) -> EvidenceDirs:
     """Resolve the evidence directory set.
 
@@ -159,19 +181,100 @@ def evidence_dirs(*, env: Mapping[str, str] | None = None) -> EvidenceDirs:
     disposable and never decides the layout.
     """
     environment = os.environ if env is None else env
-    roots = (
-        _root(environment, "XDG_DATA_HOME", ".local", "share"),
-        _root(environment, "XDG_CONFIG_HOME", ".config"),
-        _root(environment, "XDG_CACHE_HOME", ".cache"),
-    )
-    data_root, config_root, _ = roots
-
-    def exists(leaf: Path) -> bool:
-        return (data_root / leaf).is_dir() or (config_root / leaf).is_dir()
-
-    legacy_present = exists(LEGACY_EVIDENCE_LEAF)
-    if exists(EVIDENCE_LEAF):
+    roots = _evidence_roots(environment)
+    legacy_present = bool(_evidence_layout_dirs(roots, LEGACY_EVIDENCE_LEAF))
+    if _evidence_layout_dirs(roots, EVIDENCE_LEAF):
         return _evidence_set(roots, EVIDENCE_LEAF, EVIDENCE_DB_NAME, "canonical", legacy_present)
     if legacy_present:
         return _evidence_set(roots, LEGACY_EVIDENCE_LEAF, LEGACY_EVIDENCE_DB_NAME, "legacy", True)
     return _evidence_set(roots, EVIDENCE_LEAF, EVIDENCE_DB_NAME, "new", False)
+
+
+def _modified(path: Path) -> str:
+    try:
+        stamp = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return "modified time unknown"
+    return f"modified {stamp.strftime('%Y-%m-%dT%H:%M:%SZ')}"
+
+
+def _legacy_variables() -> Iterator[tuple[str, str, bool]]:
+    """Yield ``(legacy, canonical, empty_is_unset)`` for every renamed variable.
+
+    The engines treat an empty value as unset. ``component_bins`` treats a set
+    but empty executable override as a value, so it can conflict.
+    """
+    from . import component_bins, component_manifest
+
+    yield LEGACY_CODE_GRAPH_DB_ENV, CODE_GRAPH_DB_ENV, True
+    yield LEGACY_CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV, CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV, True
+    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items():
+        yield component_bins.ENV_OVERRIDES[legacy], component_bins.ENV_OVERRIDES[canonical], False
+
+
+def legacy_findings(target: Path, *, env: Mapping[str, str] | None = None) -> list[Finding]:
+    """Doctor rows for legacy engine names still in effect.
+
+    Both layouts present is a WARN with both paths and their modification
+    times; the canonical one is used and nothing is merged or deleted. A legacy
+    environment variable is INFO in v0.31. Conflicting old and new values are a
+    WARN because every reader refuses them. Nothing here prints to stderr: the
+    deprecation lines for legacy names land in R5 (docs/phase-engine-rename.md).
+    """
+    environment = os.environ if env is None else env
+    findings: list[Finding] = []
+    canonical, legacy = code_graph_db_paths(target)
+    if canonical.is_file() and legacy.is_file():
+        findings.append(
+            (
+                "WARN",
+                "code graph index layout",
+                f"both {canonical} ({_modified(canonical)}) and {legacy} ({_modified(legacy)}) exist; "
+                "the canonical index is used and nothing is merged or deleted",
+                "target",
+            )
+        )
+    try:
+        roots = _evidence_roots(environment)
+    except ValueError:
+        roots = None
+    if roots is not None:
+        current = _evidence_layout_dirs(roots, EVIDENCE_LEAF)
+        retired = _evidence_layout_dirs(roots, LEGACY_EVIDENCE_LEAF)
+        if current and retired:
+            listed = ", ".join(f"{path} ({_modified(path)})" for path in (*current, *retired))
+            findings.append(
+                (
+                    "WARN",
+                    "evidence directory layout",
+                    f"canonical and legacy evidence directories both exist: {listed}; "
+                    "the canonical set is used and nothing is merged or deleted",
+                    "operator",
+                )
+            )
+    for old, new, empty_is_unset in _legacy_variables():
+        old_value = environment.get(old)
+        if old_value is None or (empty_is_unset and not old_value):
+            continue
+        new_value = environment.get(new)
+        if empty_is_unset and not new_value:
+            new_value = None
+        if new_value is not None and new_value != old_value:
+            findings.append(
+                (
+                    "WARN",
+                    "legacy environment variable",
+                    f"{old} and {new} differ and are refused; unset {old}",
+                    "operator",
+                )
+            )
+        else:
+            findings.append(
+                (
+                    "INFO",
+                    "legacy environment variable",
+                    f"{old} is set; use {new} ({old} is removed in {LEGACY_REMOVAL_RELEASE})",
+                    "operator",
+                )
+            )
+    return findings

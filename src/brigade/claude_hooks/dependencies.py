@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .. import context_eval, engine_paths, graphtrail_delta, localio
+from .. import context_eval, engine_paths, code_graph_delta, localio
 
 MAX_SEEN_FILES = 2048
 MAX_CHECKS = 32
@@ -169,13 +169,13 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
         return None, "graph_unavailable"
     if not db.is_file():
         return None, "no_index"
-    binary = graphtrail_delta._graphtrail_bin()
+    binary = code_graph_delta._graphtrail_bin()
     if binary is None:
         return None, "graph_unavailable"
     # Incremental sync handles ordinary edits. Only force extraction when the
     # independent content check finds edits the size/mtime shortcut missed.
     for extra in ((), ("--force",)):
-        result = graphtrail_delta._run_graphtrail(binary, db, "sync", *extra, timeout=GRAPH_TIMEOUT_SECONDS, cwd=target)
+        result = code_graph_delta._run_graphtrail(binary, db, "sync", *extra, timeout=GRAPH_TIMEOUT_SECONDS, cwd=target)
         if result.get("timed_out"):
             return None, "sync_timed_out"
         if result.get("returncode") != 0:
@@ -195,7 +195,7 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
             break
     else:
         return None, "stale_graph"
-    result = graphtrail_delta._run_graphtrail(
+    result = code_graph_delta._run_graphtrail(
         binary, db, "affected", path, timeout=GRAPH_TIMEOUT_SECONDS, json_output=True, cwd=target
     )
     if result.get("timed_out"):

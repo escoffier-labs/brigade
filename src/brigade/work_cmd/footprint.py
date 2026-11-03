@@ -144,7 +144,7 @@ def predict_footprint(
     target = target.expanduser().resolve()
     seed_symbols = _unique_strings(symbols)
     seed_files = _unique_strings(files)
-    binary = component_bins.resolve("graphtrail")
+    binary = component_bins.resolve("brigade-code-graph")
     if binary is None:
         return empty_predicted(reason="graphtrail binary not found")
     try:

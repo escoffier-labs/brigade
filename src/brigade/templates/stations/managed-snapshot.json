@@ -80,43 +80,25 @@
     },
     {
       "manifest": {
-        "lifecycle": "embedded",
-        "name": "content-guard",
-        "owner": "brigade-cli",
-        "schema": "brigade.station.v1",
-        "station": "guard",
-        "summary": "historical standalone package now maintained inside brigade-cli",
-        "tools": []
-      },
-      "source": {
-        "asserted_by": "brigade-cli",
-        "kind": "lifecycle-assertion",
-        "manifest_sha256": "5d488d470c5fb7ac62cae8c3fe774673d5fad1d1d107bc09a7f9d628fde5b6fe",
-        "observed_repository": "content-guard",
-        "observed_revision": "d93468ba05485635e252c0fd4129063c750e2cce"
-      }
-    },
-    {
-      "manifest": {
         "lifecycle": "active",
-        "name": "graphtrail",
+        "name": "brigade-code-graph",
         "schema": "brigade.station.v1",
         "station": "search",
         "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
         "tools": [
           {
-            "command": "graphtrail",
+            "command": "brigade-code-graph",
             "install": [
               "brigade",
               "setup"
             ],
             "kind": "executable",
-            "name": "graphtrail",
+            "name": "brigade-code-graph",
             "summary": "local code-graph CLI: callers, callees, impact, context briefs, and structural diffs",
             "surfaces": [
               {
                 "command": [
-                  "graphtrail",
+                  "brigade-code-graph",
                   "context",
                   "<task>",
                   "--markdown"
@@ -124,7 +106,7 @@
                 "kind": "brief-markdown",
                 "max_chars": 4000,
                 "probe": [
-                  "graphtrail",
+                  "brigade-code-graph",
                   "context",
                   "--help"
                 ],
@@ -136,7 +118,7 @@
               },
               {
                 "command": [
-                  "graphtrail",
+                  "brigade-code-graph",
                   "--version"
                 ],
                 "kind": "verify-exit",
@@ -145,13 +127,13 @@
               },
               {
                 "command": [
-                  "graphtrail",
+                  "brigade-code-graph",
                   "doctor",
                   "--json"
                 ],
                 "kind": "doctor-json",
                 "probe": [
-                  "graphtrail",
+                  "brigade-code-graph",
                   "doctor",
                   "--help"
                 ],
@@ -166,38 +148,39 @@
         ]
       },
       "source": {
-        "manifest_sha256": "fe402e8c09b0c1ef0f0468ea075d7d09b502ba77a3eb79d4b162e72d0a2ca252",
-        "repository": "graphtrail",
-        "revision": "e2c7868c8fe0471469f66e90b020845fb56a7ca6"
+        "kind": "in-tree",
+        "manifest_sha256": "64cc7f28df4fb2edf3c1fb6ec5a1917abe2132e209c6240e2518dcccb2986794",
+        "path": "engines/code-graph/station.json",
+        "repository": "brigade"
       }
     },
     {
       "manifest": {
         "lifecycle": "active",
-        "name": "miseledger",
+        "name": "brigade-evidence",
         "schema": "brigade.station.v1",
         "station": "evidence",
         "summary": "local evidence archive, bounded retrieval, and untrusted context bundles",
         "tools": [
           {
-            "command": "miseledger",
+            "command": "brigade-evidence",
             "install": [
               "brigade",
               "setup"
             ],
             "kind": "executable",
-            "name": "miseledger",
+            "name": "brigade-evidence",
             "summary": "local-first SQLite archive for agent sessions and imported evidence",
             "surfaces": [
               {
                 "command": [
-                  "miseledger",
+                  "brigade-evidence",
                   "doctor",
                   "--json"
                 ],
                 "kind": "doctor-json",
                 "probe": [
-                  "miseledger",
+                  "brigade-evidence",
                   "doctor",
                   "--help"
                 ],
@@ -211,7 +194,7 @@
               },
               {
                 "command": [
-                  "miseledger",
+                  "brigade-evidence",
                   "evidence",
                   "<task>",
                   "--markdown",
@@ -221,7 +204,7 @@
                 "kind": "brief-markdown",
                 "max_chars": 4000,
                 "probe": [
-                  "miseledger",
+                  "brigade-evidence",
                   "evidence",
                   "--help"
                 ],
@@ -234,7 +217,7 @@
               },
               {
                 "command": [
-                  "miseledger",
+                  "brigade-evidence",
                   "version"
                 ],
                 "kind": "verify-exit",
@@ -246,9 +229,28 @@
         ]
       },
       "source": {
-        "manifest_sha256": "511afd8a4787f2dfcd3dbcccb5e213909a09a6adf5ae7cf07449b127c740965d",
-        "repository": "miseledger",
-        "revision": "87c563dcb6bd1950ac0c28542de47c1556b9f7ea"
+        "kind": "in-tree",
+        "manifest_sha256": "4293fb0d6c4595e9e34855eefb8351ed0e3b7e10cfff78eea9acee768e0d4e70",
+        "path": "engines/evidence-ledger/station.json",
+        "repository": "brigade"
+      }
+    },
+    {
+      "manifest": {
+        "lifecycle": "embedded",
+        "name": "content-guard",
+        "owner": "brigade-cli",
+        "schema": "brigade.station.v1",
+        "station": "guard",
+        "summary": "historical standalone package now maintained inside brigade-cli",
+        "tools": []
+      },
+      "source": {
+        "asserted_by": "brigade-cli",
+        "kind": "lifecycle-assertion",
+        "manifest_sha256": "5d488d470c5fb7ac62cae8c3fe774673d5fad1d1d107bc09a7f9d628fde5b6fe",
+        "observed_repository": "content-guard",
+        "observed_revision": "d93468ba05485635e252c0fd4129063c750e2cce"
       }
     },
     {

@@ -25,7 +25,6 @@ from .. import agents
 from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
-from .. import graphtrail_delta
 from .. import causal_receipt
 from .. import localio
 from .. import message_envelope

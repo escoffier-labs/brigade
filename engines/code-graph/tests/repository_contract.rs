@@ -21,8 +21,8 @@ fn assert_supported_read_only_command(command: &Value, context: &str) {
         .collect();
 
     let supported = match command.as_slice() {
-        ["graphtrail", "--version"] => true,
-        ["graphtrail", subcommand, ..] => matches!(
+        ["brigade-code-graph" | "graphtrail", "--version"] => true,
+        ["brigade-code-graph" | "graphtrail", subcommand, ..] => matches!(
             *subcommand,
             "search"
                 | "neighbors"
@@ -41,7 +41,11 @@ fn assert_supported_read_only_command(command: &Value, context: &str) {
                 | "blend"
                 | "links"
         ),
-        ["graphtrail-mcp"] | ["graphtrail-mcp", "--help" | "--version"] => true,
+        ["brigade-code-graph-mcp" | "graphtrail-mcp"]
+        | [
+            "brigade-code-graph-mcp" | "graphtrail-mcp",
+            "--help" | "--version",
+        ] => true,
         ["brigade", "status", ..] | ["brigade", "work", "brief", ..] => true,
         _ => false,
     };
@@ -565,7 +569,14 @@ fn station_manifest_preserves_the_read_only_startup_contract() {
             .and_then(Value::as_str)
             .expect("station tool command was validated above");
         assert!(
-            matches!(executable, "graphtrail" | "graphtrail-mcp" | "brigade"),
+            matches!(
+                executable,
+                "brigade-code-graph"
+                    | "brigade-code-graph-mcp"
+                    | "graphtrail"
+                    | "graphtrail-mcp"
+                    | "brigade"
+            ),
             "station tool {name} must use a supported GraphTrail or Brigade entry point; found {executable}"
         );
 

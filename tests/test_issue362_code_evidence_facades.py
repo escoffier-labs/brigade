@@ -478,7 +478,7 @@ def test_evidence_status_json_contract_unchanged(monkeypatch, tmp_path):
 def test_evidence_export_plan_json_contract_unchanged(tmp_path):
     payload = evidence_cmd.export_plan_payload(target=tmp_path)
     assert payload["kind"] == "export"
-    assert any("receipts export miseledger" in " ".join(cmd) for cmd in payload["commands"])
+    assert any("receipts export evidence" in " ".join(cmd) for cmd in payload["commands"])
 
 
 def test_component_shim_ids_remain_required():

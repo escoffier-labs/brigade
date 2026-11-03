@@ -48,23 +48,33 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_journal.add_argument("--since", help="Inclusive UTC date or timezone-aware ISO timestamp cutoff.")
     p_journal.add_argument("--out", metavar="PATH|-", default="-", help="New private output file, or '-' for stdout.")
     p_journal.set_defaults(func=dispatch)
-    p_miseledger = export_sub.add_parser("miseledger", help="Export receipts as miseledger.adapter.v1 JSONL.")
-    p_miseledger.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_miseledger.add_argument("--out", default="-", help="Output path, or '-' for stdout.")
-    p_miseledger.add_argument("--limit", type=int, default=0, help="Maximum records to export; 0 means all.")
-    p_miseledger.add_argument("--new-only", action="store_true", help="Export only receipt items not in the cursor.")
-    p_miseledger.add_argument(
-        "--import", dest="import_miseledger", action="store_true", help="Import the JSONL with miseledger."
-    )
-    p_miseledger.add_argument(
-        "--json", action="store_true", help="Print a brigade.miseledger_export_result.v1 summary to stdout."
-    )
-    p_miseledger.add_argument(
-        "--fleet",
-        action="store_true",
-        help="Export from enabled [[repo]] entries in the target fleet config instead of the target itself.",
-    )
-    p_miseledger.set_defaults(func=dispatch)
+    # `evidence` is the canonical name. The legacy `miseledger` spelling stays
+    # accepted through v0.32 and is left out of --help: a subparser registered
+    # without help text is not listed (docs/phase-engine-rename.md, R4).
+    for export_name, export_help in (
+        ("evidence", {"help": "Export receipts as evidence adapter JSONL."}),
+        ("miseledger", {}),
+    ):
+        p_evidence = export_sub.add_parser(export_name, **export_help)
+        p_evidence.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        p_evidence.add_argument("--out", default="-", help="Output path, or '-' for stdout.")
+        p_evidence.add_argument("--limit", type=int, default=0, help="Maximum records to export; 0 means all.")
+        p_evidence.add_argument("--new-only", action="store_true", help="Export only receipt items not in the cursor.")
+        p_evidence.add_argument(
+            "--import",
+            dest="import_miseledger",
+            action="store_true",
+            help="Import the JSONL with the evidence engine.",
+        )
+        p_evidence.add_argument(
+            "--json", action="store_true", help="Print a brigade.miseledger_export_result.v1 summary to stdout."
+        )
+        p_evidence.add_argument(
+            "--fleet",
+            action="store_true",
+            help="Export from enabled [[repo]] entries in the target fleet config instead of the target itself.",
+        )
+        p_evidence.set_defaults(func=dispatch)
     help_attestation = "Export verify receipt as an in-toto attestation (SSH and cosign profiles)."
     p_attestation = export_sub.add_parser(
         "attestation",
@@ -317,7 +327,7 @@ def dispatch(args) -> int:
             return 1
         print(f"evidence derivative exported ({report.removed_fields} fields removed)")
         return 0
-    if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
+    if args.receipts_command == "export" and args.receipts_export_command in {"evidence", "miseledger"}:
         return receipts_cmd.export_miseledger(
             target=args.target,
             out=args.out,
