@@ -14,12 +14,13 @@ from pathlib import Path
 import pytest
 
 from brigade import engine_paths, memory_cmd, memory_proposal_v2, memory_reflect_candidates
+from tests._home import set_home
 
 LAYOUTS = ("canonical", "legacy", "both")
 BUNDLE_ID = "bundle-one"
 # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
-REF = f"miseledger://evidence/{BUNDLE_ID}"
-bundle_path = memory_cmd._miseledger_evidence_path
+REF = f"{memory_cmd.EVIDENCE_LOCATOR_PREFIX}{BUNDLE_ID}"
+bundle_path = memory_cmd._evidence_bundle_path
 
 
 @pytest.fixture
@@ -108,7 +109,7 @@ def test_legacy_config_directory_alone_selects_the_legacy_layout(roots):
 def test_default_roots_come_from_home(tmp_path, monkeypatch):
     for kind in ("DATA", "CONFIG", "CACHE"):
         monkeypatch.delenv(f"XDG_{kind}_HOME", raising=False)
-    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    set_home(monkeypatch, tmp_path / "home")
 
     expected = tmp_path / "home" / ".cache" / engine_paths.EVIDENCE_LEAF / "evidence" / f"{BUNDLE_ID}.json"
     assert bundle_path(BUNDLE_ID) == expected

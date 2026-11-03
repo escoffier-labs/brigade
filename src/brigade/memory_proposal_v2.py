@@ -108,7 +108,7 @@ def _evidence(
     for ref in resolved:
         try:
             bundle = memory_cmd._miseledger_evidence_id(ref)
-            path = memory_cmd._miseledger_evidence_path(bundle) if bundle else target / io.relative(ref)
+            path = memory_cmd._evidence_bundle_path(bundle) if bundle else target / io.relative(ref)
             if path is not None:
                 raw = io.read_bytes(path)
                 assert raw is not None

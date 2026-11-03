@@ -463,17 +463,21 @@ def _evidence_refs(meta: dict[str, Any]) -> list[str]:
     return [rendered] if rendered else []
 
 
+# A frozen locator scheme: stored cards and receipts carry it, so the text never changes.
+EVIDENCE_LOCATOR_PREFIX = "miseledger://evidence/"
+
+
 def _miseledger_evidence_id(ref: str) -> str | None:
     # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
-    if ref.startswith("miseledger://evidence/"):
+    if ref.startswith(EVIDENCE_LOCATOR_PREFIX):
         # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
-        return ref.removeprefix("miseledger://evidence/").strip()
+        return ref.removeprefix(EVIDENCE_LOCATOR_PREFIX).strip()
     if ref.startswith("miseledger:"):
         return ref.removeprefix("miseledger:").strip()
     return None
 
 
-def _miseledger_evidence_path(bundle_id: str) -> Path | None:
+def _evidence_bundle_path(bundle_id: str) -> Path | None:
     if not re.fullmatch(r"[A-Za-z0-9._-]+", bundle_id):
         return None
     # The engine writes bundles to <cache>/evidence in whichever layout it resolved
@@ -487,7 +491,7 @@ def _miseledger_evidence_path(bundle_id: str) -> Path | None:
 def _tracked_evidence_ref_missing(target: Path, ref: str) -> str | None:
     bundle_id = _miseledger_evidence_id(ref)
     if bundle_id is not None:
-        path = _miseledger_evidence_path(bundle_id)
+        path = _evidence_bundle_path(bundle_id)
         if path is None:
             return f"invalid MiseLedger evidence id: {ref}"
         return None if path.is_file() else f"missing MiseLedger evidence bundle: {ref}"
