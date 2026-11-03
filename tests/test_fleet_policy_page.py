@@ -669,7 +669,7 @@ def test_runtime_role_keys_and_friendly_labels_both_render(conn):
     _seed(conn)
     view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory())
     page = _render(view)
-    for key in ("impl", "review", "research", "scout", "security", "chef"):
+    for key in ("impl", "review", "research", "scout", "security", "orchestrator"):
         assert f"role.{key}" in page or f'value="{key}"' in page or f">{key}<" in page
     assert "Worker" in page
     assert "Orchestrator" in page
@@ -2321,3 +2321,115 @@ def test_read_only_policy_page_has_one_access_notice(conn):
     page = _render(view, editable=False)
     assert page.count("read-only") >= 1
     assert "Saved assignments · read-only" not in page
+
+
+def _seed_historical_chef(conn, document):
+    """Recreate a stored pre-alias revision, bypassing canonical new writes."""
+    revision = _seed(conn, document)
+    historical = fleet_policy.parse_document(document)
+    conn.execute(
+        "UPDATE fleet_policy_revisions SET document=?, digest=? WHERE revision=?",
+        (fleet_policy.canonical_json(historical), fleet_policy.document_digest(historical), revision),
+    )
+    conn.commit()
+    return revision
+
+
+@pytest.mark.parametrize("layer", ["defaults", "consumer", "repository"])
+def test_settings_edit_preserves_retired_historical_chef_assignment(conn, layer):
+    document = _document()
+    tree = {
+        "defaults": document["defaults"],
+        "consumer": document["consumers"]["brigade-run"].setdefault("default_patches", {}),
+        "repository": document["repositories"]["acme/public-tool"].setdefault("patches", {}),
+    }[layer]
+    tree.setdefault("roles", {})["chef"] = "seat-beta"
+    revision = _seed_historical_chef(conn, document)
+    conn.execute("INSERT INTO retired_models VALUES ('provider-b', 'model-b-1', 'exact', 0, 'fixture', 'fixture')")
+    conn.commit()
+    result = _apply(
+        conn,
+        _submission("defaults", "save", revision, execution_concurrency="3"),
+        actor="operator",
+        inventory=_fresh_inventory(),
+        activation=fleet_policy_page.UNKNOWN_ACTIVATION,
+    )
+    assert result.status == "saved", result.plan.errors
+    saved = fleet_hub_policy.current_policy(conn)["document"]
+    assert saved["defaults"]["execution"]["concurrency"] == 3
+    assert (
+        fleet_policy.resolve_policy(saved, "brigade-run", "acme/public-tool")["effective"]["roles"]["orchestrator"]
+        == "seat-beta"
+    )
+
+
+def test_rollback_preview_canonicalizes_historical_chef_without_rewriting_history(conn):
+    document = _document()
+    document["defaults"]["roles"]["chef"] = "seat-beta"
+    first = _seed_historical_chef(conn, document)
+    historical = fleet_hub_policy.current_policy(conn)
+    second = _seed(conn)
+    preview = _apply(
+        conn,
+        _submission("rollback", "preview", second, to_revision=str(first)),
+        actor="operator",
+        inventory=_fresh_inventory(),
+        activation=fleet_policy_page.UNKNOWN_ACTIVATION,
+    )
+    assert preview.status == "previewed"
+    paths = {item["path"] for items in preview.plan.diff.values() for item in items}
+    assert "defaults.roles.orchestrator" in paths
+    assert "defaults.roles.chef" not in paths
+    applied = _apply(
+        conn,
+        _submission("rollback", "save", second, to_revision=str(first)),
+        actor="operator",
+        inventory=_fresh_inventory(),
+        activation=fleet_policy_page.UNKNOWN_ACTIVATION,
+    )
+    assert applied.status == "saved", applied.message
+    saved = fleet_hub_policy.current_policy(conn)
+    assert saved["digest"] == preview.plan.digest
+    assert preview.plan.diff == fleet_policy.diff_documents(fleet_policy.parse_document(_document()), saved["document"])
+    old = next(row for row in fleet_hub_policy.list_revisions(conn) if row["revision"] == first)
+    assert old == historical
+
+
+@pytest.mark.parametrize(
+    "scope,target,prefix",
+    [
+        ("defaults", "", ""),
+        ("consumer", "brigade-run", ""),
+        ("repository", "acme/public-tool", "patch_"),
+    ],
+)
+@pytest.mark.parametrize(
+    "legacy,canonical,expected",
+    [
+        ("seat-beta", None, "seat-beta"),
+        ("", None, None),
+        ("@keep-current", None, "seat-alpha"),
+        ("seat-beta", "seat-alpha", "seat-alpha"),
+        ("seat-beta", "", None),
+    ],
+)
+def test_legacy_policy_form_role_alias(scope, target, prefix, legacy, canonical, expected):
+    document = _document()
+    tree = {
+        "defaults": document["defaults"],
+        "consumer": document["consumers"]["brigade-run"].setdefault("default_patches", {}),
+        "repository": document["repositories"]["acme/public-tool"].setdefault("patches", {}),
+    }[scope]
+    tree.setdefault("roles", {})["orchestrator"] = "seat-alpha"
+    fields = {f"{prefix}role_chef": legacy}
+    if canonical is not None:
+        fields[f"{prefix}role_orchestrator"] = canonical
+    submission = _submission(scope, "save", 2, target=target, **fields)
+    built = fleet_policy_page.build_document(document, submission)
+    tree = {
+        "defaults": built["defaults"],
+        "consumer": built["consumers"]["brigade-run"]["default_patches"],
+        "repository": built["repositories"]["acme/public-tool"]["patches"],
+    }[scope]
+    assert tree.get("roles", {}).get("orchestrator") == expected
+    assert "chef" not in tree.get("roles", {})

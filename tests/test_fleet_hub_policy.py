@@ -478,3 +478,16 @@ def test_pending_policy_rejects_nonfinite_values(conn):
             effective={"data": {"allow_training": float("nan")}},
             sources={},
         )
+
+
+def test_preview_chef_document_matches_canonical_save(conn):
+    document = _document()
+    document["defaults"]["roles"]["chef"] = "seat-alpha"
+    preview = fleet_hub_policy.preview_policy(conn, document, expected_version=1, actor="operator", reason="alias")
+    saved = fleet_hub_policy.save_policy(conn, document, expected_version=1, actor="operator", reason="alias")
+    assert preview["ok"]
+    assert preview["digest"] == saved["digest"]
+    paths = {item["path"] for items in preview["diff"].values() for item in items}
+    assert "defaults.roles.orchestrator" in paths
+    assert "defaults.roles.chef" not in paths
+    assert document["defaults"]["roles"]["chef"] == "seat-alpha"

@@ -243,7 +243,7 @@ def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, cap
         'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
         '[agents.worker]\ncli = "codex"\nrole = "implement"\n'
     )
-    run_preference.write_cached(run_preference.RunPreference(chef="worker"))
+    run_preference.write_cached(run_preference.RunPreference(orchestrator="worker"))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("readiness attempted a network refresh")

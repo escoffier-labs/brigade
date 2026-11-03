@@ -1723,3 +1723,22 @@ def test_v31_to_v32_preserves_event_history(tmp_path):
         assert len(fleet_hub.latest_status(conn, include_all=True)) == 2
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_status_falls_back_to_cache_for_long_policy_role(monkeypatch, capsys, json_output):
+    from brigade import cli, run_preference
+
+    monkeypatch.setattr(fleet_client, "fetch_status", lambda **kwargs: [])
+    monkeypatch.setattr(fleet_client, "fetch_run_preference", lambda: {"chef": "s" * 65})
+    monkeypatch.setattr(
+        run_preference, "load_cached", lambda: run_preference.parse_preference({"orchestrator": "cached-seat"})
+    )
+    assert cli.main(["fleet", "status", *(["--json"] if json_output else [])]) == 0
+    output = capsys.readouterr().out
+    if json_output:
+        payload = json.loads(output)
+        assert payload["preference"]["orchestrator"] == "cached-seat"
+    else:
+        assert "run preference (cached)" in output
+        assert "orchestrator: cached-seat" in output

@@ -579,7 +579,7 @@ def _add_question(conn):
 
 
 def test_fresh_database_reaches_schema_45_with_questions_and_paging(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 47
+    assert fleet_hub.SCHEMA_VERSION == 48
     conn = fleet_hub.init_db(tmp_path / "fleet.db")
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION

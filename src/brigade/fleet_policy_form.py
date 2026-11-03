@@ -18,7 +18,7 @@ from . import fleet_policy, fleet_policy_pr_rules
 _MAX_FIELDS = 1024
 SCOPES = ("defaults", "seat", "consumer", "repository", "pr_rules", "rollback")
 ACTIONS = ("preview", "save")
-RUNTIME_ROLES: tuple[str, ...] = ("impl", "review", "research", "scout", "security", "chef")
+RUNTIME_ROLES: tuple[str, ...] = ("impl", "review", "research", "scout", "security", "orchestrator")
 ADMISSION_ROLE = "admission_default"
 POLICY_ROLES: tuple[str, ...] = (*RUNTIME_ROLES, ADMISSION_ROLE)
 SEAT_TEXT_FIELDS = ("provider", "model", "effort", "cost_class", "retention", "quota_pool", "notes")
@@ -177,6 +177,10 @@ def _patch_from(fields: Mapping[str, str], prefix: str) -> dict[str, Any] | None
 
 def _merge_patch(existing: Mapping[str, Any], fields: Mapping[str, str], prefix: str) -> dict[str, Any]:
     """Apply the submitted leaves onto an existing sparse tree, leaf by leaf."""
+    fields = dict(fields)
+    legacy_role = f"{prefix}role_chef"
+    if legacy_role in fields:
+        fields.setdefault(f"{prefix}role_orchestrator", fields[legacy_role])
     submitted = _patch_from(fields, prefix)
     if submitted is None:
         return {section: dict(body) for section, body in existing.items()}
@@ -329,7 +333,7 @@ def _pr_rules_document(document: dict[str, Any], submission: Submission) -> dict
 
 def build_document(current: Mapping[str, Any], submission: Submission) -> dict[str, Any]:
     """One scoped edit applied to the current document. Never a wholesale copy-in."""
-    document = json.loads(json.dumps(fleet_policy.parse_document(current)))
+    document = json.loads(json.dumps(fleet_policy.canonical_role_document(current)))
     if submission.scope == "defaults":
         document["defaults"] = _merge_patch(document["defaults"], submission.fields, "")
         return document
