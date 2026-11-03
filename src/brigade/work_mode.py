@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .config import (
@@ -39,10 +40,6 @@ MODE_YOLO = "yolo"
 RAILS_STATES = ("on", "off")
 # Exit status of `brigade work rails check` when rails are off for the target.
 RAILS_OFF_EXIT = 3
-# Claude hook events whose only job is verification enforcement. Project-scope
-# installs in yolo mode leave them out; the runtime also skips their checks so
-# user-scope hooks shared across repos behave the same way.
-YOLO_DROPPED_CLAUDE_EVENTS = ("PostToolUseFailure", "Stop")
 
 RAILS_OFF_WARNING = (
     "warning: safety rails are off for {target}. Brigade's pre-push hook no longer scans for "
@@ -90,6 +87,10 @@ def is_yolo(target: Path) -> bool:
     return resolve_mode(target) == MODE_YOLO
 
 
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, timeout=5, check=False)
+
+
 def _config_is_tracked(target: Path, path: Path | None = None) -> bool:
     """True when rails-off cannot be honored for the config at ``path``.
 
@@ -98,8 +99,13 @@ def _config_is_tracked(target: Path, path: Path | None = None) -> bool:
     the file is reached through a symlink: the path itself or any parent directory
     inside the target is a symlink, or it resolves outside the target. A committed
     ``.brigade`` symlink to a tracked directory would otherwise let a pushed commit
-    disable the checks for every clone. ``path`` is the file that actually supplied
-    the settings, which may be a legacy location; it defaults to the canonical config.
+    disable the checks for every clone. It also returns True when the outer index
+    tracks the file or has an entry at an ancestor path inside the target, such as
+    a submodule gitlink, and when the file sits inside a nested repository or
+    submodule work tree (an ancestor below the target holds ``.git``): in a
+    recursive clone a committed ``.brigade`` submodule appears as a gitlink, not
+    as the file. ``path`` is the file that actually supplied the settings, which
+    may be a legacy location; it defaults to the canonical config.
     """
     config_file = target / CONFIG_REL_PATH if path is None else path
     try:
@@ -108,27 +114,39 @@ def _config_is_tracked(target: Path, path: Path | None = None) -> bool:
         return True
     probe = target
     try:
-        for part in relative_parts:
+        for index, part in enumerate(relative_parts):
             probe = probe / part
             if probe.is_symlink():
+                return True
+            # A directory between the target and the config with its own .git is a
+            # nested repository or submodule; its content is repository-controlled.
+            if index < len(relative_parts) - 1 and os.path.lexists(probe / ".git"):
                 return True
         resolved_target = target.resolve()
         relative = config_file.resolve().relative_to(resolved_target).as_posix()
     except (OSError, RuntimeError, ValueError):
         return True
+    ancestors = list(PurePosixPath(relative).parents)[:-1]  # drop "."
     try:
-        result = subprocess.run(
-            ["git", "-C", str(resolved_target), "ls-files", "--error-unmatch", "--", relative],
-            capture_output=True,
-            timeout=5,
-            check=False,
-        )
+        result = _git(resolved_target, "ls-files", "--error-unmatch", "--", relative)
+        if result.returncode == 128:
+            # 128 is also "pathspec is in submodule"; only no repository at all is untracked.
+            return _git(resolved_target, "rev-parse", "--is-inside-work-tree").returncode == 0
+        if result.returncode != 1:
+            return True  # tracked (0) or git could not say
+        # An index entry at an ancestor path itself (a submodule gitlink, mode 160000,
+        # or a committed file or symlink) means the outer repository controls what
+        # sits there. Tracked siblings under a plain directory do not count.
+        for ancestor in ancestors:
+            staged = _git(resolved_target, "ls-files", "--stage", "-z", "--", ancestor.as_posix())
+            if staged.returncode != 0:
+                return True
+            for entry in staged.stdout.split(b"\0"):
+                if entry.partition(b"\t")[2] == ancestor.as_posix().encode():
+                    return True
     except (OSError, subprocess.SubprocessError):
         return True
-    if result.returncode == 0:
-        return True
-    # 1 means untracked inside a work tree; 128 means no repository at all.
-    return result.returncode not in {1, 128}
+    return False
 
 
 def _rails_off_source(target: Path) -> Path | None:
@@ -157,13 +175,6 @@ def rails_enabled(target: Path) -> bool:
 
 def summary(target: Path) -> dict[str, str]:
     return {"mode": resolve_mode(target), "rails": "on" if rails_enabled(target) else "off"}
-
-
-def claude_project_events(target: Path, events: tuple[str, ...]) -> tuple[str, ...]:
-    """Managed Claude events a project-scope install should carry for ``target``."""
-    if not is_yolo(target):
-        return events
-    return tuple(event for event in events if event not in YOLO_DROPPED_CLAUDE_EVENTS)
 
 
 def _update(target: Path, **changes: Any) -> str | None:
@@ -196,8 +207,8 @@ def set_rails(target: Path, state: str) -> str | None:
 
 RAILS_HOOK_MARKER = "brigade work rails check"
 TRACKED_CONFIG_NOTE = (
-    "on: work.rails is off, but git tracks .brigade/config.json, so the checks stay on; "
-    "a committed setting cannot disable them"
+    "on: work.rails is off, but git tracks .brigade/config.json (or it comes through a symlink, "
+    "a submodule, or a nested repository), so the checks stay on; a committed setting cannot disable them"
 )
 
 

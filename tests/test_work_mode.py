@@ -119,9 +119,9 @@ def test_switching_back_to_enforced_restores_block_and_hooks(tmp_path: Path, mon
     enforced_settings = (target / ".claude" / "settings.json").read_text()
 
     _set_mode(target, "yolo", capsys)
-    hooks = _settings_events(target)
-    assert "Stop" not in hooks and "PostToolUseFailure" not in hooks
-    assert {"SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "SessionEnd"} <= set(hooks)
+    # Yolo keeps every managed event; the runtime skips checks per target.
+    assert (target / ".claude" / "settings.json").read_text() == enforced_settings
+    assert set(install_cmd.MANAGED_EVENTS) <= set(_settings_events(target))
     status = install_cmd.status_payload(target)
     assert status["current"] is True and status["work_mode"] == "yolo"
 
@@ -143,27 +143,73 @@ def test_mode_switch_preserves_foreign_stop_handlers(tmp_path: Path, capsys) -> 
     settings["hooks"]["Stop"].append(foreign)
     settings_path.write_text(json.dumps(settings))
     _set_mode(target, "yolo", capsys)
-    assert _settings_events(target)["Stop"] == [foreign]
+    stop = _settings_events(target)["Stop"]
+    assert foreign in stop and len(stop) == 2
     _set_mode(target, "enforced", capsys)
     stop = _settings_events(target)["Stop"]
     assert foreign in stop and len(stop) == 2
 
 
-def test_stale_enforcement_event_in_yolo_project_is_reported(tmp_path: Path, capsys) -> None:
+def test_yolo_install_missing_stop_is_reported_and_healed(tmp_path: Path, capsys) -> None:
     target = _wired(tmp_path)
-    # Switching only the setting, without the reinstall, leaves Stop installed.
-    assert work_mode.set_mode(target, "yolo") is None
+    _set_mode(target, "yolo", capsys)
+    # An install written by a build that dropped Stop in yolo mode is incomplete.
+    settings_path = target / ".claude" / "settings.json"
+    settings = json.loads(settings_path.read_text())
+    del settings["hooks"]["Stop"]
+    settings_path.write_text(json.dumps(settings))
     status = install_cmd.status_payload(target)
-    assert status["current"] is False and "Stop" in status["stale_events"]
+    assert status["current"] is False and "Stop" in status["missing_events"]
+    _set_mode(target, "yolo", capsys)
+    assert "Stop" in _settings_events(target)
+    assert install_cmd.status_payload(target)["current"] is True
 
 
-def test_init_yolo_installs_without_enforcement_events(tmp_path: Path, capsys) -> None:
+def test_yolo_workspace_session_is_blocked_for_enforced_child_repo(tmp_path: Path, monkeypatch, capsys) -> None:
+    workspace = _wired(tmp_path, name="workspace")
+    _set_mode(workspace, "yolo", capsys)
+    child = workspace / "child"
+    selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+    assert install_selection(child, selection) == 0
+    capsys.readouterr()
+    assert "Stop" in _settings_events(workspace)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+
+    runtime.handle_payload("SessionStart", _payload(workspace, "SessionStart", session_id="mixed"))
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            workspace,
+            "PostToolUse",
+            session_id="mixed",
+            tool_name="Write",
+            tool_input={"file_path": str(child / "src.py"), "content": "x\n"},
+        ),
+    )
+    blocked = runtime.handle_payload("Stop", _payload(workspace, "Stop", session_id="mixed", stop_hook_active=False))
+    assert blocked is not None and blocked["decision"] == "block"
+    assert str(child.resolve()) in blocked["reason"]
+
+
+def test_yolo_only_session_finishes_with_stop_installed(tmp_path: Path, monkeypatch, capsys) -> None:
+    target = _wired(tmp_path)
+    _set_mode(target, "yolo", capsys)
+    assert "Stop" in _settings_events(target)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief: test")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
+    runtime.handle_payload("PostToolUse", _write(target))
+    assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False)) is None
+
+
+def test_init_yolo_installs_every_managed_event(tmp_path: Path, capsys) -> None:
     target = tmp_path / "fresh"
     rc = cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude", "--yolo"])
     assert rc == 0
     capsys.readouterr()
     assert work_mode.resolve_mode(target) == "yolo"
-    assert "Stop" not in _settings_events(target)
+    assert set(install_cmd.MANAGED_EVENTS) <= set(_settings_events(target))
     # Re-running init without --yolo keeps the recorded mode.
     assert cli.main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "claude"]) == 0
     assert work_mode.resolve_mode(target) == "yolo"
@@ -476,6 +522,13 @@ def test_doctor_does_not_claim_checks_active_without_pre_push_hook(tmp_path: Pat
     assert "none was found" in rows["safety rails"] and "are active" not in rows["safety rails"]
 
 
+def _symlink(link: Path, target: Path | str, *, directory: bool = False) -> None:
+    try:
+        link.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"platform cannot create symlinks: {exc}")
+
+
 def _git_repo_with_rails_off_settings(tmp_path: Path) -> Path:
     repo = tmp_path / "repo"
     (repo / "shared-settings").mkdir(parents=True)
@@ -490,7 +543,7 @@ def _git_repo_with_rails_off_settings(tmp_path: Path) -> Path:
 
 def test_tracked_brigade_symlink_cannot_disable_rails(tmp_path: Path) -> None:
     repo = _git_repo_with_rails_off_settings(tmp_path)
-    (repo / ".brigade").symlink_to("shared-settings", target_is_directory=True)
+    _symlink(repo / ".brigade", "shared-settings", directory=True)
     subprocess.run(["git", "add", ".brigade", "shared-settings/config.json"], cwd=repo, check=True)
     assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
@@ -499,7 +552,8 @@ def test_tracked_brigade_symlink_cannot_disable_rails(tmp_path: Path) -> None:
 def test_symlinked_config_file_cannot_disable_rails(tmp_path: Path) -> None:
     repo = _git_repo_with_rails_off_settings(tmp_path)
     (repo / ".brigade").mkdir()
-    (repo / config.CONFIG_REL_PATH).symlink_to("../shared-settings/config.json")
+    # Path() gives native separators: Windows does not resolve "/" in a relative link.
+    _symlink(repo / config.CONFIG_REL_PATH, Path("..", "shared-settings", "config.json"))
     assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
@@ -509,7 +563,7 @@ def test_config_resolving_outside_target_cannot_disable_rails(tmp_path: Path) ->
     outside = tmp_path / "outside"
     outside.mkdir()
     (repo / "shared-settings" / "config.json").replace(outside / "config.json")
-    (repo / ".brigade").symlink_to(outside, target_is_directory=True)
+    _symlink(repo / ".brigade", outside, directory=True)
     assert work_mode.rails_off_requested(repo) is True
     assert work_mode.rails_enabled(repo) is True
 
@@ -518,4 +572,66 @@ def test_plain_untracked_config_still_turns_rails_off(tmp_path: Path) -> None:
     repo = _git_repo_with_rails_off_settings(tmp_path)
     (repo / ".brigade").mkdir()
     (repo / "shared-settings" / "config.json").replace(repo / config.CONFIG_REL_PATH)
+    assert work_mode.rails_enabled(repo) is False
+
+
+def _git_c(cwd: Path, *args: str) -> None:
+    identity = ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "protocol.file.allow=always"]
+    subprocess.run(["git", *identity, *args], cwd=cwd, check=True, capture_output=True)
+
+
+def _rails_off_settings_repo(path: Path) -> Path:
+    """A standalone repository whose committed config.json sets rails off."""
+    path.mkdir(parents=True)
+    selection = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=[])
+    config.write_config(path, config.Config(version=1, selection=selection, safety_rails=False))
+    (path / config.CONFIG_REL_PATH).replace(path / "config.json")
+    (path / ".brigade").rmdir()
+    _git_c(path, "init", "-q")
+    _git_c(path, "add", "config.json")
+    _git_c(path, "commit", "-q", "-m", "settings")
+    return path
+
+
+def test_committed_brigade_submodule_cannot_disable_rails(tmp_path: Path) -> None:
+    settings = _rails_off_settings_repo(tmp_path / "settings-upstream")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_c(repo, "init", "-q")
+    _git_c(repo, "submodule", "add", "-q", str(settings), ".brigade")
+    _git_c(repo, "commit", "-q", "-m", "add settings submodule")
+    clone = tmp_path / "clone"
+    _git_c(tmp_path, "clone", "-q", "--recurse-submodules", str(repo), str(clone))
+    assert work_mode.rails_off_requested(clone) is True
+    assert work_mode.rails_enabled(clone) is True
+
+
+def test_gitlink_ancestor_cannot_disable_rails_without_nested_git(tmp_path: Path) -> None:
+    settings = _rails_off_settings_repo(tmp_path / "settings-upstream")
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=settings, check=True, capture_output=True, text=True)
+    repo = tmp_path / "repo"
+    (repo / ".brigade").mkdir(parents=True)
+    _git_c(repo, "init", "-q")
+    _git_c(repo, "update-index", "--add", "--cacheinfo", f"160000,{head.stdout.strip()},.brigade")
+    (settings / "config.json").replace(repo / config.CONFIG_REL_PATH)
+    assert work_mode.rails_off_requested(repo) is True
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_nested_independent_repo_config_cannot_disable_rails(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git_c(repo, "init", "-q")
+    # The nested repository's own committed config.json is .brigade/config.json here.
+    _rails_off_settings_repo(repo / ".brigade")
+    assert work_mode.rails_off_requested(repo) is True
+    assert work_mode.rails_enabled(repo) is True
+
+
+def test_tracked_sibling_under_brigade_still_allows_local_rails_off(tmp_path: Path) -> None:
+    repo = _git_repo_with_rails_off_settings(tmp_path)
+    (repo / ".brigade").mkdir()
+    (repo / "shared-settings" / "config.json").replace(repo / config.CONFIG_REL_PATH)
+    (repo / ".brigade" / "runbook.json").write_text("{}\n")
+    _git_c(repo, "add", ".brigade/runbook.json")
     assert work_mode.rails_enabled(repo) is False

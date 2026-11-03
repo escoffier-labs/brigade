@@ -18,7 +18,11 @@ def _emit(payload: dict[str, object], *, json_output: bool) -> None:
 
 
 def _reconcile_claude_hooks(target: Path) -> str | None:
-    """Re-merge an existing project-scope Claude install so only the mode's events remain."""
+    """Re-merge an existing project-scope Claude install after a mode switch.
+
+    Every mode carries the same events; this heals installs written by builds that
+    dropped ``Stop`` and ``PostToolUseFailure`` in yolo mode.
+    """
     from .claude_hooks import install_cmd
 
     try:
@@ -31,7 +35,7 @@ def _reconcile_claude_hooks(target: Path) -> str | None:
         if install_cmd.status_payload(target).get("managed_events"):
             return (
                 f"managed Claude hooks exist without {install_cmd.SIDECAR_REL_PATH}; "
-                f"run `brigade work hooks install --target {target}` so the mode's events match"
+                f"run `brigade work hooks install --target {target}` so every managed event is installed"
             )
         return None
     if install_cmd.hooks_install(target=target, quiet=True) != 0:

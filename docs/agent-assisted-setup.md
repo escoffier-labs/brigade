@@ -129,7 +129,7 @@ brigade work mode set yolo --target .       # switch an existing repo or workspa
 brigade work mode set enforced --target .   # switch back
 ```
 
-Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Switching reinstalls only the Claude `Stop` and `PostToolUseFailure` hook events. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
+Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Both modes install the same Claude hook events. The hooks skip verification checks only for targets set to yolo, so a session started in a yolo workspace is still held to the receipt gate for an enforced child repository it writes into. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
 
 Without receipts you give up evidence. Nothing records which checks ran, on which tree, or with what exit code. Outcomes are not captured, so skill and card scores stop moving. Adoption and doctor no longer flag a session that edited code and never ran a test, which leaves a skipped check invisible.
 
@@ -140,7 +140,7 @@ brigade work rails off --target .   # prints what stops being checked
 brigade work rails on --target .
 ```
 
-Turning rails off makes Brigade's pre-push hook skip its scans. You lose the check that stops secrets, credentials, private hostnames, and private paths from leaving the machine, including the history scan of commits that a clean tip would hide. Guard policies and baselines stay untouched, so `rails on` restores the same checks. Only an untracked `.brigade/config.json` can turn rails off. If git tracks that file, the rails stay on and doctor reports why. That way a committed setting cannot disable leak checks for everyone who pushes from a clone. Enforced mode with rails off is allowed, for a private repo that wants receipts and never publishes.
+Turning rails off makes Brigade's pre-push hook skip its scans. You lose the check that stops secrets, credentials, private hostnames, and private paths from leaving the machine, including the history scan of commits that a clean tip would hide. Guard policies and baselines stay untouched, so `rails on` restores the same checks. Only an untracked `.brigade/config.json` can turn rails off. If git tracks that file, or it arrives through a symlink, a submodule, or a nested repository, the rails stay on and doctor reports why. That way a committed setting cannot disable leak checks for everyone who pushes from a clone. Enforced mode with rails off is allowed, for a private repo that wants receipts and never publishes.
 
 ## Success Check
 

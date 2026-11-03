@@ -136,13 +136,6 @@ def _layout(*, scope: HooksScope, target: Path) -> _InstallLayout:
     )
 
 
-def _required_events(layout: _InstallLayout) -> tuple[str, ...]:
-    """Events this install should carry: a yolo project drops verification-only events (#2233)."""
-    if layout.scope == "user":
-        return MANAGED_EVENTS
-    return work_mode.claude_project_events(layout.root, MANAGED_EVENTS)
-
-
 def _load_settings(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return {}, None
@@ -210,15 +203,8 @@ def _merge_settings(settings: dict[str, Any], *, layout: _InstallLayout) -> dict
         specs = managed_user_groups(layout.script_path)
     else:
         specs = managed_groups()
-    required = _required_events(layout)
     for event in MANAGED_EVENTS:
-        kept = _without_managed_or_legacy(hooks.get(event), event, layout=layout)
-        if event in required:
-            hooks[event] = kept + specs[event]
-        elif kept:
-            hooks[event] = kept
-        else:
-            hooks.pop(event, None)
+        hooks[event] = _without_managed_or_legacy(hooks.get(event), event, layout=layout) + specs[event]
     merged["hooks"] = hooks
     return merged
 
@@ -310,7 +296,7 @@ def _write_package(
         "package_id": PACKAGE_ID,
         "package_version": PACKAGE_VERSION,
         "settings_path": layout.settings_rel,
-        "managed_events": list(_required_events(layout)),
+        "managed_events": list(MANAGED_EVENTS),
         "installed_at": previous.get("installed_at") or now,
         "updated_at": now,
     }
@@ -436,11 +422,9 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
         and sidecar.get("package_version") == PACKAGE_VERSION
         and (layout.scope == "project" or sidecar.get("scope") == "user")
     )
-    required = _required_events(layout)
     ordered_present = [event for event in MANAGED_EVENTS if event in present]
-    ordered_current = [event for event in MANAGED_EVENTS if event in current_events and event in required]
-    missing = [event for event in required if event not in ordered_present]
-    # An enforcement event left installed in a yolo project is stale until reinstalled.
+    ordered_current = [event for event in MANAGED_EVENTS if event in current_events]
+    missing = [event for event in MANAGED_EVENTS if event not in ordered_present]
     stale = [event for event in ordered_present if event not in ordered_current]
     ordered_legacy_events = [event for event in MANAGED_EVENTS if event in legacy_events]
     script_installed = layout.script_path is None or layout.script_path.is_file()
@@ -473,7 +457,9 @@ def status_payload(target: Path, *, scope: HooksScope = "project") -> dict[str, 
         "sidecar": sidecar,
         "error": error,
     }
-    if required != MANAGED_EVENTS:
+    # Yolo keeps every managed event: a session started here can write into an enforced
+    # child repository, and the runtime skips Stop and failure checks per target (#2233).
+    if layout.scope == "project" and work_mode.is_yolo(layout.root):
         result["work_mode"] = work_mode.MODE_YOLO
     if layout.scope == "user":
         result["scope"] = layout.scope
