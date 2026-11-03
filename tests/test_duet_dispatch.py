@@ -280,3 +280,28 @@ def test_terminal_states_match_the_event_watcher():
     from brigade.dot.duet_dispatch import TERMINAL
 
     assert TERMINAL == events.TERMINAL
+
+
+@requires_local_state
+def test_terminal_observation_started_during_busy_followup_keeps_slot(fleet):
+    import json
+    from tests.test_dot_fleet_tools import REQUEST
+
+    tools, run = fleet
+    assert submit(tools)["ok"]
+    # A followup has reserved the slot and is still waiting for the fleet to accept it.
+    with tools.state.transaction() as connection:
+        connection.execute("UPDATE duet_dispatch SET busy=1, generation=generation+1 WHERE request_id=?", (REQUEST,))
+    stale = json.dumps({"schema": "t3-fleet.result.v1", "request_id": REQUEST, "state": "succeeded"})
+
+    def observe_previous_turn_then_followup_lands(argv, **kwargs):
+        # The followup completes while this status call is in flight.
+        with tools.state.transaction() as connection:
+            connection.execute("UPDATE duet_dispatch SET busy=0 WHERE request_id=?", (REQUEST,))
+        run.output = stale
+        return run(argv, **kwargs)
+
+    tools.runner._run = observe_previous_turn_then_followup_lands
+    assert tools.fleet_status(REQUEST)["ok"]
+    run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": "other", "state": "running"})
+    assert submit(tools)["error"] == "open_limit"

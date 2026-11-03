@@ -85,6 +85,10 @@ class DuetFleetTools(FleetTools):
                 # Unknown outcomes keep both the open slot and busy flag until operator reconciliation.
             elif action in {"status", "wait"} and result.get("ok") and nested.get("state") in TERMINAL:
                 assert row is not None
+                if row["busy"]:
+                    # Started while a followup was launching: this terminal state may describe the
+                    # previous turn, so it must not release the new turn's reservation.
+                    return result
                 # A status concurrent with a followup cannot release its admission reservation.
                 connection.execute(
                     "UPDATE duet_dispatch SET open=0 WHERE request_id=? AND busy=0 AND generation=?",
