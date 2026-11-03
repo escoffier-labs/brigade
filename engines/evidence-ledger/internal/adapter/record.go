@@ -7,6 +7,7 @@ import (
 	"strings"
 )
 
+// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 const SchemaV1 = "miseledger.adapter.v1"
 
 type Record struct {

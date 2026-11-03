@@ -3534,7 +3534,9 @@ order by s.kind, c.name, i.created_at, i.id`)
 }
 
 const (
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	exportManifestName = ".miseledger-export-files"
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	exportStageDirName = ".miseledger-export-stage"
 )
 
@@ -3610,6 +3612,7 @@ func markdownExportBasename(group exportMarkdownGroup) string {
 
 func markdownExportTupleEncoding(group exportMarkdownGroup) []byte {
 	var b bytes.Buffer
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	b.WriteString("miseledger.markdown-export-filename.v1")
 	for _, field := range []string{group.source, group.collectionKind, group.collection} {
 		var length [8]byte

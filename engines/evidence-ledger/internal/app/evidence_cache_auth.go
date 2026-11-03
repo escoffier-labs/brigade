@@ -55,6 +55,7 @@ var evidenceMACKeyAfterMissProbe func()
 
 const (
 	evidenceBundleMACField   = "bundle_mac"
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	evidenceBundleMACDomain  = "miseledger.evidence.bundle-mac.v1\x00"
 	evidenceBundleMACKeyFile = "evidence-bundle-mac.key"
 )
