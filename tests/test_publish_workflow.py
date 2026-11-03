@@ -417,15 +417,27 @@ def test_published_artifact_acceptance_unix_step_passes_github_token_from_github
 
 def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
-    publish = text.index("      - name: Publish to PyPI")
-    verify = text.index("      - name: Verify check.brigade.tools reports the published version")
-    acceptance = text.index("  published-artifact-acceptance:")
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/publish.yml")
+    jobs = workflow["jobs"]
+    verify = jobs["verify-version-check-endpoint"]
+    publish_steps = [step.get("name") for step in jobs["build-and-publish"]["steps"]]
 
-    assert publish < verify < acceptance
-    section = text[verify : text.index("  published-artifact-acceptance:")]
-    assert "scripts/verify_version_check_endpoint.py" in section
-    assert "EXPECTED_VERSION: ${{ github.ref_name }}" in section
-    assert '--expected-version "${EXPECTED_VERSION#v}" --wait-seconds 1500' in section
+    assert "Publish to PyPI" in publish_steps
+    assert "Verify check.brigade.tools reports the published version" not in publish_steps
+    # The endpoint wait runs beside acceptance instead of delaying it.
+    assert verify["needs"] == "build-and-publish"
+    assert jobs["published-artifact-acceptance"]["needs"] == "build-and-publish"
+    assert verify["if"] == jobs["build-and-publish"]["if"]
+    assert verify["permissions"] == {"contents": "read"}
+    step = next(
+        step
+        for step in verify["steps"]
+        if step.get("name") == "Verify check.brigade.tools reports the published version"
+    )
+    assert step["env"] == {"EXPECTED_VERSION": "${{ github.ref_name }}"}
+    assert step["run"] == (
+        'python scripts/verify_version_check_endpoint.py --expected-version "${EXPECTED_VERSION#v}" --wait-seconds 1500'
+    )
     assert "skip-existing: true" in text
     assert (
         "https://check.brigade.tools/v1/version" in (ROOT / "scripts" / "verify_version_check_endpoint.py").read_text()

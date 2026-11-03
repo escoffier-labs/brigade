@@ -120,10 +120,13 @@ def test_recall_caps_matches_and_stable_equal_score_order(tmp_path: Path):
     payload = memory_hooks.recall_cards_payload(target=hub, cwd=session, limit=99)
     assert len(payload["matches"]) == memory_hooks.DEFAULT_RECALL_LIMIT
     scores = [m["score"] for m in payload["matches"]]
-    assert scores == sorted(scores, reverse=True)
-    # Equal scores order by path for stability.
-    equal = [m for m in payload["matches"] if m["score"] == scores[0]]
-    assert [m["path"] for m in equal] == sorted(m["path"] for m in equal)
+    # Every name is one token, so the six cards have equal BM25 lengths and
+    # term counts: all scores tie and only the path tie-break orders them.
+    assert all(isinstance(score, float) and score > 0 for score in scores)
+    assert len(set(scores)) == 1
+    assert [m["path"] for m in payload["matches"]] == [
+        f"memory/cards/{name}" for name in ("alpha.md", "beta.md", "delta.md", "gamma.md", "mid.md")
+    ]
 
 
 def test_missing_and_broken_targets_exit_zero_without_output(tmp_path: Path, capsys):
@@ -355,7 +358,8 @@ def test_primary_and_linked_checkout_recall_same_cards_only_from_target(tmp_path
     for cwd in (worktree, repo):
         payload = memory_hooks.recall_cards_payload(target=hub, cwd=cwd)
         assert payload["query"] == "orbit notes"
-        assert payload["query_source"] == "repo"
+        # The repository basename is folder-derived, so it is labeled cwd (#2196).
+        assert payload["query_source"] == "cwd"
         assert [match["title"] for match in payload["matches"]] == ["Orbit notes"]
         assert str(repo / ".git") not in json.dumps(payload)
 
@@ -386,7 +390,7 @@ def test_blank_explicit_query_falls_through_repo_workspace_and_cwd(tmp_path: Pat
     subdir = worktree / "sub-section"
     subdir.mkdir()
     for cwd, expected, source in (
-        (worktree, "orbit notes", "repo"),
+        (worktree, "orbit notes", "cwd"),
         (hub, "workspace", "workspace"),
         (subdir, "sub section", "cwd"),
     ):
@@ -513,7 +517,7 @@ def test_poisoned_git_environment_does_not_redirect_identity(tmp_path: Path, mon
         monkeypatch.setenv(key, value)
     payload = memory_hooks.recall_cards_payload(target=hub, cwd=worktree)
     assert payload["query"] == "orbit notes"
-    assert payload["query_source"] == "repo"
+    assert payload["query_source"] == "cwd"
     assert payload["matches"][0]["title"] == "Orbit notes"
     assert str(repo / ".git") not in json.dumps(payload)
 

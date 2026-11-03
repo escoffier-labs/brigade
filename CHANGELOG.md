@@ -8,6 +8,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Add diagnostic-only `memory reflect preflight` reports for retained candidates, with bound policy and snapshot hashes, supporting-proof checks and explicit holds for missing promotion authority. Automatic promotion remains disabled.
+- Stop the content guard from blocking code-shaped hostname lookalikes: when the dotted value starts with a well-known JavaScript receiver (`args`, `process`, `this`, `options` and similar), an indented `key: value,` object member ending the line or a `delete`, `typeof`, `void` or `await` operand ending a statement is code. The `home-path` rule no longer matches a known tool config directory rendered directly under a sandbox home root with no username segment. Real hosts in YAML, shell and prose, and real user home paths including `.`-segment and hidden homes, stay detected.
+- Fence new key publication and sealed admission to an installed Hub identity, retaining per-signer sequence history, paired migration readback and exact retained retries. Older Hub binaries must not rewrite identity metadata after history exists: inconsistent signer state refuses new mesh writes and requires operator recovery from a consistent backup without discarding signer history.
+- Allow writing and frontend task roles to use explicit Hub policy seat fallbacks and optional host-local instructions files, with bounded reads and fail-closed dispatch.
+
 - Point package homepages to https://brigadestack.com for the next release, retaining documentation links on brigade.tools.
 
 - Use `brigade components list|discover|verify` as the catalog command. Keep `stations` as a supported alias hidden from root help, with unchanged `station.json` manifests, schemas and JSON keys.
@@ -240,6 +244,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add project-only Codex instruction diagnosis under `brigade bug diagnose --component instructions`, with body-free modeled selection, explicit finding export and local report preparation.
 
+- Add an inactive transactional model for external Worklore leases, with owner fencing and conflict checks. No external registration route is enabled.
 
 - Skill proposals preserve behavioral contracts and reject changed packages or baselines. Fleet skill review binds explicit copies and mutation commands to exact reviewed package identities.
 - Paired skill trials can plan, replay and validate five receipt-backed scenarios in disposable targets. Replay results remain offline and cannot promote a skill. Live execution requires a tool adapter that is not implemented yet.
@@ -248,6 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Unscoped Worklore histories omit external ownership events before pagination, while preserving legacy event fields and cursors.
 
+- Keep external Worklore scopes reserved across later legacy events, and refuse expiry cleanup of unsupported ownership histories.
 
 ## [0.30.0] - 2026-10-20
 

@@ -567,7 +567,23 @@ def dispatch(args) -> int:
                     failure_reason = "seat-unavailable"
                     raise ValueError(failure_reason)
                 loaded_roster = replace(loaded_roster, agents={**loaded_roster.agents, selected: agent})
-            loaded_roster = task_roles.strict_roster(loaded_roster, selected)
+            policy_seats = resolution.get("seats")
+            if not isinstance(policy_seats, dict):
+                policy_seats = fleet_client_policy.show_policy().get("document", {}).get("seats", {})
+            record = policy_seats.get(selected) or {}
+            allowed = []
+            for fallback in record.get("fallback") or []:
+                if not isinstance(fallback, str) or fallback == selected or fallback in allowed:
+                    continue
+                if _direct_worker_error(fallback, loaded_roster, roster_mod, read_only=args.read_only) is not None:
+                    continue
+                if fallback not in loaded_roster.agents:
+                    agent, error = _hub_synthesized_agent(fallback, loaded_roster)
+                    if agent is None or error is not None:
+                        continue
+                    loaded_roster = replace(loaded_roster, agents={**loaded_roster.agents, fallback: agent})
+                allowed.append(fallback)
+            loaded_roster = task_roles.policy_roster(loaded_roster, selected, tuple(allowed))
         except (fleet_client.FleetClientError, OSError, ValueError):
             print(
                 f"error: task classified {classified.workload}; role seat unavailable: {failure_reason}. "
@@ -576,7 +592,15 @@ def dispatch(args) -> int:
             )
             return 2
         source = resolution.get("sources", {}).get(f"roles.{role}", {}).get("layer")
-        evidence = {**classified.payload(), "seat": selected, "source_layer": source, "fallback": "disabled"}
+        evidence = {**classified.payload(), "seat": selected, "source_layer": source, "fallback": allowed or "disabled"}
+        try:
+            instructions, instruction_evidence = task_roles.load_instructions(loaded_roster, role)
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        if instruction_evidence is not None:
+            evidence["instructions"] = instruction_evidence
+        loaded_roster = replace(loaded_roster, worker_instructions=instructions)
         loaded_roster = replace(loaded_roster, seat_routing=(*loaded_roster.seat_routing, {"task_role": evidence}))
         args.worker = selected
         args.task_role_workload = classified.workload

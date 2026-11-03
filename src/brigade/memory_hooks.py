@@ -1,8 +1,11 @@
-"""Bounded session-start memory recall primitive (#466 Slice 1).
+"""Bounded memory recall primitive (#466 Slice 1, #2196).
 
-Derives bounded explicit or checkout search terms, runs card search against a
-machine-local hub or mirror, and formats index-level output (title, tags, path)
-suitable for harness SessionStart injection. Failures stay fail-open.
+Searches with the user's prompt when one is available (UserPromptSubmit) or an
+explicit query, and falls back to checkout or folder basename terms only when
+there is neither (SessionStart, labeled ``query_source: "cwd"``). Runs card
+search against a machine-local hub or mirror and formats index-level output
+(title, tags, path) for harness injection. Prompt text never reaches disk.
+Failures stay fail-open.
 """
 
 from __future__ import annotations
@@ -24,6 +27,8 @@ RECALL_TIMEOUT_SECONDS = 5
 RECALL_QUERY_MAX_CHARS = 256
 _GIT_TIMEOUT_SECONDS = 0.5
 GENERIC_WORKSPACE_QUERY = "workspace"
+# Sources whose query text came from a person (a prompt or a --query flag).
+QUERY_TEXT_SOURCES = frozenset({"explicit", "prompt"})
 _TERM_SPLIT = re.compile(r"[-_]+")
 
 
@@ -67,11 +72,13 @@ def _normalize_query(query: str) -> str:
     return bounded.strip()
 
 
-def _base_recall_query(cwd: Path, *, memory_root: Path, query: str | None) -> tuple[str, str]:
-    """Choose explicit or legacy fallback terms without probing Git in the parent."""
+def _base_recall_query(
+    cwd: Path, *, memory_root: Path, query: str | None, query_source: str = "explicit"
+) -> tuple[str, str]:
+    """Choose the prompt or explicit query, else folder fallback terms, without probing Git in the parent."""
     explicit = _normalize_query(query or "")
     if explicit:
-        return explicit, "explicit"
+        return explicit, query_source if query_source in QUERY_TEXT_SOURCES else "explicit"
     source = "cwd"
     try:
         if cwd.expanduser().resolve(strict=False) == memory_root.expanduser().resolve(strict=False):
@@ -194,12 +201,18 @@ def format_recall_match_line(match: dict[str, Any]) -> str:
 
 
 def format_recall_text(payload: dict[str, Any]) -> str:
-    """Render recall output: at most 5 matches and 10 lines; no bodies/summaries."""
+    """Render recall output: at most 5 matches and 10 lines; no bodies/summaries.
+
+    Prompt-driven recall never echoes the prompt: hook output is persisted.
+    """
     query = _normalize_query(str(payload.get("query") or ""))
     matches = payload.get("matches")
     if not isinstance(matches, list) or not matches:
         return ""
-    lines = [f"memory recall: {query}"]
+    header = (
+        "memory recall (from your prompt):" if payload.get("query_source") == "prompt" else f"memory recall: {query}"
+    )
+    lines = [header]
     for match in matches[:DEFAULT_RECALL_LIMIT]:
         if not isinstance(match, dict):
             continue
@@ -236,8 +249,10 @@ def _recall_cards_payload_impl(
     cwd: Path,
     limit: int = DEFAULT_RECALL_LIMIT,
     query: str | None = None,
+    query_source: str = "explicit",
 ) -> dict[str, Any]:
     """In-process recall body (runs in a killable child when timed)."""
+    from . import memory_recall_log
     from .memory_cmd import search_cards_payload
 
     capped = _clamp_limit(limit)
@@ -245,11 +260,10 @@ def _recall_cards_payload_impl(
         memory_root = target.expanduser().resolve(strict=False)
     except OSError:
         memory_root = target
-    query, query_source = _base_recall_query(cwd, memory_root=memory_root, query=query)
+    query, query_source = _base_recall_query(cwd, memory_root=memory_root, query=query, query_source=query_source)
     if query_source == "cwd":
-        repo_query = _query_from_repo(cwd)
-        if repo_query:
-            query, query_source = repo_query, "repo"
+        # The checkout basename is still a folder name, so it keeps the cwd label.
+        query = _query_from_repo(cwd) or query
     empty = _empty_recall_payload(
         target=target,
         cwd=cwd,
@@ -281,6 +295,8 @@ def _recall_cards_payload_impl(
                 "score": item.get("score"),
             }
         )
+    if query_source in QUERY_TEXT_SOURCES:
+        memory_recall_log.record_recall(memory_root, query=query, query_source=query_source, matches=matches)
     return {
         "target": str(raw.get("target") or memory_root),
         "cwd": str(cwd),
@@ -303,6 +319,7 @@ def _recall_worker_main() -> None:
         cwd=Path(str(req["cwd"])),
         limit=int(req["limit"]),
         query=req.get("query"),
+        query_source=str(req.get("query_source") or "explicit"),
     )
     sys.stdout.write(json.dumps(payload, sort_keys=True))
 
@@ -313,12 +330,15 @@ def recall_cards_payload(
     cwd: Path,
     limit: int = DEFAULT_RECALL_LIMIT,
     query: str | None = None,
+    query_source: str = "explicit",
 ) -> dict[str, Any]:
-    """Run bounded recall against ``target`` using explicit or checkout terms.
+    """Run bounded recall against ``target`` using the prompt, explicit, or checkout terms.
 
-    Git identity and card search run in a killable child bounded by
-    ``RECALL_TIMEOUT_SECONDS``. Earlier target/context resolution is outside
-    that deadline. Timeout and child failures return an empty fail-open payload.
+    Callers that have the user's prompt pass it as ``query`` with
+    ``query_source="prompt"``. Git identity and card search run in a killable
+    child bounded by ``RECALL_TIMEOUT_SECONDS``; the query travels over stdin,
+    never argv or a file. Earlier target/context resolution is outside that
+    deadline. Timeout and child failures return an empty fail-open payload.
     """
     capped = _clamp_limit(limit)
     try:
@@ -326,7 +346,9 @@ def recall_cards_payload(
     except OSError:
         memory_root = target
     explicit_query = _normalize_query(query or "")
-    query, query_source = _base_recall_query(cwd, memory_root=memory_root, query=explicit_query)
+    query, query_source = _base_recall_query(
+        cwd, memory_root=memory_root, query=explicit_query, query_source=query_source
+    )
     empty = _empty_recall_payload(
         target=target,
         cwd=cwd,
@@ -341,6 +363,7 @@ def recall_cards_payload(
             "cwd": str(cwd.expanduser().absolute()),
             "limit": capped,
             "query": explicit_query,
+            "query_source": query_source,
         },
         sort_keys=True,
     )
@@ -380,8 +403,12 @@ def recall_text_for_hook(
     cwd: Path | None = None,
     limit: int = DEFAULT_RECALL_LIMIT,
     query: str | None = None,
+    prompt: str | None = None,
 ) -> str:
-    """Hook-facing recall: empty string on any failure (fail open, no leak)."""
+    """Hook-facing recall: empty string on any failure (fail open, no leak).
+
+    ``prompt`` is the user's prompt (UserPromptSubmit); it wins over ``query``.
+    """
     try:
         recall_target, status = resolve_memory_recall_target(wired_target)
         if status != "active" or recall_target is None:
@@ -389,7 +416,16 @@ def recall_text_for_hook(
         session_cwd = cwd if cwd is not None else wired_target
         if not recall_target.exists():
             return ""
-        payload = recall_cards_payload(target=recall_target, cwd=session_cwd, limit=limit, query=query)
+        if prompt is not None and not _normalize_query(prompt):
+            # A prompt that normalizes to nothing (whitespace or control
+            # characters) recalls nothing, like a blank prompt; no cwd fallback.
+            return ""
+        if prompt is not None:
+            payload = recall_cards_payload(
+                target=recall_target, cwd=session_cwd, limit=limit, query=prompt, query_source="prompt"
+            )
+        else:
+            payload = recall_cards_payload(target=recall_target, cwd=session_cwd, limit=limit, query=query)
         if payload.get("status") != "ok":
             return ""
         return format_recall_text(payload)

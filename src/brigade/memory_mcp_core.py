@@ -9,13 +9,12 @@ the shape mcp_server.ToolCaller expects.
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote
 
-from . import memory_cmd, memory_scope
+from . import memory_bm25, memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
@@ -81,6 +80,11 @@ def split_ref(ref: str) -> tuple[str | None, str]:
         if ref.startswith(prefix):
             return origin, ref[len(prefix) :]
     return None, ref
+
+
+def _inside_store(root: Path) -> Callable[[Path], bool]:
+    """A path filter that keeps only paths inside ``root``."""
+    return lambda path: _inside(path, root)
 
 
 def _inside(path: Path, root: Path) -> bool:
@@ -177,8 +181,9 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": "search_cards",
             "description": (
-                "Keyword-search memory cards across the repo and user stores. A term in a card's title, tags, "
-                "or summary outranks one found only in the body, and repo matches rank first on ties. Returns "
+                "Keyword-search memory cards across the repo and user stores with BM25: each card's title, "
+                "tags, summary, and body form one field, so rare terms weigh more than common ones and no "
+                "field is boosted. Repo matches rank first on ties. Returns "
                 f"up to {SEARCH_LIMIT} matches with path, title, tags, summary, score, origin, and ref; read "
                 "one with get_card."
             ),
@@ -329,15 +334,21 @@ class MemoryTools:
 
     def _search_cards(self, arguments: dict[str, Any]) -> ToolResult:
         query = str(arguments.get("query") or "")
-        ranked: list[tuple[int, dict[str, Any]]] = []
+        # BM25 scores depend on corpus statistics, so every store's eligible
+        # cards are ranked together; per-store scores are not comparable.
+        eligible: list[tuple[int, MemoryStore, dict[str, Any]]] = []
         for rank, store in enumerate(self.resolution().stores):
-            # Uncapped so outside-the-store matches dropped here cannot crowd out real ones.
-            payload = memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize, config=store.config)
-            for match in payload["matches"]:
-                match = {**match, "path": _posix(match["path"])}
-                if not _inside(store.root / match["path"], store.root):
-                    continue
-                ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
+            root = store.root.expanduser().resolve()
+            # Outside-the-store cards are dropped before they are read or
+            # ranked, so they neither crowd out real matches nor shift the statistics.
+            for fields in memory_cmd.search_card_fields(root, store.config, keep=_inside_store(store.root)):
+                eligible.append((rank, store, fields))
+        texts = [memory_bm25.card_text(fields) for _, _, fields in eligible]
+        ranked: list[tuple[int, dict[str, Any]]] = []
+        for index, score in memory_bm25.rank(texts, query):
+            rank, store, fields = eligible[index]
+            match = {**memory_cmd.card_search_match(fields, score), "path": _posix(fields["rel"])}
+            ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
         ranked.sort(key=lambda item: (-item[1]["score"], item[0], item[1]["path"]))
         return [match for _, match in ranked[:SEARCH_LIMIT]], False
 

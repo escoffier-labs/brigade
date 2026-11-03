@@ -1,6 +1,6 @@
 ---
 name: verify-brigade
-description: "Prove a Brigade change works by driving the real `brigade` CLI against a throwaway temp target, then capture receipts as evidence. Use when you changed anything under src/brigade/ and need proof beyond pytest - init/doctor wiring, work-verify receipts, Grok Bot connector packs, feed manifests, handoff lint. Also use before claiming a CLI behavior in a PR body, handoff, or job report."
+description: "Prove a Brigade change works by driving the real `brigade` CLI against a throwaway temp target, then capture receipts as evidence. Use when you changed anything under src/brigade/ and need proof beyond pytest - init/doctor wiring, work-verify receipts, Grok Bot connector packs, feed manifests, handoff lint, guard scan/redact parity, the Fleet Hub HTTP wire contract. Also use before claiming a CLI behavior in a PR body, handoff, or job report."
 ---
 
 # Verify Brigade
@@ -139,6 +139,9 @@ Real commands from this repo, one per mapped feature. The full map is in
 [`features/README.md`](features/README.md); drive the feature your change
 actually touched, not just the convenient one.
 
+A paused feature can still be driven by hand, but its observations are
+about to change: read its header before citing the result.
+
 ```bash
 C=registry/skills/verify-brigade/control-brigade.py
 
@@ -149,6 +152,7 @@ $C doctor-target --target "$TARGET"
 $C work-verify --target "$TARGET" --capture verify-brigade
 
 # Grok Bot connector pack lifecycle (implementation-worker is the worker pack)
+# PAUSED: pack doctor goes through the Fleet Hub on a host with a hub URL
 $C grokbot-pack-setup  --target "$TARGET" --id implementation-worker
 $C grokbot-pack-setup  --target "$TARGET" --id implementation-worker --apply
 $C grokbot-pack-doctor --target "$TARGET" --id implementation-worker
@@ -156,11 +160,19 @@ $C grokbot-pack-canary --target "$TARGET" --id implementation-worker
 $C grokbot-pack-remove --target "$TARGET" --id implementation-worker
 
 # feed manifest validation and queue projection
+# PAUSED: grokbot status goes through the Fleet Hub on a host with a hub URL
 $C grokbot-feed   --target "$TARGET" --sample
 $C grokbot-status --target "$TARGET"
 
 # handoff inbox lint
+# PAUSED: the handoff format may change with hub memory v2
 $C handoff-lint --target "$TARGET" --content-guard
+
+# guard scan and redact parity (lookbehind and backreference goldens)
+$C guard-parity --target "$TARGET"
+
+# Fleet Hub wire contract over HTTP (starts its own throwaway hub; no target needed)
+$C hub-contract
 ```
 
 Read the exit code, not the prose:
@@ -272,16 +284,18 @@ next drive; remove it only when you are done with the tree
 
 CLI surfaces in this repo and the tests that cover them. Drive the helper
 feature your change actually touched (`features/README.md`); use the
-pytest selectors here when the proof is a focused gate. Names confirmed
-present under `tests/` on this checkout.
+pytest selectors here when the proof is a focused gate. These selectors are
+**stand-in proofs**: a passing test is not a drive of the command, so cite it
+as a stand-in and never as "driven". Names confirmed present under `tests/`
+on this checkout.
 
 | Surface | Command | Tests |
 |---|---|---|
 | run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (34 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
-| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files) |
+| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files), `tests/test_verify_brigade_hub_contract.py` |
 | grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
-| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
+| guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py`, `tests/test_verify_brigade_guard_parity.py` |
 
 Doctor and status for the checkout itself: `tests/test_doctor.py`,
 `tests/test_status.py`.
@@ -298,7 +312,7 @@ registry/skills/verify-brigade/control-brigade.py --help
 Subcommands: `doctor`, `new-target`, `init`, `doctor-target`, `work-verify`,
 `grokbot-pack-setup`, `grokbot-pack-doctor`, `grokbot-pack-canary`,
 `grokbot-pack-remove`, `grokbot-feed`, `grokbot-status`, `handoff-lint`,
-`evidence`, `cleanup`.
+`guard-parity`, `hub-contract`, `audit`, `evidence`, `cleanup`.
 
 Global flags: `--brigade "<command>"` to drive a different Brigade build (for
 example `--brigade "$(command -v python3) -m brigade"`), `--root <dir>` to
@@ -306,17 +320,59 @@ isolate the state root when two runs go at once (a directory under `$TMPDIR`,
 not `$TMPDIR` itself), `--timeout <s>` per call.
 
 Every subcommand that writes accepts `--dry-run`, which reports the command it
-skipped and mutates nothing: `new-target`, `init`, `work-verify`,
-`grokbot-feed --sample`, `evidence`, `cleanup`, and
+skipped and touches nothing outside the helper's own private state root (which
+every subcommand resolves and creates first): `new-target`, `init`, `work-verify`,
+`grokbot-feed --sample`, `guard-parity`, `hub-contract`, `evidence`, `cleanup`, and
 `grokbot-pack-setup`/`grokbot-pack-remove` (there it forces preview even with
 `--apply`). The dry-run envelope carries `"dry_run": true` and a `would_run`,
-`would_remove`, or `would_copy` list.
+`would_remove`, or `would_copy` list; `hub-contract` instead reports
+`would_launch` (the hub argv, or `null` for `--hub-url`) and `would_create` (the
+hub's state directory, or `null`).
 
 `tests/test_verify_brigade_skill.py` runs `new-target`, `doctor-target`,
 `work-verify`, and `cleanup` in a pytest `tmp_path`, and asserts the path
 refusals (including a symlink planted at the default state root), the
 unwritable-root JSON envelope, and the `0600`/`0700` permissions, so CI fails
 if this helper stops working or stops guarding.
+`tests/test_verify_brigade_guard_parity.py` runs `guard-parity` against the
+real CLI and asserts the goldens hold, that a drifted engine is reported, and
+that `--dry-run` writes nothing.
+`tests/test_verify_brigade_hub_contract.py` runs `hub-contract` against the
+in-repo hub and asserts zero mismatches, checks the covered routes against
+`docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
+prove each drift is reported.
+
+`tests/test_verify_brigade_audit.py` runs `audit` against the shipped map and
+against broken copies of it, so CI fails when the map drifts from the CLI.
+
+## Keeping the map honest
+
+The feature map drifts as the CLI changes. When a change adds, renames, or
+removes a command or flag, or changes output a feature file asserts on, run
+the audit and follow the loop in
+[`features/MAINTENANCE.md`](features/MAINTENANCE.md):
+
+```bash
+registry/skills/verify-brigade/control-brigade.py audit
+```
+
+The audit is read-only. It reads the live command tree from
+`brigade completions bash` (plus `--help` for families such as `guard` that
+parse their own verbs), checks every active feature's commands still answer
+`--help`, and prints one JSON object: `uncovered` commands, `uncovered_flags`,
+`stale` features with no recent drive, `paused` and `unreachable` features
+with their reasons, and `failures`. Exit 0 means the map matches the CLI
+apart from documented gaps. Exit 3 means it does not.
+
+Three rules from that page apply to every proof:
+
+- **Coverage.** A drive covers the commands it runs and nothing else. One
+  convenient entry point driven once says nothing about its siblings.
+- **Stand-ins are labeled.** A pytest selector, a mock, or a fake `brigade`
+  wrapper is a stand-in proof. Say so; never call it driven.
+- **Pauses and unreachable marks carry a reason.** A paused feature names
+  what unpauses it. An unreachable one names what blocked it. "Not driven
+  yet" is a gap, not unreachability.
 
 ## Reporting the proof
 

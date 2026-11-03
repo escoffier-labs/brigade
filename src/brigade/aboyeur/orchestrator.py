@@ -41,6 +41,7 @@ from .. import run_projector
 from .. import run_shadow
 from .. import seat_health
 from .. import seat_health_policy
+from .. import task_roles
 from .. import verification_contract
 from ..result_integrity import validate_final_output
 from ..run_receipts import (
@@ -291,15 +292,18 @@ def resolve_orchestrator_health_routing(
                     f"using declared fallback {selected}"
                 )
             else:
-                fallback = roster.agents[selected]
-                requested_agent = roster.agents[requested]
-                effective_agents[requested] = replace(
-                    fallback,
-                    name=requested,
-                    role=requested_agent.role,
-                    purpose=requested_agent.purpose,
-                    fallback=(),
-                )
+                if not direct_worker:
+                    # Planned assignments retain role keys; direct workers use
+                    # the declared fallback identity for admission and leasing.
+                    fallback = roster.agents[selected]
+                    requested_agent = roster.agents[requested]
+                    effective_agents[requested] = replace(
+                        fallback,
+                        name=requested,
+                        role=requested_agent.role,
+                        purpose=requested_agent.purpose,
+                        fallback=(),
+                    )
                 warnings.append(
                     f"warning: seat {requested} is unhealthy [{typed_cause}]; using declared fallback {selected}"
                 )
@@ -893,6 +897,8 @@ def run(
                         ),
                         file=sys.stderr,
                     )
+                    roster = task_roles.retarget_worker_evidence(roster, requested=worker, effective=effective)
+                    worker = effective
                 break
         if routing.receipt is not None:
             routing_receipt = dict(routing.receipt)
@@ -1552,6 +1558,7 @@ def run(
     active_seat = active_seats[0] if len(active_seats) == 1 else None
     worker_prompt_builder = partial(
         planning._worker_prompt,
+        instructions=roster.worker_instructions,
         skill_policy=skill_policy,
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,

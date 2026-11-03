@@ -35,11 +35,13 @@ Query categories (weighted toward hard cases):
 
 ## Adapters
 
-1. **current** — existing keyword scorer in `brigade.memory_cmd` (title/tag/summary hits score 3, body hits score 1).
-2. **grep** — naive tokenized substring match count. Deliberately dumb floor.
-3. **semantic** (optional) — on-device embeddings + cosine via `sentence_transformers`, only when the package is installed **and** a local model loads with `local_files_only=True`. Set `BRIGADE_MEMORY_EVAL_EMBED_MODEL` to a local path or cached model id. Otherwise the adapter is reported as skipped; the harness still exits 0.
+1. **current**: production search, `brigade.memory_cmd.search_cards_payload`. Since #2196 this is plain BM25 (k1=1.2, b=0.75) over one field per card: title, tags, summary, and the card text.
+2. **bm25**: the same BM25 ranker from `brigade.memory_bm25`, called directly with the index built once per run. It should match `current`; a gap means the production path drifted.
+3. **substring**: the scorer production used before #2196, kept only as a baseline: a whitespace query term scores 3 when it is a substring of the title, tags, or summary, else 1 when it is a substring of the card text.
+4. **grep**: naive tokenized substring match count. Deliberately dumb floor.
+5. **semantic** (optional): on-device embeddings + cosine via `sentence_transformers`, only when the package is installed **and** a local model loads with `local_files_only=True`. Set `BRIGADE_MEMORY_EVAL_EMBED_MODEL` to a local path or cached model id. Otherwise the adapter is reported as skipped; the harness still exits 0.
 
-Adapters 1 and 2 never touch the network and never download a model.
+Adapters 1 through 4 never touch the network and never download a model.
 
 ## Metrics
 

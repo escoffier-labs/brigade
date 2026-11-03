@@ -794,6 +794,7 @@ def _worker_prompt(
     assignment: Assignment,
     *,
     prior_results: list[WorkerResult] | None = None,
+    instructions: str = "",
     read_only: bool = False,
     direct: bool = False,
     code_graph: briefs.CodeGraphBrief | None = None,
@@ -838,7 +839,10 @@ def _worker_prompt(
         f"{tool_gate}"
         f"{policy}"
     )
-    return briefs._prepend_optional_briefs(prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence)
+    prompt = briefs._prepend_optional_briefs(
+        prompt, code_graph=code_graph, drift_impact=drift_impact, evidence=evidence
+    )
+    return f"{instructions}\n\n{prompt}" if instructions else prompt
 
 
 def _contains_event_marker(value: Any, marker: str) -> bool:
@@ -1259,6 +1263,7 @@ def dispatch(
     if bound_prompt is None:
         bound_prompt = partial(
             _worker_prompt,
+            instructions=roster.worker_instructions,
             run_id=run_id or (output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID),
             to_seat=roster.orchestrator,
         )

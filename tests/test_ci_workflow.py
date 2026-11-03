@@ -671,6 +671,8 @@ def test_ci_workflow_runs_four_shards_on_every_supported_python():
     assert "fail-fast: false" in shards
     assert "python scripts/ci_pytest_shard.py" in shards
     assert '--shard-index "${{ matrix.shard }}" --shard-count 4' in shards
+    # Each 4-vCPU shard runs its selection across four xdist workers.
+    assert shards.count("--shard-count 4 -- -q -n 4 --dist=worksteal") == 2
 
 
 def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks():
