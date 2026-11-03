@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import fleet_admin_stats_collector, worklore_brigade_sync, worklore_github_sync
+from .. import fleet_admin_stats_collector
 from ..fleet_claim_release import _print_claim_failure, _release_claim, _workspace_from_run_dir  # noqa: F401
 
 DEFAULT_PORT = 3774
@@ -80,6 +80,21 @@ def _format_age(ts: object, *, now: datetime | None = None) -> str:
     current = now or datetime.now(timezone.utc)
     seconds = max(0, int((current - then).total_seconds()))
     return _format_duration(seconds)
+
+
+# The work-sync modules import the ``brigade.work_cmd`` facade, so they load
+# when a sync command runs, not on every ``brigade fleet`` invocation.
+_LAZY_MODULES = frozenset({"worklore_brigade_sync", "worklore_github_sync"})
+
+
+def __getattr__(name: str):
+    if name in _LAZY_MODULES:
+        import importlib
+
+        module = importlib.import_module(f"..{name}", __package__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -1693,6 +1708,8 @@ def _dispatch_work_unlink(args: argparse.Namespace) -> int:
 def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
     import json as _json
 
+    from .. import worklore_github_sync
+
     try:
         config = worklore_github_sync.load_github_config()
         result = worklore_github_sync.sync_github(
@@ -1734,6 +1751,8 @@ def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
 
 def _dispatch_work_sync_brigade(args: argparse.Namespace) -> int:
     import json as _json
+
+    from .. import worklore_brigade_sync
 
     try:
         config = worklore_brigade_sync.load_brigade_config()
