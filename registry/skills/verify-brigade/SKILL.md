@@ -174,6 +174,9 @@ $C guard-parity --target "$TARGET"
 # Fleet Hub wire contract over HTTP (starts its own throwaway hub; no target needed)
 $C hub-contract
 
+# Read-only production profile: audit it on a throwaway hub (the only profile allowed against production)
+$C hub-contract --profile prod-readonly
+
 # Fleet Hub storage parity: every stored row against the golden (own hub, stepped clock)
 $C storage-parity
 ```
@@ -344,6 +347,9 @@ that `--dry-run` writes nothing.
 in-repo hub and asserts zero mismatches, checks the covered routes against
 `docs/phase-hub-contract.md`, and runs a deliberately drifting stand-in hub to
 prove each drift is reported.
+`tests/test_verify_brigade_hub_readonly.py` runs the `prod-readonly` audit on the
+in-repo hub, proves each mutation kind fails it, and proves an unlisted case
+stops the run before any request.
 `tests/test_verify_brigade_storage_parity.py` runs `storage-parity` in every
 profile and in a mixed-engine run, requires each to equal its golden, and
 changes one stored value at a time (a timestamp format, a JSON separator, a

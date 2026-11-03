@@ -1185,6 +1185,8 @@ def hub_contract_workdir(args: argparse.Namespace, root: Path, *, dry_run: bool)
 
 def cmd_hub_contract(args: argparse.Namespace) -> int:
     """Drive a Fleet Hub over HTTP and compare it to the recorded wire contract."""
+    if getattr(args, "profile", "contract") == "prod-readonly":
+        return load_sibling("hub_readonly").command(args, sys.modules[__name__])
     hc = load_hub_contract()
     root = state_root(args)
     brigade = brigade_args(args)
@@ -1941,6 +1943,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--startup-timeout", type=float, default=30.0, help="Seconds to wait for /health.")
     add_dry_run(p, "Report the hub command and covered routes without starting anything.")
     p.set_defaults(func=cmd_hub_contract)
+    try:  # the read-only production profile (S29) lives in its own sibling module
+        load_sibling("hub_readonly").add_arguments(p)
+    except ImportError:
+        pass
 
     try:  # a lone copy of this helper, without its sibling modules, has no storage-parity
         load_sibling("storage_parity").add_parser(sub, sys.modules[__name__], add_dry_run)
