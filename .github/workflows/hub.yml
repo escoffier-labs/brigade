@@ -40,4 +40,4 @@ jobs:
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract
-          --hub-cmd 'engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
