@@ -24,6 +24,10 @@ from tests._posix import requires_process_groups
 from tests.test_verify_brigade_skill import REPO_ROOT, SKILL_DIR, control
 
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="the audit wrapper and process checks are POSIX")
+# The audit certifies a hub only with inotify evidence, so off Linux it always reports "not certified".
+# Tests that expect a certified run or an exact problem list run on Linux only; the profile, refusal and
+# not-certified tests stay portable.
+requires_inotify = pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
 
 RUNBOOK = REPO_ROOT / "docs" / "runbooks" / "fleet-hub-proxmox.md"
 RUST_HUB = os.environ.get("BRIGADE_HUB_RUST_BIN") or str(
@@ -90,6 +94,7 @@ def _assert_clean_audit(payload: dict) -> None:
     assert all(item["ok"] and item["writes"] > 0 for item in audit["controls"]), audit["controls"]
 
 
+@requires_inotify
 def test_prod_readonly_audit_passes_on_the_python_hub(tmp_path):
     code, payload = control("hub-contract", "--profile", "prod-readonly", root=tmp_path / "state")
     assert code == 0, payload
@@ -100,6 +105,7 @@ def test_prod_readonly_audit_passes_on_the_python_hub(tmp_path):
     assert token not in capture
 
 
+@requires_inotify
 @pytest.mark.skipif(not os.access(RUST_HUB, os.X_OK), reason="needs a release build of engines/hub")
 def test_prod_readonly_audit_passes_through_the_rust_front(tmp_path):
     template = f"{RUST_HUB} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}}"
@@ -111,6 +117,7 @@ def test_prod_readonly_audit_passes_through_the_rust_front(tmp_path):
     assert payload["hub"]["argv"][0] == RUST_HUB
 
 
+@requires_inotify
 @pytest.mark.parametrize(
     ("mutation", "problems", "finding", "changed"),
     [
@@ -161,6 +168,7 @@ def test_prod_readonly_audit_fails_when_a_listed_operation_writes(tmp_path, muta
     assert audit["digest_changes"] == changed
 
 
+@requires_inotify
 def test_prod_readonly_audit_fails_when_a_helper_locks_the_database_and_exits(tmp_path):
     """A helper in the hub's process group runs BEGIN IMMEDIATE; ROLLBACK during GET /status and closes.
 
@@ -221,7 +229,7 @@ def test_prod_readonly_audit_without_open_evidence_is_not_certified(tmp_path, mo
     assert audit["window_findings"] == [] and audit["digest_changes"] == []
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
+@requires_inotify
 def test_prod_readonly_open_watch_sees_an_open_through_the_configured_path(tmp_path):
     db, route, error = hr.prepare_route(tmp_path)
     assert error is None and route is not None
@@ -244,7 +252,7 @@ def test_prod_readonly_open_watch_sees_an_open_through_the_configured_path(tmp_p
     assert not hr.route_intact(db, route, identity)
 
 
-@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="inotify is Linux-only")
+@requires_inotify
 def test_prod_readonly_open_watch_sees_a_link_made_and_removed_mid_run(tmp_path):
     db, route, error = hr.prepare_route(tmp_path)
     assert error is None and route is not None
