@@ -8,7 +8,8 @@ from typing import Any
 from .contracts import require
 from .fleet_tools import FleetTools
 
-TERMINAL = frozenset({"succeeded", "failed", "interrupted"})
+# Must match brigade.dot.events.TERMINAL; events is not imported here because it pulls in the event app.
+TERMINAL = frozenset({"succeeded", "failed", "interrupted", "cancelled", "completed"})
 
 
 class DuetFleetTools(FleetTools):

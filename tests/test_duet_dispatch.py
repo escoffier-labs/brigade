@@ -2,6 +2,7 @@
 
 import asyncio
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ from brigade.dot.runtime_config import DUET_RUNTIME_SCHEMA, parse_runtime
 from tests.test_duet_profile import _duet_document
 from tests.test_dot_lifecycle import config
 from brigade.dot import lifecycle
+from tests.dot_support import requires_local_state
 
 DISPATCH = frozenset(
     {
@@ -31,11 +33,12 @@ def document():
     data = _duet_document()
     data["dispatch_enabled"] = True
     data["owner_authorization"] = {"version": "1", "text": "Authorized fixture work."}
-    data["paths"]["fleet_config"] = "/srv/duet/fleet.toml"
-    data["paths"]["bin"]["t3_fleet"] = "/usr/bin/t3-fleet"
+    data["paths"]["fleet_config"] = str(Path("/srv/duet/fleet.toml").absolute())
+    data["paths"]["bin"]["t3_fleet"] = str(Path("/usr/bin/t3-fleet").absolute())
     return data
 
 
+@requires_local_state
 def test_opt_in_discovery_and_capabilities(dot_private_dir):
     runtime = parse_runtime(document(), schema=DUET_RUNTIME_SCHEMA)
     runtime = replace(runtime, paths=replace(runtime.paths, state_dir=dot_private_dir))
@@ -105,6 +108,7 @@ def submit(tools, **kwargs):
     )
 
 
+@requires_local_state
 def test_allowlist_and_prompt_refusals_do_not_dispatch(fleet):
     tools, run = fleet
     assert submit(tools, repository="remote-only")["error"] == "repository_not_allowed"
@@ -112,6 +116,7 @@ def test_allowlist_and_prompt_refusals_do_not_dispatch(fleet):
     assert run.calls == []
 
 
+@requires_local_state
 def test_caps_owned_handles_terminal_release_and_followups(fleet):
     import json
     from tests.test_dot_fleet_tools import REQUEST
@@ -132,6 +137,7 @@ def test_caps_owned_handles_terminal_release_and_followups(fleet):
     assert submit(tools)["error"] == "daily_limit"
 
 
+@requires_local_state
 def test_unknown_submit_keeps_open_reservation_after_restart(fleet):
     import subprocess
     from brigade.dot.duet_dispatch import DuetFleetTools
@@ -143,6 +149,7 @@ def test_unknown_submit_keeps_open_reservation_after_restart(fleet):
     assert submit(restarted)["error"] == "open_limit"
 
 
+@requires_local_state
 def test_parallel_admission_is_atomic(fleet):
     from concurrent.futures import ThreadPoolExecutor
 
@@ -162,6 +169,7 @@ def test_dispatch_preserves_isolation_check(monkeypatch):
         lifecycle.build_listener_from_target(SimpleNamespace(), pack_id="duet")
 
 
+@requires_local_state
 def test_daily_budget_reset_and_terminal_followup_reacquires_slot(fleet):
     import json
     from datetime import timedelta
@@ -179,6 +187,7 @@ def test_daily_budget_reset_and_terminal_followup_reacquires_slot(fleet):
     assert tools.fleet_followup(REQUEST, "reopen")["error"] == "open_limit"
 
 
+@requires_local_state
 def test_parallel_daily_admission_is_atomic(fleet):
     import json
     from concurrent.futures import ThreadPoolExecutor
@@ -206,6 +215,7 @@ def test_shared_fleet_identity_is_not_isolated(monkeypatch, tmp_path):
     assert not lifecycle._isolated_from_dot(tmp_path, duet)
 
 
+@requires_local_state
 def test_explicit_off_builds_no_client(dot_private_dir):
     data = _duet_document()
     data["dispatch_enabled"] = False
@@ -220,6 +230,7 @@ def test_explicit_off_builds_no_client(dot_private_dir):
         state.close()
 
 
+@requires_local_state
 def test_stale_terminal_status_cannot_release_new_followup(fleet):
     from concurrent.futures import ThreadPoolExecutor
     from threading import Event
@@ -247,3 +258,25 @@ def test_stale_terminal_status_cannot_release_new_followup(fleet):
             release.set()
         assert pending.result()["ok"]
     assert submit(tools)["error"] == "open_limit"
+
+
+@pytest.mark.parametrize("state", ["succeeded", "failed", "interrupted", "cancelled", "completed"])
+@requires_local_state
+def test_every_terminal_state_releases_the_open_slot(fleet, state):
+    import json
+    from tests.test_dot_fleet_tools import REQUEST
+
+    tools, run = fleet
+    assert submit(tools)["ok"]
+    assert submit(tools)["error"] == "open_limit"
+    run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": REQUEST, "state": state})
+    assert tools.fleet_status(REQUEST)["ok"]
+    run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": "other", "state": "running"})
+    assert submit(tools)["ok"]
+
+
+def test_terminal_states_match_the_event_watcher():
+    events = pytest.importorskip("brigade.dot.events")
+    from brigade.dot.duet_dispatch import TERMINAL
+
+    assert TERMINAL == events.TERMINAL
