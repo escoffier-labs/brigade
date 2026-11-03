@@ -89,6 +89,8 @@ class Runtime:
     messaging_enabled: bool | None = None
     skills_deny: frozenset[str] = frozenset()
     schema: str = RUNTIME_SCHEMA
+    # Opt-out: false stops inbox_list and fleet_digest from carrying memory hits.
+    memory_push: bool = True
 
 
 def _invalid() -> DotError:
@@ -233,7 +235,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "messaging_enabled"},
+        optional={"notify_command", "messaging_enabled", "memory_push"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -292,6 +294,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
         notify_command=notify_command,
         owner_authorization=owner_authorization,
         messaging_enabled=messaging_enabled,
+        memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
     )
 
 
@@ -300,7 +303,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
     root = _object(
         payload,
         {"schema", "auth", "paths", "hub", "messaging_enabled", "digest_pr_repo"},
-        optional={"notify_command", "skills_deny"},
+        optional={"notify_command", "skills_deny", "memory_push"},
     )
     if root["schema"] != DUET_RUNTIME_SCHEMA:
         raise _invalid()
@@ -345,6 +348,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         messaging_enabled=_boolean(root["messaging_enabled"]),
         skills_deny=skills_deny,
         schema=DUET_RUNTIME_SCHEMA,
+        memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
     )
 
 
