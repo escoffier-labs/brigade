@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -662,3 +663,91 @@ def test_review_non_codex_projection_refuses_lossy_native_auth(auth):
     server, _ = A.ADAPTERS["codex"].from_provider("docs", {"url": "https://mcp.example.com", **auth}, keep_secrets=True)
     with pytest.raises(ValueError, match="cannot preserve Codex native"):
         A.ADAPTERS["claude"].to_provider(server)
+
+
+# --- cursor-user projection drops repo-local code graph --db pins --- #
+
+_LEGACY_SERVER = "graphtrail"
+_LEGACY_COMMAND = "graphtrail-mcp"
+_LEGACY_DB = Path(".graphtrail") / "graphtrail.db"
+_CANONICAL_DB = Path(".brigade") / "code-graph" / "code-graph.db"
+
+
+def _code_graph_server(name, command, args, transport="stdio", url=None):
+    return CanonicalServer(name=name, transport=transport, command=command, url=url, args=tuple(args))
+
+
+def _project_cursor_user(repo, server):
+    from brigade import mcp_cmd
+
+    return mcp_cmd._project_server(repo, "cursor-user", server)
+
+
+def test_cursor_user_strips_repo_pin_for_canonical_code_graph_server(tmp_path):
+    repo = tmp_path / "repo"
+    legacy_db = repo / _LEGACY_DB
+    server = _code_graph_server("brigade-code-graph", "brigade-code-graph-mcp", ["--db", str(legacy_db), "--verbose"])
+    assert _project_cursor_user(repo, server)["args"] == ["--verbose"]
+
+
+@pytest.mark.parametrize(
+    ("name", "command"),
+    [
+        ("brigade-code-graph", "/opt/bin/brigade-code-graph"),
+        ("docs-index", "/opt/bin/brigade-code-graph-mcp.exe"),
+        ("docs-index", "/opt/bin/Brigade-Code-Graph-MCP"),
+        ("Brigade-Code-Graph-MCP", "wrapper"),
+    ],
+)
+def test_cursor_user_strips_canonical_db_pin_by_family_name(tmp_path, name, command):
+    repo = tmp_path / "repo"
+    canonical_db = repo / _CANONICAL_DB
+    server = _code_graph_server(name, command, ["mcp", f"--db={canonical_db}"])
+    assert _project_cursor_user(repo, server)["args"] == ["mcp"]
+
+
+def test_cursor_user_legacy_code_graph_projection_unchanged(tmp_path):
+    repo = tmp_path / "repo"
+    legacy_db = repo / _LEGACY_DB
+    server = _code_graph_server(_LEGACY_SERVER, f"/usr/bin/{_LEGACY_COMMAND}", ["--db", str(legacy_db)])
+    projected = _project_cursor_user(repo, server)
+    assert projected["command"] == f"/usr/bin/{_LEGACY_COMMAND}"
+    assert "args" not in projected
+
+
+def test_cursor_user_mixed_config_strips_only_code_graph_pins(tmp_path):
+    repo = tmp_path / "repo"
+    repo_db = repo / _CANONICAL_DB
+    outside_db = tmp_path / "shared" / "index.db"
+    servers = {
+        "canonical": _code_graph_server("brigade-code-graph", "brigade-code-graph-mcp", ["--db", str(repo_db)]),
+        "legacy": _code_graph_server(_LEGACY_SERVER, _LEGACY_COMMAND, ["--db", str(repo_db), "--verbose"]),
+        "outside": _code_graph_server("brigade-code-graph", "brigade-code-graph-mcp", ["--db", str(outside_db)]),
+        "other": _code_graph_server("notes", "notes-mcp", ["--db", str(repo_db)]),
+    }
+    projected = {key: _project_cursor_user(repo, server) for key, server in servers.items()}
+    assert "args" not in projected["canonical"]
+    assert projected["legacy"]["args"] == ["--verbose"]
+    assert projected["outside"]["args"] == ["--db", str(outside_db)]
+    assert projected["other"]["args"] == ["--db", str(repo_db)]
+
+
+def test_cursor_user_leaves_remote_code_graph_server_alone(tmp_path):
+    repo = tmp_path / "repo"
+    server = _code_graph_server(
+        "brigade-code-graph",
+        None,
+        ["--db", str(repo / _CANONICAL_DB)],
+        transport="http",
+        url="https://example.test/mcp",
+    )
+    assert _project_cursor_user(repo, server) == A.ADAPTERS["cursor-user"].to_provider(server)
+
+
+def test_project_level_cursor_keeps_canonical_code_graph_pin(tmp_path):
+    from brigade import mcp_cmd
+
+    repo = tmp_path / "repo"
+    repo_db = repo / _CANONICAL_DB
+    server = _code_graph_server("brigade-code-graph", "brigade-code-graph-mcp", ["--db", str(repo_db)])
+    assert mcp_cmd._project_server(repo, "cursor", server)["args"] == ["--db", str(repo_db)]
