@@ -1,7 +1,6 @@
 """Child coverage must survive the exact per-shard files uploaded by CI."""
 
 import ast
-import os
 from pathlib import Path
 import shlex
 import shutil
@@ -9,6 +8,8 @@ import subprocess
 import sys
 
 from coverage import CoverageData
+
+from tests._coverage_env import isolated_coverage_env
 
 ROOT = Path(__file__).resolve().parents[1]
 # CI's shard command measures `--cov=$PWD/src/brigade`, which records every
@@ -36,7 +37,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
     argv[argv.index("--shard-count") + 1] = "1"
     fixtures = tmp_path / "fixtures"
     shard = tmp_path / ".coverage.3.12.0"
-    environment = dict(os.environ, COVERAGE_FILE=str(shard))
+    environment = isolated_coverage_env(shard)
     result = subprocess.run(
         [
             *argv,
@@ -58,7 +59,7 @@ def test_ci_coverage_reports_after_fixture_sources_are_removed(tmp_path):
     # The reporting job has the checkout and uploaded data, not pytest's fixtures.
     shutil.rmtree(fixtures)
     combined = tmp_path / ".coverage"
-    environment = dict(os.environ, COVERAGE_FILE=str(combined))
+    environment = isolated_coverage_env(combined)
     for arguments in (["combine", str(uploaded)], ["report"]):
         result = subprocess.run(
             [sys.executable, "-m", "coverage", *arguments],
@@ -120,7 +121,7 @@ def test_nested_subprocess_coverage_survives_shard_upload_and_combine(tmp_path):
         other_lines = {4, 9} if case == 0 else {3, 8}
         for shard in range(2):
             data_file = run / f".coverage.3.12.{shard}"
-            env = dict(os.environ, COVERAGE_FILE=str(data_file), PYTHONPATH=str(tmp_path))
+            env = isolated_coverage_env(data_file, PYTHONPATH=str(tmp_path))
             result = subprocess.run(
                 [
                     sys.executable,
@@ -154,7 +155,7 @@ def test_nested_subprocess_coverage_survives_shard_upload_and_combine(tmp_path):
         result = subprocess.run(
             [sys.executable, "-m", "coverage", "combine", str(uploaded)],
             cwd=tmp_path,
-            env=dict(os.environ, COVERAGE_FILE=str(combined)),
+            env=isolated_coverage_env(combined),
             capture_output=True,
             text=True,
             timeout=45,
