@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export BRIGADE_GUARD_BIN="${BRIGADE_GUARD_BIN:-$PWD/engines/brigade-guard/target/release/brigade-guard}"
+test -x "$BRIGADE_GUARD_BIN"
+export BRIGADE_GUARD_BACKEND=python
+.venv/bin/pytest -q tests/test_verify_brigade_guard_parity.py
+export BRIGADE_GUARD_BACKEND=native
+exec ./scripts/verify-focused tests/guard/ tests/test_*guard*.py
