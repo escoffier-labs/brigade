@@ -18,23 +18,37 @@ from ..wiring import resolve_wired_target
 from .write_attribution import _literal_path, _rt
 
 _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until", "time"}
-# A cd inside a group, subshell, or control structure may not persist or may be
-# conditional, so a command mixing cd with these is not resolved.
-_GROUPING_CHARS = "(){}"
-_UNSTABLE_CD_SEPARATORS = {"||"}
-# A cd that only runs when the command before it succeeded or failed.
-_CONDITIONAL_SEPARATORS = {"&&", "||"}
-# A pipe on either side runs the cd in a subshell; a trailing `&` backgrounds it.
-# A preceding `&` only backgrounds the command before it, so the cd still runs here.
-_PIPE_SEPARATORS = {"|", "|&"}
+# Text that makes a command more than a plain list: grouping, subshells, command and
+# process substitution.
+_COMPLEX_MARKERS = ("(", ")", "{", "}", "`", "$(", "<(", ">(")
 _MAX_DEPTH = 4
+
+
+def _plain_and_chain(command: str, segments: list[list[str]], separators: list[str]) -> bool:
+    """True when ``command`` is commands joined only by ``&&``, with nothing that hides one.
+
+    In such a chain a ``cd`` that fails stops every later command, so each later
+    command runs in the ``cd`` destination or not at all. Any other separator
+    (``;``, ``||``, ``&``, a pipe, a newline), a group, a control structure, or a
+    substitution can let a command run somewhere else.
+    """
+    rt = _rt()
+    if any(separator != "&&" for separator in separators):
+        return False
+    if any(marker in command for marker in _COMPLEX_MARKERS):
+        return False
+    return not any(
+        segment and (segment[0] in rt._SHELL_CONTROL_TOKENS or segment[0] in _KEYWORDS) for segment in segments
+    )
 
 
 def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Path | None]:
     """Directories in which each verification segment of ``command`` runs.
 
     ``None`` marks a verification whose directory cannot be determined. An
-    empty list means no verification segment was found.
+    empty list means no verification segment was found. A ``cd`` moves later
+    verifications only inside a plain ``&&`` chain; a command that changes
+    directory any other way marks every verification in it undetermined.
     """
     rt = _rt()
     try:
@@ -49,43 +63,26 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             segments.append([])
         else:
             segments[-1].append(token)
+    # Judged on token text: `(cd x`, `{ cd x`, `$(cd x` and a backtick cd hide it from a segment-head check.
+    changes_directory = any(token.lstrip("({`$") in {"cd", "pushd", "popd"} for token in tokens)
+    if changes_directory and not _plain_and_chain(command, segments, separators):
+        return [None]
     found: list[Path | None] = []
     effective = cwd
-    # Set after a conditional cd: the directory holds only while the chain continues with &&.
-    conditional_chain = False
-    # Judged on token text: `(cd x` and `{ cd x` hide the cd from a segment-head check.
-    unplaceable_cd = any(token.lstrip("({") == "cd" for token in tokens) and (
-        any(char in token for token in tokens for char in _GROUPING_CHARS)
-        or any(segment and segment[0] in rt._SHELL_CONTROL_TOKENS for segment in segments)
-    )
-    for index, segment in enumerate(segments):
+    for segment in segments:
         stripped = rt._strip_command_prefixes(segment)
         while stripped and stripped[0] in _KEYWORDS:
             stripped = rt._strip_command_prefixes(stripped[1:])
         if not stripped:
             continue
-        before = separators[index - 1] if index > 0 else ""
-        after = separators[index] if index < len(separators) else ""
-        if conditional_chain and before != "&&":
-            # The conditional cd may have been skipped, so later commands may run in either directory.
-            effective = None
-            conditional_chain = False
         if Path(stripped[0]).name == "cd":
-            if before in _PIPE_SEPARATORS or after in _PIPE_SEPARATORS or after == "&":
-                continue  # runs in a subshell or the background; the shell's cwd is unchanged
             args = stripped[1:]
             if args[:1] == ["--"]:
                 args = args[1:]
             path = None
             if effective is not None and len(args) == 1 and args[0] != "-":
                 path = _literal_path(args[0], effective)
-            unstable = before in _UNSTABLE_CD_SEPARATORS or after in _UNSTABLE_CD_SEPARATORS
-            conditional = before in _CONDITIONAL_SEPARATORS
-            if unstable or (conditional and after != "&&"):
-                effective = None
-            else:
-                effective = path
-                conditional_chain = conditional
+            effective = path
             continue
         nested = rt._nested_shell_script(stripped)
         if nested is not None:
@@ -95,7 +92,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
                 found.extend(verifier_cwds(nested, effective, depth=depth + 1))
             continue
         if rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment)):
-            found.append(None if unplaceable_cd else effective)
+            found.append(effective)
     return found
 
 

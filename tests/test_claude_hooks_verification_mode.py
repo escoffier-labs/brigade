@@ -93,15 +93,23 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         assert not _denied(_bash("PreToolUse", repos["yolo"], command)), command
 
 
-def test_a_skippable_cd_does_not_move_the_check(repos) -> None:
-    # The cd is skipped when `false` fails, so pytest may run in the enforced start.
-    assert _denied(_bash("PreToolUse", repos["enforced"], f"false && cd {_sh(repos['yolo'])}; pytest -q"))
-
-
-def test_a_preceding_background_job_does_not_detach_the_cd(repos) -> None:
-    # `&` backgrounds only `sleep`; the cd and pytest run in the foreground.
-    assert not _denied(_bash("PreToolUse", repos["enforced"], f"sleep 1 & cd {_sh(repos['yolo'])} && pytest -q"))
-    assert _denied(_bash("PreToolUse", repos["yolo"], f"sleep 1 & cd {_sh(repos['enforced'])} && pytest -q"))
+@pytest.mark.parametrize(
+    "template",
+    [
+        "false && cd {yolo}; pytest -q",
+        "cd {yolo}/missing; pytest -q",
+        "cd {yolo} && true & pytest -q",
+        "sleep 1 & cd {yolo} && pytest -q",
+        "echo `pytest -q`; cd {yolo} && ruff check .",
+        "if false; then cd {yolo}; fi; bash -c 'pytest -q'",
+    ],
+)
+def test_a_cd_outside_a_plain_and_chain_never_promotes_an_enforced_start(repos, template: str) -> None:
+    # Each shape can run a check outside the cd destination: a skipped or failed cd, a
+    # backgrounded list, a substitution, or a control structure. So none may count as yolo.
+    command = template.format(yolo=_sh(repos["yolo"]))
+    assert not verification_mode.verification_in_yolo(command, str(repos["enforced"]), repos["enforced"])
+    assert _denied(_bash("PreToolUse", repos["enforced"], command))
 
 
 def test_post_failure_follows_the_verification_target(repos) -> None:
@@ -115,16 +123,18 @@ def test_post_failure_follows_the_verification_target(repos) -> None:
     [
         ("pytest -q", ["start"]),
         ("cd {yolo} && pytest -q", ["yolo"]),
-        ("cd {yolo}; cd {other} && pytest -q", ["other"]),
+        ("cd {yolo}; cd {other} && pytest -q", [None]),
         ("cd {yolo} && pytest -q && cd {other} && ruff check .", ["yolo", "other"]),
         ("bash -c 'cd {yolo} && pytest -q'", ["yolo"]),
-        ("cd {yolo} | cat; pytest -q", ["start"]),
-        ("cd {yolo} & pytest -q", ["start"]),
-        ("sleep 1 & cd {yolo} && pytest -q", ["yolo"]),
+        ("cd {yolo} | cat; pytest -q", [None]),
+        ("cd {yolo} & pytest -q", [None]),
+        ("sleep 1 & cd {yolo} && pytest -q", [None]),
         ("false && cd {yolo}; pytest -q", [None]),
         ("false || cd {yolo}; pytest -q", [None]),
         ("true && cd {yolo} && pytest -q", ["yolo"]),
-        ("true && cd {yolo} && pytest -q; ruff check .", ["yolo", None]),
+        ("true && cd {yolo} && pytest -q; ruff check .", [None]),
+        ("cd {yolo} && bash -c 'pytest -q'", ["yolo"]),
+        ("cd {yolo} && echo $(pytest -q)", [None]),
         ("cd {yolo} || exit 1; pytest -q", [None]),
         ("cd $DIR && pytest -q", [None]),
         ("cd - && pytest -q", [None]),
