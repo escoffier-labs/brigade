@@ -52,7 +52,7 @@ COMMANDS: tuple[CommandEntry, ...] = (
     CommandEntry(
         "evidence", "evidence", "Inspect and query the evidence ledger: receipts, search, crawl and export plans."
     ),
-    CommandEntry("search", "search", "Inspect and plan GraphTrail + code-search station health."),
+    CommandEntry("search", "search", "Inspect and plan code graph + code-search station health."),
     CommandEntry("tokens", "tokens", "Inspect and plan Token Glace + usage-tracker station health."),
     CommandEntry("pantry", "pantry", "Inspect and plan agentpantry session-auth sync.", extras=True),
     CommandEntry("notifications", "notifications", "Inspect and plan operator notification wiring.", extras=True),
