@@ -11,7 +11,7 @@ from . import config as brigade_config
 from . import memory_cmd, memory_proposal_io as io, memory_proposals as legacy
 from . import memory_proposal_v2 as v2, memory_proposal_v2_ops as delta
 from . import memory_reflect as reflect, memory_reflect_candidates as derive
-from .memory_evidence_log import LOG_PATH, MAX_SCAN_BYTES
+from .memory_evidence_log import LOG_PATH, MAX_SCAN_BYTES, verify_outcome_ref
 from .memory_proposal_v2_reflect import translation_payload
 
 SCHEMA = "brigade.memory-tier0-preflight.v1"
@@ -318,21 +318,59 @@ def _evidence(
     return {ref: io.sha256(raw) for ref, raw in raw_inputs.items()}, complete
 
 
+def _unbound_subjects(snapshot: Snapshot, refs: set[str]) -> set[str]:
+    """Bind patch-backed subject bytes through the snapshot before proof validation.
+
+    Outcome validation rehashes the live subject file. Reading it here first
+    puts its bytes under the final unchanged() pass and the evaluation digest,
+    and the hash check below uses those same bytes.
+    """
+    unbound: set[str] = set()
+    for ref in sorted(refs):
+        if not verify_outcome_ref(ref):
+            continue
+        try:
+            receipt = _json(snapshot.read(snapshot.target / ref, io.MAX_INPUT_BYTES) or b"")
+            binding = receipt.get("subject_binding") if isinstance(receipt, dict) else None
+            if not isinstance(binding, dict) or binding.get("binding_mode") != "patch_backed":
+                continue
+            patch = binding.get("patch_binding")
+            subject = patch.get("subject_path") if isinstance(patch, dict) else None
+            expected = patch.get("subject_hash") if isinstance(patch, dict) else None
+            if not isinstance(subject, str) or not isinstance(expected, str):
+                unbound.add(ref)
+                continue
+            raw = snapshot.read(snapshot.target / _safe_name(subject), io.MAX_INPUT_BYTES)
+            if raw is None or "sha256:" + io.sha256(raw) != expected:
+                unbound.add(ref)
+        except Refusal:
+            raise
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            unbound.add(ref)
+    return unbound
+
+
 def _proof(
-    target: Path, candidate: dict[str, Any], sources: list[dict[str, Any]], ledger: Any, bound: dict[str, str]
+    snapshot: Snapshot, candidate: dict[str, Any], sources: list[dict[str, Any]], ledger: Any, bound: dict[str, str]
 ) -> tuple[set[str], dict[str, str], bool, bool]:
     """Recount proof with the live classification fresh reflection applies.
 
-    The last value reports pending contrary or review-only evidence that the
-    retained candidate does not already carry.
+    An ID counts only while it is a valid current citation or still has a live
+    ledger row (reinforced or outcome for the reinforce class), as fresh
+    reflection requires. The last value reports pending contrary, review-only, or
+    negative-outcome evidence that the retained candidate does not already carry.
     """
+    target = snapshot.target
     excluded = {
         derive._evidence_id(ref)
         for key in ("contrary_ids", "review_evidence_ids", "unresolved_evidence_ids")
         for ref in candidate[key]
     }
     refs = {derive._evidence_id(ref) for ref in candidate["evidence_ids"]} - excluded
+    refs -= _unbound_subjects(snapshot, refs & bound.keys())
     live: set[str] = set()
+    selectable: set[str] = set()
+    kinds = {"reinforced", "outcome"} if candidate["kind"] == "reinforce" else None
     for source in sources:
         rows = [row for key in (source["id"], *source["aliases"]) for row in ledger.by_identity.get(key, [])]
         card = derive.Card(
@@ -343,9 +381,16 @@ def _proof(
             rows,
         )
         refs -= derive._invalid_outcome_ids(target, card, refs & bound.keys())
-        _, _, invalid, contrary, near_match = derive.live_evidence(target, *derive.card_window(card))
-        live.update(contrary, near_match)
+        window = derive.card_window(card)
+        # An empty selection skips receipt IO and returns every pending negative-outcome ID.
+        _, negative = derive._negative_outcome_bindings(target, window[0], set())
+        windowed, cited, invalid, contrary, near_match = derive.live_evidence(target, *window)
+        live.update(contrary, near_match, negative)
         refs -= invalid | live
+        selectable.update(cited)
+        # Window position is not checked: newer history must not erase retained diagnostics.
+        selectable.update(row["evidence_id"] for row in windowed.rows if kinds is None or row["kind"] in kinds)
+    refs &= selectable
     groups = derive._resolved(target, sorted(refs & bound.keys()), derive._evidence_roots(target))
     proof = set(groups)
     consistent = candidate["proof_count"] == len(proof) and candidate["proof_sources"] == len(set(groups.values()))
@@ -523,7 +568,7 @@ def preflight_payload(*, target: Path, candidate_id: str, policy_path: str | Non
         else:
             _check(report, "delta", "delta_invalid", state="not_evaluated")
         proof, groups, consistent_proof, live_review = _proof(
-            target, candidate, sources, ledger, report["evidence_sha256"]
+            snapshot, candidate, sources, ledger, report["evidence_sha256"]
         )
         if live_review:
             _check(report, "candidate", "candidate_live_evidence_requires_review")

@@ -2526,9 +2526,13 @@ cards without a valid cutoff. Three evidence IDs in two filesystem root groups
 satisfy count floors only. They cannot establish independent trusted sources.
 Contrary, review-only, unresolved and invalid current outcome references never
 count as supporting proof. The live recount applies the same classification as
-fresh reflection, so a pending `opposite-polarity` or `near-match` row recorded
-after the candidate was retained leaves proof and holds the candidate with
-`candidate_live_evidence_requires_review`. A mismatch with retained proof
+fresh reflection, so a pending `opposite-polarity`, `near-match` or
+`negative-outcome` row recorded after the candidate was retained leaves proof
+and holds the candidate with `candidate_live_evidence_requires_review`. An
+evidence ID counts only while it is a valid current citation or still has a
+live supporting ledger row. A patch-backed verify receipt's subject file is
+read through the bound snapshot, its hash is checked against those bytes, and
+the final reread and evaluation hash cover it. A mismatch with retained proof
 counters holds the candidate and leaves the floor checks unevaluated.
 
 Promotion remains held by `evidence_authority_unbound`,

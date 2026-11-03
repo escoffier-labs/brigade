@@ -605,6 +605,7 @@ def test_preflight_live_negative_receipt_fences(tmp_path, failed_card, capsys, d
     before = tree(tmp_path)
     report = evaluate(tmp_path, candidate)
     assert "delta_satisfied" not in codes(report)
+    assert "candidate_satisfied" not in codes(report)
     assert not report["eligible"]
     assert report["evaluation_sha256"] is None
     assert tree(tmp_path) == before
@@ -851,7 +852,8 @@ def test_preflight_live_contrary_or_review_row_leaves_proof(tmp_path, kind):
     sources, _ = v2._sources(tmp_path, care, list(candidate["card_paths"].values()))
     ledger = memory_reflect._evidence_log(tmp_path)
     bound = {ref: "bound" for ref in candidate["evidence_ids"]}
-    proof, groups, consistent, live_review = preflight._proof(tmp_path, candidate, sources, ledger, bound)
+    snapshot = preflight.Snapshot(tmp_path)
+    proof, groups, consistent, live_review = preflight._proof(snapshot, candidate, sources, ledger, bound)
     assert len(proof) == fresh["proof_count"] == 2
     assert len(set(groups.values())) == fresh["proof_sources"]
     assert fresh["tier"] != 0
@@ -876,4 +878,98 @@ def test_preflight_live_review_row_outside_proof_still_holds(tmp_path):
     assert report["proof_evidence_count"] == 3
     assert "candidate_live_evidence_requires_review" in codes(report)
     assert "candidate_satisfied" not in codes(report)
+    assert report["eligible"] is False
+
+
+def _patch_backed_support(target, monkeypatch, subject_text="subject v1\n"):
+    """Retain one patch-backed verify receipt whose outcome support check is stubbed eligible."""
+    import hashlib
+
+    from brigade import memory_evidence_log
+
+    subject = target / "src/subject.txt"
+    subject.parent.mkdir(parents=True, exist_ok=True)
+    subject.write_text(subject_text)
+    ref = ".brigade/work/verify-runs/run-1/receipt.json"
+    receipt = target / ref
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    digest = "sha256:" + hashlib.sha256(subject_text.encode()).hexdigest()
+    binding = dict(binding_mode="patch_backed", patch_binding=dict(subject_path="src/subject.txt", subject_hash=digest))
+    receipt.write_text(json.dumps(dict(subject_binding=binding)))
+    monkeypatch.setattr(memory_evidence_log, "validate_outcome_support", lambda *_a, **_k: True)
+    return subject, ref
+
+
+def test_preflight_binds_patch_subject_bytes_through_snapshot(tmp_path, monkeypatch):
+    from brigade import memory_tier0_preflight as preflight
+
+    path = card(tmp_path, "cache", body="Keep the cache warm. ^c-123abc")
+    subject, ref = _patch_backed_support(tmp_path, monkeypatch)
+    refs = [ref, evidence(tmp_path, ".brigade/receipts/a.json"), evidence(tmp_path, "memory/evidence/c.json")]
+    log(tmp_path, path, *((r, "outcome", "2026-10-20T12:00:00Z") for r in refs))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "reinforce")
+    assert ref in candidate["evidence_ids"] and candidate["proof_count"] == 3
+    clean = evaluate(tmp_path, candidate)
+    assert "candidate_satisfied" in codes(clean)
+    assert clean["evaluation_sha256"] is not None
+
+    # The subject edit lands after proof validation and before the final unchanged() pass.
+    original = preflight._proof
+
+    def edit_after_proof(*args, **kwargs):
+        result = original(*args, **kwargs)
+        subject.write_text("subject v2\n")
+        return result
+
+    monkeypatch.setattr(preflight, "_proof", edit_after_proof)
+    report = evaluate(tmp_path, candidate)
+    assert "input_drift" in codes(report)
+    assert report["evaluation_sha256"] is None
+    assert report["proof_evidence_count"] is None
+
+    # The hash check reads the snapshot bytes, not only the live projection.
+    monkeypatch.setattr(preflight, "_proof", original)
+    report = evaluate(tmp_path, candidate)
+    assert "candidate_proof_mismatch" in codes(report)
+    assert "candidate_satisfied" not in codes(report)
+
+
+def test_preflight_requires_live_supporting_rows_for_proof(tmp_path):
+    from brigade.memory_evidence_log import LOG_PATH
+
+    path, candidate = prepared(tmp_path)
+    assert "candidate_satisfied" in codes(evaluate(tmp_path, candidate))
+    ledger = tmp_path / LOG_PATH
+    rows = [json.loads(line) for line in ledger.read_text().splitlines()]
+    ledger.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows if row["evidence_id"] != ".brigade/receipts/a.json")
+    )
+    fresh = next(
+        c
+        for c in memory_reflect.run_payload(target=tmp_path)["candidates"]
+        if c["kind"] == "reinforce" and c["card_ids"] == candidate["card_ids"]
+    )
+    assert fresh["proof_count"] == 2
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    assert "candidate_proof_mismatch" in codes(report)
+    assert not {"candidate_satisfied", "evidence_floor_satisfied", "source_group_floor_satisfied"} & codes(report)
+    assert report["proof_evidence_count"] is None
+    assert report["evaluation_sha256"] is None
+
+
+def test_preflight_pending_negative_outcome_holds_candidate(tmp_path):
+    path, candidate = prepared(tmp_path)
+    failed = evidence(tmp_path, ".brigade/work/verify-runs/failed/receipt.json")
+    log(tmp_path, path, (failed, "negative-outcome", "2026-10-21T12:00:00Z"))
+    fresh = next(
+        c
+        for c in memory_reflect.run_payload(target=tmp_path)["candidates"]
+        if c["kind"] == "reinforce" and c["card_ids"] == candidate["card_ids"]
+    )
+    assert fresh["tier"] != 0 and failed in fresh["review_evidence_ids"]
+    report = evaluate(tmp_path, candidate, policy_path=policy(tmp_path))
+    assert "candidate_live_evidence_requires_review" in codes(report)
+    assert "candidate_satisfied" not in codes(report)
+    # The failed receipt is outside proof, so the floors still report fresh reflection's count.
+    assert report["proof_evidence_count"] == fresh["proof_count"] == 3
     assert report["eligible"] is False
