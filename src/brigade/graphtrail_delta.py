@@ -427,6 +427,7 @@ def _failure_payload(
         "stale_graph_used": before.get("stale_graph_used") is True,
     }
     if timeout_value is not None:
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
         payload["graphtrail_timeout_seconds"] = timeout_value
     return payload
 
@@ -462,6 +463,7 @@ def _compact(payload: dict[str, Any]) -> dict[str, Any]:
     }
     timeout = payload.get("graphtrail_timeout_seconds")
     if isinstance(timeout, (int, float)) and not isinstance(timeout, bool):
+        # frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
         compact["graphtrail_timeout_seconds"] = float(timeout)
     compact["stale_graph_used"] = payload.get("stale_graph_used") is True
     commands = payload.get("commands")

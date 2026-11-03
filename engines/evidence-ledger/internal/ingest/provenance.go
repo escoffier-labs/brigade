@@ -129,6 +129,7 @@ func appendProvenanceEvent(tx *sql.Tx, itemID string, fromLabel, toLabel, conten
 		Schema:              ProvenanceEventSchema,
 		SchemaVersion:       1,
 		At:                  at,
+		// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 		ItemRef:             "miseledger:item:" + itemID,
 		FromLabel:           fromLabel,
 		ToLabel:             toLabel,
@@ -607,10 +608,12 @@ func buildInferredBackfillEnvelope(tx *sql.Tx, itemID, text, rawHash, sourceID, 
 	if externalID == "" {
 		externalID = itemID
 	}
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	locator := fmt.Sprintf("miseledger://%s/%s/%s", sourceKind, collectionExternalID, externalID)
 	at := time.Now().UTC().Format(time.RFC3339Nano)
 	origin, modality := inferOriginModality(sourceKind)
 	in := provenance.EvidenceInput{
+		// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 		SourceSystem:    "miseledger",
 		SourceKind:      sourceKind,
 		SourceProducer:  "ingest.BackfillProvenance",
