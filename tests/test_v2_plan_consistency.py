@@ -34,6 +34,7 @@ GATE_OUTSIDE = "gate-prerequisite-outside-gate"
 ACCEPTANCE_UNRELATED = "acceptance-names-unrelated-slice"
 GATED_PREREQ_OUTSIDE_WAVES = "gated-prerequisite-outside-waves"
 GATE_DEPENDS_ON_GATED = "gate-depends-on-gated"
+UNRESOLVED_DEP = "unresolved-dependency"
 PARSE = "parse"
 
 
@@ -349,6 +350,16 @@ def check_plan(plan: Plan) -> list[Failure]:
             for target in sorted(targets):
                 there = plan.placements.get(target)
                 if there is None:
+                    if target not in table_ids:
+                        # A typo repeated in both dependency representations would
+                        # otherwise pass: the target has no row and no placement.
+                        failures.append(
+                            Failure(
+                                slice_id,
+                                UNRESOLVED_DEP,
+                                f"{kind} edge to {target}, which has no slice table row and no wave placement",
+                            )
+                        )
                     continue
                 if there[1] >= here[1]:
                     failures.append(
@@ -546,6 +557,14 @@ def test_verify_edge_in_later_wave() -> None:
 def test_table_cell_differs_from_dependency_list() -> None:
     dep_list = [line.replace("S3: S2 verify: S1", "S3: S2") for line in BASE_LIST]
     assert has(failures_of(make_doc(dep_list=dep_list)), "S3", CELL_MISMATCH)
+
+
+def test_dependency_on_an_undefined_slice() -> None:
+    rows = dict(BASE_ROWS)
+    rows["S5"] = ("S99", "Gated move.")
+    dep_list = [line.replace("S5: S3", "S5: S99") for line in BASE_LIST]
+    failures = failures_of(make_doc(rows=rows, dep_list=dep_list))
+    assert has(failures, "S5", UNRESOLVED_DEP, "S99")
 
 
 def test_release_gate_slice_has_prerequisite_outside_gate() -> None:
