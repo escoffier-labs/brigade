@@ -115,6 +115,9 @@ def test_unresolvable_or_unwired_target_keeps_the_starting_mode(repos) -> None:
         "cd yolo && pytest -q",
         "cd {yolo} && uv run bash -c 'cd {enforced} && pytest -q'",
         "cd {yolo} && npx sh -c 'pytest -q'",
+        "cd {yolo} && npm test --workspace=packages/enforced",
+        "cd {yolo} && npm test -w packages/enforced",
+        "cd {yolo} && pnpm --filter enforced test",
         "cd {yolo} && python -c 'import os; os.chdir(\"/\")' && pytest -q",
     ],
 )
@@ -174,6 +177,12 @@ def test_a_dot_slash_cd_into_a_child_yolo_repo_is_allowed(repos, capsys) -> None
     _wired(repos["enforced"] / "child", "yolo", capsys)
     assert not _denied(_bash("PreToolUse", repos["enforced"], "cd ./child && pytest -q"))
     assert _denied(_bash("PreToolUse", repos["enforced"], "cd child && pytest -q"))
+
+
+def test_a_workspace_subcommand_is_a_directory_override() -> None:
+    # `yarn workspace <name> test` runs in a member package, wherever the shell is.
+    assert verification_mode._overrides_cwd(["yarn", "workspace", "enforced", "test"])
+    assert not verification_mode._overrides_cwd(["pytest", "-q"])
 
 
 def test_every_verification_in_a_command_must_be_yolo(repos) -> None:

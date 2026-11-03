@@ -25,10 +25,30 @@ _MAX_DEPTH = 4
 # Options through which a wrapper or tool runs the check somewhere other than the shell's
 # directory (`env -C`, `make -C`, `npm --prefix`, `uv --directory`, ...). A verifier that
 # carries one has an undetermined directory.
-_CWD_OPTIONS = ("-C", "--chdir", "--directory", "--cwd", "--prefix", "--rootdir", "--manifest-path")
+_CWD_OPTIONS = (
+    "-C",
+    "--chdir",
+    "--directory",
+    "--cwd",
+    "--prefix",
+    "--rootdir",
+    "--manifest-path",
+    # Workspace and project selectors run the check in a member package's directory.
+    "-w",
+    "--workspace",
+    "--workspaces",
+    "--filter",
+    "--package",
+    "--project",
+    "--dir",
+)
+# Subcommands that select a workspace member (`yarn workspace <name> test`).
+_WORKSPACE_SUBCOMMANDS = {"workspace", "workspaces"}
 
 
 def _overrides_cwd(segment: list[str]) -> bool:
+    if any(token in _WORKSPACE_SUBCOMMANDS for token in segment[1:]):
+        return True
     for token in segment:
         if token in _CWD_OPTIONS or any(token.startswith(f"{option}=") for option in _CWD_OPTIONS if option != "-C"):
             return True
