@@ -1274,6 +1274,7 @@ Import inbox commands:
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
 - `brigade work import --from-bd-jsonl export.jsonl --bd-version 1.3.1` stages an additive Beads snapshot as pending inbox proposals. It validates the entire file and dependency graph before writing, preserves native edge types as proposals with bd IDs, and writes a versioned digest receipt under `.brigade/work/import-runs/`. Receipt storage requires POSIX descriptor-relative or Windows handle-relative operations. Hosts without either fail closed. Operational row changes alone do not duplicate proposals. Review and map proposed endpoints to native task IDs before applying edges. See [the dated re-check and import contract](research/beads-770-recheck.md).
+- `brigade work import bd` mirrors a bd project's issues and dependency edges into the task ledger, keyed by bd id, so `work ready` and `work claim` honor bd blockers. `brigade work export bd-outcomes --output FILE` writes receipts and PR links per bd issue id. Brigade runs only `bd version --json` and `bd export` and supports bd 1.3.x. See [Beads for planning, Brigade for verification](beads-with-brigade.md).
 - `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, missing-frontmatter, missing-reviewed, and missing-freshness issues without editing memory.
 - `brigade memory care plan-fixes` plans low-risk reviewed/freshness metadata repairs, reports top block-reason counts, unblocks freshness dates that can be derived from `last_reviewed + stale_after_days`, and writes no card files.
 - `brigade memory care import-issues` routes the latest memory-care refresh queue into the work inbox.
@@ -2387,6 +2388,7 @@ Each subsystem has a companion doc under [`docs/`](.) with the full local contra
 - [`docs/chat-surfaces.md`](chat-surfaces.md) - local chat export surfaces and the chat memory sweep
 - [`docs/tool-catalog.md`](tool-catalog.md) - the portable tool catalog, call review, runtimes, and policy
 - [`docs/backup-health.md`](backup-health.md) - read-only backup health summaries and issue routing
+- [`docs/beads-with-brigade.md`](beads-with-brigade.md) - mirroring a Beads ready set and edges in, and writing outcomes out
 - [`docs/memory-care.md`](memory-care.md) - memory card decay scanning and refresh imports
 - [`docs/execution-model.md`](execution-model.md) - operator control, autonomous work, service lifecycles, and record locations
 - [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned care schedules and runbook receipts, including the `brigade care` scaffold

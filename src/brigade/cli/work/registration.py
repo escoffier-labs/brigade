@@ -1130,6 +1130,30 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--metadata", action="append", default=[], help="Limit --all dismissal by metadata key=value. May be repeated."
     )
     p_work_import_dismiss.add_argument("--reason", default=None, help="Optional dismiss reason.")
+    p_work_import_bd = import_sub.add_parser(
+        "bd", help="Mirror bd issues and dependency edges into the task ledger. Reads bd only."
+    )
+    p_work_import_bd.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_bd.add_argument(
+        "--bd-repo", type=Path, default=None, help="Repo whose bd project to read. Defaults to --target."
+    )
+    p_work_import_bd.add_argument("--bd-bin", default="bd", help="bd executable to run (default: bd on PATH).")
+    p_work_import_bd.add_argument(
+        "--from-jsonl", dest="bd_sync_input", type=Path, default=None, help="Read a saved bd export instead of bd."
+    )
+    p_work_import_bd.add_argument(
+        "--bd-version", dest="bd_sync_version", default=None, help="bd release that wrote --from-jsonl."
+    )
+    p_work_import_bd.add_argument("--dry-run", action="store_true", help="Report changes without writing.")
+    p_work_import_bd.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_export = work_sub.add_parser("export", help="Export work outcomes for other tools.")
+    export_sub = p_work_export.add_subparsers(dest="export_command", metavar="<export-command>")
+    p_work_export_bd = export_sub.add_parser(
+        "bd-outcomes", help="Write receipts and PR links per bd issue id as JSONL."
+    )
+    p_work_export_bd.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to read.")
+    p_work_export_bd.add_argument("--output", "-o", type=Path, required=True, help="JSONL file to write.")
+    p_work_export_bd.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to show.")

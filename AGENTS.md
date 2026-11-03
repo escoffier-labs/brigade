@@ -164,3 +164,11 @@ Pinned during environment setup to **bd 1.1.2**
 `steveyegge/beads` → `gastownhall/beads` release assets. Beads is young and
 schema-mobile — if `bd` commands fail after an upstream release, re-check the
 installed pin before assuming a Brigade bug.
+
+Session-scratch rule: treat bd as planning scratch. Nothing tracked only in bd
+counts as done until it appears as a PR, a Brigade receipt, or a hub record.
+`brigade work import bd` mirrors bd issues and edges into the task ledger and
+`brigade work export bd-outcomes` writes results back as a file. Brigade runs
+only `bd version --json` and `bd export` and never writes bd storage. It
+supports bd 1.3.x, so it refuses the 1.1.2 pin above. See
+[docs/beads-with-brigade.md](docs/beads-with-brigade.md).
