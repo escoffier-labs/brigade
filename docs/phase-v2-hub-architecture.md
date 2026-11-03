@@ -1865,10 +1865,10 @@ agent sees a real event (an email, a job post, a pull request)
   -> answer: {finding_id, first_seen, owner, state, report_ref, reservation}
        reservation is set only for the owner principal, only while no report
        exists and no other reservation is live:
-       {reservation_id, generation, expires_at}, 10 minutes by default
-  -> the holder reports externally, carrying
-       report_key = HMAC(findings key, "report:" + finding_id)
-     wherever the destination can hold it
+       {reservation_id, generation, expires_at, report_key}, 10 minutes by default,
+       where the hub computes report_key = HMAC(findings key, "report:" + finding_id)
+  -> the holder reports externally, carrying report_key wherever the
+     destination can hold it
   -> POST /findings {action: "reported", finding_id, reservation_id, generation, report_ref}
   -> everyone else sees report_ref or a live reservation and stays quiet
   -> POST /findings {action: "resolve", finding_id} when done
@@ -1887,7 +1887,10 @@ agent sees a real event (an email, a job post, a pull request)
   therefore at least once across crashes. A holder whose reservation has a
   generation above 1 searches the destination for `report_key` first when the
   destination can be searched (sent mail, an issue tracker), and if it finds
-  it, records that reference instead of reporting again.
+  it, records that reference instead of reporting again. The findings key never
+  leaves the hub, so the hub returns `report_key` inside every reservation it
+  grants. It is the same value for every generation of one finding, and only a
+  reservation holder receives it.
 - Owner reassignment: a charter change applies to new reservations, and a
   live reservation runs to its expiry.
 - Authentication: node tokens, and message-principal tokens with a `findings`
@@ -2253,7 +2256,7 @@ next number.
 | ID | Slice | Depends on | Acceptance | Parallel with |
 |---|---|---|---|---|
 | S22a | Python hub route-registration seam, so new routes live in their own modules | none | Behavior-preserving: the drive and every hub test pass unchanged, and `fleet_hub_http.py` drops enough lines for the S22, S11 and S28 hooks | S1, S2, S3 |
-| S22 | Findings ledger on the Python hub: tables, `/findings` with reservations, canonical keys, the `findings` grant, charter `findings` match, `findings` drive profile | S22a | Drive cases pass. Two concurrent sessions of one principal get one reservation. The expiry rule for `reported` holds. A duplicate report gets 409. Only HMACs under the findings key are stored. A crash between the external report and `reported` leads to a generation-2 reservation and the report-key search | S1, S2, S3 |
+| S22 | Findings ledger on the Python hub: tables, `/findings` with reservations, canonical keys, the `findings` grant, charter `findings` match, `findings` drive profile | S22a | Drive cases pass. Two concurrent sessions of one principal get one reservation. The expiry rule for `reported` holds. A duplicate report gets 409. Only HMACs under the findings key are stored. A crash between the external report and `reported` leads to a generation-2 reservation that returns the same `report_key` as the first, and the report-key search | S1, S2, S3 |
 | S23 | Push in tool responses on hub memory: `fleet_digest` memory section, `inbox_list` `related_memory`, trust filter, head revalidation, prompt-load scan, size bounds | S14, S18, the connectivity PR | Connector snapshots updated. Responses stay under the bounds with a 2,000-card fixture. Unreviewed cards from other principals never appear. A stale snapshot hit is dropped after revalidation. The runbook step grants Dot and Duet read on `fleet` | S24, S25 |
 | S24 | Hooks: hub recall at session start and per prompt, Stop capture, deduplication against brief context | S14, S18 | The capture holds ids only. Hooks keep their 5 s cap with the hub stopped. Local card text goes through the prompt-load scan too | S23, S25 |
 | S25 | Dispatch packets: `memory_context` in `aboyeur` briefs, the Grok Bot T3 adapter, native T3 child tasks and Worklore prepared handoffs. References only in Grok Bot job metadata | S14, S18 | Each packet stays under 4 KiB. Grok Bot job payloads still contain no task text | S23, S24 |
