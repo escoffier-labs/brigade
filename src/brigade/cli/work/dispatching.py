@@ -823,6 +823,18 @@ def _dispatch_impl(args) -> int:
             args._brigade_parser.error("parent --target and --json require --from-bd-jsonl")
         if args.bd_version or args.import_command is None:
             args._brigade_parser.error("work import requires a subcommand or --from-bd-jsonl with --bd-version")
+        if args.import_command == "bd":
+            from ...work_cmd.bd_sync import sync_bd
+
+            return sync_bd(
+                target=args.target,
+                bd_repo=args.bd_repo,
+                bd_bin=args.bd_bin,
+                input_path=args.bd_sync_input,
+                bd_version=args.bd_sync_version,
+                dry_run=args.dry_run,
+                json_output=args.json,
+            )
         if args.import_command == "add":
             return work_cmd.import_add(
                 target=args.target,
@@ -951,6 +963,13 @@ def _dispatch_impl(args) -> int:
                 metadata=args.metadata,
             )
         args._brigade_parser.error(f"unknown import command: {args.import_command}")
+        return 2
+    if args.work_command == "export":
+        if args.export_command == "bd-outcomes":
+            from ...work_cmd.bd_sync import export_bd_outcomes
+
+            return export_bd_outcomes(target=args.target, output=args.output, json_output=args.json)
+        args._brigade_parser.error("work export requires a subcommand: bd-outcomes")
         return 2
     if args.work_command == "list":
         return work_cmd.list_sessions(target=args.target, limit=args.limit)
