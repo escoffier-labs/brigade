@@ -1150,10 +1150,12 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path engine-bin | Out-Null
           Push-Location engines/code-graph
-          cargo build --release --locked --bin graphtrail --bin graphtrail-mcp
-          if ($LASTEXITCODE -ne 0) { throw "graphtrail build failed" }
-          Copy-Item target/release/graphtrail.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail.exe"
-          Copy-Item target/release/graphtrail-mcp.exe "$env:GITHUB_WORKSPACE/engine-bin/graphtrail-mcp.exe"
+          $codeGraphBins = @("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp")
+          cargo build --release --locked @($codeGraphBins | ForEach-Object { "--bin"; $_ })
+          if ($LASTEXITCODE -ne 0) { throw "code graph build failed" }
+          foreach ($bin in $codeGraphBins) {
+            Copy-Item "target/release/$bin.exe" "$env:GITHUB_WORKSPACE/engine-bin/$bin.exe"
+          }
           Pop-Location
           Push-Location engines/evidence-ledger
           $env:CGO_ENABLED = "0"

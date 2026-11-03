@@ -1047,7 +1047,14 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "center readiness import-issues" not in text
     assert "$payload.ready" in text
     assert "$payload.blocking_issue_count" in text
-    assert "--db $dbPath sync $workRepo" in text
+    # A fresh repository is indexed without --db and must get the canonical index.
+    assert '$dbPath = Join-Path $workRepo ".brigade\\code-graph\\code-graph.db"' in text
+    assert "& $codeGraphExe sync $workRepo" in text
+    # Callers and MCP initialize run under each distinct entry point name.
+    assert "foreach ($callersExe in @(@($codeGraphExe, $" in text
+    assert "foreach ($mcpExe in @(@($codeGraphMcpExe, $" in text
+    assert text.count("| Select-Object -Unique)) {") >= 2
+    assert "& $callersExe --db $dbPath callers greet" in text
     assert "callers greet" in text
     assert 'if ($callersOutput -notmatch "call_greet")' in text
     assert "brigadewinacceptance" in text
@@ -1592,7 +1599,8 @@ def test_windows_native_acceptance_source_mode_requires_same_commit_engine_binar
     # engines. It must land *after* the component report; see
     # test_windows_native_acceptance_asserts_component_health_before_pinning_engines
     # for why the reverse order cannot work.
-    assert main.index("Install-SameCommitEngines") < main.index("$mcpResponse =")
+    assert main.index("Install-SameCommitEngines") < main.index("$mcpRequest =")
+    assert '$codeGraphMcpExe = Join-Path $EngineBinDir "brigade-code-graph-mcp.exe"' in main
 
 
 def test_windows_native_acceptance_asserts_component_health_before_pinning_engines():
@@ -1629,7 +1637,11 @@ def test_ci_windows_native_acceptance_builds_and_pins_same_commit_engines():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "windows-native-acceptance")
 
-    assert "cargo build --release --locked --bin graphtrail --bin graphtrail-mcp" in section
+    assert (
+        '$codeGraphBins = @("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp")' in section
+    )
+    assert 'cargo build --release --locked @($codeGraphBins | ForEach-Object { "--bin"; $_ })' in section
+    assert 'Copy-Item "target/release/$bin.exe" "$env:GITHUB_WORKSPACE/engine-bin/$bin.exe"' in section
     assert "./cmd/miseledger" in section
     assert "./cmd/sessionfind" in section
     assert "-EngineBinDir" in section
