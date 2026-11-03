@@ -146,7 +146,7 @@ func usage(w io.Writer) {
 	for _, cmd := range commandTable {
 		parts = append(parts, cmd.usage)
 	}
-	fmt.Fprintln(w, "miseledger "+strings.Join(parts, " | "))
+	fmt.Fprintln(w, program+" "+strings.Join(parts, " | "))
 }
 
 func findCommand(name string) *commandSpec {
@@ -161,7 +161,7 @@ func findCommand(name string) *commandSpec {
 func cmdVersion(args []string, out, errw io.Writer) int {
 	_ = args
 	_ = errw
-	fmt.Fprintf(out, "miseledger %s\n", Version)
+	fmt.Fprintf(out, "%s %s\n", program, Version)
 	return 0
 }
 
@@ -206,7 +206,7 @@ func cmdStatus(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "status: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger status [--json]")
+		return fatalf(errw, "usage: "+program+" status [--json]")
 	}
 	asJSON := bools["json"]
 	db, paths, err := openMigrated()
@@ -282,8 +282,8 @@ func collectStatus(db *sql.DB, paths Paths) (Status, error) {
 
 func cmdDoctor(args []string, out, errw io.Writer) int {
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
-		fmt.Fprintln(out, "usage: miseledger doctor [--json] [--mcp] [--archive]")
-		fmt.Fprintln(out, "       miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+		fmt.Fprintln(out, "usage: "+program+" doctor [--json] [--mcp] [--archive]")
+		fmt.Fprintln(out, "       "+program+" doctor provenance backfill [--json] [--batch N] [--after ID]")
 		return 0
 	}
 	if len(args) > 0 && args[0] == "provenance" {
@@ -294,7 +294,7 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "doctor: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger doctor [--json] [--mcp] [--archive]")
+		return fatalf(errw, "usage: "+program+" doctor [--json] [--mcp] [--archive]")
 	}
 	asJSON := bools["json"]
 	checkMCP := bools["mcp"]
@@ -369,13 +369,13 @@ func cmdDoctor(args []string, out, errw io.Writer) int {
 
 func cmdTrust(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
+		return fatalf(errw, "usage: "+program+" trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 	switch args[0] {
 	case "review":
 		return cmdTrustReview(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
+		return fatalf(errw, "usage: "+program+" trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 }
 
@@ -391,7 +391,7 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "trust review: %s", err)
 	}
 	if len(rest) != 0 || values["item"] == "" || values["content-hash"] == "" {
-		return fatalf(errw, "usage: miseledger trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
+		return fatalf(errw, "usage: "+program+" trust review --item ID --content-hash DIGEST [--to-label reviewed] [--mark-injection-clean] [--operator-command CMD] [--capability JSON] [--json]")
 	}
 	toLabel := values["to-label"]
 	if toLabel == "" {
@@ -468,13 +468,13 @@ func cmdTrustReview(args []string, out, errw io.Writer) int {
 
 func cmdDoctorProvenance(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+		return fatalf(errw, "usage: "+program+" doctor provenance backfill [--json] [--batch N] [--after ID]")
 	}
 	switch args[0] {
 	case "backfill":
 		return cmdDoctorProvenanceBackfill(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+		return fatalf(errw, "usage: "+program+" doctor provenance backfill [--json] [--batch N] [--after ID]")
 	}
 }
 
@@ -484,7 +484,7 @@ func cmdDoctorProvenanceBackfill(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "doctor provenance backfill: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger doctor provenance backfill [--json] [--batch N] [--after ID]")
+		return fatalf(errw, "usage: "+program+" doctor provenance backfill [--json] [--batch N] [--after ID]")
 	}
 	batch := 100
 	if values["batch"] != "" {
@@ -613,14 +613,14 @@ func firstMapValue(m map[string]any) any {
 
 func cmdSources(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] != "discover" {
-		return fatalf(errw, "usage: miseledger sources discover --json")
+		return fatalf(errw, "usage: "+program+" sources discover --json")
 	}
 	_, bools, rest, err := splitFlags(args[1:], nil, map[string]bool{"json": true})
 	if err != nil {
 		return fatalf(errw, "sources discover: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger sources discover --json")
+		return fatalf(errw, "usage: "+program+" sources discover --json")
 	}
 	result := discoverSources()
 	if bools["json"] {
@@ -706,7 +706,7 @@ func cmdFork(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "fork: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger fork <dest-db-path> [--json]")
+		return fatalf(errw, "usage: "+program+" fork <dest-db-path> [--json]")
 	}
 	dest, err := filepath.Abs(rest[0])
 	if err != nil {
@@ -781,7 +781,7 @@ func cmdDiff(args []string, out, errw io.Writer) int {
 		base, baseLabel = b, rest[0]
 		fork, forkLabel = f, rest[1]
 	default:
-		return fatalf(errw, "usage: miseledger diff [<base-db>] <fork-db> [--json]")
+		return fatalf(errw, "usage: "+program+" diff [<base-db>] <fork-db> [--json]")
 	}
 	defer base.Close()
 	defer fork.Close()
@@ -963,7 +963,7 @@ func sampleIdents(keys []string, n int) []string {
 
 func cmdScans(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger scans list|show")
+		return fatalf(errw, "usage: "+program+" scans list|show")
 	}
 	switch args[0] {
 	case "list":
@@ -975,7 +975,7 @@ func cmdScans(args []string, out, errw io.Writer) int {
 	case "changed":
 		return cmdScansChanged(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger scans list|show|diff|changed")
+		return fatalf(errw, "usage: "+program+" scans list|show|diff|changed")
 	}
 }
 
@@ -985,7 +985,7 @@ func cmdScansList(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans list: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger scans list [--json] [--source KIND]")
+		return fatalf(errw, "usage: "+program+" scans list [--json] [--source KIND]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1024,7 +1024,7 @@ func cmdScansShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger scans show <id-or-path> --json")
+		return fatalf(errw, "usage: "+program+" scans show <id-or-path> --json")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1057,7 +1057,7 @@ func cmdScansDiff(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans diff: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger scans diff <path> --json")
+		return fatalf(errw, "usage: "+program+" scans diff <path> --json")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1082,7 +1082,7 @@ func cmdScansChanged(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "scans changed: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger scans changed [--json] [--source KIND]")
+		return fatalf(errw, "usage: "+program+" scans changed [--json] [--source KIND]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1195,7 +1195,7 @@ func checkPrivate(path string) bool {
 
 func cmdImport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger import adapter|stationtrail|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: "+program+" import adapter|stationtrail|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
 	}
 	switch args[0] {
 	case "adapter":
@@ -1227,7 +1227,7 @@ func cmdImport(args []string, out, errw io.Writer) int {
 	case "claude-export":
 		return cmdImportNative("claude-export", providerexports.GenerateClaude, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
+		return fatalf(errw, "usage: "+program+" import adapter|discovered|stationtrail|sourceharvest|codex|openclaw|claude|pi|hermes|opencode|cursor|grok|chatgpt-export|claude-export <path>")
 	}
 }
 
@@ -1237,7 +1237,7 @@ func cmdImportAdapter(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger import adapter <path> --source <kind>")
+		return fatalf(errw, "usage: "+program+" import adapter <path> --source <kind>")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -1292,7 +1292,7 @@ func cmdImportStationTrail(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import stationtrail: %s", err)
 	}
 	if len(rest) != 2 {
-		return fatalf(errw, "usage: miseledger import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return fatalf(errw, "usage: "+program+" import stationtrail <source> <path-or-session-id> [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	sourceKind, sourcePath := rest[0], rest[1]
 	if err := toolpath.Require("stationtrail", toolpath.HintStationTrail); err != nil {
@@ -1555,7 +1555,7 @@ func evalStationTrailCompat(probe stationTrailProbe, sourceKind string) error {
 	}
 	caps := probe.Caps
 	if caps.Schema != "" && caps.Schema != adapter.SchemaV1 {
-		return fmt.Errorf("stationtrail %s emits schema %q but this miseledger expects %q; upgrade the older of the two", caps.Version, caps.Schema, adapter.SchemaV1)
+		return fmt.Errorf("stationtrail %s emits schema %q but this evidence engine expects %q; upgrade the older of the two", caps.Version, caps.Schema, adapter.SchemaV1)
 	}
 	if len(caps.Sources) > 0 {
 		for _, s := range caps.Sources {
@@ -1653,7 +1653,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 
 func cmdAdapter(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: "+program+" adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
 	}
 	switch args[0] {
 	case "codex":
@@ -1673,7 +1673,7 @@ func cmdAdapter(args []string, out, errw io.Writer) int {
 	case "grok":
 		return cmdAdapterGenerate("grok", grok.Generate, args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
+		return fatalf(errw, "usage: "+program+" adapter codex|openclaw|claude|pi|hermes|opencode|cursor|grok <path-or-dir> --out <file|->")
 	}
 }
 
@@ -1683,7 +1683,7 @@ func cmdAdapterGenerate(name string, generator sources.Generator, args []string,
 		return fatalf(errw, "adapter %s: %s", name, err)
 	}
 	if len(rest) != 1 || values["out"] == "" {
-		return fatalf(errw, "usage: miseledger adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--redact LIST] [--json]", name)
+		return fatalf(errw, "usage: "+program+" adapter %s <path-or-dir> --out <file|-> [--limit N] [--since DATE] [--redact LIST] [--json]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
@@ -1727,7 +1727,7 @@ func cmdImportNative(name string, generator sources.Generator, args []string, ou
 		return fatalf(errw, "import %s: %s", name, err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger import %s <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE] [--redact LIST]", name)
+		return fatalf(errw, "usage: "+program+" import %s <path-or-dir> [--json] [--dry-run] [--full] [--limit N] [--since DATE] [--redact LIST]", name)
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {
@@ -1969,7 +1969,7 @@ func cmdSearch(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "search: %s", err)
 	}
 	if len(rest) < 1 && codeReference == nil {
-		return fatalf(errw, "usage: miseledger search <query>")
+		return fatalf(errw, "usage: "+program+" search <query>")
 	}
 	query := strings.Join(rest, " ")
 	db, _, err := openMigrated()
@@ -2499,7 +2499,7 @@ func cmdExplain(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "explain: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: miseledger explain <query> [--json] [--limit N] [--source KIND] [--collection ID] [--kind KIND] [--actor-type TYPE] [--project NAME] [--tags LIST] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: "+program+" explain <query> [--json] [--limit N] [--source KIND] [--collection ID] [--kind KIND] [--actor-type TYPE] [--project NAME] [--tags LIST] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -2572,7 +2572,7 @@ func cmdShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger show <item-id> [--json] [--include-untrusted-body] [--forensic-content]")
+		return fatalf(errw, "usage: "+program+" show <item-id> [--json] [--include-untrusted-body] [--forensic-content]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -2610,7 +2610,7 @@ func cmdShow(args []string, out, errw io.Writer) int {
 }
 
 func writeEvidenceUsage(w io.Writer) int {
-	fmt.Fprintln(w, "usage: miseledger evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+	fmt.Fprintln(w, "usage: "+program+" evidence <query> [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
 	return 0
 }
 
@@ -2631,7 +2631,7 @@ func cmdEvidence(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence: %s", err)
 	}
 	if len(rest) < 1 {
-		return fatalf(errw, "usage: miseledger evidence <query>|show <bundle-id>|list [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
+		return fatalf(errw, "usage: "+program+" evidence <query>|show <bundle-id>|list [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {
@@ -2672,7 +2672,7 @@ func cmdEvidenceShow(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence show: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger evidence show <bundle-id> [--json] [--markdown]")
+		return fatalf(errw, "usage: "+program+" evidence show <bundle-id> [--json] [--markdown]")
 	}
 	body, err := regenerateEvidenceBundle(rest[0])
 	if err != nil {
@@ -2692,7 +2692,7 @@ func cmdEvidenceList(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "evidence list: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger evidence list [--json]")
+		return fatalf(errw, "usage: "+program+" evidence list [--json]")
 	}
 	body, err := listEvidenceBundles()
 	if err != nil {
@@ -3362,14 +3362,14 @@ func queryMaps(db *sql.DB, sqlText string, args ...any) []map[string]any {
 
 func cmdExport(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || args[0] != "markdown" {
-		return fatalf(errw, "usage: miseledger export markdown --out <dir>")
+		return fatalf(errw, "usage: "+program+" export markdown --out <dir>")
 	}
 	values, _, rest, err := splitFlags(args[1:], map[string]bool{"out": true}, nil)
 	if err != nil {
 		return fatalf(errw, "export: %s", err)
 	}
 	if len(rest) != 0 || values["out"] == "" {
-		return fatalf(errw, "usage: miseledger export markdown --out <dir>")
+		return fatalf(errw, "usage: "+program+" export markdown --out <dir>")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -3633,13 +3633,13 @@ func safeName(s string) string {
 
 func cmdRelations(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger relations backfill [--json]")
+		return fatalf(errw, "usage: "+program+" relations backfill [--json]")
 	}
 	switch args[0] {
 	case "backfill":
 		return cmdRelationsBackfill(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger relations backfill [--json]")
+		return fatalf(errw, "usage: "+program+" relations backfill [--json]")
 	}
 }
 
@@ -3649,7 +3649,7 @@ func cmdRelationsBackfill(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "relations backfill: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger relations backfill [--json]")
+		return fatalf(errw, "usage: "+program+" relations backfill [--json]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -3683,7 +3683,7 @@ func cmdStats(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "stats: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger stats [--json]")
+		return fatalf(errw, "usage: "+program+" stats [--json]")
 	}
 	db, paths, err := openMigrated()
 	if err != nil {
@@ -3739,7 +3739,7 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "compact: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger compact [--json]")
+		return fatalf(errw, "usage: "+program+" compact [--json]")
 	}
 	db, paths, err := openMigrated()
 	if err != nil {
@@ -3783,7 +3783,7 @@ func cmdCompact(args []string, out, errw io.Writer) int {
 
 func cmdPrune(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger prune imports|scans|policy")
+		return fatalf(errw, "usage: "+program+" prune imports|scans|policy")
 	}
 	if strings.HasPrefix(args[0], "--") {
 		return cmdPrunePolicy(args, out, errw)
@@ -3796,7 +3796,7 @@ func cmdPrune(args []string, out, errw io.Writer) int {
 	case "policy":
 		return cmdPrunePolicy(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger prune imports|scans|policy")
+		return fatalf(errw, "usage: "+program+" prune imports|scans|policy")
 	}
 }
 
@@ -3806,7 +3806,7 @@ func cmdPruneImports(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "prune imports: %s", err)
 	}
 	if len(rest) != 0 || values["before"] == "" {
-		return fatalf(errw, "usage: miseledger prune imports --before DATE [--json] [--dry-run]")
+		return fatalf(errw, "usage: "+program+" prune imports --before DATE [--json] [--dry-run]")
 	}
 	before, err := normalizeDateTime(values["before"])
 	if err != nil {
@@ -3861,7 +3861,7 @@ func cmdPruneScans(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "prune scans: %s", err)
 	}
 	if len(rest) != 0 || !bools["missing"] {
-		return fatalf(errw, "usage: miseledger prune scans --missing [--json] [--dry-run]")
+		return fatalf(errw, "usage: "+program+" prune scans --missing [--json] [--dry-run]")
 	}
 	db, _, err := openMigrated()
 	if err != nil {
@@ -3945,7 +3945,7 @@ func cmdSQL(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "sql: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger sql <select> [--json]")
+		return fatalf(errw, "usage: "+program+" sql <select> [--json]")
 	}
 	query := rest[0]
 	if err := validateReadOnlySQL(query); err != nil {

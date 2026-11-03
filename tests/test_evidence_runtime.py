@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from brigade import evidence_runtime
 
 
@@ -620,3 +622,53 @@ def test_register_memory_facade_extensions_is_inert():
 def test_known_sources_excludes_memory():
     assert "memory" not in evidence_runtime.known_sources()
     assert "discord" in evidence_runtime.known_sources()
+
+
+# ---- entry point identity (docs/phase-engine-rename.md, R3) -----------------
+
+_LEGACY_ENGINE = evidence_runtime.component_manifest.family_names("brigade-evidence")[-1]
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("brigade-evidence 0.6.0", "0.6.0"),
+        (f"{_LEGACY_ENGINE} 0.6.0", "0.6.0"),
+        ("  Brigade-Evidence 0.7.1\n", "0.7.1"),
+        ("brigade-evidence\t0.6.0", "0.6.0"),
+        (f"{_LEGACY_ENGINE.upper()} 0.6.0", "0.6.0"),
+        ("0.6.0", "0.6.0"),
+        ("brigade-code-graph 0.4.0", "brigade-code-graph 0.4.0"),
+        ("brigade-evidence", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_version_normalization_accepts_either_banner(raw, expected):
+    assert evidence_runtime._normalize_evidence_version(raw) == expected
+
+
+@pytest.mark.parametrize("banner", ["brigade-evidence", _LEGACY_ENGINE])
+@pytest.mark.parametrize(("version", "state"), [("0.6.0", "ok"), ("0.5.0", "fail")])
+def test_memory_preflight_floor_reads_either_banner(monkeypatch, tmp_path, banner, version, state):
+    # The doctor JSON carries no engine_version, so the banner decides the floor.
+    bin_dir = _make_bin(tmp_path)
+    binary = _write_script(
+        bin_dir / "brigade-evidence",
+        (
+            f'if [ "$1" = "version" ]; then echo "{banner} {version}"; exit 0; fi\n'
+            'if [ "$1" = "doctor" ] && [ "$2" = "--json" ]; then '
+            'echo \'{"ok":true,"capability":{"memory":"memory-projection.v1"},'
+            '"checks":[{"name":"database","ok":true,"detail":"db"}]}\'; exit 0; fi\n'
+            "exit 1\n"
+        ),
+    )
+    monkeypatch.setenv("PATH", _path_with(tmp_path, bin_dir))
+
+    probe = evidence_runtime.probe_memory_projection(str(binary))
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+
+    assert probe.version == version
+    assert compat.state == state, compat.detail
+    if state == "fail":
+        assert "version below floor" in compat.detail

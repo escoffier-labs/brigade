@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/escoffier-labs/miseledger/internal/app"
 )
 
 // Exercise compiled entry points so argument slicing, streams, and os.Exit
@@ -33,6 +35,7 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 		bins = append(bins, bin)
 	}
 
+	legacyNotice := app.LegacyProgram + ": this command name is deprecated and will be removed in v0.33.0; run " + app.CanonicalProgram + " instead\n"
 	t.Run("arguments-and-streams", func(t *testing.T) {
 		env, _ := executableHome(t, false)
 		for _, tc := range []struct {
@@ -42,61 +45,106 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			out  string
 			err  string
 		}{
-			{"no-args", nil, 0, "miseledger ", ""},
-			{"help", []string{"--help"}, 0, "miseledger ", ""},
-			{"short-help", []string{"-h"}, 0, "miseledger ", ""},
-			{"help-command", []string{"help"}, 0, "miseledger ", ""},
-			{"nested-help", []string{"search", "--help"}, 0, "usage: miseledger search", ""},
-			{"version", []string{"version"}, 0, "miseledger 0.6.0\n", ""},
+			{"no-args", nil, 0, "PROG version | ", ""},
+			{"help", []string{"--help"}, 0, "PROG version | ", ""},
+			{"short-help", []string{"-h"}, 0, "PROG version | ", ""},
+			{"help-command", []string{"help"}, 0, "PROG version | ", ""},
+			{"nested-help", []string{"search", "--help"}, 0, "usage: PROG search", ""},
+			{"version", []string{"version"}, 0, "PROG 0.6.0\n", ""},
 			{"unknown-with-spaces", []string{"missing command", "extra"}, 1, "", "unknown command: missing command\n"},
-			{"extra-argument", []string{"status", "unexpected argument"}, 1, "", "usage: miseledger status [--json]\n"},
+			{"extra-argument", []string{"status", "unexpected argument"}, 1, "", "usage: PROG status [--json]\n"},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
 				legacy := runExecutable(t, bins[0], env, tc.args...)
 				canonical := runExecutable(t, bins[1], env, tc.args...)
-				if canonical != legacy {
-					t.Fatalf("canonical = %#v, legacy = %#v", canonical, legacy)
+				// Only the legacy entry point prints the notice, once, first.
+				if !strings.HasPrefix(legacy.err, legacyNotice) || strings.Count(legacy.err, "deprecated") != 1 {
+					t.Fatalf("legacy stderr %q does not start with one deprecation notice", legacy.err)
 				}
-				stdoutMatches := legacy.out == tc.out
-				if tc.out != "" {
-					stdoutMatches = strings.HasPrefix(legacy.out, tc.out)
+				if strings.Contains(canonical.err, "deprecated") || strings.Contains(canonical.out+canonical.err, app.LegacyProgram) {
+					t.Fatalf("canonical entry point named the legacy program: %#v", canonical)
 				}
-				if legacy.code != tc.code || !stdoutMatches || legacy.err != tc.err {
-					t.Fatalf("result = %#v, want exit %d stdout prefix %q stderr %q", legacy, tc.code, tc.out, tc.err)
+				if strings.Contains(legacy.out, app.CanonicalProgram) {
+					t.Fatalf("legacy entry point stdout named the canonical program: %q", legacy.out)
+				}
+				// After normalizing the program name, both entry points agree.
+				for _, result := range []struct {
+					prog string
+					got  executableResult
+				}{
+					{app.LegacyProgram, executableResult{legacy.code, legacy.out, strings.TrimPrefix(legacy.err, legacyNotice)}},
+					{app.CanonicalProgram, canonical},
+				} {
+					got := executableResult{
+						result.got.code,
+						strings.ReplaceAll(result.got.out, result.prog, "PROG"),
+						strings.ReplaceAll(result.got.err, result.prog, "PROG"),
+					}
+					stdoutMatches := got.out == tc.out
+					if tc.out != "" {
+						stdoutMatches = strings.HasPrefix(got.out, tc.out)
+					}
+					if got.code != tc.code || !stdoutMatches || got.err != tc.err {
+						t.Fatalf("%s result = %#v, want exit %d stdout prefix %q stderr %q", result.prog, got, tc.code, tc.out, tc.err)
+					}
+				}
+				if strings.ReplaceAll(legacy.out, app.LegacyProgram, "PROG") != strings.ReplaceAll(canonical.out, app.CanonicalProgram, "PROG") {
+					t.Fatalf("normalized stdout differs: legacy %q canonical %q", legacy.out, canonical.out)
 				}
 			})
 		}
 	})
 
-	for _, configured := range []bool{false, true} {
-		name := "default-storage"
-		if configured {
-			name = "configured-xdg-storage"
+	t.Run("version-banners", func(t *testing.T) {
+		env, _ := executableHome(t, false)
+		for i, prog := range []string{app.LegacyProgram, app.CanonicalProgram} {
+			if got := runExecutable(t, bins[i], env, "version"); got.out != prog+" "+app.Version+"\n" {
+				t.Fatalf("%s version = %q", prog, got.out)
+			}
 		}
-		t.Run(name, func(t *testing.T) {
-			env, roots := executableHome(t, configured)
+	})
+
+	for _, tc := range []struct {
+		name       string
+		configured bool
+		legacy     bool
+	}{
+		{"fresh-home-canonical", false, false},
+		{"fresh-xdg-canonical", true, false},
+		{"existing-legacy-storage", false, true},
+		{"existing-legacy-xdg-storage", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, roots := executableHome(t, tc.configured)
+			layout, other := canonicalLeaf, legacyLeaf
+			if tc.legacy {
+				layout, other = legacyLeaf, canonicalLeaf
+			}
 			want := map[string]string{
-				"config_path": filepath.Join(roots[0], "miseledger", "config.toml"),
-				"data_dir":    filepath.Join(roots[1], "miseledger"),
-				"db_path":     filepath.Join(roots[1], "miseledger", "miseledger.db"),
-				"cache_dir":   filepath.Join(roots[2], "miseledger"),
+				"config_path": filepath.Join(roots[0], layout.dir, "config.toml"),
+				"data_dir":    filepath.Join(roots[1], layout.dir),
+				"db_path":     filepath.Join(roots[1], layout.dir, layout.db),
+				"cache_dir":   filepath.Join(roots[2], layout.dir),
 			}
-			// Existing config must survive either executable's initialization.
-			if err := os.MkdirAll(filepath.Dir(want["config_path"]), 0700); err != nil {
-				t.Fatal(err)
-			}
-			config := []byte("# existing configuration\n")
-			if err := os.WriteFile(want["config_path"], config, 0600); err != nil {
-				t.Fatal(err)
+			var config []byte
+			if tc.legacy {
+				// Existing config must survive either executable's initialization.
+				if err := os.MkdirAll(filepath.Dir(want["config_path"]), 0700); err != nil {
+					t.Fatal(err)
+				}
+				config = []byte("# existing configuration\n")
+				if err := os.WriteFile(want["config_path"], config, 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			// Reverse the order as well: either name can create the shared archive.
 			ordered := bins
-			if configured {
+			if tc.configured {
 				ordered = []string{bins[1], bins[0]}
 			}
 			for _, bin := range ordered {
 				result := runExecutable(t, bin, env, "init")
-				if result.code != 0 || result.err != "" {
+				if result.code != 0 || strings.TrimPrefix(result.err, legacyNotice) != "" {
 					t.Fatalf("init: %#v", result)
 				}
 				var payload struct {
@@ -112,23 +160,32 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			}
 			legacy := runExecutable(t, bins[0], env, "status", "--json")
 			canonical := runExecutable(t, bins[1], env, "status", "--json")
-			if legacy.code != 0 || legacy.err != "" || canonical != legacy {
+			if legacy.code != 0 || legacy.err != legacyNotice || canonical.err != "" || canonical.out != legacy.out {
 				t.Fatalf("shared archive status: %#v / %#v", legacy, canonical)
 			}
 			if _, err := os.Stat(want["db_path"]); err != nil {
 				t.Fatal(err)
 			}
-			if got, err := os.ReadFile(want["config_path"]); err != nil || !bytes.Equal(got, config) {
-				t.Fatalf("config changed: %q, %v", got, err)
+			if config != nil {
+				if got, err := os.ReadFile(want["config_path"]); err != nil || !bytes.Equal(got, config) {
+					t.Fatalf("config changed: %q, %v", got, err)
+				}
 			}
 			for _, root := range roots {
-				if _, err := os.Stat(filepath.Join(root, "brigade-evidence")); !errors.Is(err, os.ErrNotExist) {
-					t.Fatalf("unexpected canonical storage at %s: %v", root, err)
+				if _, err := os.Stat(filepath.Join(root, other.dir)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("unexpected second storage layout at %s: %v", root, err)
 				}
 			}
 		})
 	}
 }
+
+type storageLeaf struct{ dir, db string }
+
+var (
+	canonicalLeaf = storageLeaf{filepath.Join("brigade", "evidence"), "evidence.db"}
+	legacyLeaf    = storageLeaf{app.LegacyProgram, app.LegacyProgram + ".db"}
+)
 
 type executableResult struct {
 	code     int

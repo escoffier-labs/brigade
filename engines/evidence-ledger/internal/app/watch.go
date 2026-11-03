@@ -54,7 +54,7 @@ type discoveredImportRow struct {
 
 func cmdWatch(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger watch once|daemon [--json] [--interval DURATION]")
+		return fatalf(errw, "usage: "+program+" watch once|daemon [--json] [--interval DURATION]")
 	}
 	switch args[0] {
 	case "once":
@@ -79,7 +79,7 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 			return fatalf(errw, "watch daemon: %s", err)
 		}
 		if len(rest) != 0 {
-			return fatalf(errw, "usage: miseledger watch daemon [--interval DURATION] [--max-runs N] [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+			return fatalf(errw, "usage: "+program+" watch daemon [--interval DURATION] [--max-runs N] [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 		}
 		interval := time.Minute
 		if values["interval"] != "" {
@@ -125,7 +125,7 @@ func cmdWatch(args []string, out, errw io.Writer) int {
 			}
 		}
 	default:
-		return fatalf(errw, "usage: miseledger watch once|daemon")
+		return fatalf(errw, "usage: "+program+" watch once|daemon")
 	}
 }
 
@@ -135,7 +135,7 @@ func parseWatchOnceArgs(args []string) (bool, []string, error) {
 		return false, nil, err
 	}
 	if len(rest) != 0 {
-		return false, nil, fmt.Errorf("usage: miseledger watch once [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return false, nil, fmt.Errorf("usage: %s watch once [--if-changed] [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]", program)
 	}
 	return bools["if-changed"], stripBoolFlag(args, "if-changed"), nil
 }
@@ -166,7 +166,7 @@ func cmdImportDiscovered(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "import discovered: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger import discovered [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		return fatalf(errw, "usage: "+program+" import discovered [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {

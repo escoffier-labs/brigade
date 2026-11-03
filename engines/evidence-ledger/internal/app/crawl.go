@@ -11,7 +11,7 @@ import (
 
 func cmdCrawl(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: "+program+" crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
 	}
 	switch args[0] {
 	case "sessions":
@@ -39,13 +39,13 @@ func cmdCrawl(args []string, out, errw io.Writer) int {
 	case "chatgpt-export", "claude-export":
 		return cmdImport(args, out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
+		return fatalf(errw, "usage: "+program+" crawl sessions|memory|docs|files|repo|markdown|html|gitlog|json|jsonl|adapter|cursor|discord|github|slack|granola|notion|gmail|telegram|chatgpt-export|claude-export <path> [options]")
 	}
 }
 
 func cmdCrawlSessions(args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: miseledger crawl sessions [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
+		fmt.Fprintln(out, "usage: "+program+" crawl sessions [--json] [--dry-run] [--limit N] [--since DATE] [--redact LIST]")
 		return 0
 	}
 	return cmdImportDiscovered(args, out, errw)
@@ -55,7 +55,7 @@ func cmdCrawlSessions(args []string, out, errw io.Writer) int {
 // defaults to the standard Cursor config root so the common case is one word.
 func cmdCrawlCursor(args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: miseledger crawl cursor [path] [--json] [--dry-run] [--limit N] [--since DATE]")
+		fmt.Fprintln(out, "usage: "+program+" crawl cursor [path] [--json] [--dry-run] [--limit N] [--since DATE]")
 		return 0
 	}
 	if firstPositional(args) == "" {
@@ -66,15 +66,15 @@ func cmdCrawlCursor(args []string, out, errw io.Writer) int {
 
 func cmdCrawlSourceHarvest(mode, defaultSource string, args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintf(out, "usage: miseledger crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]\n", mode)
+		fmt.Fprintf(out, "usage: "+program+" crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]\n", mode)
 		return 0
 	}
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
+		return fatalf(errw, "usage: "+program+" crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
 	}
 	sourcePath := sourceHarvestPath(args)
 	if sourcePath == "" {
-		return fatalf(errw, "usage: miseledger crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
+		return fatalf(errw, "usage: "+program+" crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
 	}
 	passArgs := append([]string{mode}, args...)
 	passArgs = ensureValueFlag(passArgs, "source", defaultSource)
