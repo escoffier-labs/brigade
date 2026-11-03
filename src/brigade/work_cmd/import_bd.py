@@ -34,11 +34,34 @@ def _invalid(message: str, *, line: int) -> BdImportError:
     return BdImportError(message, reason="invalid_bd_row", details={"line": line})
 
 
-def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
-    records: list[dict[str, Any]] = []
+# bd export rows carry no schema marker, so the producer release pins the shape.
+# Each series below was checked against a scratch `bd init` export; others fail closed.
+SUPPORTED_BD_SERIES = ("1.3",)
+TESTED_BD_VERSIONS = ("1.3.1", "1.3.2")
+_VERSION = re.compile(r"([0-9]+)\.([0-9]+)\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?\Z")
+
+
+def check_bd_version(bd_version: str) -> str:
+    """Return ``bd_version`` when its export schema is pinned, else fail closed."""
+    match = _VERSION.fullmatch(bd_version or "")
+    if match is None:
+        raise BdImportError("--bd-version must be a release version", reason="invalid_bd_version")
+    if f"{match.group(1)}.{match.group(2)}" not in SUPPORTED_BD_SERIES:
+        supported = ", ".join(f"{series}.x" for series in SUPPORTED_BD_SERIES)
+        raise BdImportError(
+            f"bd {bd_version} export schema is not supported (supported: {supported}; "
+            f"tested: {', '.join(TESTED_BD_VERSIONS)}). Pin bd to a supported release or upgrade Brigade.",
+            reason="unsupported_bd_schema",
+            details={"bd_version": bd_version, "supported_series": list(SUPPORTED_BD_SERIES)},
+        )
+    return bd_version
+
+
+def _validated_rows(raw: bytes) -> list[tuple[int, dict[str, Any], bytes, list[dict[str, str]]]]:
+    """Validate every row and the native dependency graph before any caller writes."""
+    rows: list[tuple[int, dict[str, Any], bytes, list[dict[str, str]]]] = []
     graph_edges: list[dict[str, str]] = []
     seen: set[str] = set()
-    input_digest = hashlib.sha256(raw).hexdigest()
     for line, data in enumerate(raw.splitlines(), 1):
         if not data.strip():
             continue
@@ -88,17 +111,45 @@ def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
             if proposal not in proposals:
                 proposals.append(proposal)
                 graph_edges.append(proposal)
-        text = f"[bd:{key}] {row['title'].strip()}"
-        for field in ("description", "design", "notes"):
-            if row.get(field):
-                text += f"\n\n{field}:\n{row[field]}"
+        rows.append((line, row, data, proposals))
+    if rows:
+        try:
+            edges.validate_graph_plan(
+                {
+                    "nodes": [{"key": row["id"], "text": row["title"]} for _, row, _, _ in rows],
+                    "edges": graph_edges,
+                }
+            )
+        except edges.EdgeError as exc:
+            raise BdImportError(str(exc), reason=exc.reason, details=exc.details) from exc
+    return rows
+
+
+# bd priorities 0 through 4 onto Brigade's priority names.
+PRIORITY_BY_BD = ("high", "high", "normal", "low", "low")
+
+
+def issue_text(row: dict[str, Any]) -> str:
+    """Task text for a validated bd row: id-tagged title, then the free-form sections."""
+    text = f"[bd:{row['id']}] {row['title'].strip()}"
+    for field in ("description", "design", "notes"):
+        if row.get(field):
+            text += f"\n\n{field}:\n{row[field]}"
+    return text
+
+
+def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    input_digest = hashlib.sha256(raw).hexdigest()
+    for _line, row, data, proposals in _validated_rows(raw):
+        key = row["id"]
         record = ledger._sanitize_untrusted_import_record(
             {
-                "text": text,
+                "text": issue_text(row),
                 "kind": "task",
                 "metadata": row.get("metadata", {}),
                 "type": "task",
-                "priority": ("high", "high", "normal", "low", "low")[row["priority"]],
+                "priority": PRIORITY_BY_BD[row["priority"]],
                 "acceptance": [row["acceptance_criteria"]] if row.get("acceptance_criteria") else [],
             },
             importer_source="bd-jsonl",
@@ -128,16 +179,6 @@ def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
             }
         )
         records.append(record)
-    if records:
-        try:
-            edges.validate_graph_plan(
-                {
-                    "nodes": [{"key": item["metadata"]["bd"]["id"], "text": item["text"]} for item in records],
-                    "edges": graph_edges,
-                }
-            )
-        except edges.EdgeError as exc:
-            raise BdImportError(str(exc), reason=exc.reason, details=exc.details) from exc
     return records
 
 
@@ -161,8 +202,7 @@ def _write_receipt(directory: int, payload: dict[str, Any]) -> None:
 
 def import_bd_jsonl(*, target: Path, input_path: Path, bd_version: str, json_output: bool = False) -> int:
     """Validate the whole export, then append proposals through the inbox gate."""
-    if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][A-Za-z0-9.-]+)?", bd_version):
-        raise BdImportError("--bd-version must be a release version", reason="invalid_bd_version")
+    check_bd_version(bd_version)
     target = target.expanduser().resolve()
     try:
         if not target.is_dir():
