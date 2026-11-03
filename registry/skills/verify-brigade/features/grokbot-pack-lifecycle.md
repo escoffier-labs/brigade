@@ -1,4 +1,21 @@
+---
+status: paused
+proof: drive
+surfaces: run cloud grokbot pack setup, run cloud grokbot pack doctor, run cloud grokbot pack canary, run cloud grokbot pack remove
+drive: grokbot-pack-setup, grokbot-pack-doctor, grokbot-pack-canary, grokbot-pack-remove
+last-drive: 2026-11-03 31d5c549d
+reason: pack doctor reads the job queue and the host-wide feed authority through the Fleet Hub when the host has a hub URL, so its verdict there is a hub answer; setup, canary, and remove are local
+unpause: pending: a decision on driving Grok Bot verbs against a hub-free home or a pinned Fleet Hub contract
+---
+
 # Grok Bot connector pack lifecycle
+
+> **Paused.** `pack doctor` reads the job queue and the host-wide feed
+> authority through the Fleet Hub whenever the host has a hub URL configured,
+> so on such a host its verdict is the hub's answer. `setup`, `canary`, and
+> `remove` stay local and can still be driven by hand. The header says what unpauses it. The observations
+> below were last checked on main `31d5c549d`; do not cite them as current
+> proof until the status is `active` again.
 
 First-party connector packs are the role-scoped MCP listeners Grok Bot talks
 to. `implementation-worker` is the pack an Implementation Worker runs behind.
@@ -65,10 +82,19 @@ Observed end state on a fresh target, with no listener running:
 - `setup --apply` -> exit 0, `"applied": true`, and both files present under
   `$TARGET/.brigade/grokbot/`. Check the files; the preview list is a promise,
   the files are the proof.
-- `doctor` -> exit 0 from the helper (the CLI itself exits 1), with
-  `"config_resolved": true`, `"listener_running": false`, and checks
+- `doctor` on main `31d5c549d`, on a host with a hub URL configured and
+  without the `grokbot` extra -> helper exit 3 (the CLI exits 1), with
+  `"config_resolved": true`, `"listener_running": false`,
+  `"failed_checks": ["dependency", "queue"]`, and checks
   `dependency=fail, config=ok, permissions=ok, queue=fail,
-  host-wide-feed-authority=skipped, endpoint=fail`.
+  host-wide-feed-authority=skipped, endpoint=fail, bind-drift=ok`.
+  This page used to record helper exit 0 for the same checks. The helper
+  sinks the drive on any failing check other than `endpoint`, so exit 3 is the
+  current answer. `bind-drift` is a check added since the last record.
+- The same `doctor` call run straight against the CLI with a throwaway `HOME`
+  (no fleet config, so no hub URL) reported `queue=ok` and no
+  `host-wide-feed-authority` row at all. That run bypassed the helper, so it is
+  a hand check, not a recorded drive. It shows which rows depend on the host.
 - `canary` -> exit 0 from the helper (the CLI exits 1), `"reason": "health"`,
   `"listener_running": false`, `"expected_without_listener": true`.
 - `remove` preview -> exit 0, `"applied": false`, `"paths"` listing the two

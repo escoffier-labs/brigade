@@ -1,3 +1,11 @@
+---
+status: active
+proof: drive
+surfaces: init, doctor
+drive: new-target, init, doctor-target
+last-drive: 2026-11-03 31d5c549d
+---
+
 # init and doctor
 
 Installing Brigade into a repo or workspace, and checking afterwards that the
@@ -18,7 +26,9 @@ change.
   `.git/info/exclude` with `--git-exclude`.
 - The memory owner (`brigade: memory owner -> claude`), overridable with
   `--owner`.
-- `--dry-run`, `--force`, `--no-wire`, `--profile`, `--include`.
+- `--dry-run`, `--force`, `--no-wire`, `--no-gitignore`, `--profile`,
+  `--include`. The helper drives only `--depth` and `--harnesses`; none of
+  these flags is driven.
 - `brigade doctor` returns per-check `OK` / `WARN` / `FAIL` / `MANUAL`,
   plus `ready`, `depth`, `harnesses`, `owner`, and a summary count.
   `--agent` drops passes, `--json` makes it machine-readable, `--full` stops
@@ -67,8 +77,9 @@ Plus, on disk: `$TARGET/.brigade/config.json` exists, and
 `--harnesses`. Check the files, not only the summary.
 
 Observed baseline on a fresh `--depth workspace --harnesses claude,codex`
-target: `{"failed": 0, "manual": 0, "ok": 54, "total": 61, "warn": 6}`,
-`ready: true`, `owner: claude`. A change that moves `failed` off zero, or
+target, main `31d5c549d`: `{"failed": 0, "manual": 0, "ok": 55, "total": 62, "warn": 6}`,
+`ready: true`, `owner: claude`. The previous record, on an older main, was 54
+ok of 61. A change that moves `failed` off zero, or
 drops `ok` sharply, is the regression.
 
 ## Gotchas
