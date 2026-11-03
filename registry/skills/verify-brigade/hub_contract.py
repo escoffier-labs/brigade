@@ -14,11 +14,15 @@ case here fail against a hub that used to pass it; that bumps
 `CONTRACT_VERSION`.
 
 The drive assumes the hub runs with its default flags: no
-`--allow-admin-writes`, no `--require-sealed`, and Worklore off.
+`--allow-admin-writes`, no `--require-sealed`, and Worklore off. It sets one
+environment variable, `BRIGADE_FLEET_OPERATOR_RECIPIENT`, to an agent
+principal it enrolls itself, so the question actions have an operator.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import http.client
 import ipaddress
 import json
@@ -29,6 +33,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -71,6 +76,59 @@ COVERED_ROUTES = (
     "POST /nodes",
     "POST /sessions",
 )
+
+# The actions the Python hub accepts on POST /messages. The route table in the
+# v2 hub design splits /messages by action, so coverage is tracked per action.
+HUB_MESSAGE_ACTIONS = (
+    "ack",
+    "claims",
+    "count",
+    "events_list",
+    "events_subscribe",
+    "events_unsubscribe",
+    "identity",
+    "keys_get",
+    "keys_publish",
+    "list",
+    "manifests_get",
+    "question_create",
+    "question_desktop",
+    "question_status",
+    "reply",
+    "send",
+    "sent",
+    "sent_lookup",
+    "who",
+)
+# The subset this drive sends. A deliberately unknown action is not counted.
+COVERED_MESSAGE_ACTIONS = (
+    "ack",
+    "claims",
+    "count",
+    "identity",
+    "keys_get",
+    "keys_publish",
+    "list",
+    "manifests_get",
+    "question_create",
+    "question_desktop",
+    "question_status",
+    "reply",
+    "send",
+    "sent",
+    "sent_lookup",
+    "who",
+)
+
+# The hub caps long polls at this many milliseconds and at two waiters per
+# recipient. A long-poll case waits at most this long before the drive gives up.
+MAX_WAIT_MS = 20_000
+# Generous on purpose: a wake must land well before the waiter's own deadline,
+# not within a tight latency, so a loaded CI host still passes.
+WAKE_MARGIN_SECONDS = 5.0
+# How long the drive keeps probing for the waiter cap before it records a miss.
+PARK_DEADLINE_SECONDS = 10.0
+OPERATOR_ENV = "BRIGADE_FLEET_OPERATOR_RECIPIENT"
 
 ADMIN_WRITE_REFUSAL = (
     "the admin token may not post events or claims: enroll this node with 'brigade fleet nodes add' and "
@@ -177,6 +235,10 @@ def match(spec: Any, value: Any, path: str = "$") -> list[dict]:
         for index, item in enumerate(value):
             problems += match(spec[0], item, f"{path}[{index}]")
         return problems
+    if isinstance(spec, tuple) and not all(isinstance(item, type) for item in spec):
+        # A tuple mixing specs, such as (DIGITS, NONE), passes when any alternative does.
+        ok = any(not match(item, value, path) for item in spec)
+        return [] if ok else [{"path": path, "expected": _describe(spec), "observed": value}]
     if isinstance(spec, (type, tuple)):
         return [] if _type_ok(spec, value) else [{"path": path, "expected": _describe(spec), "observed": value}]
     raise TypeError(f"unknown spec {spec!r}")
@@ -276,6 +338,51 @@ OWNERS = {
     "truncated_sources": list,
     "unknown_sources": list,
 }
+CLAIM_REFUSAL = {"error": NonEmpty(), "owner": (dict, NONE)}
+SEALED_MESSAGE = {**MESSAGE, "envelope": NonEmpty(), "envelope_bytes": int, "content_state": NonEmpty()}
+KEY_ENTRY = {
+    "principal_id": NonEmpty(),
+    "kid": NonEmpty(),
+    "record": dict,
+    "state": NonEmpty(),
+    "created_at": NonEmpty(),
+    "retired_at": OPT_STR,
+    "revoked_at": OPT_STR,
+    "compromised_from": OPT_STR,
+}
+STATION_PAGE = {"truncated": bool, "oversized": int, "next_cursor": OPT_STR}
+WHO = {
+    **STATION_PAGE,
+    "nodes": [{"node_id": NonEmpty()}],
+    "principals": [{"principal_id": NonEmpty(), "label": str}],
+    "sessions": list,
+    "total": {"nodes": int, "principals": int, "sessions": int},
+}
+STATION_CLAIMS = {**STATION_PAGE, "claims": [{"target": NonEmpty(), "owner_node": NonEmpty()}], "total": int}
+DIGITS = Pred(lambda value: isinstance(value, str) and value.isdigit(), "a decimal string")
+HEX32 = Pred(
+    lambda value: isinstance(value, str) and len(value) == 32 and all(c in "0123456789abcdef" for c in value),
+    "32 lowercase hex digits",
+)
+QUESTION = {
+    "question_id": HEX32,
+    "caller": NonEmpty(),
+    "request_id": NonEmpty(),
+    "operator": NonEmpty(),
+    "message_id": DIGITS,
+    "deadline": NonEmpty(),
+    "status": NonEmpty(),
+    "answer": OPT_STR,
+    "answer_id": (DIGITS, NONE),
+    "source": OPT_STR,
+    "answered_by": OPT_STR,
+    "answered_at": OPT_STR,
+    "late_answer_message_id": (DIGITS, NONE),
+    "late_answered_at": OPT_STR,
+    "operator_reply_after_desktop_message_id": (DIGITS, NONE),
+    "operator_reply_after_desktop_at": OPT_STR,
+    "created": bool,
+}
 
 
 # ----------------------------------------------------------- hub process
@@ -286,6 +393,9 @@ class Hub:
     url: str
     admin_token: str
     mode: str
+    # The `agent:` principal the hub routes question_create to. The drive
+    # enrolls it, so it must be fresh for every run against the same hub.
+    operator: str = ""
     argv: list[str] = field(default_factory=list)
     state_dir: Path | None = None
     log: Path | None = None
@@ -324,12 +434,18 @@ def expand_command(template: str, *, brigade: list[str], values: dict[str, str])
     return argv
 
 
-def hub_env(state_dir: Path, admin_token: str) -> dict[str, str]:
+def new_operator() -> str:
+    """A fresh `agent:` principal id for the question operator."""
+    return "agent:contract-operator-" + secrets.token_hex(3)
+
+
+def hub_env(state_dir: Path, admin_token: str, operator: str) -> dict[str, str]:
     """A child environment that cannot see the operator's hub, tokens, or home.
 
     Every `BRIGADE_*` variable is dropped (a stray `BRIGADE_FLEET_TOKEN` would
     otherwise become the admin token), the XDG roots fall back to the fake
     home, and the throwaway admin token is passed both ways a hub reads it.
+    The only other Brigade variable set is the question operator recipient.
     """
     env = {
         key: value
@@ -341,6 +457,7 @@ def hub_env(state_dir: Path, admin_token: str) -> dict[str, str]:
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
     env["BRIGADE_FLEET_TOKEN"] = admin_token
+    env[OPERATOR_ENV] = operator
     # A Python hub block-buffers its startup line; keep it in hub.log.
     env["PYTHONUNBUFFERED"] = "1"
     return env
@@ -348,6 +465,7 @@ def hub_env(state_dir: Path, admin_token: str) -> dict[str, str]:
 
 def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_timeout: float) -> Hub:
     admin_token = "contract-admin-" + secrets.token_urlsafe(18)
+    operator = new_operator()
     token_file = state_dir / "admin-token"
     token_file.write_text(admin_token + "\n", encoding="utf-8")
     token_file.chmod(0o600)
@@ -374,7 +492,7 @@ def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_ti
             stdin=subprocess.DEVNULL,
             stdout=handle,
             stderr=subprocess.STDOUT,
-            env=hub_env(state_dir, admin_token),
+            env=hub_env(state_dir, admin_token, operator),
             cwd=str(state_dir),
             **popen_kwargs,
         )
@@ -385,6 +503,7 @@ def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_ti
         url=f"http://{LOOPBACK}:{port}",
         admin_token=admin_token,
         mode="launched",
+        operator=operator,
         argv=argv,
         state_dir=state_dir,
         log=log,
@@ -485,6 +604,21 @@ def guard_hub_url(raw: str) -> str:
     if parts.path not in ("", "/") or parts.query or parts.fragment:
         raise ContractError(f"refusing --hub-url {raw!r}: give the bare origin, without a path or query")
     return f"{parts.scheme}://{parts.netloc}"
+
+
+def guard_operator(raw: str) -> str:
+    """Accept only an `agent:` principal id the hub would route questions to."""
+    name = raw.removeprefix("agent:")
+    valid = (
+        raw.startswith("agent:")
+        and 1 <= len(name) <= 63
+        and name[0].isascii()
+        and name[0].islower()
+        and all(c.isascii() and (c.islower() or c.isdigit() or c in "._-") for c in name)
+    )
+    if not valid:
+        raise ContractError(f"refusing --operator-recipient {raw!r}: it must look like agent:<lowercase name>")
+    return raw
 
 
 # ----------------------------------------------------------- HTTP
@@ -614,6 +748,7 @@ class Drive:
         self.mismatches: list[dict] = []
         self.exchanges: list[dict] = []
         self.routes: set[str] = set()
+        self.actions: set[str] = set()
         # Every token the drive holds or the hub issues, scrubbed from the result.
         self.secrets: set[str] = {hub.admin_token} if hub.admin_token else set()
 
@@ -631,6 +766,7 @@ class Drive:
         headers: dict[str, str] | None = None,
         json_body: bool = True,
         route: bool = True,
+        timeout: float = REQUEST_TIMEOUT,
     ) -> Any:
         """One exchange: check the status, the content type, and the body shape.
 
@@ -638,9 +774,31 @@ class Drive:
         later case can use an id or token the hub handed out. `route=False`
         keeps a deliberately unknown path out of the coverage list.
         """
-        resp = request(self.hub.url, method, path, body=body, raw=raw, token=token, headers=headers)
+        resp = request(self.hub.url, method, path, body=body, raw=raw, token=token, headers=headers, timeout=timeout)
+        return self.check(
+            case, method, path, resp, status=status, shape=shape, body=body, json_body=json_body, route=route
+        )
+
+    def check(
+        self,
+        case: str,
+        method: str,
+        path: str,
+        resp: Response,
+        *,
+        status: int,
+        shape: Any = None,
+        body: Any = None,
+        json_body: bool = True,
+        route: bool = True,
+    ) -> Any:
+        """Record a response the drive already holds, such as one a long-poll thread fetched."""
         if route:
             self.routes.add(f"{method} {path.partition('?')[0]}")
+            if method == "POST" and path == "/messages" and isinstance(body, dict):
+                action = body.get("action")
+                if action in HUB_MESSAGE_ACTIONS:
+                    self.actions.add(action)
         problems: list[dict] = []
         if resp.status != status:
             problems.append({"check": "status", "expected": status, "observed": resp.status or resp.error})
@@ -720,6 +878,1341 @@ def _keyed(items: list[dict], key: str) -> dict[str, dict]:
 def _ids(page: Any) -> list[Any]:
     messages = page.get("messages") if isinstance(page, dict) else None
     return [m.get("id") if isinstance(m, dict) else None for m in messages] if isinstance(messages, list) else []
+
+
+# ----------------------------------------------------------- sealed mail fixtures
+#
+# The hub checks the bm1 wire format and never verifies a signature or
+# decrypts (#2005), so random bytes of the right length stand in for keys,
+# signatures, wraps, and ciphertext. Nothing here imports Brigade's crypto.
+
+
+def b64(raw: bytes) -> str:
+    """Unpadded URL-safe base64, the mesh binary encoding."""
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+def canonical(value: Any) -> str:
+    """The canonical envelope text: sorted keys, no spaces, ASCII only."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
+
+
+def mesh_now() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+
+
+def key_record(principal: str, hub_id: str) -> dict:
+    """A public key record whose key id matches its random public keys."""
+    sig, enc = secrets.token_bytes(32), secrets.token_bytes(1216)
+    kid = "k1_" + b64(hashlib.sha256(b"brigade-mesh/v1/kid\0" + sig + enc).digest()[:16])
+    return {
+        "v": 1,
+        "principal": principal,
+        "hub": hub_id,
+        "kid": kid,
+        "sig_pub": b64(sig),
+        "enc_pub": b64(enc),
+        "suites": ["bm1"],
+        "created_at": "2026-01-01T00:00:00Z",
+        "self_sig": b64(secrets.token_bytes(64)),
+    }
+
+
+def sealed_envelope(
+    *,
+    hub_id: str,
+    sender: str,
+    sender_kid: str,
+    recipient: str,
+    recipient_kid: str,
+    client_id: str,
+    in_reply_to: dict | None = None,
+    pad: int = 1024,
+) -> dict:
+    """A structurally valid bm1 envelope. `canonical()` turns it into wire text."""
+    rcpt = sorted({sender_kid, recipient_kid})
+    value: dict[str, Any] = {
+        "v": 1,
+        "suite": "bm1",
+        "hub": hub_id,
+        "from": sender,
+        "from_kid": sender_kid,
+        "to": recipient,
+        "kind": "message",
+        "priority": "normal",
+        "client_id": client_id,
+        "created_at": mesh_now(),
+        "pad": pad,
+        "rcpt": rcpt,
+        "ct_sha256": b64(secrets.token_bytes(32)),
+        "wraps_sha256": b64(secrets.token_bytes(32)),
+        "rc": b64(secrets.token_bytes(32)),
+        "sig": b64(secrets.token_bytes(64)),
+        "ct": b64(secrets.token_bytes(pad + 16)),
+        "recipients": [{"kid": kid, "wrap": b64(secrets.token_bytes(1168))} for kid in rcpt],
+    }
+    if in_reply_to is not None:
+        value["in_reply_to"] = in_reply_to
+    return value
+
+
+# ----------------------------------------------------------- long polls
+
+
+class Waiter(threading.Thread):
+    """One `list` long poll on its own thread, so the drive can act while it waits.
+
+    A 429 while the waiters are still parking is retried: the drive's own cap
+    probe can hold a slot for a moment. The drive records `resp` afterwards.
+    """
+
+    def __init__(self, hub: Hub, token: str, after: int) -> None:
+        super().__init__(daemon=True)
+        self.hub, self.token = hub, token
+        self.body = {"action": "list", "after": after, "unacked": False, "wait_ms": MAX_WAIT_MS}
+        self.retry_until = time.monotonic() + PARK_DEADLINE_SECONDS
+        self.resp = Response(None, "", b"", None, error="the waiter never returned")
+        self.started = self.finished = 0.0
+
+    def run(self) -> None:
+        while True:
+            self.started = time.monotonic()
+            resp = request(
+                self.hub.url,
+                "POST",
+                "/messages",
+                body=self.body,
+                token=self.token,
+                timeout=MAX_WAIT_MS / 1000 + REQUEST_TIMEOUT,
+            )
+            self.finished = time.monotonic()
+            if resp.status == 429 and time.monotonic() < self.retry_until:
+                time.sleep(0.05)
+                continue
+            self.resp = resp
+            return
+
+
+def park_waiters(hub: Hub, token: str, after: int) -> tuple[list[Waiter], bool]:
+    """Start two long polls for one recipient and wait until both hold a slot.
+
+    The hub caps waiters at two per recipient and reports no other sign that a
+    poll is waiting, so the drive probes with `wait_ms: 1` until the third
+    poll is refused. It gives up when a waiter returns early or the deadline passes.
+    """
+    waiters = [Waiter(hub, token, after) for _ in range(2)]
+    for waiter in waiters:
+        waiter.start()
+    probe = {"action": "list", "after": after, "unacked": False, "wait_ms": 1}
+    deadline = time.monotonic() + PARK_DEADLINE_SECONDS
+    while time.monotonic() < deadline and all(waiter.is_alive() for waiter in waiters):
+        if request(hub.url, "POST", "/messages", body=probe, token=token).status == 429:
+            return waiters, True
+        time.sleep(0.05)
+    return waiters, False
+
+
+def record_waiters(d: Drive, case: str, waiters: list[Waiter], woken_at: float, expect: Callable[[Any], bool]) -> None:
+    """Record each waiter's answer and check it woke with the mail, well before `wait_ms`."""
+    budget = MAX_WAIT_MS / 1000 - WAKE_MARGIN_SECONDS
+    for index, waiter in enumerate(waiters, start=1):
+        waiter.join(timeout=MAX_WAIT_MS / 1000 + REQUEST_TIMEOUT + 5)
+        name = f"{case} (waiter {index})"
+        page = d.check(name, "POST", "/messages", waiter.resp, status=200, shape=PAGE, body=waiter.body)
+        waited = waiter.finished - waiter.started
+        d.invariant(
+            name,
+            expect(page) and waiter.finished >= woken_at and waited < budget,
+            f"the waiter returns the new message after the write and within {budget:g}s of a "
+            f"{MAX_WAIT_MS // 1000}s wait_ms",
+            {"ids": _ids(page), "waited_seconds": round(waited, 3), "woke_after_write": waiter.finished >= woken_at},
+        )
+
+
+# ----------------------------------------------------------- hot-set cases
+#
+# The hub track of the v2 plan ports these first, so each records what the
+# Python hub does today, quirks included.
+
+
+@dataclass
+class Ctx:
+    """Identities and ids the hot-set cases share with the core cases."""
+
+    tag: str
+    admin: str
+    node_a: str
+    node_b: str
+    a: str
+    b: str
+    principal_id: str
+    principal_token: str
+    m1: Any
+    m2: Any
+    c1: str
+    kid_a: str = ""
+    kid_b: str = ""
+    held_target: str = ""
+
+
+def _claim_body(action: str, target: str, node: str, holder: str | None, **extra: Any) -> dict:
+    body: dict[str, Any] = {"action": action, "target": target, "node_id": node, **extra}
+    if holder is not None:
+        body["holder"] = holder
+    return body
+
+
+def drive_claim_fencing(d: Drive, x: Ctx) -> None:
+    """Holder, node, and force scopes, lease supersession, generations, and expiry."""
+    target = f"repo:example-org/fenced-{x.tag}"
+    lease = {
+        "token": f"contract-lease-{x.tag}",
+        "acquired_at": "2026-01-01T00:00:00+00:00",
+        "run_dir": "/srv/example/run-1",
+    }
+
+    def claim(action: str, node: str, holder: str | None, **extra: Any) -> dict:
+        return _claim_body(action, target, node, holder, **extra)
+
+    def refused(key: str, reason: str, owner: Any) -> dict:
+        return {key: Eq(False), "reason": Eq(reason), "error": Eq(f"claim operation refused: {reason}"), "owner": owner}
+
+    def at(generation: int, **pins: Any) -> dict:
+        return {**CLAIM, "target": Eq(target), "generation": Eq(generation), **pins}
+
+    free = d.call(
+        "claims inspect an unseen target",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_b, None),
+        token=x.b,
+        shape={"inspected": Eq(True), "claim": NONE, "owned": Eq(False)},
+    )
+    d.invariant(
+        "claims inspect an unseen target",
+        "generation" not in free,
+        "an unseen target has no generation key",
+        sorted(free),
+    )
+    first = d.call(
+        "claims acquire starts at generation 1",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": at(1, owner_node=Eq(x.node_a))},
+    )
+    again = d.call(
+        "claims acquire retry keeps the generation",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": at(1)},
+    )
+    acquired = [_obj(item.get("claim")).get("acquired_at") for item in (first, again)]
+    d.invariant(
+        "claims acquire retry keeps the generation",
+        acquired[0] is not None and acquired[0] == acquired[1],
+        "a same-holder retry keeps acquired_at",
+        acquired,
+    )
+    d.call(
+        "claims acquire retry with the pre-acquire generation",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600, generation=0),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": at(1)},
+    )
+    d.call(
+        "claims acquire with a stale generation",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("acquire", x.node_b, "fence-holder-b", ttl_seconds=600, generation=7),
+        token=x.b,
+        shape=refused("granted", "stale-generation", at(1, owner_node=Eq(x.node_a))),
+    )
+    d.call(
+        "claims renew with a stale generation",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=2),
+        token=x.a,
+        shape=refused("renewed", "stale-generation", at(1)),
+    )
+    d.call(
+        "claims renew with the current generation",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=1),
+        token=x.a,
+        shape={"renewed": Eq(True), "claim": at(1)},
+    )
+    d.call(
+        "claims inspect as the owner",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_a, None),
+        token=x.a,
+        shape={"inspected": Eq(True), "owned": Eq(True), "generation": Eq(1), "claim": at(1), "lock_run_dir": NONE},
+    )
+    d.call(
+        "claims release with a stale generation",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("release", x.node_a, "fence-holder-1", generation=5),
+        token=x.a,
+        shape=refused("released", "stale-generation", at(1)),
+    )
+    released = d.call(
+        "claims release in holder scope",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("release", x.node_a, "fence-holder-1", generation=1),
+        token=x.a,
+        shape={"released": Eq(True)},
+    )
+    d.invariant(
+        "claims release in holder scope", "claim" not in released, "a holder release echoes no claim", sorted(released)
+    )
+    d.call(
+        "claims inspect after a release",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_b, None),
+        token=x.b,
+        shape={"inspected": Eq(True), "claim": NONE, "owned": Eq(False), "generation": Eq(2)},
+    )
+    d.call(
+        "claims acquire by a retired holder",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600),
+        token=x.a,
+        shape=refused("granted", "stale-holder", Eq({})),
+    )
+    d.call(
+        "claims release by a retired holder",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("release", x.node_a, "fence-holder-1"),
+        token=x.a,
+        shape={"released": Eq(False), "reason": Eq("stale-holder")},
+    )
+    d.call(
+        "claims acquire with a run lease",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("acquire", x.node_a, "fence-holder-2", ttl_seconds=600, lock=lease),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": at(3)},
+    )
+    d.call(
+        "claims inspect shows the owner its run dir",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_a, None),
+        token=x.a,
+        shape={"owned": Eq(True), "generation": Eq(3), "lock_run_dir": Eq(lease["run_dir"])},
+    )
+    other = d.call(
+        "claims inspect hides the run dir from other nodes",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_b, None),
+        token=x.b,
+        shape={"owned": Eq(False), "generation": Eq(3), "claim": at(3)},
+    )
+    d.invariant(
+        "claims inspect hides the run dir from other nodes",
+        "lock_run_dir" not in other,
+        "lock_run_dir is only shown to the owning node",
+        sorted(other),
+    )
+    d.call(
+        "claims node scope acquire without a lease to supersede",
+        "POST",
+        "/claims",
+        status=400,
+        body=claim("acquire", x.node_a, "fence-holder-3", scope="node"),
+        token=x.a,
+        shape=error_body("claim field 'supersede' (the reconciled dead lease) is required for a node-scoped acquire"),
+    )
+    d.call(
+        "claims node scope acquire with another lease",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("acquire", x.node_a, "fence-holder-3", scope="node", supersede={"token": "contract-lease-other"}),
+        token=x.a,
+        shape={
+            "granted": Eq(False),
+            "error": Eq(
+                f"target {target!r} is held by {x.node_a} under another lease than the reconciled dead run's "
+                "(not superseded)"
+            ),
+            "owner": at(3),
+        },
+    )
+    d.call(
+        "claims node scope acquire supersedes the dead lease",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim(
+            "acquire",
+            x.node_a,
+            "fence-holder-3",
+            scope="node",
+            supersede={"token": lease["token"], "acquired_at": lease["acquired_at"]},
+        ),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": at(4), "superseded": at(3)},
+    )
+    d.call(
+        "claims renew by the superseded holder",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("renew", x.node_a, "fence-holder-2", ttl_seconds=600),
+        token=x.a,
+        shape=refused("renewed", "stale-holder", at(4)),
+    )
+    d.call(
+        "claims node scope release without acquired_at",
+        "POST",
+        "/claims",
+        status=400,
+        body=claim("release", x.node_a, None, scope="node"),
+        token=x.a,
+        shape=error_body("claim field 'acquired_at' is required for a token-less node-scoped release"),
+    )
+    d.call(
+        "claims node scope release by another node",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("release", x.node_b, None, scope="node", acquired_at="2026-01-01T00:00:00+00:00"),
+        token=x.b,
+        shape={
+            "released": Eq(False),
+            "error": Eq(f"target {target!r} is held by {x.node_a}, not {x.node_b}"),
+            "owner": at(4),
+        },
+    )
+    prefix = f"target {target!r} was re-acquired since it was inspected (now acquired "
+    d.call(
+        "claims node scope release with a stale acquired_at",
+        "POST",
+        "/claims",
+        status=409,
+        body=claim("release", x.node_a, None, scope="node", acquired_at="2000-01-01T00:00:00+00:00"),
+        token=x.a,
+        shape={
+            "released": Eq(False),
+            "error": Pred(lambda v: isinstance(v, str) and v.startswith(prefix), f"text starting {prefix!r}"),
+            "owner": at(4),
+        },
+    )
+    d.call(
+        "claims force release by another node",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("release", x.node_b, None, scope="force"),
+        token=x.b,
+        shape={"released": Eq(True), "claim": at(4, owner_node=Eq(x.node_a))},
+    )
+    noop = d.call(
+        "claims force release of a free target",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("release", x.node_b, None, scope="force"),
+        token=x.b,
+        shape={"released": Eq(False)},
+    )
+    d.invariant(
+        "claims force release of a free target",
+        "reason" not in noop and "claim" not in noop,
+        "a no-op force release carries no reason and no claim",
+        sorted(noop),
+    )
+    d.call(
+        "claims inspect after a no-op force release",
+        "POST",
+        "/claims",
+        status=200,
+        body=claim("inspect", x.node_b, None),
+        token=x.b,
+        shape={"claim": NONE, "owned": Eq(False), "generation": Eq(6)},
+    )
+    for case, body, message in (
+        (
+            "claims renew in node scope",
+            claim("renew", x.node_a, "fence-holder-3", scope="node"),
+            "claim field 'scope' for renew must be one of: holder",
+        ),
+        (
+            "claims generation out of range",
+            claim("acquire", x.node_a, "fence-holder-3", generation=-1),
+            "claim field 'generation' must be an integer in [0, 9223372036854775807]",
+        ),
+        (
+            "claims ttl out of range",
+            claim("acquire", x.node_a, "fence-holder-3", ttl_seconds=0),
+            "claim field 'ttl_seconds' must be an integer in [1, 86400]",
+        ),
+        (
+            "claims holder named unknown",
+            claim("acquire", x.node_a, "unknown"),
+            "claim field 'holder' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')",
+        ),
+    ):
+        d.call(case, "POST", "/claims", status=400, body=body, token=x.a, shape=error_body(message))
+
+    # -- lease expiry: a lapsed claim hides, refuses renewal, and costs a generation
+    short = f"repo:example-org/short-lease-{x.tag}"
+    d.call(
+        "claims acquire a one-second lease",
+        "POST",
+        "/claims",
+        status=200,
+        body=_claim_body("acquire", short, x.node_a, "fence-holder-1", ttl_seconds=1),
+        token=x.a,
+        shape={"granted": Eq(True), "claim": {**CLAIM, "target": Eq(short), "generation": Eq(1), "ttl_seconds": Eq(1)}},
+    )
+    # Expiry is the hub's clock against expires_at, so sleeping longer than the
+    # lease can only make the case more certain under load.
+    time.sleep(1.5)
+    listed = d.call(
+        "claims list hides an expired lease", "GET", "/claims", status=200, token=x.b, shape={"claims": [LISTED_CLAIM]}
+    )
+    targets = [item.get("target") for item in _items(listed, "claims")]
+    d.invariant(
+        "claims list hides an expired lease", short not in targets, "the default view hides a lapsed lease", targets
+    )
+    every = d.call(
+        "claims list all shows an expired lease",
+        "GET",
+        "/claims?all=1",
+        status=200,
+        token=x.b,
+        shape={"claims": [LISTED_CLAIM]},
+    )
+    lapsed = _keyed(_items(every, "claims"), "target").get(short, {})
+    d.invariant(
+        "claims list all shows an expired lease",
+        lapsed.get("expired") is True,
+        "?all=1 lists the lapsed lease with expired: true",
+        lapsed.get("expired", "<missing>"),
+    )
+    d.call(
+        "claims renew an expired lease",
+        "POST",
+        "/claims",
+        status=409,
+        body=_claim_body("renew", short, x.node_a, "fence-holder-1", ttl_seconds=600),
+        token=x.a,
+        shape={"renewed": Eq(False), "error": Eq(f"claim on {short!r} is expired or missing"), "owner": NONE},
+    )
+    d.call(
+        "claims acquire after expiry",
+        "POST",
+        "/claims",
+        status=200,
+        body=_claim_body("acquire", short, x.node_b, "fence-holder-b", ttl_seconds=600),
+        token=x.b,
+        shape={
+            "granted": Eq(True),
+            "claim": {**CLAIM, "target": Eq(short), "owner_node": Eq(x.node_b), "generation": Eq(3)},
+        },
+    )
+    x.held_target = short
+
+
+def drive_keys_and_sealed(d: Drive, x: Ctx) -> None:
+    """The key directory, manifests, and opaque sealed envelopes."""
+    hub_id = "h_" + b64(secrets.token_bytes(16))
+    record_a, record_b = key_record(x.node_a, hub_id), key_record(x.node_b, hub_id)
+    x.kid_a, x.kid_b = record_a["kid"], record_b["kid"]
+
+    def key_shape(node: str, kid: str) -> dict:
+        return {"key": {**KEY_ENTRY, "principal_id": Eq(node), "kid": Eq(kid), "state": Eq("active")}}
+
+    published = d.call(
+        "messages keys_publish",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "keys_publish", "record": record_a},
+        token=x.a,
+        shape=key_shape(x.node_a, x.kid_a),
+    )
+    echoed = _obj(published.get("key")).get("record")
+    d.invariant("messages keys_publish", echoed == record_a, "the stored record comes back unchanged", "differs")
+    d.call(
+        "messages keys_publish for a second node",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "keys_publish", "record": record_b},
+        token=x.b,
+        shape=key_shape(x.node_b, x.kid_b),
+    )
+    stray = key_record(x.node_a, hub_id)
+    stray["kid"] = "k1_" + b64(secrets.token_bytes(16))
+    for case, record, token, status, shape in (
+        (
+            "messages keys_publish an existing key id",
+            record_a,
+            x.a,
+            409,
+            {"error": Eq("key id was already published"), "code": Eq("principal_key_exists")},
+        ),
+        (
+            "messages keys_publish a replacement without the previous key",
+            key_record(x.node_a, hub_id),
+            x.a,
+            409,
+            {"error": Eq("replacement requires the current previous key"), "code": Eq("principal_key_exists")},
+        ),
+        (
+            "messages keys_publish for another principal",
+            key_record(x.node_b, hub_id),
+            x.a,
+            403,
+            {"error": Eq("key principal must match caller"), "code": Eq("principal_key_mismatch")},
+        ),
+        (
+            "messages keys_publish with a mismatched key id",
+            stray,
+            x.a,
+            400,
+            error_body("mesh key id does not match public keys"),
+        ),
+    ):
+        d.call(
+            case,
+            "POST",
+            "/messages",
+            status=status,
+            body={"action": "keys_publish", "record": record},
+            token=token,
+            shape=shape,
+        )
+    d.call(
+        "messages keys_get",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "keys_get", "kid": x.kid_a},
+        token=x.b,
+        shape={"key": {**KEY_ENTRY, "principal_id": Eq(x.node_a), "kid": Eq(x.kid_a)}},
+    )
+    for case, body, token, status, shape in (
+        (
+            "messages keys_get an unknown key",
+            {"action": "keys_get", "kid": "k1_" + b64(secrets.token_bytes(16))},
+            x.b,
+            404,
+            error_body("key not found"),
+        ),
+        (
+            "messages keys_get without a key id",
+            {"action": "keys_get"},
+            x.b,
+            400,
+            error_body("keys_get requires a key id"),
+        ),
+        (
+            "messages keys_get for a principal without grants",
+            {"action": "keys_get", "kid": x.kid_a},
+            x.principal_token,
+            404,
+            error_body("key not found"),
+        ),
+        ("messages manifests_get", {"action": "manifests_get"}, x.a, 200, {"statements": Eq({})}),
+        (
+            "messages manifests_get with arguments",
+            {"action": "manifests_get", "kind": "hub"},
+            x.a,
+            400,
+            error_body("manifests_get takes no arguments"),
+        ),
+    ):
+        d.call(case, "POST", "/messages", status=status, body=body, token=token, shape=shape)
+
+    # -- sealed envelopes: stored and returned byte for byte -------------------
+    cid = f"s1-{x.tag}"
+    value = sealed_envelope(
+        hub_id=hub_id, sender=x.node_a, sender_kid=x.kid_a, recipient=x.node_b, recipient_kid=x.kid_b, client_id=cid
+    )
+    text = canonical(value)
+    sealed_shape = {
+        "message": {
+            **SEALED_MESSAGE,
+            "sender": Eq(x.node_a),
+            "recipient": Eq(x.node_b),
+            "subject": Eq(""),
+            "body": Eq(""),
+            "ref": NONE,
+            "reply_to": NONE,
+            "client_id": Eq(cid),
+            "kind": Eq("message"),
+            "envelope": Eq(text),
+            "envelope_bytes": Eq(len(text)),
+            "content_state": Eq("sealed"),
+        }
+    }
+    sent = d.call(
+        "messages sealed send",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "send", "envelope": text},
+        token=x.a,
+        shape=sealed_shape,
+    )
+    sealed_id = _obj(sent.get("message")).get("id")
+    retried = d.call(
+        "messages sealed send retry",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "send", "envelope": text},
+        token=x.a,
+        shape=sealed_shape,
+    )
+    retry_id = _obj(retried.get("message")).get("id")
+    d.invariant(
+        "messages sealed send retry",
+        isinstance(sealed_id, int) and retry_id == sealed_id,
+        "resending the same envelope returns the first id",
+        [sealed_id, retry_id],
+    )
+    after = sealed_id - 1 if isinstance(sealed_id, int) and sealed_id > 0 else 0
+    page = d.call(
+        "messages sealed list",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "list", "after": after, "unacked": False},
+        token=x.b,
+        shape=PAGE,
+    )
+    listed = _keyed([{**m, "key": str(m.get("id"))} for m in _items(page, "messages")], "key").get(str(sealed_id), {})
+    d.invariant(
+        "messages sealed list",
+        listed.get("envelope") == text and listed.get("content_state") == "sealed",
+        "the recipient's inbox returns the envelope byte for byte",
+        {"content_state": listed.get("content_state"), "same_bytes": listed.get("envelope") == text},
+    )
+    malformed = {"error": Eq("invalid sealed envelope"), "code": Eq("envelope_malformed")}
+    bad_pad = dict(value, pad=1000, client_id=f"s2-{x.tag}")
+    short_digest = dict(value, ct_sha256=b64(secrets.token_bytes(16)), client_id=f"s3-{x.tag}")
+    as_b = sealed_envelope(
+        hub_id=hub_id,
+        sender=x.node_b,
+        sender_kid=x.kid_b,
+        recipient=x.node_a,
+        recipient_kid=x.kid_a,
+        client_id=f"s4-{x.tag}",
+    )
+    stale = sealed_envelope(
+        hub_id=hub_id,
+        sender=x.node_a,
+        sender_kid="k1_" + b64(secrets.token_bytes(16)),
+        recipient=x.node_b,
+        recipient_kid=x.kid_b,
+        client_id=f"s5-{x.tag}",
+    )
+    not_ascii = {"error": Eq("envelope must be canonical ASCII JSON text"), "code": Eq("envelope_malformed")}
+    for case, body, status, shape in (
+        (
+            "messages sealed send with plaintext fields",
+            {"action": "send", "envelope": text, "subject": "contract"},
+            400,
+            error_body("an envelope cannot accompany plaintext or routing fields"),
+        ),
+        (
+            "messages sealed send not in canonical form",
+            {"action": "send", "envelope": json.dumps(value)},
+            400,
+            malformed,
+        ),
+        (
+            "messages sealed send with a duplicate key",
+            {"action": "send", "envelope": '{"v":1,' + text[1:]},
+            400,
+            malformed,
+        ),
+        ("messages sealed send with bad padding", {"action": "send", "envelope": canonical(bad_pad)}, 400, malformed),
+        (
+            "messages sealed send with a short digest",
+            {"action": "send", "envelope": canonical(short_digest)},
+            400,
+            malformed,
+        ),
+        (
+            "messages sealed send as another sender",
+            {"action": "send", "envelope": canonical(as_b)},
+            403,
+            {"error": Eq("envelope sender must match caller"), "code": Eq("message_sender_mismatch")},
+        ),
+        (
+            "messages sealed send with a stale sender key",
+            {"action": "send", "envelope": canonical(stale)},
+            409,
+            {"error": Eq("sender key is no longer active"), "code": Eq("sender_key_stale")},
+        ),
+        (
+            "messages sealed send that is not ASCII",
+            {"action": "send", "envelope": text[:-1] + ',"x":"é"}'},
+            400,
+            not_ascii,
+        ),
+        ("messages sealed envelope that is not a string", {"action": "send", "envelope": value}, 400, not_ascii),
+        (
+            "messages sealed send over the size limit",
+            {"action": "send", "envelope": "x" * (96 * 1024 + 1)},
+            400,
+            {"error": Eq("sealed envelope exceeds storage limit"), "code": Eq("message_too_large")},
+        ),
+    ):
+        d.call(case, "POST", "/messages", status=status, body=body, token=x.a, shape=shape)
+    d.call(
+        "messages plaintext reply to a sealed message",
+        "POST",
+        "/messages",
+        status=400,
+        body={"action": "reply", "id": sealed_id, "body": "plain"},
+        token=x.b,
+        shape={"error": Eq("a sealed parent requires a sealed reply"), "code": Eq("message_sealing_required")},
+    )
+    unlinked = sealed_envelope(
+        hub_id=hub_id,
+        sender=x.node_b,
+        sender_kid=x.kid_b,
+        recipient=x.node_a,
+        recipient_kid=x.kid_a,
+        client_id=f"s6-{x.tag}",
+    )
+    d.call(
+        "messages sealed reply without in_reply_to",
+        "POST",
+        "/messages",
+        status=400,
+        body={"action": "reply", "id": sealed_id, "envelope": canonical(unlinked)},
+        token=x.b,
+        shape=error_body("reply_to and signed in_reply_to must both be present or absent"),
+    )
+    reply = canonical(
+        sealed_envelope(
+            hub_id=hub_id,
+            sender=x.node_b,
+            sender_kid=x.kid_b,
+            recipient=x.node_a,
+            recipient_kid=x.kid_a,
+            client_id=f"s7-{x.tag}",
+            in_reply_to={"hub": hub_id, "from": x.node_a, "client_id": cid},
+        )
+    )
+    d.call(
+        "messages sealed reply",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "reply", "id": sealed_id, "envelope": reply},
+        token=x.b,
+        shape={
+            "message": {
+                **SEALED_MESSAGE,
+                "sender": Eq(x.node_b),
+                "recipient": Eq(x.node_a),
+                "reply_to": Eq(sealed_id) if isinstance(sealed_id, int) else int,
+                "envelope": Eq(reply),
+                "content_state": Eq("sealed"),
+            }
+        },
+    )
+
+
+def drive_message_actions(d: Drive, x: Ctx) -> None:
+    """reply, sent_lookup, sent by ids, the station reads, and identity peers."""
+    m1 = x.m1 if isinstance(x.m1, int) else 0
+    m2 = x.m2 if isinstance(x.m2, int) else 0
+    replied = d.call(
+        "messages reply",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "reply", "id": m2, "body": "got it", "client_id": f"r1-{x.tag}"},
+        token=x.b,
+        shape={
+            "message": {
+                **MESSAGE,
+                "sender": Eq(x.node_b),
+                "recipient": Eq(x.node_a),
+                "subject": Eq("Re: contract"),
+                "reply_to": Eq(m2),
+            }
+        },
+    )
+    reply_id = _obj(replied.get("message")).get("id")
+    retried = d.call(
+        "messages reply retry",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "reply", "id": m2, "body": "got it", "client_id": f"r1-{x.tag}"},
+        token=x.b,
+        shape={"message": MESSAGE},
+    )
+    again = _obj(retried.get("message")).get("id")
+    d.invariant(
+        "messages reply retry",
+        isinstance(reply_id, int) and again == reply_id,
+        "a retried reply returns the first id",
+        [reply_id, again],
+    )
+    d.call(
+        "messages send with reply_to",
+        "POST",
+        "/messages",
+        status=201,
+        body={
+            "action": "send",
+            "to": x.node_a,
+            "subject": "contract",
+            "body": "via send",
+            "client_id": f"r2-{x.tag}",
+            "reply_to": m1,
+        },
+        token=x.b,
+        shape={"message": {**MESSAGE, "sender": Eq(x.node_b), "recipient": Eq(x.node_a), "reply_to": Eq(m1)}},
+    )
+    for case, body, token, status, shape in (
+        (
+            "messages reply to a message the caller did not receive",
+            {"action": "reply", "id": m2, "body": "not mine"},
+            x.a,
+            404,
+            error_body("message not found"),
+        ),
+        (
+            "messages reply with a bad id",
+            {"action": "reply", "id": 0, "body": "bad"},
+            x.b,
+            400,
+            error_body("id must be a positive integer within SQLite's range"),
+        ),
+        (
+            "messages send with a reply_to the caller sent",
+            {
+                "action": "send",
+                "to": x.node_a,
+                "subject": "contract",
+                "body": "wrong parent",
+                "client_id": f"r3-{x.tag}",
+                "reply_to": reply_id if isinstance(reply_id, int) else 1,
+            },
+            x.b,
+            400,
+            error_body("reply_to must identify an inbox message from the recipient"),
+        ),
+        (
+            "messages sent_lookup",
+            {"action": "sent_lookup", "client_id": x.c1},
+            x.a,
+            200,
+            {"message": {**MESSAGE, "id": Eq(m1), "client_id": Eq(x.c1)}},
+        ),
+        (
+            "messages sent_lookup unknown client_id",
+            {"action": "sent_lookup", "client_id": f"nope-{x.tag}"},
+            x.a,
+            404,
+            {"error": Eq("message not found"), "code": Eq("not_found")},
+        ),
+        (
+            "messages sent_lookup with extra fields",
+            {"action": "sent_lookup", "client_id": x.c1, "after": 0},
+            x.a,
+            400,
+            error_body("sent_lookup requires only client_id"),
+        ),
+        (
+            "messages sent with after and ids",
+            {"action": "sent", "after": 0, "ids": [m1]},
+            x.a,
+            400,
+            error_body("sent accepts either after or ids"),
+        ),
+    ):
+        d.call(case, "POST", "/messages", status=status, body=body, token=token, shape=shape)
+    by_ids = d.call(
+        "messages sent by ids",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "sent", "ids": [m2]},
+        token=x.a,
+        shape=PAGE,
+    )
+    d.invariant(
+        "messages sent by ids", _ids(by_ids) == [m2], "ids selects exactly the named sent messages", _ids(by_ids)
+    )
+
+    who = d.call("messages who", "POST", "/messages", status=200, body={"action": "who"}, token=x.b, shape=WHO)
+    nodes = _keyed(_items(who, "nodes"), "node_id")
+    principals = set(_keyed(_items(who, "principals"), "principal_id"))
+    d.invariant(
+        "messages who",
+        {x.node_a, x.node_b} <= set(nodes) and x.principal_id in principals,
+        "who lists the active nodes and the agent principal",
+        {"nodes": sorted(nodes), "principals": sorted(principals)},
+    )
+    kids = [key.get("kid") for key in _obj(nodes.get(x.node_a)).get("keys", []) if isinstance(key, dict)]
+    d.invariant("messages who", kids == [x.kid_a], "a node with a published key lists its active key", kids)
+    d.call(
+        "messages who with an unknown argument",
+        "POST",
+        "/messages",
+        status=400,
+        body={"action": "who", "bogus": True},
+        token=x.b,
+        shape=error_body("invalid station read arguments"),
+    )
+    d.call(
+        "messages who with a bad limit",
+        "POST",
+        "/messages",
+        status=400,
+        body={"action": "who", "limit": 0},
+        token=x.b,
+        shape=error_body("who limit must be an integer from 1 to 500"),
+    )
+    station = d.call(
+        "messages claims", "POST", "/messages", status=200, body={"action": "claims"}, token=x.b, shape=STATION_CLAIMS
+    )
+    targets = [item.get("target") for item in _items(station, "claims")]
+    d.invariant("messages claims", x.held_target in targets, "a node station read lists the held claim", targets)
+    d.call(
+        "messages claims for a principal without grants",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "claims"},
+        token=x.principal_token,
+        shape={**STATION_CLAIMS, "claims": Eq([]), "total": Eq(0)},
+    )
+    d.call(
+        "messages identity with peers for a node",
+        "POST",
+        "/messages",
+        status=403,
+        body={"action": "identity", "peers": ["agent:contract-peer"]},
+        token=x.a,
+        shape={
+            "error": Eq("identity peers requires an agent principal"),
+            "code": Eq("message_identity_peers_unsupported"),
+        },
+    )
+    d.call(
+        "messages identity with peers",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "identity", "peers": ["agent:contract-peer"]},
+        token=x.principal_token,
+        shape={
+            "schema": Eq("brigade.message_authorization.v1"),
+            "principal": Eq(x.principal_id),
+            "enrollment_epoch": NonEmpty(),
+            "grant_epoch": NonEmpty(),
+            "peers": [
+                {
+                    "principal": Eq("agent:contract-peer"),
+                    "authorized": Eq(False),
+                    "enrollment_epoch": NONE,
+                    "grant_epoch": NONE,
+                }
+            ],
+        },
+    )
+    d.call(
+        "messages identity with bad peers",
+        "POST",
+        "/messages",
+        status=400,
+        body={"action": "identity", "peers": [x.principal_id]},
+        token=x.principal_token,
+        shape={"error": Eq("invalid identity arguments"), "code": Eq("invalid_argument")},
+    )
+
+
+def drive_long_poll(d: Drive, x: Ctx) -> None:
+    """wait_ms bounds, an empty wait, the waiter cap, and a send waking every waiter."""
+    page = d.call(
+        "messages list before a long poll",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "list", "after": 0, "unacked": False},
+        token=x.b,
+        shape=PAGE,
+    )
+    ids = [value for value in _ids(page) if isinstance(value, int)]
+    cursor = max(ids) if ids else 0
+    bound = error_body(f"wait_ms must be an integer between 0 and {MAX_WAIT_MS}")
+    for case, wait in (
+        ("messages list wait_ms above the cap", MAX_WAIT_MS + 1),
+        ("messages list wait_ms that is not an integer", True),
+    ):
+        d.call(
+            case,
+            "POST",
+            "/messages",
+            status=400,
+            body={"action": "list", "after": cursor, "unacked": False, "wait_ms": wait},
+            token=x.b,
+            shape=bound,
+        )
+    started = time.monotonic()
+    d.call(
+        "messages list wait_ms times out empty",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "list", "after": cursor, "unacked": False, "wait_ms": 300},
+        token=x.b,
+        shape={"messages": Eq([]), "next_cursor": Eq(cursor)},
+    )
+    waited = time.monotonic() - started
+    d.invariant(
+        "messages list wait_ms times out empty",
+        waited >= 0.25,
+        "a long poll with no mail holds the request for about wait_ms",
+        round(waited, 3),
+    )
+    waiters, _ = park_waiters(d.hub, x.b, cursor)
+    d.call(
+        "messages list over the waiter cap",
+        "POST",
+        "/messages",
+        status=429,
+        body={"action": "list", "after": cursor, "unacked": False, "wait_ms": 1},
+        token=x.b,
+        shape={"error": Eq("message wait capacity reached"), "code": Eq("message_wait_capped")},
+    )
+    woken_at = time.monotonic()
+    sent = d.call(
+        "messages send wakes long polls",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "send", "to": x.node_b, "subject": "wake", "body": "wake", "client_id": f"w1-{x.tag}"},
+        token=x.a,
+        shape={"message": {**MESSAGE, "recipient": Eq(x.node_b)}},
+    )
+    wake_id = _obj(sent.get("message")).get("id")
+    record_waiters(d, "messages long poll woken by a send", waiters, woken_at, lambda got: _ids(got) == [wake_id])
+
+
+def drive_questions(d: Drive, x: Ctx, operator: str) -> None:
+    """question_create inserts a message for the operator, wakes its long poll, and is answered two ways."""
+    enrolled = d.call(
+        "message principal add the question operator",
+        "POST",
+        "/message-principals",
+        status=201,
+        body={"action": "add", "name": operator.removeprefix("agent:")},
+        token=x.admin,
+        shape={"principal": {"principal_id": Eq(operator), "token": NonEmpty()}},
+    )
+    op_token = str(_obj(enrolled.get("principal")).get("token") or "contract-missing-token")
+    if op_token != "contract-missing-token":
+        d.secrets.add(op_token)
+    d.call(
+        "message principal grants for the question operator",
+        "POST",
+        "/message-principals",
+        status=200,
+        body={"action": "grants", "name": operator.removeprefix("agent:"), "may_send_to": ["node:*"]},
+        token=x.admin,
+        shape={"principal": {"principal_id": Eq(operator), "may_send_to": Eq(["node:*"])}},
+    )
+    question = "Ship the contract drive?"
+    create = {"action": "question_create", "question": question, "timeout_secs": 120, "request_id": f"q1-{x.tag}"}
+    waiters, _ = park_waiters(d.hub, op_token, 0)
+    woken_at = time.monotonic()
+    created = d.call(
+        "questions create",
+        "POST",
+        "/messages",
+        status=201,
+        body=create,
+        token=x.a,
+        shape={
+            **QUESTION,
+            "caller": Eq(x.node_a),
+            "request_id": Eq(f"q1-{x.tag}"),
+            "operator": Eq(operator),
+            "status": Eq("pending"),
+            "answer": NONE,
+            "created": Eq(True),
+        },
+    )
+    qid = created.get("question_id")
+    asked = created.get("message_id")
+
+    def delivered(got: Any) -> bool:
+        items = _items(got, "messages")
+        return (
+            len(items) == 1
+            and str(items[0].get("id")) == asked
+            and items[0].get("kind") == "operator_question"
+            and items[0].get("sender") == x.node_a
+            and items[0].get("body") == question
+        )
+
+    record_waiters(d, "operator long poll woken by question_create", waiters, woken_at, delivered)
+    pinned = Eq(qid) if isinstance(qid, str) else HEX32
+    d.call(
+        "questions create retry",
+        "POST",
+        "/messages",
+        status=200,
+        body=create,
+        token=x.a,
+        shape={**QUESTION, "question_id": pinned, "created": Eq(False)},
+    )
+    q2 = {"action": "question_create", "question": "Second question?", "timeout_secs": 120, "request_id": f"q2-{x.tag}"}
+    for case, body, token, status, shape in (
+        (
+            "questions create with a reused request_id",
+            {**create, "question": "A different question?"},
+            x.a,
+            409,
+            {"error": Eq("request_id was used for a different question"), "code": Eq("question_request_conflict")},
+        ),
+        (
+            "questions status",
+            {"action": "question_status", "question_id": qid},
+            x.a,
+            200,
+            {**QUESTION, "question_id": pinned, "status": Eq("pending"), "created": Eq(False)},
+        ),
+        (
+            "questions status by another node",
+            {"action": "question_status", "question_id": qid},
+            x.b,
+            403,
+            {"error": Eq("question is not owned by this credential"), "code": Eq("question_not_owned")},
+        ),
+        (
+            "questions status with a malformed id",
+            {"action": "question_status", "question_id": "not-a-question"},
+            x.a,
+            400,
+            error_body("question_id is invalid"),
+        ),
+        (
+            "questions create with a bad timeout",
+            {**create, "timeout_secs": 0},
+            x.a,
+            400,
+            error_body("timeout_secs must be an integer from 1 to 120"),
+        ),
+        (
+            "questions create with an unsupported field",
+            {**create, "priority": "high"},
+            x.a,
+            400,
+            error_body("unsupported question fields"),
+        ),
+    ):
+        d.call(case, "POST", "/messages", status=status, body=body, token=token, shape=shape)
+    second = d.call(
+        "questions create a second question",
+        "POST",
+        "/messages",
+        status=201,
+        body=q2,
+        token=x.a,
+        shape={**QUESTION, "status": Eq("pending"), "created": Eq(True)},
+    )
+    d.call(
+        "questions create over the pending limit",
+        "POST",
+        "/messages",
+        status=429,
+        body={**q2, "request_id": f"q3-{x.tag}", "question": "Third question?"},
+        token=x.a,
+        shape={"error": Eq("question station has two pending questions"), "code": Eq("question_station_busy")},
+    )
+    d.call(
+        "questions desktop answer",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "question_desktop", "question_id": qid, "answer": "yes"},
+        token=x.a,
+        shape={
+            **QUESTION,
+            "question_id": pinned,
+            "status": Eq("answered"),
+            "answer": Eq("yes"),
+            "source": Eq("caller_reported_desktop"),
+            "answered_by": Eq(x.node_a),
+        },
+    )
+    second_message = second.get("message_id")
+    parent = int(second_message) if isinstance(second_message, str) and second_message.isdigit() else 1
+    answered = d.call(
+        "questions operator reply",
+        "POST",
+        "/messages",
+        status=201,
+        body={"action": "reply", "id": parent, "body": "approved"},
+        token=op_token,
+        shape={"message": {**MESSAGE, "sender": Eq(operator), "recipient": Eq(x.node_a), "reply_to": Eq(parent)}},
+    )
+    answer_id = _obj(answered.get("message")).get("id")
+    d.call(
+        "questions status after the operator reply",
+        "POST",
+        "/messages",
+        status=200,
+        body={"action": "question_status", "question_id": second.get("question_id")},
+        token=x.a,
+        shape={
+            **QUESTION,
+            "status": Eq("answered"),
+            "answer": Eq("approved"),
+            "source": Eq("operator_reply"),
+            "answered_by": Eq(operator),
+            "answer_id": Eq(str(answer_id)) if isinstance(answer_id, int) else DIGITS,
+        },
+    )
 
 
 def run_contract(hub: Hub) -> dict:
@@ -1419,23 +2912,48 @@ def run_contract(hub: Hub) -> dict:
     d.call("owners as admin", "GET", "/owners", status=200, token=admin, shape=OWNERS)
     d.call("worklore off by default", "GET", "/work/items", status=404, token=a, shape=error_body("not found"))
 
-    unexpected = sorted(d.routes - set(COVERED_ROUTES))
-    unlisted = sorted(set(COVERED_ROUTES) - d.routes)
-    if unexpected or unlisted:
-        d.mismatches.append(
-            {
-                "case": "coverage",
-                "check": "invariant",
-                "expected": "the drive exercises exactly COVERED_ROUTES",
-                "observed": {"not in COVERED_ROUTES": unexpected, "never exercised": unlisted},
-            }
-        )
+    # -- hot set: the routes the Rust hub ports first ------------------------
+    ctx = Ctx(
+        tag=tag,
+        admin=admin,
+        node_a=node_a,
+        node_b=node_b,
+        a=a,
+        b=b,
+        principal_id=f"agent:contract-agent-{tag}",
+        principal_token=principal_token,
+        m1=m1,
+        m2=m2,
+        c1=f"c1-{tag}",
+    )
+    drive_claim_fencing(d, ctx)
+    drive_keys_and_sealed(d, ctx)
+    drive_message_actions(d, ctx)
+    drive_long_poll(d, ctx)
+    drive_questions(d, ctx, hub.operator or new_operator())
+
+    for label, seen, listed in (
+        ("COVERED_ROUTES", d.routes, COVERED_ROUTES),
+        ("COVERED_MESSAGE_ACTIONS", d.actions, COVERED_MESSAGE_ACTIONS),
+    ):
+        unexpected = sorted(seen - set(listed))
+        unlisted = sorted(set(listed) - seen)
+        if unexpected or unlisted:
+            d.mismatches.append(
+                {
+                    "case": "coverage",
+                    "check": "invariant",
+                    "expected": f"the drive exercises exactly {label}",
+                    "observed": {f"not in {label}": unexpected, "never exercised": unlisted},
+                }
+            )
     secrets_ = {secret for secret in d.secrets if len(secret) >= 8}
     return {
         "cases": d.cases,
         "mismatches": scrub(d.mismatches, secrets_),
         "exchanges": scrub(d.exchanges, secrets_),
         "covered_routes": sorted(d.routes),
+        "covered_message_actions": sorted(d.actions),
     }
 
 
@@ -1447,12 +2965,18 @@ def drive(
     hub_url: str | None,
     admin_token: str | None,
     startup_timeout: float,
+    operator: str | None = None,
 ) -> tuple[Hub, dict]:
     """Start (or attach to) a hub, run the contract, and always stop what it started."""
     if hub_url is not None:
         if not admin_token:
             raise ContractError("--hub-url needs the admin token in the environment variable --admin-token-env names")
-        hub = Hub(url=guard_hub_url(hub_url), admin_token=admin_token, mode="external")
+        hub = Hub(
+            url=guard_hub_url(hub_url),
+            admin_token=admin_token,
+            mode="external",
+            operator=guard_operator(operator) if operator else new_operator(),
+        )
         return hub, run_contract(hub)
     if state_dir is None:
         raise ContractError("a launched hub needs a state directory")
