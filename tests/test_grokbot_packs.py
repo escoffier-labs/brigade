@@ -22,6 +22,7 @@ PACK_IDS = (
     "dot",
     "duet",
     "fleet-steward",
+    "grokbot-memory",
     "implementation-worker",
     "n8n-operator",
     "obsidian-operator",
@@ -192,6 +193,13 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert set(shown["tools"]) == dot.DUET_TOOLS
             assert shown["default_bind"] == "127.0.0.1:8780"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "grokbot-memory":
+            from brigade import dot
+
+            assert pack["kind"] == "connector"
+            assert set(shown["tools"]) == dot.GROKBOT_MEMORY_TOOLS
+            assert shown["default_bind"] == "127.0.0.1:8781"
             assert shown["public_route"] == ""
         elif pack["id"] == "t3-dispatch":
             assert pack["kind"] == "connector"
