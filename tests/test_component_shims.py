@@ -128,3 +128,16 @@ def test_snapshot_restore_keeps_an_operator_symlink(tmp_path):
     assert link.is_symlink()
     assert os.readlink(link) == str(target)
     assert target.read_bytes() == b"operator tool"
+
+
+def test_corrupted_split_copy_is_still_removed_for_repair(installed):
+    # A rollback after a failed repair restores the executable and its alias as
+    # separate files with the same corrupted bytes. The alias must stay removable.
+    current, root, source, shim = installed
+    create(current, root)
+    source.write_bytes(b"corrupted in place")
+    shim.unlink()
+    shim.write_bytes(b"corrupted in place")
+    shims.remove_shims(current, root, install.verify_cached_asset)
+    assert not shim.exists()
+    assert source.exists()

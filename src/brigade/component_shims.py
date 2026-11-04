@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import filecmp
 import os
 import tempfile
 from pathlib import Path
@@ -40,15 +41,23 @@ def remove_shims(
         shim = Path(component_paths.managed_executable_path(data_root, legacy))
         if shim.is_symlink() or not shim.is_file():
             continue
-        if not _shares_inode(shim, expected):
-            # A copy is ours only while it still matches the recorded asset.
+        if not (_shares_inode(shim, expected) or _same_bytes(shim, expected)):
+            # Otherwise a copy is ours only while it still matches the recorded asset.
             try:
                 verify(shim, byte_size=record.byte_size, sha256=record.sha256)
             except RuntimeError:
                 continue
-        # A hardlink to the managed executable is ours even when an in-place
-        # write corrupted both names, so setup can still repair the canonical file.
+        # A link or byte-identical copy of the managed executable is ours even when
+        # an in-place write corrupted both names, and stays recognizable after a
+        # rollback restores the two names as separate files. Setup can then repair.
         shim.unlink()
+
+
+def _same_bytes(path: Path, other: Path) -> bool:
+    try:
+        return other.is_file() and not other.is_symlink() and filecmp.cmp(path, other, shallow=False)
+    except OSError:
+        return False
 
 
 def _shares_inode(path: Path, other: Path) -> bool:
