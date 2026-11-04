@@ -69,7 +69,8 @@ def _fsync_dir(path: Path) -> None:
 
 
 def _fsync_file(path: Path) -> None:
-    with open(path, "rb") as handle:
+    # Windows refuses fsync on a read-only descriptor (EBADF).
+    with open(path, "r+b") as handle:
         os.fsync(handle.fileno())
 
 
