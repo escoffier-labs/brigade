@@ -585,3 +585,22 @@ def test_watchdog_never_restarts_a_fenced_hub(tmp_path):
     done = subprocess.run(["/bin/sh", str(RECIPE / "bin" / "hub-watchdog.sh")], env=env, timeout=30)
     assert done.returncode == 0
     assert not (tmp_path / "docker.calls").exists()
+
+
+def test_clean_exit_check_reads_a_stopped_container(monkeypatch):
+    calls = []
+
+    def run(argv, **_):
+        calls.append(argv)
+        from types import SimpleNamespace
+
+        if argv[:2] == ["docker", "logs"]:
+            return SimpleNamespace(stdout="brigade fleet hub stopped cleanly\n", stderr="", returncode=0)
+        # `compose ps -a -q hub` still lists the stopped container.
+        return SimpleNamespace(stdout="abc123\n" if "-a" in argv else "", stderr="", returncode=0)
+
+    monkeypatch.setattr(checks, "run", run)
+    assert checks.clean_exit_logged(container="known") is True
+    assert calls[-1][-1] == "known"
+    assert checks.clean_exit_logged() is True
+    assert calls[-1][-1] == "abc123"

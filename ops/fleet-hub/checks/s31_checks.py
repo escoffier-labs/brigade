@@ -194,11 +194,13 @@ def one_namespace(result: Result) -> None:
     result.ok(marks.get("front") == holder, "front is in the holder's namespace", marks.get("front"))
 
 
-def clean_exit_logged(service: str = "hub", since: str | None = None) -> bool:
+def clean_exit_logged(service: str = "hub", since: str | None = None, container: str | None = None) -> bool:
     argv = ["docker", "logs"]
     if since:
         argv += ["--since", since]
-    done = run([*argv, container_id(service) or service])
+    # A stopped container is missing from plain `compose ps`, so look it up with -a.
+    target = container or run(compose("ps", "-a", "-q", service)).stdout.strip() or service
+    done = run([*argv, target])
     return "brigade fleet hub stopped cleanly" in done.stdout + done.stderr
 
 
@@ -645,7 +647,7 @@ def check_restart(args: argparse.Namespace, result: Result) -> None:
             "docker stop ends the hub with exit 0",
             f"{time.monotonic() - started:.1f}s",
         )
-        result.ok(clean_exit_logged(), "hub logged a clean exit")
+        result.ok(clean_exit_logged(container=hub), "hub logged a clean exit")
         run(compose("up", "-d", "--no-build"), timeout=300)
     elif case == "hub-kill":
         run(["docker", "kill", container_id("hub")])
