@@ -164,6 +164,16 @@ class Registration(unittest.TestCase):
                     {"action": "revoke", "node_id": "test-node"},
                 )
                 self.assertEqual(revoked.status, 200, revoked.body)
+                # A token query parameter is refused before any registration write.
+                queried = request(
+                    "POST",
+                    "/nodes?%74oken=x",
+                    hub.admin_token,
+                    {"action": "add", "node_id": "query-node"},
+                )
+                self.assertEqual(queried.status, 401)
+                listed = request("GET", "/nodes", hub.admin_token)
+                self.assertNotIn(b"query-node", listed.body)
                 refused = request("GET", "/nodes", token)
                 self.assertEqual(refused.status, 401)
                 self.assertEqual(

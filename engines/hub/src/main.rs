@@ -290,6 +290,12 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
 fn req_path(parts: &axum::http::request::Parts) -> &str {
     parts.uri.path()
 }
+/// Matches Python's `"token" in parse_qs(query, keep_blank_values=True)`:
+/// names are split on `&` and percent- and plus-decoded.
+fn query_names_token(query: Option<&str>) -> bool {
+    query
+        .is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).any(|(name, _)| name == "token"))
+}
 fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
     if path == "/messages" && bytes.len() <= BODY_LIMIT {
         if let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(bytes) {
@@ -445,7 +451,10 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     let native = app
         .registration
         .as_ref()
-        .filter(|_| registration::Registration::route(parts.method.as_str(), parts.uri.path()));
+        .filter(|_| registration::Registration::route(parts.method.as_str(), parts.uri.path()))
+        // Python refuses any `token` query parameter with 401 before routing. Leave
+        // those requests to the proxy so the refusal and its bytes stay Python's.
+        .filter(|_| !query_names_token(parts.uri.query()));
     if let Some(native) = native {
         if let Some(refusal) = native.auth(&parts).await {
             return refusal;
@@ -998,6 +1007,14 @@ mod tests {
         assert_eq!(parse_upstream_key("fake-key", true).unwrap(), "fake-key");
     }
 
+    #[test]
+    fn token_query_names_match_python_parse_qs() {
+        assert!(query_names_token(Some("token=x")));
+        assert!(query_names_token(Some("a=1&token")));
+        assert!(query_names_token(Some("%74oken=x")));
+        assert!(!query_names_token(Some("tokens=x&a=token")));
+        assert!(!query_names_token(None));
+    }
     #[test]
     fn long_poll_uses_body_and_caps_wait() {
         assert_eq!(
