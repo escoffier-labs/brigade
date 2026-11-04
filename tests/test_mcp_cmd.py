@@ -762,3 +762,18 @@ def test_codex_sync_of_resolved_engine_command_settles_current(tmp_path, capsys,
         payload = _payload(capsys)
         assert payload["files_written"] == []
         assert all(item["status"] == "current" for item in payload["items"])
+
+
+def test_runtime_verification_probes_the_projected_engine_command(tmp_path, monkeypatch):
+    # verify must launch the same resolved engine path sync writes, not the bare catalog name.
+    engine = tmp_path / "bin" / "brigade-code-graph-mcp"
+    engine.parent.mkdir()
+    engine.write_text("#!/bin/sh\n")
+    engine.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_MCP_BIN", str(engine))
+    _init(tmp_path)
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command="graphtrail-mcp", json_output=True) == 0
+    servers, errors, _ = mcp_cmd.load_canonical(tmp_path)
+    assert errors == []
+    selected = mcp_cmd._servers_for_verification(servers, ["claude"])
+    assert selected["code-graph"].command == str(engine)

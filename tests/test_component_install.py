@@ -2643,3 +2643,45 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
     for old, canonical in aliases.items():
         shim = Path(component_paths.managed_executable_path(roots.data_root, old))
         assert shim.read_bytes() == Path(restored.components[canonical].executable).read_bytes()
+
+
+def test_upgrade_repairs_a_corrupted_legacy_install(tmp_path, monkeypatch):
+    # A v0.30 install is legacy-keyed: state names graphtrail and friends, and the
+    # managed executables sit at the legacy paths. If one was corrupted in place,
+    # setup must still migrate it to the canonical executable and its shim.
+    from dataclasses import replace
+
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    platform = "windows-amd64" if os.name == "nt" else "linux-amd64"
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: platform)
+    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+    downloads = all_fixture_payloads(platform=platform)
+    roots = resolve_roots(env=env)
+
+    def fixture_runner(argv, **kwargs):
+        if os.name == "nt":
+            argv = [sys.executable, *argv]
+        return subprocess.run(argv, **kwargs)
+
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    components = dict(state.components)
+    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items():
+        record = components.pop(canonical)
+        legacy_path = Path(component_paths.managed_executable_path(roots.data_root, legacy))
+        legacy_path.unlink()  # the shim R5 created
+        os.replace(record.executable, legacy_path)
+        components[legacy] = replace(record, executable=str(legacy_path))
+    component_state.write_installed_state(state_path, replace(state, components=components))
+    legacy = next(iter(component_manifest.COMPONENT_FAMILIES))
+    legacy_path = Path(component_paths.managed_executable_path(roots.data_root, legacy))
+    with legacy_path.open("r+b") as handle:
+        handle.write(b"CORRUPT")
+
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    repaired = component_state.load_installed_state(state_path)
+    assert legacy not in repaired.components
+    record = repaired.components[component_manifest.COMPONENT_FAMILIES[legacy]]
+    assert Path(record.executable).read_bytes() == downloads[record.download_url]
+    assert legacy_path.read_bytes() == Path(record.executable).read_bytes()
