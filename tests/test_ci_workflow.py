@@ -2431,7 +2431,8 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine):
 
     base, bodies, checksums = _release_fixture(additive=case != "legacy")
     if case == "partial":
-        del checksums["brigade-evidence-linux-amd64"]
+        # Drop one legacy alias: the pinned canonical set stays complete, so only the count check can catch it.
+        del checksums["miseledger-linux-amd64"]
     elif case == "corrupt":
         bodies["brigade-evidence-windows-amd64.exe"] = b"bad alias"
     elif case == "extra":
