@@ -41,15 +41,17 @@ pub struct Metrics {
     pub busy: u64,
     pub failures: u64,
     pub wal_bytes: u64,
-    pub free_bytes: u64,
+    pub free_bytes: Option<u64>,
     pub sweeps_rejected: u64,
 }
 #[derive(Default)]
 pub struct DiskPressure(AtomicBool);
 impl DiskPressure {
-    pub fn update(&self, wal_bytes: u64, free_bytes: u64) {
-        self.0
-            .store(wal_bytes > GIB || free_bytes < GIB, Ordering::Release);
+    pub fn update(&self, wal_bytes: u64, free_bytes: Option<u64>) {
+        self.0.store(
+            wal_bytes > GIB || free_bytes.is_some_and(|free| free < GIB),
+            Ordering::Release,
+        );
     }
     pub fn admit(&self, durable: bool) -> Result<(), &'static str> {
         if !durable && self.0.load(Ordering::Acquire) {
@@ -95,23 +97,73 @@ fn open(path: &Path) -> Result<Connection, String> {
     }
     Ok(c)
 }
-fn free_bytes(path: &Path) -> u64 {
-    // Python is already required by the proxy. Its portable API avoids platform
-    // dependent statvfs layouts and adds no runtime package dependency.
-    std::process::Command::new(
-        std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
-    )
-    .args([
-        "-c",
-        "import shutil,sys; print(shutil.disk_usage(sys.argv[1]).free)",
-    ])
-    .arg(path.parent().unwrap_or(Path::new(".")))
-    .output()
-    .ok()
-    .filter(|o| o.status.success())
-    .and_then(|o| String::from_utf8(o.stdout).ok())
-    .and_then(|s| s.trim().parse().ok())
-    .unwrap_or(0)
+fn database_directory(path: &Path) -> &Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
+#[cfg(unix)]
+#[allow(clippy::unnecessary_cast)] // statvfs field widths vary across Unix targets.
+fn free_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::{ffi::CString, mem::MaybeUninit, os::unix::ffi::OsStrExt};
+    let directory = CString::new(database_directory(path).as_os_str().as_bytes())?;
+    let mut stat = MaybeUninit::<libc::statvfs>::uninit();
+    // SAFETY: directory is NUL-terminated and stat points to writable storage.
+    if unsafe { libc::statvfs(directory.as_ptr(), stat.as_mut_ptr()) } != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: statvfs initialized stat on success.
+    let stat = unsafe { stat.assume_init() };
+    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64))
+}
+
+#[cfg(windows)]
+fn free_bytes(path: &Path) -> std::io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let directory: Vec<u16> = database_directory(path)
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect();
+    let mut available = 0;
+    // SAFETY: directory is NUL-terminated and available is writable; the other
+    // optional output pointers are null.
+    if unsafe {
+        GetDiskFreeSpaceExW(
+            directory.as_ptr(),
+            &mut available,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(available)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn free_bytes(_: &Path) -> std::io::Result<u64> {
+    Err(std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "disk space sampler unavailable",
+    ))
+}
+
+fn sample_space<'a>(paths: impl Iterator<Item = &'a Path>) -> Option<u64> {
+    // Failed samples are unknown, never zero. Ignore them for admission while
+    // retaining low-space pressure from any successfully sampled volume.
+    paths
+        .filter_map(|path| match free_bytes(path) {
+            Ok(free) => Some(free),
+            Err(error) => {
+                eprintln!("disk space sample failed for {}: {error}", path.display());
+                None
+            }
+        })
+        .min()
 }
 struct FileState {
     path: PathBuf,
@@ -201,7 +253,7 @@ impl Maintenance {
                 })
                 .max()
                 .unwrap_or(0),
-            files.iter().map(|f| free_bytes(&f.path)).min().unwrap_or(0),
+            sample_space(files.iter().map(|f| f.path.as_path())),
         );
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let (stop, receive) = mpsc::sync_channel(256);
@@ -210,7 +262,7 @@ impl Maintenance {
             let mut sweep_at = Instant::now();
             let mut schema_cookie = initial_cookie;
             let mut space_sample = Instant::now() - Duration::from_secs(1);
-            let mut free = 0;
+            let mut free = None;
             loop {
                 match receive.recv_timeout(Duration::from_millis(250)) {
                     Ok(Command::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -236,7 +288,7 @@ impl Maintenance {
                 }
                 let mut max_wal = 0;
                 if space_sample.elapsed() >= Duration::from_secs(1) {
-                    free = files.iter().map(|f| free_bytes(&f.path)).min().unwrap_or(0);
+                    free = sample_space(files.iter().map(|f| f.path.as_path()));
                     space_sample = Instant::now();
                 }
                 for (index, file) in files.iter_mut().enumerate() {
@@ -329,5 +381,128 @@ impl Drop for Maintenance {
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_sample_does_not_trip_pressure() {
+        let path = std::env::temp_dir()
+            .join(format!("hub-missing-volume-{}", std::process::id()))
+            .join("missing")
+            .join("hub.db");
+        let sample = sample_space(std::iter::once(path.as_path()));
+        assert_eq!(sample, None);
+        let disk = DiskPressure::default();
+        disk.update(0, sample);
+        assert_eq!(disk.admit(false), Ok(()));
+        disk.update(GIB + 1, sample);
+        assert_eq!(disk.admit(false), Err("disk-pressure"));
+        disk.update(0, Some(0));
+        assert_eq!(disk.admit(false), Err("disk-pressure"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_sampler_starts_no_child_process() {
+        if std::env::var_os("HUB_SAMPLER_TEST_CHILD").is_none() {
+            let dir = std::env::temp_dir().join(format!("hub-sampler-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "maintenance::tests::unix_sampler_starts_no_child_process",
+                ])
+                .env("HUB_SAMPLER_TEST_CHILD", "1")
+                .current_dir(&dir)
+                .status()
+                .unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+            assert!(result.success());
+            return;
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
+        {
+            // This isolated test thread may not create processes. A subprocess
+            // implementation cannot return a successful sample under this filter.
+            let mut filter = vec![libc::sock_filter {
+                code: 0x20,
+                jt: 0,
+                jf: 0,
+                k: 0, // BPF_LD | BPF_W | BPF_ABS: syscall nr
+            }];
+            for syscall in [
+                libc::SYS_clone,
+                libc::SYS_clone3,
+                libc::SYS_fork,
+                libc::SYS_vfork,
+            ] {
+                filter.push(libc::sock_filter {
+                    code: 0x15,
+                    jt: 0,
+                    jf: 1,
+                    k: syscall as u32, // BPF_JMP | BPF_JEQ
+                });
+                filter.push(libc::sock_filter {
+                    code: 0x06,
+                    jt: 0,
+                    jf: 0, // BPF_RET: EPERM
+                    k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+                });
+            }
+            filter.push(libc::sock_filter {
+                code: 0x06,
+                jt: 0,
+                jf: 0,
+                k: libc::SECCOMP_RET_ALLOW,
+            });
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_mut_ptr(),
+            };
+            // SAFETY: prctl receives the documented scalar arguments and a valid
+            // BPF program. The filter applies only to this isolated test thread.
+            unsafe {
+                assert_eq!(libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), 0);
+                assert_eq!(
+                    libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program),
+                    0
+                );
+            }
+        }
+        // No other tests run in this subprocess, so child resource accounting
+        // also catches reaped sampler children on other Unix platforms.
+        let children = || {
+            let mut usage = std::mem::MaybeUninit::<libc::rusage>::uninit();
+            // SAFETY: usage points to writable storage, initialized on success.
+            assert_eq!(
+                unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, usage.as_mut_ptr()) },
+                0
+            );
+            unsafe { usage.assume_init() }
+        };
+        let before = children();
+        assert_eq!(database_directory(Path::new("hub.db")), Path::new("."));
+        for _ in 0..3 {
+            assert!(free_bytes(Path::new("hub.db")).unwrap() > 0);
+        }
+        let after = children();
+        assert_eq!(
+            (
+                before.ru_utime.tv_sec,
+                before.ru_utime.tv_usec,
+                before.ru_stime.tv_sec,
+                before.ru_stime.tv_usec
+            ),
+            (
+                after.ru_utime.tv_sec,
+                after.ru_utime.tv_usec,
+                after.ru_stime.tv_sec,
+                after.ru_stime.tv_usec
+            )
+        );
     }
 }

@@ -17,3 +17,9 @@ rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 url = "=2.4.1"
+
+[target.'cfg(unix)'.dependencies]
+libc = "=0.2.191"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "=0.61.2", features = ["Win32_Storage_FileSystem"] }

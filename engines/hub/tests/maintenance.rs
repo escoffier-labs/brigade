@@ -55,11 +55,11 @@ fn version_watch_ignores_own_commits_and_notices_other_connections() {
 fn disk_pressure_preserves_durable_writes_and_recovers() {
     let disk = DiskPressure::default();
     for (wal, free) in [(0, 0), (1024 * 1024 * 1024 + 1, u64::MAX)] {
-        disk.update(wal, free);
+        disk.update(wal, Some(free));
         assert_eq!(disk.admit(false), Err("disk-pressure"));
         assert_eq!(disk.admit(true), Ok(()));
     }
-    disk.update(0, u64::MAX);
+    disk.update(0, Some(u64::MAX));
     assert_eq!(disk.admit(false), Ok(()));
 }
 
@@ -106,7 +106,7 @@ fn maintenance_checkpoints_both_files_and_schedules_writer_commands() {
 #[test]
 fn durable_admission_leaves_sqlite_full_to_the_writer() {
     let disk = DiskPressure::default();
-    disk.update(0, 0);
+    disk.update(0, Some(0));
     assert_eq!(disk.admit(true), Ok(()));
     let c = Connection::open_in_memory().unwrap();
     c.execute_batch("PRAGMA page_size=512; PRAGMA max_page_count=2; CREATE TABLE t(x)")
