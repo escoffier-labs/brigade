@@ -772,7 +772,10 @@ def test_runtime_verification_probes_the_projected_engine_command(tmp_path, monk
     engine.chmod(0o755)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_MCP_BIN", str(engine))
     _init(tmp_path)
-    assert mcp_cmd.add(target=tmp_path, name="code-graph", command="graphtrail-mcp", json_output=True) == 0
+    from brigade import component_manifest
+
+    legacy = next(k for k, v in component_manifest.COMPONENT_FAMILIES.items() if v == "brigade-code-graph-mcp")
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command=legacy, json_output=True) == 0
     servers, errors, _ = mcp_cmd.load_canonical(tmp_path)
     assert errors == []
     selected = mcp_cmd._servers_for_verification(servers, ["claude"])
