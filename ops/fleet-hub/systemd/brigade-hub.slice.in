@@ -11,4 +11,7 @@ CPUWeight=10000
 MemoryMin=1G
 MemoryMax=3G
 IOWeight=1000
+# Its peer here is the embedder slice only: this target keeps the embedder's
+# model reads from stretching the hub's commits. The target on brigade.slice
+# is the one that acts on agent writers.
 IODeviceLatencyTargetSec=@DB_DEVICE@ @IO_LATENCY@

@@ -101,7 +101,10 @@ Conventions:
   slices reserve 2 performance cores, `MemoryMin` 1 GiB and `MemoryMax` 3 GiB
   for the hub, and 1 core, 2 GiB and 4 GiB for the embedder. They set
   `CPUWeight=10000`, `IOWeight=1000` and an I/O latency target on the database
-  device. The drop-ins keep agent work off the reserved cores.
+  device. The kernel applies a latency target only between peers, so the one
+  that acts on agent writers in `user.slice` and `system.slice` is on
+  `brigade.slice`, their peer, and the hub slice's own target acts on the
+  embedder slice beside it. The drop-ins keep agent work off the reserved cores.
 - Command (Docker must use the systemd cgroup driver:
   `docker info -f '{{.CgroupDriver}}'` prints `systemd`):
 

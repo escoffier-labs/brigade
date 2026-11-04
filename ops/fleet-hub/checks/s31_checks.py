@@ -301,9 +301,16 @@ def check_io(args: argparse.Namespace, result: Result) -> None:
     major_minor = args.device_id
     qos = (CGROUP / "io.cost.qos").read_text(encoding="utf-8") if (CGROUP / "io.cost.qos").exists() else ""
     enabled = any(line.startswith(major_minor) and "enable=1" in line for line in qos.splitlines())
-    latency = CGROUP / "brigade.slice" / "brigade-hub.slice" / "io.latency"
-    target = latency.read_text(encoding="utf-8").strip() if latency.exists() else ""
-    result.ok(major_minor in target, "hub slice io.latency names the database device", target or "absent")
+    # The kernel applies io.latency only between peers, so the target that
+    # protects the hub from agent writers sits on brigade.slice, the peer of
+    # user.slice and system.slice. The hub slice's own target guards it from
+    # its embedder sibling.
+    for name, path in (
+        ("brigade slice", CGROUP / "brigade.slice" / "io.latency"),
+        ("hub slice", CGROUP / "brigade.slice" / "brigade-hub.slice" / "io.latency"),
+    ):
+        target = path.read_text(encoding="utf-8").strip() if path.exists() else ""
+        result.ok(major_minor in target, f"{name} io.latency names the database device", target or "absent")
     if enabled:
         result.add(
             "INFO", "io.cost.qos enabled for the device: IOWeight can act", "record a fdatasync run with --writer"
@@ -635,6 +642,74 @@ def check_load(args: argparse.Namespace, result: Result) -> None:
     result.add("INFO", "refused connections", outcomes.get("refused", 0))
 
 
+# Run inside the hub container by `restart --case hub-kill`. `docker kill`
+# marks a container manually stopped, so the restart policy ignores it and the
+# watchdog skips it. A crash is the hub's own process dying instead. docker-init
+# is PID 1 (compose `init: true`), and a namespace's init ignores SIGKILL sent
+# from inside the namespace, so this signals its child, `brigade fleet serve`.
+# docker exec runs as the image's USER 10001, the serve process's own uid, so
+# the kill needs no CAP_KILL (compose drops every capability). docker-init then
+# exits non-zero and `restart: unless-stopped` starts the container again.
+KILL_SERVE = """
+import os, signal
+me = os.getpid()
+for name in os.listdir("/proc"):
+    if not name.isdigit() or int(name) in (1, me):
+        continue
+    try:
+        with open(f"/proc/{name}/cmdline", "rb") as handle:
+            argv = handle.read().split(b"\\0")
+    except OSError:
+        continue
+    if any(argv[i : i + 2] == [b"fleet", b"serve"] for i in range(len(argv))):
+        os.kill(int(name), signal.SIGKILL)
+        print(name)
+        break
+else:
+    raise SystemExit("no brigade fleet serve process in the container")
+"""
+
+
+def restart_count(container: str) -> int:
+    text = inspect(container, "{{.RestartCount}}")
+    return int(text) if text.isdigit() else -1
+
+
+def hub_kill(result: Result, limit: float = 60) -> None:
+    """SIGKILL the hub's serve process, then expect the restart policy and the front to bring it back."""
+    hub = container_id("hub")
+    before = restart_count(hub)
+    killed = run(["docker", "exec", hub, "python", "-c", KILL_SERVE])
+    started = time.monotonic()
+    result.ok(
+        killed.returncode == 0, "SIGKILL to the hub's serve process", (killed.stdout + killed.stderr).strip()[:200]
+    )
+    after = before
+    while time.monotonic() - started < limit:
+        after = restart_count(hub)
+        if after > before:
+            break
+        time.sleep(1)
+    restarted = result.ok(
+        after > before, "restart policy restarted the hub container", f"RestartCount {before} -> {after}"
+    )
+    took = None
+    if restarted:
+        rest = wait_for_front(max(0.0, limit - (time.monotonic() - started)))
+        took = None if rest is None else round(time.monotonic() - started, 1)
+    result.ok(took is not None, "request through the front within 60 s of killing the hub process", took)
+    if took is None:
+        # Leave the host serving: start the hub, and the front if it exited too.
+        services = ["hub"]
+        front = container_id("front")
+        if not front or inspect(front, "{{.State.Running}}") != "true":
+            services.append("front")
+        up = run(compose("up", "-d", "--no-build", *services), timeout=300)
+        result.add(
+            "INFO", "recovery failed; service restored with compose up", {"services": services, "rc": up.returncode}
+        )
+
+
 def check_restart(args: argparse.Namespace, result: Result) -> None:
     """Restart cases. Every case but `after-reboot` changes state: it stops, kills or restarts containers or the daemon."""
     case = args.case
@@ -650,9 +725,7 @@ def check_restart(args: argparse.Namespace, result: Result) -> None:
         result.ok(clean_exit_logged(container=hub), "hub logged a clean exit")
         run(compose("up", "-d", "--no-build"), timeout=300)
     elif case == "hub-kill":
-        run(["docker", "kill", container_id("hub")])
-        took = wait_for_front(60)
-        result.ok(took is not None, "request through the front within 60 s of killing the hub process", took)
+        hub_kill(result)
     elif case == "holder-restart":
         run(["docker", "restart", container_id("netns")])
         took = wait_for_front(90)

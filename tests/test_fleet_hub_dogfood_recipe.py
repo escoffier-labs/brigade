@@ -262,6 +262,9 @@ def test_units_render_every_placeholder(project, tmp_path):
     assert f"ConditionPathExists=!{project}/hub.fenced" in boot
     assert "AllowedCPUs=6-7" in rendered["brigade-hub.slice"]
     assert "IODeviceLatencyTargetSec=/dev/nvme0n1 10ms" in rendered["brigade-hub.slice"]
+    # io.latency acts only between peers: agents in user.slice and system.slice
+    # compete with brigade.slice, so the target that protects the hub is there.
+    assert "IODeviceLatencyTargetSec=/dev/nvme0n1 10ms" in rendered["brigade.slice"]
     assert "AllowedCPUs=0-4,8-23" in rendered["user.slice.d/50-brigade-agent-cpus.conf"]
     assert "OnUnitActiveSec=10s" in rendered["brigade-hub-watchdog.timer"]
     assert "--profile backup run --rm --no-deps backup" in rendered["brigade-hub-backup.service"]
@@ -618,3 +621,63 @@ def test_clean_exit_check_reads_a_stopped_container(monkeypatch):
     assert calls[-1][-1] == "known"
     assert checks.clean_exit_logged() is True
     assert calls[-1][-1] == "abc123"
+
+
+def _hub_kill_fakes(monkeypatch, *, restarted: bool):
+    from types import SimpleNamespace
+
+    calls = []
+    state = {"killed": False}
+
+    def run(argv, **_):
+        calls.append(argv)
+        if argv[:2] == ["docker", "exec"]:
+            state["killed"] = True
+            return SimpleNamespace(stdout="7\n", stderr="", returncode=0)
+        if argv[:2] == ["docker", "inspect"] and argv[3] == "{{.RestartCount}}":
+            count = "1" if state["killed"] and restarted else "0"
+            return SimpleNamespace(stdout=count + "\n", stderr="", returncode=0)
+        if argv[:2] == ["docker", "inspect"] and argv[3] == "{{.State.Running}}":
+            return SimpleNamespace(stdout="false\n", stderr="", returncode=0)
+        if "ps" in argv:
+            return SimpleNamespace(stdout=f"{argv[-1]}-cid\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr(checks, "run", run)
+    monkeypatch.setattr(checks, "wait_for_front", lambda limit: 2.0 if restarted else None)
+    monkeypatch.setattr(checks, "one_namespace", lambda result: None)
+    clock = {"now": 0.0}
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    monkeypatch.setattr(checks, "time", SimpleNamespace(monotonic=lambda: clock["now"], sleep=sleep))
+    return calls
+
+
+def test_hub_kill_signals_the_serve_process_and_never_uses_docker_kill(monkeypatch, capsys):
+    import argparse
+
+    calls = _hub_kill_fakes(monkeypatch, restarted=True)
+    result = checks.Result("restart")
+    checks.check_restart(argparse.Namespace(case="hub-kill"), result)
+    assert not any(argv[:2] == ["docker", "kill"] for argv in calls)
+    execs = [argv for argv in calls if argv[:2] == ["docker", "exec"]]
+    assert execs == [["docker", "exec", "hub-cid", "python", "-c", checks.KILL_SERVE]]
+    script = checks.KILL_SERVE
+    compile(script, "kill-serve", "exec")
+    assert "signal.SIGKILL" in script and '[b"fleet", b"serve"]' in script
+    # PID 1 (docker-init) ignores SIGKILL from inside its namespace, so it is skipped.
+    assert "(1, me)" in script
+    assert result.status == "pass"
+    assert not any("up" in argv for argv in calls)
+
+
+def test_hub_kill_restores_service_when_the_container_does_not_restart(monkeypatch, capsys):
+    import argparse
+
+    calls = _hub_kill_fakes(monkeypatch, restarted=False)
+    result = checks.Result("restart")
+    checks.check_restart(argparse.Namespace(case="hub-kill"), result)
+    assert result.status == "fail"
+    assert calls[-1][-5:] == ["up", "-d", "--no-build", "hub", "front"]

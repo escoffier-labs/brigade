@@ -1,5 +1,9 @@
 # Parent of the hub and embedder slices. A child's MemoryMin only takes effect
 # up to its parent's, so the parent reserves the sum of both.
+# The kernel applies io.latency only between peers at one level of the cgroup
+# tree. Agent work runs in user.slice and system.slice, whose peer is this
+# slice, not the hub slice, so the latency target that holds agent writers back
+# when the hub's I/O misses it sits here.
 [Unit]
 Description=Brigade reserved resources (dogfood hub and embedder)
 
@@ -7,3 +11,4 @@ Description=Brigade reserved resources (dogfood hub and embedder)
 AllowedCPUs=@HUB_CPUS@,@EMBED_CPUS@
 CPUWeight=10000
 MemoryMin=3G
+IODeviceLatencyTargetSec=@DB_DEVICE@ @IO_LATENCY@
