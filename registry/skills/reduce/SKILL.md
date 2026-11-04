@@ -14,10 +14,10 @@ A reduction simmers a sauce to drive off the water and concentrate the flavor, a
 Before you change a single line, establish the lock. This is the whole safety story; everything else is taste.
 
 1. **Pin the scope.** Default to the code that recently changed (see Scope). Know exactly which files and functions you are reducing before you start.
-2. **Find the tests that cover it.** Run them and confirm they exercise the code you are about to touch. If coverage is thin, write characterization tests first ([taste](../taste/SKILL.md)) that capture the *current* behavior, edge cases included, only when that is safe and in scope. If you cannot lock the behavior with tests, drop to report mode.
+2. **Find the tests that cover it.** Run them and confirm they exercise the code you are about to touch. If coverage is thin, write characterization tests first (`superpowers:test-driven-development`) that capture the *current* behavior, edge cases included, only when that is safe and in scope. If you cannot lock the behavior with tests, drop to report mode.
 3. **Baseline-verify green.** Run the suite and read the output before touching anything. You are proving the starting point, not assuming it.
 4. **Reduce in small steps,** one category of simplification at a time (see What to reduce).
-5. **Re-run the same verification after each meaningful change.** Evidence in hand before any "behavior unchanged" claim ([check](../check/SKILL.md)). A reduction you did not re-run is a hypothesis.
+5. **Re-run the same verification after each meaningful change.** Evidence in hand before any "behavior unchanged" claim (`superpowers:verification-before-completion`). A reduction you did not re-run is a hypothesis.
 6. **Cannot lock it?** Switch to report mode or ask the user. Never apply a simplification you cannot prove safe.
 
 ## Two modes
@@ -67,7 +67,7 @@ Dead code in one commit, duplication in the next, guard clauses in the next. Eac
 
 `reduce` applies changes; it is not an audit and it does not hunt for defects.
 
-- Borrows from [taste](../taste/SKILL.md) for characterization tests, [check](../check/SKILL.md) for evidence before claims, and [refire](../refire/SKILL.md) when a reduction surfaces a real bug: stop, do not "simplify" the bug away, switch to debugging.
+- Borrows from `superpowers:test-driven-development` for characterization tests, `superpowers:verification-before-completion` for evidence before claims, and `superpowers:systematic-debugging` when a reduction surfaces a real bug: stop, do not "simplify" the bug away, switch to debugging.
 - Hands accepted report findings to [expedite](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/expedite/SKILL.md) to drive to done.
 - Hands correctness issues to [bug-hunt](../bug-hunt/SKILL.md), security issues to [security-sweep](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/security-sweep/SKILL.md), and repo-wide quality to [line-check](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/line-check/SKILL.md). Finding a bug is not in scope here; routing it is.
 
