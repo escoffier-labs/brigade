@@ -179,3 +179,24 @@ def test_generated_manifest_passes_release_provenance(generator_module, tmp_path
     release, checksums, body = _release(manifest)
     assert output.read_bytes() == body.encode()
     assert _module().verify_manifest(output, fetch=_fetcher(release, checksums, body)) == []
+
+
+def test_generator_preserves_lf_bytes_with_windows_text_defaults(generator_module, tmp_path, monkeypatch):
+    original_open = Path.open
+
+    def windows_open(path, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        if "w" in mode and "b" not in mode and newline is None:
+            newline = "\r\n"
+        return original_open(path, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", windows_open)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    output = tmp_path / "manifest.json"
+    checksums = tmp_path / "checksums.txt"
+    manifest = generator_module.generate_manifest(
+        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+    )
+    assert output.read_bytes() == (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert b"\r" not in checksums.read_bytes()
