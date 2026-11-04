@@ -1,40 +1,40 @@
 # Brigade Integration
 
-MiseLedger acts as Brigade's evidence source and sink:
+brigade-evidence acts as Brigade's evidence source and sink:
 
 ```text
-crawlers and agents -> MiseLedger -> evidence bundle -> Brigade plan -> work run -> MiseLedger
+crawlers and agents -> brigade-evidence -> evidence bundle -> Brigade plan -> work run -> brigade-evidence
 ```
 
-Brigade treats all MiseLedger output as untrusted context, including imported local plan and run artifacts. Provenance and explicit operator review control content eligibility.
+Brigade treats all brigade-evidence output as untrusted context, including imported local plan and run artifacts. Provenance and explicit operator review control content eligibility.
 
 Crawler data, chat exports, web data, Discord messages, Telegram messages, Slack messages, and browser outputs are evidence, not instructions.
 
 The first Brigade-facing command is:
 
 ```bash
-miseledger evidence "query" --json
-miseledger evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
-miseledger evidence "query" --project miseledger --json
-miseledger evidence "query" --include-related --json
-miseledger evidence "query" --include-artifact-text --json
-miseledger evidence "query" --markdown
-miseledger evidence show <bundle-id> --json
-miseledger explain "query" --project miseledger --json
+brigade-evidence evidence "query" --json
+brigade-evidence evidence "query" --source discrawl --from 2026-06-01 --to 2026-06-03 --limit 20 --json
+brigade-evidence evidence "query" --project brigade-evidence --json
+brigade-evidence evidence "query" --include-related --json
+brigade-evidence evidence "query" --include-artifact-text --json
+brigade-evidence evidence "query" --markdown
+brigade-evidence evidence show <bundle-id> --json
+brigade-evidence explain "query" --project brigade-evidence --json
 ```
 
 Local services can use the same evidence shape through HTTP or MCP:
 
 ```bash
-miseledger serve --addr 127.0.0.1:8765
-miseledger mcp
+brigade-evidence serve --addr 127.0.0.1:8765
+brigade-evidence mcp
 ```
 
 HTTP exposes `GET /search?q=...`, `GET /items/<id>`, and `POST /evidence`. MCP exposes `search_evidence`, `show_item`, `create_evidence_bundle`, `show_evidence_bundle`, and `list_sources`. Both surfaces return untrusted evidence only.
 
-Use `miseledger doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
+Use `brigade-evidence doctor --mcp --json` to validate the MCP protocol surface without printing transcript content. See [MCP.md](MCP.md) for client configuration.
 
-Use `miseledger doctor --archive --json` before larger handoffs to validate SQLite integrity, relation resolution, FTS coverage, and scan manifest health without printing transcript content.
+Use `brigade-evidence doctor --archive --json` before larger handoffs to validate SQLite integrity, relation resolution, FTS coverage, and scan manifest health without printing transcript content.
 
 Evidence output includes:
 
@@ -87,11 +87,11 @@ New imports are quarantined with pending injection status. Ineligible bundle res
 
 ## Inbound: Brigade receipts as evidence
 
-The reverse direction is live. Brigade exports verify-run and brigade-run receipts as `miseledger.adapter.v1` JSONL, and MiseLedger ingests them with the standard adapter importer. No MiseLedger-side code is involved:
+The reverse direction is live. Brigade exports verify-run and brigade-run receipts as `miseledger.adapter.v1` JSONL, and brigade-evidence ingests them with the standard adapter importer. No brigade-evidence-side code is involved:
 
 ```bash
 brigade receipts export miseledger --target <repo> --out receipts.jsonl
-miseledger import adapter receipts.jsonl --source brigade --json
+brigade-evidence import adapter receipts.jsonl --source brigade --json
 ```
 
 What each imported item carries:
@@ -105,14 +105,14 @@ What each imported item carries:
 
 Receipts are trusted local artifacts at export time, but once inside the archive they flow through the same evidence surfaces as everything else and come back marked untrusted context like any other search result.
 
-Trust transitions are minted only by `brigade evidence trust review`. The Python parent holds a fresh 32-byte secret in memory, MACs a capability bound to item id, current digest, and the requested transition, and writes `brigade.authority.capability-handoff.v1` to the engine's stdin. The secret never enters the child environment or argv. Calling `miseledger trust review` directly is unsupported.
+Trust transitions are minted only by `brigade evidence trust review`. The Python parent holds a fresh 32-byte secret in memory, MACs a capability bound to item id, current digest, and the requested transition, and writes `brigade.authority.capability-handoff.v1` to the engine's stdin. The secret never enters the child environment or argv. Calling `brigade-evidence trust review` directly is unsupported.
 
-MiseLedger can receive an optional structured code reference filter. It checks matching receipt metadata before lexical FTS and uses FTS unchanged if no exact reference exists. Repository, revision, file path, qualified name, symbol kind, and change kind form the match. Source spans record location only.
+brigade-evidence can receive an optional structured code reference filter. It checks matching receipt metadata before lexical FTS and uses FTS unchanged if no exact reference exists. Repository, revision, file path, qualified name, symbol kind, and change kind form the match. Source spans record location only.
 
 Potential future commands:
 
 ```bash
 brigade work import context --from-miseledger "ops-deck auth errors"
 brigade work task plan <id> --write --from-miseledger "project:ops-deck"
-brigade work tasks add --source miseledger --kind repeated-error
+brigade work tasks add --source brigade-evidence --kind repeated-error
 ```

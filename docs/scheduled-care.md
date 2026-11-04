@@ -67,7 +67,7 @@ Brigade's timer file, and `effective_calendar`, read from
 `systemctl --user show ... TimersCalendar` after systemd resolves drop-ins. A
 different effective value sets `schedule_diverged`. If `evidence-crawl` shares
 an effective calendar with the known `brigadeclaw-daily-report` timer, status
-adds a `miseledger-calendar-collision` warning. The warning is advisory and
+adds a `brigade-evidence-calendar-collision` warning. The warning is advisory and
 does not disable either timer.
 
 To install one job without the rest of that set, pass `--entry JOB_ID`

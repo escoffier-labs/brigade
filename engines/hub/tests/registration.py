@@ -30,7 +30,7 @@ class Registration(unittest.TestCase):
                     state.mkdir()
                     template = f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --test-clock-file {clock}"
                     if native:
-                        template += " --native-registration"
+                        template += " --route-mode registration=native"
                     hubs.append(
                         hc.launch_hub(
                             template,
@@ -135,7 +135,7 @@ class Registration(unittest.TestCase):
     def test_native_registration(self):
         with tempfile.TemporaryDirectory() as directory:
             hub = hc.launch_hub(
-                f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --native-registration",
+                f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --route-mode registration=native",
                 brigade=[sys.executable, "-m", "brigade"],
                 state_dir=Path(directory),
                 startup_timeout=30,

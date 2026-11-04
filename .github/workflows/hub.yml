@@ -34,6 +34,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Ops authentication and shadow housekeeping
+        run: python tests/ops.py
       - name: Development load harness unit tests
         run: python -m unittest discover -s bench -p 'test_*.py'
       - name: Proxy transport integration
@@ -52,15 +54,15 @@ jobs:
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --native-registration'
-          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --native-registration --test-clock-file {clock_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'
+          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --test-clock-file {clock_file}'
       - name: Native registration storage parity
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py storage-parity
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --native-registration --test-clock-file {clock_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --test-clock-file {clock_file}'
       - name: Read-only production profile audit through managed front
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile prod-readonly
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --native-registration'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'

@@ -107,11 +107,43 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
   'engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
 ```
 
-S5 registration handlers ship behind `--native-registration` (off by default).
-This enables `GET /nodes`, `POST /nodes` and `POST /message-principals`.
-S9's `registration` family selection can replace this boolean at the
-`Registration::route` dispatch seam. Registration flips last in cutover
-phase 3. The Python hub remains the schema owner throughout rollback.
+### Route modes and observations (S9)
+
+Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
+value wins. `health` defaults to native and supports proxy and shadow on
+`GET /health`. `/ready` always stays local. `metrics` requires native mode.
+`registration` accepts native or proxy. `heartbeat`, `claims`, `messages`, `cold`
+and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
+startup. Native handlers and housekeeping audits for those families land in
+S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
+
+`GET /metrics` requires the admin bearer token. Node, principal, cookie and
+query credentials do not grant access. It serves metrics text version 0.0.4.
+Writer queue depth, batch size, apply time, commit time, lock wait and aborted
+batches are `NaN` with a `Not yet wired` help line pending S4a. Reader and CPU
+queue depth also remain `NaN`. Checkpoint metrics use S4b's samples when this
+front owns maintenance, including busy results, failures, WAL frames,
+checkpointed frames, WAL bytes and outstanding frames (`checkpoint_stall_frames`).
+The external-upstream mode has no local checkpoint sampler and reports an
+unavailable stall value. Long-poll, memory and webhook metrics arrive with their
+own handlers. No writer or bench code changes in S9.
+
+Shadow comparisons use the shared `hub-shadow-rules.json` drive policy. Stored
+values are exact. A dedicated read-only, query-only watch connection samples
+`data_version` before forwarding and after comparison. A stable mismatch is
+definite. With intervening commits, at most two more reads distinguish a
+transient match from an inconclusive mismatch. Boundary and projection helpers
+require handler evidence for budget exhaustion or purge eligibility. Health
+has neither exception. Mismatch JSON logs contain status codes, result, first
+JSON pointer and SHA-256 body digests, with no bodies.
+
+Request JSON logs count streamed bytes through completion or disconnect and
+include a generated request ID, family, status, elapsed seconds and credential
+kind. Labels and logs omit request queries, identities and bearer material.
+
+S5 registration handlers run with `--route-mode registration=native` (proxy by
+default). This serves `GET /nodes`, `POST /nodes` and `POST /message-principals`
+natively. Registration flips last in cutover phase 3. The Python hub remains the schema owner throughout rollback.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.

@@ -106,7 +106,7 @@ Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
   slots for the Git common directory, or the slots under
   `BRIGADE_VERIFY_LOCK_PATH` when that override is set. Do not retry it with a bigger timeout; run
   `./scripts/verify-focused` or wait.
-- The receipt captures a code-graph delta by shelling out to the `graphtrail`
+- The receipt captures a code-graph delta by shelling out to the `brigade-code-graph`
   binary. On a host without it, `code_graph_delta` comes back
   `{"ok": false, "status": "unavailable", ...}` and the run still completes -
   do not read a missing binary as a failed verification.

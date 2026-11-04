@@ -1,8 +1,10 @@
 # Standalone Compatibility Install Smoke
 
-This smoke covers the standalone public release installer as a one-release compatibility fallback. It is not general installation guidance. Brigade-managed engine smoke starts with `brigade setup`, which verifies the unified release manifest before installing MiseLedger.
+This smoke covers the standalone public release installer as a one-release compatibility fallback. It is not general installation guidance. Brigade-managed engine smoke starts with `brigade setup`, which verifies the unified release manifest before installing brigade-evidence.
 
 It does not import private session logs.
+
+The pinned standalone release installs the legacy `miseledger` executable, so commands on this path use that name.
 
 ```bash
 tmp_home="$(mktemp -d)"
