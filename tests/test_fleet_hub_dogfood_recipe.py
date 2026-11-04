@@ -468,3 +468,33 @@ def test_fdatasync_probe_records_its_runs(tmp_path, capsys):
     assert [item["detail"]["run"] for item in items] == [1, 2]
     assert all(item["detail"]["writes"] > 0 for item in items)
     assert not list(tmp_path.glob("s31-fdatasync-*"))
+
+
+def test_restore_check_creates_its_ledger_and_passes_against_the_real_tool(tmp_path, monkeypatch, capsys):
+    import argparse
+    import contextlib
+    import io
+
+    from brigade import cli, fleet_hub, fleet_hub_backup
+
+    db = tmp_path / "fleet-hub.db"
+    fleet_hub.init_db(db).close()
+    copies = tmp_path / "copies"
+    fleet_hub_backup.take_backup([db], copies, disk_usage=lambda _p: type("U", (), {"free": 10**15}))
+
+    def in_process(argv, *, timeout=120, check=False):
+        assert argv[0] == "brigade"
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            code = cli.main(argv[1:])
+        return subprocess.CompletedProcess(argv, code, out.getvalue(), err.getvalue())
+
+    monkeypatch.setattr(checks, "run", in_process)
+    result = checks.Result("restore")
+    checks.check_restore(argparse.Namespace(backup_dir=str(copies), drive=False), result)
+    # The docker drive needs a host, so without --drive it stays PENDING.
+    failed = [item for item in result.items if item["status"] != "PASS"]
+    assert failed == [
+        {"status": "PENDING", "name": "full drive against a restored copy", "detail": "rerun with --drive"}
+    ]
+    assert any(item["name"] == "ledger holds one record per restore" for item in result.items)

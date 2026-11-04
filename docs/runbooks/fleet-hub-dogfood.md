@@ -267,10 +267,16 @@ moving forward.
      --json
    ```
 
-   Setup creates the ledger beside the backups. Create the hub-host copy
-   once with `install -m 0600 /dev/null "$HOME/.brigade/hub-recovery-ledger.jsonl"`.
+   Setup creates the ledger beside the backups, and HOST-ACTIONS 1 creates
+   the hub-host copy with
+   `install -D -m 0600 /dev/null "$HOME/.brigade/hub-recovery-ledger.jsonl"`.
    Only a ledger file that exists counts: a missing file may be a lost
-   ledger, so the tool refuses rather than start from nothing.
+   ledger, so the tool refuses rather than start from nothing. The tool
+   creates a new ledger file only when you pass `--assert-no-prior-restore`.
+   Without it, a named ledger that does not exist is listed under
+   `ledgers_unreachable` and left alone, because its directory may be the
+   empty mount point of a volume that is not mounted. Recreate a lost copy
+   from a surviving one, then restore again.
 
    The tool advances the message sequence, the roster and policy revisions and
    the claim recovery floor, each 2^32 above the higher of the copy's value and
@@ -285,7 +291,7 @@ moving forward.
    ```bash
    docker compose run --rm --no-deps --user 0 --cap-add CHOWN --cap-add DAC_OVERRIDE \
      -v "$restore_dir:/restore:ro" --entrypoint sh hub -c \
-     'rm -f /var/lib/brigade/fleet-hub.db-wal /var/lib/brigade/fleet-hub.db-shm &&
+     'rm -f /var/lib/brigade/fleet-hub.db-wal /var/lib/brigade/fleet-hub.db-shm /var/lib/brigade/fleet-hub.db-journal &&
       install -o 10001 -g 10001 -m 0600 /restore/fleet-hub.db /var/lib/brigade/fleet-hub.db'
    ```
 

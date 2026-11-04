@@ -710,6 +710,9 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
     copy = copies[-1] / "fleet-hub.db"
     with tempfile.TemporaryDirectory(prefix="s31-restore-") as scratch:
         ledger = Path(scratch) / "recovery-ledger.jsonl"
+        # The tool counts only a ledger file that exists and never creates one
+        # without --assert-no-prior-restore, the way setup creates the real one.
+        os.close(os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
         reports = []
         for index in (1, 2):
             target = Path(scratch) / f"restored-{index}.db"
