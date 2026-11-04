@@ -743,17 +743,17 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
             $expected[$name] = $asset.sha256
         }
     }
-    $canonical = @{}
+    $aliases = @{}
     foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger")) {
         foreach ($platform in $platforms) {
             $name = "$componentId-$platform"
             if ($platform -eq "windows-amd64") { $name += ".exe" }
-            $canonical[$name] = $true
+            $aliases[$name] = $true
         }
     }
     if ($checksums.Count -eq 41) {
-        foreach ($name in $canonical.Keys) {
-            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete canonical matrix" }
+        foreach ($name in $aliases.Keys) {
+            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete legacy alias matrix" }
             $expected[$name] = $checksums[$name]
         }
     }
