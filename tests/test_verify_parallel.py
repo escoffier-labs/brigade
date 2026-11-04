@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
 from tests._coverage_env import isolated_coverage_env
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -89,17 +90,18 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
     pid_file = tmp_path / "child.pid"
     leader_file = tmp_path / "leader.pid"
     child_code = (
-        "import os,time,signal; from pathlib import Path; "
+        PUBLISH_SOURCE
+        + "import os,time,signal; from pathlib import Path; "
         + ("signal.signal(signal.SIGTERM, signal.SIG_IGN); " if repeat else "")
-        + f"Path({str(pid_file)!r}).write_text(str(os.getpid())); "
+        + f"publish({str(pid_file)!r}, str(os.getpid())); "
         f"p=Path({str(heartbeat)!r}); "
         "\nfor i in range(400):\n p.write_text(str(i)); time.sleep(0.05)\n"
     )
     suite = tmp_path / "test_child.py"
     suite.write_text(
-        "import subprocess,sys,time,signal,os\nfrom pathlib import Path\n"
+        PUBLISH_SOURCE + "import subprocess,sys,time,signal,os\nfrom pathlib import Path\n"
         "def test_child():\n"
-        f"    Path({str(leader_file)!r}).write_text(str(os.getpid()))\n"
+        f"    publish({str(leader_file)!r}, str(os.getpid()))\n"
         + ("    signal.signal(signal.SIGTERM, signal.SIG_IGN)\n" if repeat else "")
         + f"    subprocess.Popen([sys.executable, '-c', {child_code!r}])\n"
         "    time.sleep(30)\n"
@@ -138,9 +140,10 @@ def test_shard_cancellation_stops_test_grandchildren(tmp_path, repeat):
             runner.kill()
             runner.communicate()
         for path in (pid_file, leader_file):
-            if path.exists():
+            published = wait_for_text(path, timeout=1)
+            if published is not None:
                 try:
-                    os.kill(int(path.read_text()), signal.SIGKILL)
+                    os.kill(int(published), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
 

@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade.grokbot_fleet.contracts import FleetError
 from brigade.grokbot_fleet.exec import (
     EXEC_MAX_OUTPUT_BYTES,
@@ -70,8 +72,8 @@ def test_run_exec_rejects_out_of_range_bounds():
 def test_run_exec_times_out_and_reaps_descendants(tmp_path: Path):
     pid_path = tmp_path / "descendant.pid"
     descendant = (
-        "import os,time; from pathlib import Path; "
-        f"Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(30)"
+        PUBLISH_SOURCE + "import os,time; from pathlib import Path; "
+        f"publish({str(pid_path)!r}, str(os.getpid())); time.sleep(30)"
     )
     parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', {descendant!r}]); time.sleep(30)"
     started = time.monotonic()
@@ -82,11 +84,9 @@ def test_run_exec_times_out_and_reaps_descendants(tmp_path: Path):
         assert "sleep" not in str(caught.value)
         assert time.monotonic() - started < 5
     finally:
-        if pid_path.is_file():
-            try:
-                _reap_pid(int(pid_path.read_text(encoding="utf-8").strip()))
-            except ValueError:
-                pass
+        published = wait_for_text(pid_path, timeout=1)
+        if published is not None:
+            _reap_pid(int(published))
 
 
 def test_run_exec_overflows_without_leaking_output():
