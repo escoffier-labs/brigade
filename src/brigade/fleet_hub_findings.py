@@ -108,7 +108,7 @@ def _key(conn: sqlite3.Connection) -> bytes:
         info = os.fstat(stream.fileno())
         if (
             not stat.S_ISREG(info.st_mode)
-            or info.st_mode & 0o077
+            or (os.name == "posix" and info.st_mode & 0o077)
             or info.st_nlink != 1
             or (hasattr(os, "getuid") and info.st_uid != os.getuid())
         ):

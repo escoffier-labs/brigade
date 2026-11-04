@@ -163,3 +163,24 @@ def test_charter_findings_and_open_holdings(tmp_path):
     f.handle(conn, {"action": "resolve", "finding_id": finding["finding_id"]}, caller="admin", owners=None, admin=True)
     assert not fleet_owners.load_view(conn, now_epoch=0).by_owner["watcher"]
     conn.close()
+
+
+@pytest.mark.parametrize("platform", ["posix", "nt"])
+def test_key_permission_bits_are_posix_only(tmp_path, monkeypatch, platform):
+    import os
+    import stat
+    from types import SimpleNamespace
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        expected = f._key(conn)
+        # Windows reports synthetic mode bits, not POSIX access permissions.
+        metadata = SimpleNamespace(st_mode=stat.S_IFREG | 0o666, st_nlink=1, st_uid=getattr(os, "getuid", lambda: 0)())
+        monkeypatch.setattr(f, "os", SimpleNamespace(**{**vars(os), "name": platform, "fstat": lambda fd: metadata}))
+        if platform == "posix":
+            with pytest.raises(f.FindingError, match="unsafe findings key file"):
+                f._key(conn)
+        else:
+            assert f._key(conn) == expected
+    finally:
+        conn.close()
