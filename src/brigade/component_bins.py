@@ -10,8 +10,8 @@ through :func:`resolve` so one resolution order applies everywhere:
    before the legacy one (docs/phase-engine-rename.md, R4);
 4. a legacy standalone location kept for machines mid-migration.
 
-Legacy names print no deprecation line here. The stderr notices for legacy
-entry points and legacy environment variables land together in R5.
+Legacy environment overrides print one stderr deprecation notice per spelling
+per process. Canonical resolution stays silent.
 
 Config generators use the same resolver so emitted configs (Cursor MCP
 servers, station wiring) carry the managed absolute path instead of a bare
@@ -25,7 +25,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import component_manifest, component_paths, component_state
+from . import component_manifest, component_paths, component_state, engine_deprecation
 
 # Engine name -> env var override honored before any other resolution step.
 ENV_OVERRIDES = {
@@ -101,6 +101,8 @@ def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     environment = env if env is not None else os.environ
     search_path = environment.get("PATH")
     names = component_manifest.family_names(name)
+    for alias in names[1:]:
+        engine_deprecation.environment(ENV_OVERRIDES[alias], ENV_OVERRIDES[names[0]], environment)
     overrides = _override_values(names, environment)
     if overrides:
         if len(set(overrides)) != 1 or not overrides[0].strip():
@@ -163,4 +165,4 @@ def canonical_command(command: str | None) -> str | None:
     canonical = component_manifest.family_id(command)
     if canonical not in component_manifest.COMPONENT_FAMILIES.values():
         return command
-    return resolve(canonical) or canonical
+    return resolve_argv([canonical])[0]

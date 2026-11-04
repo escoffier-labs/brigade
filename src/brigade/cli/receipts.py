@@ -328,6 +328,10 @@ def dispatch(args) -> int:
         print(f"evidence derivative exported ({report.removed_fields} fields removed)")
         return 0
     if args.receipts_command == "export" and args.receipts_export_command in {"evidence", "miseledger"}:
+        if args.receipts_export_command != "evidence":
+            from brigade.engine_deprecation import notice
+
+            notice("receipts export " + args.receipts_export_command, "receipts export evidence")
         return receipts_cmd.export_miseledger(
             target=args.target,
             out=args.out,

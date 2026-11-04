@@ -104,7 +104,7 @@ def legacy_config_keys(target: Path) -> list[tuple[str, str, bool]]:
 
     ``ignored`` is true when the canonical key is also present, so ``load_config``
     never reads the legacy value. The file is the one ``load_config`` reads.
-    Doctor reports them; loading never prints (the stderr notices land in R5).
+    Doctor reports them. Loading prints one stderr notice per legacy key.
     """
     path = _existing_config_path(target)
     try:
@@ -260,6 +260,10 @@ def load_config(target: Path) -> Optional[Config]:
         includes=list(data.get("includes", [])),
     )
     sel.validate()
+    from brigade.engine_deprecation import notice
+
+    if LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
+        notice(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY)
     # The canonical key wins; the legacy key is read only when it is absent.
     timeout_key = (
         CODE_GRAPH_DELTA_TIMEOUT_KEY if CODE_GRAPH_DELTA_TIMEOUT_KEY in data else LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY
