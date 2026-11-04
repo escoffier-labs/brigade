@@ -1,0 +1,585 @@
+use super::*;
+use rusqlite::Connection;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
+static NEXT: AtomicUsize = AtomicUsize::new(0);
+pub(super) fn fixture() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!(
+        "hub-writer-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("fleet-hub.db");
+    Connection::open(&path).unwrap().execute_batch("PRAGMA journal_mode=WAL; CREATE TABLE rows(id INTEGER PRIMARY KEY AUTOINCREMENT, value TEXT UNIQUE); CREATE TABLE child(parent INTEGER REFERENCES rows(id) DEFERRABLE INITIALLY DEFERRED);").unwrap();
+    path
+}
+struct Sql(&'static str);
+impl Command for Sql {
+    fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+        if self.0 == "FULL" {
+            tx.query("PRAGMA max_page_count=10", &[])?;
+            tx.execute("INSERT INTO rows(value) VALUES(zeroblob(1000000))", &[])?;
+        } else {
+            tx.execute(self.0, &[])?;
+        }
+        Ok(Json::Bool(true))
+    }
+}
+fn budget(durable: bool) -> Budget {
+    Budget {
+        events: 1,
+        bytes: 100,
+        durable,
+        deadline: Instant::now() + Duration::from_secs(10),
+    }
+}
+fn batch(path: &Path, commands: Vec<Sql>) -> Vec<Answer> {
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(100);
+    let mut replies = Vec::new();
+    for command in commands {
+        let (reply, receiver) = oneshot::channel();
+        sender
+            .try_send(Envelope {
+                command: Box::new(command),
+                budget: budget(false),
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(receiver);
+    }
+    drop(sender);
+    worker::run(
+        worker::open(path).unwrap(),
+        receiver,
+        Config::new(path.to_path_buf()),
+        arbiter,
+    );
+    replies
+        .into_iter()
+        .map(|r| r.blocking_recv().unwrap())
+        .collect()
+}
+fn values(path: &Path) -> i64 {
+    Connection::open(path)
+        .unwrap()
+        .query_row("SELECT count(*) FROM rows", [], |r| r.get(0))
+        .unwrap()
+}
+#[test]
+fn savepoint_failure_keeps_neighbors() {
+    let path = fixture();
+    let results = batch(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('b')"),
+        ],
+    );
+    assert!(results[0].is_ok() && results[1].is_err() && results[2].is_ok());
+    assert_eq!(values(&path), 2);
+}
+#[test]
+fn transaction_abort_replays_prior_command_once() {
+    let path = fixture();
+    let results = batch(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT OR ROLLBACK INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('b')"),
+        ],
+    );
+    assert!(results[0].is_ok() && results[1].is_err() && results[2].is_ok());
+    assert_eq!(values(&path), 2);
+}
+#[test]
+fn actual_sqlite_full_never_acknowledges_lost_rows() {
+    struct Full;
+    impl Command for Full {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.query("PRAGMA max_page_count=10", &[])?;
+            tx.execute("INSERT INTO rows(value) VALUES(zeroblob(1000000))", &[])?;
+            Ok(Json::Null)
+        }
+    }
+    let path = fixture();
+    let db = worker::open(&path).unwrap();
+    db.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let arbiter = Arc::new(Arbiter::default());
+    let (reply, _) = oneshot::channel();
+    let e = Envelope {
+        command: Box::new(Full),
+        budget: budget(false),
+        reply: Some(reply),
+        _permits: vec![],
+        arbiter,
+    };
+    // The SQLite FULL error really aborts the outer transaction.
+    assert!(super::worker::test_apply(&db, &e).is_err());
+    assert!(db.is_autocommit());
+    drop(db);
+    let results = batch(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("FULL"),
+            Sql("INSERT INTO rows(value) VALUES('b')"),
+        ],
+    );
+    assert!(results[0].is_ok() && results[1].is_err() && results[2].is_ok());
+    assert_eq!(values(&path), 2);
+}
+#[test]
+fn failed_commit_fails_entire_batch_and_reopens() {
+    let path = fixture();
+    let results = batch(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO child(parent) VALUES(999)"),
+        ],
+    );
+    assert!(
+        results
+            .iter()
+            .all(|r| r == &Err(Failure::storage("commit-failed")))
+    );
+    assert_eq!(values(&path), 0);
+    assert!(batch(&path, vec![Sql("INSERT INTO rows(value) VALUES('b')")])[0].is_ok());
+}
+#[tokio::test]
+async fn overload_and_durable_reserve_are_bounded() {
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let turn = arbiter
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let mut config = Config::new(path);
+    config.capacity = 6;
+    config.durable_reserve = 2;
+    let writer = Writer::start(config, arbiter).unwrap();
+    let mut accepted = Vec::new();
+    let mut rejected = 0;
+    for _ in 0..18 {
+        match writer
+            .submit(
+                Sql("INSERT INTO rows(value) VALUES(random())"),
+                budget(false),
+            )
+            .await
+        {
+            Ok(r) => accepted.push(r),
+            Err(e) => {
+                assert_eq!(e.status, 503);
+                rejected += 1;
+            }
+        }
+    }
+    assert_eq!(accepted.len(), 4);
+    assert_eq!(rejected, 14);
+    assert_eq!(writer.slots.available_permits(), 2);
+    let durable = writer
+        .submit(
+            Sql("INSERT INTO rows(value) VALUES('durable')"),
+            budget(true),
+        )
+        .await
+        .unwrap();
+    drop(turn);
+    for r in accepted {
+        assert!(r.await.unwrap().is_ok());
+    }
+    assert!(durable.await.unwrap().is_ok());
+}
+#[tokio::test]
+async fn python_lock_for_three_seconds_delays_durable_command() {
+    use std::io::{BufRead, BufReader};
+    use std::process::{Command as Process, Stdio};
+    let path = fixture();
+    let writer = Writer::start(Config::new(path.to_path_buf()), Arc::default()).unwrap();
+    let mut child = Process::new("python3").arg("-c").arg("import sqlite3,sys,time\nc=sqlite3.connect(sys.argv[1]); c.execute('BEGIN IMMEDIATE'); print('locked',flush=True); time.sleep(3); c.rollback()")
+        .arg(&path).stdout(Stdio::piped()).spawn().unwrap();
+    let mut line = String::new();
+    BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut line)
+        .unwrap();
+    assert_eq!(line.trim(), "locked");
+    let start = Instant::now();
+    let r = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES('claim')"), budget(true))
+        .await
+        .unwrap();
+    assert!(r.await.unwrap().is_ok());
+    assert!(start.elapsed() >= Duration::from_millis(2800));
+    assert!(child.wait().unwrap().success());
+}
+#[test]
+fn memory_bucket_and_durable_hub_priority() {
+    let a = Arc::new(Arbiter::default());
+    let turn = a
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(300));
+    drop(turn);
+    assert!(
+        a.acquire(Lane::Memory, Instant::now() + Duration::from_millis(10))
+            .is_none()
+    );
+    assert!(
+        a.acquire(Lane::Hub, Instant::now() + Duration::from_millis(10))
+            .is_some()
+    );
+}
+
+#[test]
+#[ignore = "subprocess helper for kill_nine_twenty_runs"]
+fn kill_child() {
+    use std::io::Write;
+    let path = PathBuf::from(std::env::var_os("HUB_CRASH_DB").unwrap());
+    let ledger_path = std::env::var_os("HUB_CRASH_LEDGER").unwrap();
+    let mut ledger = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(ledger_path)
+        .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        struct Insert(String);
+        impl Command for Insert {
+            fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+                tx.execute(
+                    "INSERT INTO rows(value) VALUES(?1)",
+                    &[Value::Text(self.0.clone())],
+                )?;
+                Ok(Json::Null)
+            }
+        }
+        let writer = Writer::start(Config::new(path), Arc::default()).unwrap();
+        for base in (0..100000).step_by(64) {
+            let mut in_flight = Vec::new();
+            for i in base..base + 64 {
+                let value = format!("{}-{i}", std::process::id());
+                let reply = writer
+                    .submit(Insert(value.clone()), budget(true))
+                    .await
+                    .unwrap();
+                in_flight.push((value, reply));
+            }
+            for (value, reply) in in_flight {
+                assert!(reply.await.unwrap().is_ok());
+                ledger.write_all(format!("{value}\n").as_bytes()).unwrap();
+                ledger.sync_all().unwrap();
+            }
+        }
+    });
+}
+#[test]
+#[ignore = "20 SIGKILL subprocess runs with external acknowledgement ledger"]
+fn kill_nine_twenty_runs() {
+    let path = fixture();
+    let ledger = path.with_extension("ack");
+    for run in 0..20 {
+        let before = std::fs::read_to_string(&ledger)
+            .unwrap_or_default()
+            .lines()
+            .count();
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--ignored", "--exact", "writer::tests::kill_child"])
+            .env("HUB_CRASH_DB", &path)
+            .env("HUB_CRASH_LEDGER", &ledger)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while std::fs::read_to_string(&ledger)
+            .unwrap_or_default()
+            .lines()
+            .count()
+            < before + 10 + run
+        {
+            assert!(Instant::now() < deadline, "child made no progress");
+            assert!(child.try_wait().unwrap().is_none());
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let db = Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "ok"
+        );
+        let entries = std::fs::read_to_string(&ledger).unwrap();
+        let complete = entries.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&ledger)
+            .unwrap()
+            .set_len(complete as u64)
+            .unwrap();
+        for value in entries[..complete].split_terminator('\n') {
+            assert!(
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM rows WHERE value=?1)",
+                    [value],
+                    |r| r.get::<_, bool>(0)
+                )
+                .unwrap()
+            );
+        }
+    }
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[tokio::test]
+async fn expired_and_expensive_commands_do_not_commit() {
+    struct Expensive;
+    impl Command for Expensive {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('must-rollback')", &[])?;
+            tx.query("WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<100000000) SELECT sum(n) FROM x",&[])?;
+            Ok(Json::Null)
+        }
+    }
+    let path = fixture();
+    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let mut b = budget(true);
+    b.deadline = Instant::now() + Duration::from_millis(20);
+    let reply = writer.submit(Expensive, b).await.unwrap();
+    assert_eq!(reply.await.unwrap(), Err(Failure::timeout(true)));
+    assert_eq!(values(&path), 0);
+}
+
+#[tokio::test]
+async fn overload_three_times_default_capacity_records_rss() {
+    struct Payload(Vec<u8>);
+    impl Command for Payload {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute(
+                "INSERT INTO rows(value) VALUES(?1)",
+                &[Value::Blob(self.0.clone())],
+            )?;
+            Ok(Json::Null)
+        }
+    }
+    fn rss() -> usize {
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_to_string("/proc/self/status")
+                .unwrap()
+                .lines()
+                .find(|l| l.starts_with("VmRSS:"))
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .parse::<usize>()
+                .unwrap()
+                * 1024
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            0
+        }
+    }
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let turn = arbiter
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(2))
+        .unwrap();
+    let writer = Writer::start(Config::new(path), arbiter).unwrap();
+    let before = rss();
+    let mut replies = Vec::new();
+    let mut rejected = 0;
+    for _ in 0..3 * 4096 {
+        let mut b = budget(false);
+        b.bytes = 16 * 1024;
+        match writer.submit(Payload(vec![0; 16 * 1024]), b).await {
+            Ok(r) => replies.push(r),
+            Err(e) => {
+                assert_eq!(e.status, 503);
+                rejected += 1;
+            }
+        }
+    }
+    let growth = rss().saturating_sub(before);
+    eprintln!(
+        "3x overload: accepted={}, excess={rejected}, RSS growth={growth} bytes",
+        replies.len()
+    );
+    assert_eq!(replies.len(), 3584);
+    assert_eq!(rejected, 12288 - 3584);
+    assert!(growth < 96 * 1024 * 1024);
+    drop(turn);
+    drop(writer);
+    drop(replies);
+}
+
+#[test]
+fn batch_budgets_and_no_linger() {
+    let path = fixture();
+    let db = worker::open(&path).unwrap();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let observed = commits.clone();
+    db.commit_hook(Some(move || {
+        observed.fetch_add(1, Ordering::Relaxed);
+        false
+    }))
+    .unwrap();
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(300);
+    let mut replies = Vec::new();
+    for i in 0..300 {
+        struct Insert(usize);
+        impl Command for Insert {
+            fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+                tx.execute(
+                    "INSERT INTO rows(value) VALUES(?1)",
+                    &[Value::Integer(self.0 as i64)],
+                )?;
+                Ok(Json::Null)
+            }
+        }
+        let (reply, r) = oneshot::channel();
+        let mut b = budget(false);
+        b.events = 20;
+        b.bytes = 40000;
+        sender
+            .try_send(Envelope {
+                command: Box::new(Insert(i)),
+                budget: b,
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(r);
+    }
+    drop(sender);
+    worker::run(db, receiver, Config::new(path), arbiter);
+    for r in replies {
+        assert!(r.blocking_recv().unwrap().is_ok());
+    }
+    // Event budget fits 204 commands and byte budget fits 209, so two commits.
+    assert_eq!(commits.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn byte_admission_and_begin_deadline() {
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let turn = arbiter
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let mut config = Config::new(path.clone());
+    config.queue_bytes = 1024;
+    let writer = Writer::start(config, arbiter).unwrap();
+    let mut b = budget(false);
+    b.bytes = 600;
+    let first = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES('bytes')"), b)
+        .await
+        .unwrap();
+    assert!(matches!(
+        writer.submit(Sql("SELECT 1"), b).await,
+        Err(Failure {
+            status: 503,
+            reason: "writer-queue-full"
+        })
+    ));
+    drop(turn);
+    assert!(first.await.unwrap().is_ok());
+    let lock = Connection::open(&path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut b = budget(true);
+    b.deadline = Instant::now() + Duration::from_millis(50);
+    let started = Instant::now();
+    let reply = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES('late')"), b)
+        .await
+        .unwrap();
+    assert_eq!(reply.await.unwrap(), Err(Failure::timeout(true)));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    lock.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(values(&path), 1);
+}
+#[tokio::test]
+async fn domain_refusal_rolls_back_partial_command() {
+    struct Refuse;
+    impl Command for Refuse {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('refused')", &[])?;
+            Err(ApplyError::Rejected(Failure {
+                status: 409,
+                reason: "conflict",
+            }))
+        }
+    }
+    let path = fixture();
+    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let reply = writer.submit(Refuse, budget(false)).await.unwrap();
+    assert_eq!(
+        reply.await.unwrap(),
+        Err(Failure {
+            status: 409,
+            reason: "conflict"
+        })
+    );
+    assert_eq!(values(&path), 0);
+}
+
+#[test]
+fn second_abort_fails_prior_commands_instead_of_replaying_again() {
+    struct AbortOnReplay(Arc<AtomicUsize>);
+    impl Command for AbortOnReplay {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('a')", &[])?;
+            if self.0.fetch_add(1, Ordering::Relaxed) > 0 {
+                tx.execute("INSERT OR ROLLBACK INTO rows(value) VALUES('a')", &[])?;
+            }
+            Ok(Json::Null)
+        }
+    }
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(4);
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut replies = Vec::new();
+    let commands: Vec<Box<dyn Command>> = vec![
+        Box::new(AbortOnReplay(calls.clone())),
+        Box::new(Sql("INSERT OR ROLLBACK INTO rows(value) VALUES('a')")),
+        Box::new(Sql("INSERT INTO rows(value) VALUES('survivor')")),
+    ];
+    for command in commands {
+        let (reply, r) = oneshot::channel();
+        sender
+            .try_send(Envelope {
+                command,
+                budget: budget(false),
+                reply: Some(reply),
+                _permits: vec![],
+                arbiter: arbiter.clone(),
+            })
+            .unwrap_or_else(|_| panic!("queue"));
+        replies.push(r);
+    }
+    drop(sender);
+    worker::run(
+        worker::open(&path).unwrap(),
+        receiver,
+        Config::new(path.clone()),
+        arbiter,
+    );
+    let results: Vec<_> = replies
+        .into_iter()
+        .map(|r| r.blocking_recv().unwrap())
+        .collect();
+    assert!(results[0].is_err() && results[1].is_err() && results[2].is_ok());
+    assert_eq!(calls.load(Ordering::Relaxed), 2);
+    assert_eq!(values(&path), 1);
+}

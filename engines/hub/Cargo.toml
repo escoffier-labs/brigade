@@ -7,6 +7,7 @@ license = "MIT"
 publish = false
 
 [dependencies]
+rusqlite = { version = "0.40", features = ["bundled", "hooks"] }
 axum = "0.8"
 clap = { version = "=4.5.60", features = ["derive"] }
 futures-util = "0.3"
