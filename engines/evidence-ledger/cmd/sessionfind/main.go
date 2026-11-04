@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/escoffier-labs/miseledger/internal/app"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/app"
 )
 
 func main() {

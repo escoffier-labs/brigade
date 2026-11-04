@@ -24,8 +24,8 @@ import (
 
 	"crypto/rand"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
 )
 
 type csvFormulaStringer struct{}

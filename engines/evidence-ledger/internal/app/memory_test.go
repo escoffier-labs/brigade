@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
 )
 
 const testMemoryNamespace = "memory-aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"

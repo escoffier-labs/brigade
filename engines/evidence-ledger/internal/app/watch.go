@@ -13,17 +13,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/sources/claude"
-	"github.com/escoffier-labs/miseledger/internal/sources/codex"
-	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
-	"github.com/escoffier-labs/miseledger/internal/sources/grok"
-	"github.com/escoffier-labs/miseledger/internal/sources/hermes"
-	"github.com/escoffier-labs/miseledger/internal/sources/openclaw"
-	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
-	"github.com/escoffier-labs/miseledger/internal/sources/pi"
-	"github.com/escoffier-labs/miseledger/internal/toolpath"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/claude"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/codex"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/cursor"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/grok"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/hermes"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/openclaw"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/opencode"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/pi"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
 type discoveredRoot struct {

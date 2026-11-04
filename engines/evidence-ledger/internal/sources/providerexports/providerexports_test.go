@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 )
 
 func TestGenerateChatGPTLimitAndSince(t *testing.T) {

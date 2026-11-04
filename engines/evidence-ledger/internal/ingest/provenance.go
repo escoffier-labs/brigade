@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
 )
 
 // Indexed provenance projections in item_metadata. Search and SQL filter these

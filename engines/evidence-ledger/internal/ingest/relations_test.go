@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
 )
 
 func TestResolveRelationsQualifiedAndLegacy(t *testing.T) {

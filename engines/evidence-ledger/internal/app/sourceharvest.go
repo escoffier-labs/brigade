@@ -16,10 +16,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/ingest"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/toolpath"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
 type sourceHarvestSummary struct {
