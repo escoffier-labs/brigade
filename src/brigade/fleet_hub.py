@@ -124,7 +124,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 50
+SCHEMA_VERSION = 50  # v50: claim recovery floor (fleet_hub_claims.recovery_floor), no DDL
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -747,9 +747,6 @@ def _apply_schema(
     fleet_hub_message_keys.ensure_schema(conn)
     fleet_hub_identity.ensure_schema(conn)
     fleet_hub_findings.ensure_schema(conn)
-    # v49 -> v50: no DDL. Claim generations honor the restore tool's recovery
-    # floor (hub_meta 'recovery'), so a Python that predates that rule must
-    # refuse the file instead of handing a target generation 1 again.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
