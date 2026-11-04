@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import enum
 import errno
 import hashlib
 import json
@@ -55,6 +56,8 @@ _UNTRACKED_ENUM_BUDGET_BYTES = proc.MAX_DELIMITED_BYTES
 _UNTRACKED_ENUM_TIMEOUT_SECONDS = 120.0
 _WINDOWS_LOCK_RELEASE_RETRY_SECONDS = 1.0
 _WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS = 0.025
+_RECOVERY_GATE_BUSY_RETRY_SECONDS = 2.0
+_RECOVERY_GATE_BUSY_POLL_SECONDS = 0.02
 
 # Receipt copies of a snapshot summarize path sets beyond this many entries so
 # run.json and pre-run-snapshot.json stay bounded; totals make the truncation
@@ -340,6 +343,10 @@ def _recovery_gate_path(path: Path) -> Path:
     return path.with_name(f".{path.name}.recovery-gate")
 
 
+class _RecoveryGate(enum.Enum):
+    BUSY = "busy"
+
+
 def _try_lock_descriptor(descriptor: int) -> bool:
     if sys.platform == "win32":
         import msvcrt
@@ -347,7 +354,10 @@ def _try_lock_descriptor(descriptor: int) -> bool:
         os.lseek(descriptor, 0, os.SEEK_SET)
         try:
             msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        except OSError:
+        except OSError as exc:
+            # Only a lock violation means another handle holds the gate; anything else is a broken gate.
+            if exc.errno not in {errno.EACCES, errno.EDEADLK}:
+                raise
             return False
         return True
     import fcntl
@@ -385,12 +395,12 @@ def _stale_recovery_gate(path: Path) -> Iterator[bool]:
     try:
         descriptor = os.open(gate, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
     except OSError as exc:
-        raise RunLockError(f"could not open run lock recovery gate {gate}: {exc}") from exc
+        raise _recovery_gate_error("open", gate, path, exc) from exc
     try:
         try:
             acquired = _try_lock_descriptor(descriptor)
         except OSError as exc:
-            raise RunLockError(f"could not lock run lock recovery gate {gate}: {exc}") from exc
+            raise _recovery_gate_error("lock", gate, path, exc) from exc
         if not acquired:
             yield False
             return
@@ -402,7 +412,26 @@ def _stale_recovery_gate(path: Path) -> Iterator[bool]:
         os.close(descriptor)
 
 
-def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None:
+def _recovery_gate_error(action: str, gate: Path, path: Path, exc: OSError) -> RunLockError:
+    return RunLockError(
+        f"could not {action} run lock recovery gate {gate}: {exc}. Stale lock recovery cannot proceed: "
+        f"remove {gate} or fix its permissions (file locking must work here); the dead lock is {path}"
+    )
+
+
+def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | None] | None:
+    """``_claim_stale_lock``, waiting a bounded time while another recoverer holds the gate."""
+    deadline: float | None = None  # read the clock only once the gate is busy
+    while (result := _claim_stale_lock(path)) is _RecoveryGate.BUSY:
+        now = time.monotonic()
+        deadline = now + _RECOVERY_GATE_BUSY_RETRY_SECONDS if deadline is None else deadline
+        if now >= deadline:
+            raise RunLockError(f"stale lock recovery in progress: {path}. Another process holds the gate; retry.")
+        time.sleep(_RECOVERY_GATE_BUSY_POLL_SECONDS)
+    return result
+
+
+def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None | _RecoveryGate:
     # Renaming ``path`` takes whatever directory is there at that instant, so a
     # stale verdict is only safe to act on if nothing can replace the judged
     # lock before the rename. Two things move a lock directory off ``path``: its
@@ -412,16 +441,16 @@ def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | Non
     # and C can both judge a dead lock stale; B recovers it and publishes its
     # own lock, and C's rename then takes B's live lock out of sight (B crashes
     # on `stat`, or B's lock is stranded under C's claim name while another
-    # acquirer publishes beside it).
+    # acquirer publishes beside it). A busy gate returns BUSY, never None: the lock may still be dead.
     judged = _lock_fingerprint(path)
     if judged is None or not _lock_is_stale(path):
         return None
     with _stale_recovery_gate(path) as gated:
         if not gated:
-            return None
-        # Re-judge under the gate. The same lock seen before and after the
-        # stale check means the verdict is about that lock: a lock that left
-        # ``path`` comes back only through a gated restore.
+            return _RecoveryGate.BUSY
+        # Re-judge under the gate: the same lock before and after the stale check means the verdict is
+        # about that lock. Ungated renames into ``path`` (publish, restores, `_release_lock`'s put-back)
+        # all need ``path`` empty, so none can displace a judged lock.
         if _lock_fingerprint(path) != judged or not _lock_is_stale(path) or _lock_fingerprint(path) != judged:
             return None
         claimed = _recovery_claim_path(path)
@@ -883,7 +912,7 @@ def reconcile_run_lock(workspace: Path) -> str:
     if not _lock_is_reconcileable(path, owner):
         return "skipped"
     claimed_owner = _claim_stale_lock(path)
-    if claimed_owner is None:
+    if claimed_owner is None or claimed_owner is _RecoveryGate.BUSY:
         return "skipped"
     claimed, claimed_meta = claimed_owner
     _finish_claimed_recovery(path, claimed, claimed_meta)
@@ -1092,7 +1121,7 @@ def recover_stale_run(
     if _lock_path_is_directory(path) is not None:
         owner = _read_lock_owner(path)
         if owner is not None and _owner_matches_run(owner, run_dir):
-            stale = _claim_stale_lock(path)
+            stale = _claim_stale_lock_patiently(path)
             if stale is None:
                 if _lock_path_is_directory(path) is not None:
                     raise RunLockError(f"run owner process is still active: {path}")
@@ -1415,7 +1444,7 @@ def _acquire_lock(
         except FileExistsError:
             if _lock_path_is_directory(path) is None:
                 continue
-            stale = _claim_stale_lock(path)
+            stale = _claim_stale_lock_patiently(path)
             if stale is None:
                 if _lock_path_is_directory(path) is None:
                     continue

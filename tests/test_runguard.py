@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import math
 import os
 import shutil
+import sys
 import threading
 import time as stdlib_time
+import types
 from pathlib import Path
 
 import pytest
@@ -580,6 +583,99 @@ def test_recovery_gate_is_exclusive_and_released(tmp_path):
     with runguard._stale_recovery_gate(lock_path) as again:
         assert again
     assert runguard._stale_claims(lock_path) == []
+
+
+def _dead_run_lock(tmp_path, monkeypatch):
+    """A repo whose run lock belongs to an abandoned run with a dead owner pid."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    runguard._publish_lock(lock_path, run_dir=run_dir)
+    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+    owner["pid"] = _DEAD_PID
+    (lock_path / "owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    (lock_path / "pid").write_text(f"{_DEAD_PID}\n", encoding="utf-8")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != _DEAD_PID)
+    return repo, run_dir, lock_path, owner["owner_token"]
+
+
+def test_busy_recovery_gate_reports_recovery_in_progress_not_a_live_owner(tmp_path, monkeypatch):
+    """Another recoverer holds the gate over a dead lock: say so, never "still active"."""
+    repo, run_dir, lock_path, dead_token = _dead_run_lock(tmp_path, monkeypatch)
+    monkeypatch.setattr(runguard, "_RECOVERY_GATE_BUSY_RETRY_SECONDS", 0.05)
+
+    with runguard._stale_recovery_gate(lock_path) as held:
+        assert held
+        assert runguard._claim_stale_lock(lock_path) is runguard._RecoveryGate.BUSY
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as recovering:
+            runguard.recover_stale_run(repo, run_dir)
+        assert "still active" not in str(recovering.value)
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as acquiring:
+            runguard._acquire_lock(lock_path)
+        assert "appears active" not in str(acquiring.value)
+
+    assert json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))["owner_token"] == dead_token
+    assert runguard._stale_claims(lock_path) == []
+
+
+def test_recovery_waits_out_a_briefly_busy_gate(tmp_path, monkeypatch):
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    other_recoverer = contextlib.ExitStack()
+    assert other_recoverer.enter_context(runguard._stale_recovery_gate(lock_path))
+    waits = []
+
+    def other_recoverer_finishes(seconds):
+        waits.append(seconds)
+        other_recoverer.close()
+
+    monkeypatch.setattr(runguard.time, "sleep", other_recoverer_finishes)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert len(waits) == 1
+    assert not lock_path.exists()
+    assert json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_unopenable_recovery_gate_names_the_gate_and_the_dead_lock(tmp_path, monkeypatch):
+    """A gate that cannot be opened (here a directory: EISDIR) fails with a way out."""
+    lock_path = tmp_path / "tasks.json.lock"
+    dead = _dead_holder_lock(lock_path, monkeypatch)
+    gate = runguard._recovery_gate_path(lock_path)
+    gate.mkdir()
+
+    with pytest.raises(runguard.RunLockError) as raised:
+        runguard._acquire_lock(lock_path)
+
+    message = str(raised.value)
+    assert f"recovery gate {gate}" in message
+    assert f"remove {gate} or fix its permissions" in message
+    assert f"the dead lock is {lock_path}" in message
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == dead.owner_token
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(errno.EACCES, False), (errno.EDEADLK, False), (errno.ENOLCK, "raises"), (errno.EBADF, "raises")],
+)
+def test_windows_gate_treats_only_a_lock_violation_as_busy(tmp_path, monkeypatch, error, expected):
+    def locking(descriptor, mode, nbytes):
+        raise OSError(error, os.strerror(error))
+
+    fake_msvcrt = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+    gate = tmp_path / "gate"
+    descriptor = os.open(gate, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with monkeypatch.context() as patched:
+            patched.setitem(sys.modules, "msvcrt", fake_msvcrt)
+            patched.setattr(runguard.sys, "platform", "win32")
+            if expected == "raises":
+                with pytest.raises(OSError) as raised:
+                    runguard._try_lock_descriptor(descriptor)
+                assert raised.value.errno == error
+            else:
+                assert runguard._try_lock_descriptor(descriptor) is expected
+    finally:
+        os.close(descriptor)
 
 
 _DEAD_HOLDER_CHILD = r"""
