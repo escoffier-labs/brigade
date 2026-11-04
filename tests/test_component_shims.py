@@ -110,3 +110,20 @@ def test_corrupted_hardlink_is_still_removed_for_repair(installed):
     shims.remove_shims(current, root, install.verify_cached_asset)
     assert not shim.exists()
     assert source.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges on Windows")
+def test_snapshot_restore_keeps_an_operator_symlink(tmp_path):
+    target = tmp_path / "operator-graphtrail"
+    target.write_bytes(b"operator tool")
+    link = tmp_path / "bin" / "graphtrail"
+    link.parent.mkdir()
+    link.symlink_to(target)
+    snapshots = install._snapshot_managed_executables([link])
+    # A failed transaction may have replaced the link with a regular file.
+    link.unlink()
+    link.write_bytes(b"replaced")
+    install._restore_managed_executables(snapshots)
+    assert link.is_symlink()
+    assert os.readlink(link) == str(target)
+    assert target.read_bytes() == b"operator tool"

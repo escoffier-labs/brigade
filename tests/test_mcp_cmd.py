@@ -744,3 +744,21 @@ bearer_token_env_var = "fake-invalid-value!"
     errors = _payload(capsys)["errors"]
     assert "broken:" in errors[0]
     assert "fake-invalid-value" not in errors[0]
+
+
+def test_codex_sync_of_resolved_engine_command_settles_current(tmp_path, capsys, monkeypatch):
+    # The planner fingerprints the resolved engine path; the ownership record must store the same fingerprint.
+    engine = tmp_path / "bin" / "brigade-code-graph-mcp"
+    engine.parent.mkdir()
+    engine.write_text("#!/bin/sh\n")
+    engine.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_MCP_BIN", str(engine))
+    _init(tmp_path)
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command="brigade-code-graph-mcp", json_output=True) == 0
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+    for _ in range(2):
+        capsys.readouterr()
+        assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+        payload = _payload(capsys)
+        assert payload["files_written"] == []
+        assert all(item["status"] == "current" for item in payload["items"])
