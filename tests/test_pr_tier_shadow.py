@@ -494,6 +494,7 @@ def test_full_only_failures_stay_unconfirmed_and_timing_units_are_separate(evide
         "wrong-job-sha",
         "wrong-run",
         "shadow-incomplete",
+        "unfinished-job",
     ],
 )
 def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
@@ -533,6 +534,8 @@ def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
         jobs[0]["run_id"] = 124
     elif problem == "shadow-incomplete":
         selected["complete"] = False
+    elif problem == "unfinished-job":
+        jobs[0]["completed_at"] = None
     result = shadow.compare(IDENTITY, run, jobs, logs, selected, errors=errors)
     assert result["status"] == "incomplete"
     assert result["full_only_candidate_count"] is None
