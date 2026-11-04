@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/security"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/security"
 )
 
 // Cached evidence bundles are re-opened by `evidence show` and regenerated

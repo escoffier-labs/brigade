@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 	"github.com/klauspost/compress/zstd"
 )
 

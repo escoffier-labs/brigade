@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
 )
 
 func benchmarkSearchArchive(b *testing.B) *sql.DB {

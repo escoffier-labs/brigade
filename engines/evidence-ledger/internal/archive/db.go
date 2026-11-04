@@ -7,7 +7,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/escoffier-labs/miseledger/internal/security"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/security"
 	_ "modernc.org/sqlite"
 )
 

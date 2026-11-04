@@ -1250,20 +1250,11 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/cmd/brigade-evidence/main.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/cmd/miseledger/entrypoints_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 3
+      "miseledger": 2
     }
   },
   {
@@ -1271,7 +1262,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 2
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
   },
@@ -1283,15 +1274,6 @@
       "MiseLedger": 1,
       "miseledger": 1
     }
-  },
-  {
-    "path": "engines/evidence-ledger/cmd/sessionfind/main.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/docs/ADAPTER_CONTRACT.md",
@@ -1532,14 +1514,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/go.mod",
-    "kind": "frozen",
-    "reason": "Internal crate, module or adapter identity retained by the rename contract.",
-    "literals": {
-      "miseledger": 1
-    }
-  },
-  {
     "path": "engines/evidence-ledger/install.sh",
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
@@ -1573,7 +1547,7 @@
     "literals": {
       "GraphTrail": 1,
       "MiseLedger": 2,
-      "miseledger": 20
+      "miseledger": 5
     },
     "remove_in": "0.33.0"
   },
@@ -1582,15 +1556,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 40
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/compressed_sessions_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 1
+      "miseledger": 38
     }
   },
   {
@@ -1598,17 +1564,8 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 4
+      "miseledger": 2
     }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/crawl.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/internal/app/crawlexport.go",
@@ -1616,7 +1573,7 @@
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
       "MiseLedger": 1,
-      "miseledger": 5
+      "miseledger": 2
     },
     "remove_in": "0.33.0"
   },
@@ -1625,7 +1582,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 8
+      "miseledger": 6
     }
   },
   {
@@ -1633,7 +1590,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 2
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
   },
@@ -1651,17 +1608,8 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 6
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/gitcrawl.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
       "miseledger": 4
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/help.go",
@@ -1673,7 +1621,7 @@
     "remove_in": "0.33.0"
   },
   {
-    "path": "engines/evidence-ledger/internal/app/help_test.go",
+    "path": "engines/evidence-ledger/internal/app/import_pipe_lifecycle_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
@@ -1681,28 +1629,11 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/import_pipe_lifecycle_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 3
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/integrity.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 3
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/app/integrity_hardening_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 6
+      "miseledger": 2
     }
   },
   {
@@ -1718,7 +1649,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 4
+      "miseledger": 2
     }
   },
   {
@@ -1735,7 +1666,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 6
+      "miseledger": 2
     },
     "remove_in": "0.33.0"
   },
@@ -1744,7 +1675,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 11
+      "miseledger": 9
     }
   },
   {
@@ -1752,17 +1683,9 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 4
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/migrate_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/paths.go",
@@ -1778,7 +1701,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 4
+      "miseledger": 2
     },
     "remove_in": "0.33.0"
   },
@@ -1809,14 +1732,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/search_benchmark_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 1
-    }
-  },
-  {
     "path": "engines/evidence-ledger/internal/app/server.go",
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
@@ -1839,7 +1754,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 6
+      "miseledger": 2
     },
     "remove_in": "0.33.0"
   },
@@ -1848,16 +1763,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 5
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/watch.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 11
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
   },
@@ -1868,15 +1774,6 @@
     "literals": {
       "MiseLedger": 2,
       "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/archive/db.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
     },
     "remove_in": "0.33.0"
   },
@@ -1902,7 +1799,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 8
+      "miseledger": 7
     }
   },
   {
@@ -1910,7 +1807,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 12
+      "miseledger": 8
     },
     "remove_in": "0.33.0"
   },
@@ -1919,7 +1816,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 34
+      "miseledger": 30
     }
   },
   {
@@ -1927,7 +1824,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 3
+      "miseledger": 2
     },
     "remove_in": "0.33.0"
   },
@@ -1936,7 +1833,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 9
+      "miseledger": 8
     }
   },
   {
@@ -1944,7 +1841,7 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 4
+      "miseledger": 3
     },
     "remove_in": "0.33.0"
   },
@@ -1953,7 +1850,7 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 25
+      "miseledger": 23
     }
   },
   {
@@ -1961,45 +1858,11 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 14
+      "miseledger": 13
     }
   },
   {
     "path": "engines/evidence-ledger/internal/provenance/envelope_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 3
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/claude/claude.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/claude/claude_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/codex/codex.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/codex/codex_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
@@ -2011,109 +1874,16 @@
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 3
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/cursor/cursor_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/grok/grok.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/grok/grok_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/hermes/hermes.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/hermes/hermes_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
   },
   {
     "path": "engines/evidence-ledger/internal/sources/memory/memory.go",
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/memory/memory_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/openclaw/openclaw.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/openclaw/openclaw_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/opencode/opencode.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 3
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/opencode/opencode_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/pi/pi.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
+      "miseledger": 1
     },
     "remove_in": "0.33.0"
   },
@@ -2122,43 +1892,16 @@
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "MiseLedger": 1,
-      "miseledger": 2
+      "MiseLedger": 1
     }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/providerexports/providerexports.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/internal/sources/providerexports/providerexports_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/redaction_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
       "miseledger": 1
     }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/source.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/internal/toolpath/toolpath.go",

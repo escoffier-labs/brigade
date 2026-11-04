@@ -11,10 +11,10 @@ import (
 	"testing"
 	"testing/iotest"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/provenance"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/sources/opencode"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/opencode"
 )
 
 func TestImportAdapterReaderIdempotent(t *testing.T) {

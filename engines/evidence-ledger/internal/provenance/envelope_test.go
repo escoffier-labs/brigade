@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
 )
 
 func fixturesDir(t *testing.T) string {

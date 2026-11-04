@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/ingest"
-	"github.com/escoffier-labs/miseledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
 )
 
 const forgedContentDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"

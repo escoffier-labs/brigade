@@ -10,9 +10,9 @@ import (
 	"io"
 	"strings"
 
-	"github.com/escoffier-labs/miseledger/internal/provenance"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/textnorm"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/textnorm"
 )
 
 var migrateBatchSize = 1000
