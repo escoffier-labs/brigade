@@ -129,7 +129,7 @@ def discover_schema_helpers(conn: sqlite3.Connection) -> None:
     hub's startup/migration owner. A new unclassified DDL owner fails lockstep.
     """
     for path in sorted((ROOT / "src/brigade").glob("fleet*.py")):
-        source = path.read_text()
+        source = path.read_text(encoding="utf-8")
         tree = ast.parse(source)
         helpers = [node.name for node in tree.body if isinstance(node, ast.FunctionDef)
                    and node.name in {"ensure_schema", "init_schema"}]
@@ -145,7 +145,7 @@ def discover_schema_helpers(conn: sqlite3.Connection) -> None:
 
 
 def fixtures(directory: Path) -> None:
-    required = json.loads(REQUIRED.read_text())
+    required = json.loads(REQUIRED.read_text(encoding="utf-8"))
     assert required["user_version"] == fleet_hub.SCHEMA_VERSION, (
         "Python schema bump needs Rust review"
     )
@@ -160,7 +160,7 @@ def fixtures(directory: Path) -> None:
         path = directory / f"{fixture.stem if fixture else 'fresh'}.db"
         if fixture:
             with sqlite3.connect(path) as conn:
-                conn.executescript(fixture.read_text())
+                conn.executescript(fixture.read_text(encoding="utf-8"))
         if fixture:
             with (
                 sqlite3.connect(path) as source,
