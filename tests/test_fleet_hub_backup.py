@@ -192,6 +192,22 @@ def test_backup_writes_an_integrity_checked_private_copy(tmp_path):
     assert not list(dest.glob(".partial-*"))
 
 
+@pytest.mark.parametrize("name", ["manifest.json", "Manifest.JSON"])
+def test_backup_refuses_a_database_named_like_the_manifest(tmp_path, name):
+    # The manifest would overwrite that copy after its integrity check passed,
+    # and retention would then prune older copies that still work.
+    db = _populated(tmp_path)
+    clash = tmp_path / "src" / name
+    clash.parent.mkdir()
+    db.rename(clash)
+    dest = tmp_path / "backups"
+    (tmp_path / "old").mkdir()
+    older = backup.take_backup([_populated(tmp_path / "old")], dest, now=T0 - timedelta(hours=1), disk_usage=_plenty)
+    with pytest.raises(backup.BackupError, match="may not be named manifest.json"):
+        backup.take_backup([clash], dest, now=T0, disk_usage=_plenty)
+    assert [copy.path for copy in backup.list_copies(dest)] == [Path(older["copy"])]
+
+
 def test_backup_copies_a_database_whose_path_contains_uri_characters(tmp_path):
     # A raw `file:` URI reads `#` as a fragment and drops the rest of the name and
     # `?mode=rw`, which backed up an empty database at a truncated path.

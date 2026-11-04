@@ -246,6 +246,10 @@ def take_backup(
     names = [item.name for item in files]
     if len(set(names)) != len(names):
         raise BackupError("two source files share a name; each copy directory holds one file per name")
+    # The manifest shares the copy directory. Compared without case, since a
+    # case-insensitive filesystem treats Manifest.JSON as the same file.
+    if any(name.casefold() == MANIFEST.casefold() for name in names):
+        raise BackupError(f"a database file may not be named {MANIFEST}; the copy directory keeps the manifest there")
     for item in files:
         if not item.is_file():
             raise BackupError(f"database file {item} does not exist")
