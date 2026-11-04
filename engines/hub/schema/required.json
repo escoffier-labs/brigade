@@ -1,4 +1,249 @@
 {
+  "optional": {
+    "tables": {
+      "fleet_mcp_reports": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["node_id", "TEXT", 0, null, 1, 0],
+          ["observed_at", "TEXT", 1, null, 0, 0],
+          ["report", "TEXT", 1, null, 0, 0],
+          ["updated_at", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_mcp_reports_1": {
+            "columns": [
+              [0, "node_id", 0, "BINARY", 1],
+              [1, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_model_inventory_aliases": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["canonical_model", "TEXT", 1, null, 2, 0],
+          ["created_at", "TEXT", 1, null, 0, 0],
+          ["native_model", "TEXT", 1, null, 0, 0],
+          ["provider", "TEXT", 1, null, 1, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_model_inventory_aliases_1": {
+            "columns": [
+              [0, "provider", 0, "BINARY", 1],
+              [1, "canonical_model", 0, "BINARY", 1],
+              [2, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_model_inventory_observations": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["account_id", "TEXT", 1, "''", 0, 0],
+          ["captured_at", "TEXT", 1, null, 0, 0],
+          ["created_at", "TEXT", 1, null, 0, 0],
+          ["error_reason", "TEXT", 0, null, 0, 0],
+          ["evidence_type", "TEXT", 1, "'cli_probe'", 0, 0],
+          ["expires_at", "TEXT", 1, null, 0, 0],
+          ["harness", "TEXT", 1, "''", 0, 0],
+          ["models_json", "TEXT", 1, null, 0, 0],
+          ["observation_id", "TEXT", 0, null, 1, 0],
+          ["provider", "TEXT", 1, null, 0, 0],
+          ["scope", "TEXT", 1, null, 0, 0],
+          ["source", "TEXT", 1, null, 0, 0],
+          ["status", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "idx_fmi_obs_coverage": {
+            "columns": [
+              [0, "provider", 0, "BINARY", 1],
+              [1, "harness", 0, "BINARY", 1],
+              [2, "account_id", 0, "BINARY", 1],
+              [3, "captured_at", 0, "BINARY", 1],
+              [4, null, 0, "BINARY", 0]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX idx_fmi_obs_coverage ON fleet_model_inventory_observations ( provider, harness, account_id, captured_at )",
+            "unique": 0
+          },
+          "sqlite_autoindex_fleet_model_inventory_observations_1": {
+            "columns": [
+              [0, "observation_id", 0, "BINARY", 1],
+              [1, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_model_inventory_projections": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["account_id", "TEXT", 1, "''", 3, 0],
+          ["captured_at", "TEXT", 1, null, 0, 0],
+          ["error_reason", "TEXT", 0, null, 0, 0],
+          ["evidence_type", "TEXT", 1, null, 0, 0],
+          ["expires_at", "TEXT", 1, null, 0, 0],
+          ["harness", "TEXT", 1, "''", 2, 0],
+          ["models_json", "TEXT", 1, null, 0, 0],
+          ["observation_id", "TEXT", 1, null, 0, 0],
+          ["provider", "TEXT", 1, null, 1, 0],
+          ["scope", "TEXT", 1, null, 0, 0],
+          ["source", "TEXT", 1, null, 0, 0],
+          ["status", "TEXT", 1, null, 0, 0],
+          ["updated_at", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_model_inventory_projections_1": {
+            "columns": [
+              [0, "provider", 0, "BINARY", 1],
+              [1, "harness", 0, "BINARY", 1],
+              [2, "account_id", 0, "BINARY", 1],
+              [3, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_policy_migration": {
+        "autoincrement": false,
+        "checks": ["activated IN (0, 1)", "singleton = 1"],
+        "columns": [
+          ["activated", "INTEGER", 1, null, 0, 0],
+          ["activated_at", "TEXT", 0, null, 0, 0],
+          ["activated_by", "TEXT", 0, null, 0, 0],
+          ["candidate_digest", "TEXT", 0, null, 0, 0],
+          ["policy_revision", "INTEGER", 1, null, 0, 0],
+          ["preference_digest", "TEXT", 0, null, 0, 0],
+          ["preview_digest", "TEXT", 1, null, 0, 0],
+          ["reason", "TEXT", 0, null, 0, 0],
+          ["roster_revision", "INTEGER", 1, null, 0, 0],
+          ["singleton", "INTEGER", 0, null, 1, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {}
+      },
+      "fleet_project_boards": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["number", "INTEGER", 1, null, 2, 0],
+          ["observed_at", "TEXT", 1, null, 0, 0],
+          ["owner", "TEXT", 1, null, 1, 0],
+          ["snapshot", "TEXT", 1, null, 0, 0],
+          ["updated_at", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_project_boards_1": {
+            "columns": [
+              [0, "owner", 0, "BINARY", 1],
+              [1, "number", 0, "BINARY", 1],
+              [2, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_skill_reports": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["node_id", "TEXT", 0, null, 1, 0],
+          ["observed_at", "TEXT", 1, null, 0, 0],
+          ["report", "TEXT", 1, null, 0, 0],
+          ["updated_at", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_skill_reports_1": {
+            "columns": [
+              [0, "node_id", 0, "BINARY", 1],
+              [1, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_skill_review_drafts": {
+        "autoincrement": false,
+        "checks": [],
+        "columns": [
+          ["created_at", "TEXT", 1, null, 0, 0],
+          ["decisions", "TEXT", 1, null, 0, 0],
+          ["draft_id", "TEXT", 0, null, 1, 0],
+          ["updated_at", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_skill_review_drafts_1": {
+            "columns": [
+              [0, "draft_id", 0, "BINARY", 1],
+              [1, null, 0, "BINARY", 0]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        }
+      },
+      "fleet_skill_review_events": {
+        "autoincrement": true,
+        "checks": [],
+        "columns": [
+          ["event_id", "INTEGER", 0, null, 1, 0],
+          ["kind", "TEXT", 1, null, 0, 0],
+          ["recorded_at", "TEXT", 1, null, 0, 0],
+          ["summary", "TEXT", 1, null, 0, 0]
+        ],
+        "foreign_keys": [],
+        "indexes": {}
+      }
+    },
+    "triggers": {
+      "fleet_policy_guard_model_consumer_defaults_delete": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_delete BEFORE DELETE ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_consumer_defaults_insert": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_insert BEFORE INSERT ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_consumer_defaults_update": "CREATE TRIGGER fleet_policy_guard_model_consumer_defaults_update BEFORE UPDATE ON model_consumer_defaults WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_policy_delete": "CREATE TRIGGER fleet_policy_guard_model_policy_delete BEFORE DELETE ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_policy_insert": "CREATE TRIGGER fleet_policy_guard_model_policy_insert BEFORE INSERT ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_policy_update": "CREATE TRIGGER fleet_policy_guard_model_policy_update BEFORE UPDATE ON model_policy WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_roster_meta_delete": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_delete BEFORE DELETE ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_roster_meta_insert": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_insert BEFORE INSERT ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_model_roster_meta_update": "CREATE TRIGGER fleet_policy_guard_model_roster_meta_update BEFORE UPDATE ON model_roster_meta WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_run_preference_delete": "CREATE TRIGGER fleet_policy_guard_run_preference_delete BEFORE DELETE ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_run_preference_insert": "CREATE TRIGGER fleet_policy_guard_run_preference_insert BEFORE INSERT ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END",
+      "fleet_policy_guard_run_preference_update": "CREATE TRIGGER fleet_policy_guard_run_preference_update BEFORE UPDATE ON run_preference WHEN EXISTS (SELECT 1 FROM fleet_policy_migration WHERE singleton=1 AND activated=1) BEGIN SELECT RAISE(ABORT, 'authority_owned: fleet policy owns model roster and run preference writes after migration'); END"
+    }
+  },
   "tables": {
     "action_broker_grants": {
       "autoincrement": false,

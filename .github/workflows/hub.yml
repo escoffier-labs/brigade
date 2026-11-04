@@ -36,6 +36,8 @@ jobs:
       - run: cargo build --locked --release
       - name: Proxy transport integration
         run: python tests/transport.py
+      - name: Lazy schema through managed front and restart
+        run: python tests/lazy_schema.py
       - name: Front admission through HTTPS
         run: python tests/admission.py
       - name: V1 claim client failure modes

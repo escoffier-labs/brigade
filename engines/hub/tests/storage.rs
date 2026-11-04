@@ -12,6 +12,33 @@ fn python_lockstep_and_both_sqlite_builds() {
         .status()
         .unwrap();
     assert!(status.success());
+    let lazy = Connection::open(dir.join("lazy.db")).unwrap();
+    let required: serde_json::Value = serde_json::from_str(schema::REQUIRED).unwrap();
+    let fresh = Connection::open(dir.join("fresh.db")).unwrap();
+    for table in required["optional"]["tables"].as_object().unwrap().keys() {
+        fresh.execute_batch("BEGIN").unwrap();
+        let mut statements = lazy.prepare("SELECT sql FROM sqlite_schema WHERE tbl_name=? AND type IN ('table','index') AND sql IS NOT NULL ORDER BY type DESC").unwrap();
+        for sql in statements
+            .query_map([table], |row| row.get::<_, String>(0))
+            .unwrap()
+        {
+            fresh.execute_batch(&sql.unwrap()).unwrap();
+        }
+        schema::check(&fresh).unwrap();
+        fresh.execute_batch("ROLLBACK").unwrap();
+    }
+    for sql in required["optional"]["triggers"]
+        .as_object()
+        .unwrap()
+        .values()
+    {
+        fresh.execute_batch("BEGIN").unwrap();
+        fresh.execute_batch(sql.as_str().unwrap()).unwrap();
+        schema::check(&fresh).unwrap();
+        fresh.execute_batch("ROLLBACK").unwrap();
+    }
+    drop(fresh);
+    drop(lazy);
     for name in ["fresh", "user-version-22", "user-version-34"] {
         if name != "fresh" {
             let raw = Connection::open(dir.join(format!("{name}.raw.db"))).unwrap();
@@ -28,6 +55,35 @@ fn python_lockstep_and_both_sqlite_builds() {
             .unwrap();
         assert!(schema::check(&conn).is_err());
     }
+    let conn = Connection::open(dir.join("lazy.db")).unwrap();
+    schema::check(&conn).unwrap();
+    let required: serde_json::Value = serde_json::from_str(schema::REQUIRED).unwrap();
+    for (table, structure) in required["optional"]["tables"].as_object().unwrap() {
+        // Every optional table is present in the Python-generated fixture.
+        conn.execute_batch(&format!(
+            "BEGIN; ALTER TABLE {table} ADD COLUMN unexpected TEXT"
+        ))
+        .unwrap();
+        assert!(schema::check(&conn).is_err(), "accepted altered {table}");
+        conn.execute_batch("ROLLBACK").unwrap();
+        for (index, value) in structure["indexes"].as_object().unwrap() {
+            if value["origin"] == "c" {
+                conn.execute_batch(&format!("BEGIN; DROP INDEX {index}"))
+                    .unwrap();
+                assert!(schema::check(&conn).is_err(), "accepted missing {index}");
+                conn.execute_batch("ROLLBACK").unwrap();
+            }
+        }
+    }
+    for trigger in required["optional"]["triggers"].as_object().unwrap().keys() {
+        conn.execute_batch(&format!("BEGIN; DROP TRIGGER {trigger}; CREATE TRIGGER {trigger} BEFORE INSERT ON events BEGIN SELECT 1; END")).unwrap();
+        assert!(schema::check(&conn).is_err(), "accepted changed {trigger}");
+        conn.execute_batch("ROLLBACK").unwrap();
+    }
+    conn.execute_batch("CREATE TABLE unknown_feature (value TEXT)")
+        .unwrap();
+    assert!(schema::check(&conn).is_err());
+    drop(conn);
     std::fs::remove_dir_all(dir).unwrap();
 }
 

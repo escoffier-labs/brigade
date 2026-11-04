@@ -37,3 +37,17 @@ def test_added_column_requires_rust_update(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(fleet_hub, "init_db", added_column)
     with pytest.raises(AssertionError, match="schema drift: fresh.db"):
         lockstep["fixtures"](tmp_path)
+
+
+def test_new_lazy_table_requires_optional_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from brigade import fleet_mcp_inventory
+
+    original = fleet_mcp_inventory.ensure_schema
+
+    def new_lazy_table(conn: sqlite3.Connection) -> None:
+        original(conn)
+        conn.execute("CREATE TABLE IF NOT EXISTS future_lazy_feature (value TEXT)")
+
+    monkeypatch.setattr(fleet_mcp_inventory, "ensure_schema", new_lazy_table)
+    with pytest.raises(AssertionError, match="schema drift: lazy.db"):
+        runpy.run_path(str(LOCKSTEP))["fixtures"](tmp_path)

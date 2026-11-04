@@ -127,7 +127,24 @@ pub fn check(c: &Connection) -> Result<(), String> {
         None
     };
     let actual = snapshot(c).map_err(|e| e.to_string())?;
-    let required: Value = serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?;
+    let mut required: Value = serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?;
+    // Optional tables carry their full required indexes and constraints. Only
+    // absence is permitted; a present object must equal the reviewed structure.
+    let optional = required
+        .as_object_mut()
+        .unwrap()
+        .remove("optional")
+        .unwrap();
+    for kind in ["tables", "triggers"] {
+        for (name, structure) in optional[kind].as_object().unwrap() {
+            if actual[kind].get(name).is_some() {
+                required[kind]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), structure.clone());
+            }
+        }
+    }
     if actual == required {
         Ok(())
     } else {
