@@ -140,7 +140,7 @@ fn s(v: &Value) -> String {
     }
 }
 
-pub fn epoch(tx: &dyn ReadTx) -> rusqlite::Result<String> {
+pub fn epoch<T: ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<String> {
     Ok(tx
         .query("SELECT value FROM memory_meta WHERE key='log_epoch'", &[])?
         .first()
@@ -153,7 +153,7 @@ struct Head {
     state: String,
     trust: String,
 }
-fn head(tx: &dyn ReadTx, scope: &str, card_id: &str) -> rusqlite::Result<Option<Head>> {
+fn head<T: ReadTx + ?Sized>(tx: &T, scope: &str, card_id: &str) -> rusqlite::Result<Option<Head>> {
     Ok(tx
         .query(
             "SELECT revision,content_hash,state,trust FROM memory_cards WHERE scope=?1 AND card_id=?2",
@@ -337,7 +337,7 @@ fn event_json(scope: &str, card_id: &str, seq: i64, hash: &str, trust: &str, sta
         "state": state,
     })
 }
-fn scan_state_of(tx: &dyn ReadTx, hash: &str) -> rusqlite::Result<String> {
+fn scan_state_of<T: ReadTx + ?Sized>(tx: &T, hash: &str) -> rusqlite::Result<String> {
     Ok(tx
         .query(
             "SELECT scan_state FROM memory_card_revisions WHERE content_hash=?1 ORDER BY seq DESC LIMIT 1",
