@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, fleet_t3_transport as t3, proc
 from brigade.claim_loss_cancellation import CLAIM_LOSS_TERMINATE_GRACE_SECONDS
 from tests.test_fleet_t3_transport import FakePolicyClient, REVISION, REPO, WINDOWS_NODE, _document
@@ -27,10 +29,7 @@ def _mock_claim_loss(monkeypatch, pid_file, lost, loss_time, refusal):
             return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
         if body["action"] == "release":
             return 200, {"released": True}
-        deadline = time.monotonic() + 10
-        while not pid_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not pid_file.exists():
+        if wait_for_text(pid_file, timeout=10) is None:
             return 200, {"granted": True}
         if refusal == "quota":
             return 409, {
@@ -91,14 +90,13 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport, *, refusal="
     pid_file = ws / "worker.pid"
     child = ws / "silent-worker"
     child.write_text(
-        f"#!{sys.executable}\n"
-        "import json, os, signal, sys, time\n"
+        f"#!{sys.executable}\n" + PUBLISH_SOURCE + "import json, os, signal, sys, time\n"
         "from pathlib import Path\n"
         "if len(sys.argv) > 1 and sys.argv[1] != 'wait':\n"
         "    print(json.dumps({'schema': 't3-fleet.result.v1', 'hosts': [{'state': 'eligible'}], "
         "'request_id': 'worker/req-test', 'result': {'state': 'running'}})); sys.exit(0)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
-        f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        f"publish({str(pid_file)!r}, str(os.getpid()))\n"
         "time.sleep(60)\n"
     )
     child.chmod(0o700)
@@ -119,20 +117,21 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport, *, refusal="
     monkeypatch.setattr(proc, "run", observed_worker_run)
 
     def kill_worker():
-        if pid_file.exists():
+        published = wait_for_text(pid_file, timeout=1)
+        if published is not None:
             try:
                 if os.name == "nt":
                     subprocess.run(
-                        ["taskkill", "/PID", pid_file.read_text(), "/T", "/F"],
+                        ["taskkill", "/PID", published, "/T", "/F"],
                         capture_output=True,
                         timeout=5,
                         check=False,
                     )
                 else:
-                    os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+                    os.killpg(int(published), signal.SIGKILL)
             except ProcessLookupError:
                 try:
-                    os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                    os.kill(int(published), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
 

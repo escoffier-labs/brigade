@@ -13,6 +13,8 @@ from pathlib import Path
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import grokbot_cerebro, grokbot_ops, grokbot_packs
 from tests.test_grokbot_ops import assert_listener_recovery_policy
 
@@ -723,9 +725,7 @@ def _reap_pid(pid: int) -> None:
 
 def test_subprocess_runner_timeout_does_not_wait_on_pipe_holding_descendant(tmp_path: Path):
     pid_path = tmp_path / "descendant.pid"
-    descendant = (
-        f"import os,time; from pathlib import Path; Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(8)"
-    )
+    descendant = PUBLISH_SOURCE + f"import os,time; publish({str(pid_path)!r}, str(os.getpid())); time.sleep(8)"
     parent = f"import subprocess,sys,time; subprocess.Popen([sys.executable, '-c', {descendant!r}]); time.sleep(8)"
     started = time.monotonic()
     try:
@@ -735,11 +735,9 @@ def test_subprocess_runner_timeout_does_not_wait_on_pipe_holding_descendant(tmp_
         assert elapsed < 2.0
         assert elapsed >= 0.25
     finally:
-        if pid_path.is_file():
-            try:
-                _reap_pid(int(pid_path.read_text(encoding="utf-8").strip()))
-            except ValueError:
-                pass
+        published = wait_for_text(pid_path, timeout=1)
+        if published is not None:
+            _reap_pid(int(published))
 
 
 def test_subprocess_runner_detects_stdout_oversize_without_unbounded_buffer(tmp_path: Path):
