@@ -195,7 +195,8 @@ def test_backup_copies_a_database_whose_path_contains_uri_characters(tmp_path):
     # A raw `file:` URI reads `#` as a fragment and drops the rest of the name and
     # `?mode=rw`, which backed up an empty database at a truncated path.
     db = _populated(tmp_path)
-    odd = db.with_name("hub#primary?x%41.db")
+    # Windows forbids "?" in file names; "#" and "%" exercise the URI bug there too.
+    odd = db.with_name("hub#primary?x%41.db" if os.name != "nt" else "hub#primary x%41.db")
     db.rename(odd)
     report = backup.take_backup([odd], tmp_path / "backups", now=T0, disk_usage=_plenty)
     copy = Path(report["copy"]) / odd.name
