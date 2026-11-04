@@ -3,7 +3,22 @@ use brigade_hub::{
     schema::DataVersion,
 };
 use rusqlite::Connection;
-use std::time::{Duration, Instant};
+use std::{
+    sync::atomic::{AtomicBool, AtomicU32, Ordering},
+    time::{Duration, Instant},
+};
+
+static CHECKPOINT_WAITING: AtomicBool = AtomicBool::new(false);
+static CHECKPOINT_WAITS: AtomicU32 = AtomicU32::new(0);
+
+// Stands in for a busy timeout the caller left on the connection. SQLite calls
+// it while a TRUNCATE checkpoint waits for readers holding the write lock, so
+// the flag says the writer would now be stalled. It gives up after about 3 s.
+fn slow_busy_handler(_: i32) -> bool {
+    CHECKPOINT_WAITING.store(true, Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(10));
+    CHECKPOINT_WAITS.fetch_add(1, Ordering::SeqCst) < 300
+}
 
 #[test]
 fn pinned_reader_keeps_checkpoint_busy_but_not_writer() {
@@ -19,14 +34,30 @@ fn pinned_reader_keeps_checkpoint_busy_but_not_writer() {
     let (started, receive) = std::sync::mpsc::channel();
     let thread = std::thread::spawn(move || {
         let c = Connection::open(checkpoint_path).unwrap();
-        c.busy_timeout(Duration::from_millis(250)).unwrap();
+        c.busy_handler(Some(slow_busy_handler)).unwrap();
         started.send(()).unwrap();
         checkpoint(&c, true).unwrap()
     });
     receive.recv().unwrap();
+    // `checkpoint` must clear the inherited handler and answer busy at once.
+    // If it kept the handler, wait until the checkpoint holds the write lock,
+    // so the insert below meets the stall every time rather than by timing.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while !thread.is_finished()
+        && !CHECKPOINT_WAITING.load(Ordering::SeqCst)
+        && Instant::now() < deadline
+    {
+        std::thread::sleep(Duration::from_millis(1));
+    }
     let at = Instant::now();
     writer.execute("INSERT INTO t VALUES(2)", []).unwrap();
-    assert!(at.elapsed() < Duration::from_millis(200));
+    // Generous for slow CI disks: a kept handler stalls the writer about 3 s.
+    let waited = at.elapsed();
+    assert!(waited < Duration::from_secs(1), "writer waited {waited:?}");
+    assert!(
+        !CHECKPOINT_WAITING.load(Ordering::SeqCst),
+        "checkpoint kept the caller's busy handler"
+    );
     assert_eq!(thread.join().unwrap().0, 1);
     reader.execute_batch("ROLLBACK").unwrap();
     assert_eq!(checkpoint(&writer, true).unwrap().0, 0);
