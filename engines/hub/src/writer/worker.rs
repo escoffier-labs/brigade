@@ -68,10 +68,32 @@ fn sync_directory(db: &Connection) -> std::io::Result<()> {
     if super::powercut::skip_directory_sync() {
         return Ok(());
     }
-    std::fs::File::open(&parent)?.sync_all()?;
+    flush_directory(&parent)?;
     #[cfg(test)]
     super::powercut::directory_synced(&parent)?;
     Ok(())
+}
+#[cfg(not(windows))]
+fn flush_directory(parent: &Path) -> std::io::Result<()> {
+    std::fs::File::open(parent)?.sync_all()
+}
+#[cfg(windows)]
+fn flush_directory(parent: &Path) -> std::io::Result<()> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+    // A directory handle needs backup semantics. Like Python's fsync_directory,
+    // a refused directory flush (ERROR_INVALID_FUNCTION or ERROR_ACCESS_DENIED)
+    // is best effort, since NTFS journals the directory entry itself.
+    let flushed = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(parent)
+        .and_then(|directory| directory.sync_all());
+    match flushed {
+        Err(error) if matches!(error.raw_os_error(), Some(1 | 5)) => Ok(()),
+        other => other,
+    }
 }
 struct Tx<'a>(&'a Connection);
 impl ReadTx for Tx<'_> {
