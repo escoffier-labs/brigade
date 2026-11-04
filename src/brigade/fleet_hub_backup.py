@@ -317,17 +317,9 @@ def take_backup(
 # ------------------------------------------------------------------ restore
 
 
-def _ledger_reachable(path: Path) -> bool:
-    if path.exists():
-        return path.is_file() and os.access(path, os.R_OK | os.W_OK)
-    return path.parent.is_dir() and os.access(path.parent, os.W_OK)
-
-
-def read_ledger(path: Path) -> list[dict[str, Any]]:
-    if not path.exists():
-        return []
+def _parse_ledger(text: str, path: Path) -> list[dict[str, Any]]:
     records = []
-    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
+    for number, line in enumerate(text.splitlines(), start=1):
         if not line.strip():
             continue
         try:
@@ -342,6 +334,97 @@ def read_ledger(path: Path) -> list[dict[str, Any]]:
     return records
 
 
+def read_ledger(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return _parse_ledger(path.read_text(encoding="utf-8"), path)
+
+
+def _lock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+        import time
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+                return
+            except OSError:
+                time.sleep(0.1)
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _unlock(fd: int) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+        return
+    import fcntl
+
+    fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+class _LockedLedgers:
+    """Exclusive locks on every ledger copy, held from the read through the restored file's commit.
+
+    Two restores sharing a ledger therefore allocate in turn: the second reads
+    the first's record before it computes its own range.
+    """
+
+    def __init__(self, paths: list[Path]) -> None:
+        self.paths = sorted(set(paths), key=str)
+        self.fds: dict[Path, int] = {}
+        self.created: list[Path] = []
+
+    def __enter__(self) -> _LockedLedgers:
+        try:
+            for path in self.paths:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                if not path.exists():
+                    self.created.append(path)
+                flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
+                self.fds[path] = os.open(path, flags, 0o600)
+                _lock(self.fds[path])
+        except BaseException:
+            self.__exit__(None, None, None)
+            raise
+        return self
+
+    def read(self) -> list[dict[str, Any]]:
+        records: list[dict[str, Any]] = []
+        for path, fd in self.fds.items():
+            os.lseek(fd, 0, os.SEEK_SET)
+            chunks = []
+            while chunk := os.read(fd, 1 << 16):
+                chunks.append(chunk)
+            records.extend(_parse_ledger(b"".join(chunks).decode("utf-8"), path))
+        return records
+
+    def append(self, record: dict[str, Any]) -> list[str]:
+        line = (json.dumps(record, sort_keys=True) + "\n").encode("utf-8")
+        for fd in self.fds.values():
+            os.lseek(fd, 0, os.SEEK_END)
+            os.write(fd, line)
+            os.fsync(fd)
+        for path in self.created:
+            _fsync_dir(path.parent)
+        return [str(path) for path in self.fds]
+
+    def __exit__(self, *exc: object) -> None:
+        for fd in self.fds.values():
+            try:
+                _unlock(fd)
+            except OSError:
+                pass
+            os.close(fd)
+        self.fds.clear()
+
+
 def ledger_base(records: Iterable[dict[str, Any]]) -> dict[str, int]:
     """The highest value of each advance across every record in every ledger copy."""
     base = dict.fromkeys(LEDGER_FIELDS, 0)
@@ -349,19 +432,6 @@ def ledger_base(records: Iterable[dict[str, Any]]) -> dict[str, int]:
         for field in LEDGER_FIELDS:
             base[field] = max(base[field], int(record[field]))
     return base
-
-
-def _append_ledger(path: Path, record: dict[str, Any]) -> None:
-    created = not path.exists()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-    try:
-        os.write(fd, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-    if created:
-        _fsync_dir(path.parent)
 
 
 def _message_sequence(conn: sqlite3.Connection) -> int:
@@ -440,17 +510,18 @@ def restore(
     check = _integrity(copy)
     if check != "ok":
         raise BackupError(f"integrity_check failed on copy {copy}: {check}")
-    reachable = [path for path in ledger_paths if _ledger_reachable(path)]
-    unreachable = [str(path) for path in ledger_paths if path not in reachable]
-    if not reachable and not assert_no_prior_restore:
+    # Only a ledger file that still exists carries restore history. A missing
+    # file in a writable directory may be a ledger that was lost, so it never
+    # counts as reachable on its own.
+    existing = [path for path in ledger_paths if path.is_file()]
+    if not existing and not assert_no_prior_restore:
         raise BackupError(
-            "no recovery ledger is reachable; refusing. If no earlier restore from this copy happened, "
-            "say so with --assert-no-prior-restore and the statement is recorded in the new ledger record"
+            "no recovery ledger is reachable (no named ledger file exists); refusing. Create the ledger files "
+            "when backups are set up. If no earlier restore from this copy happened, say so with "
+            "--assert-no-prior-restore and the statement is recorded in the new ledger record"
         )
-    records: list[dict[str, Any]] = []
-    for path in reachable:
-        records.extend(read_ledger(path))
-    base = ledger_base(records)
+    writable = [path for path in ledger_paths if path in existing or assert_no_prior_restore or path.parent.is_dir()]
+    unreachable = [str(path) for path in ledger_paths if path not in writable]
     copy_digest = _sha256(copy)
     taken = _utc(now)
     stamp = taken.isoformat().replace("+00:00", "Z")
@@ -458,7 +529,10 @@ def restore(
     for path in (staging, staging.with_name(staging.name + "-wal"), staging.with_name(staging.name + "-shm")):
         if path.exists():
             path.unlink()
+    locks = _LockedLedgers(writable)
     try:
+        locks.__enter__()
+        base = ledger_base(locks.read())
         _online_copy(copy, staging)
         conn = fleet_hub.init_db(staging)
         try:
@@ -485,10 +559,7 @@ def restore(
                 }
                 # The ledger record is durable before the restored file is: a
                 # record whose restore never committed only raises the next base.
-                written = []
-                for path in reachable or ledger_paths:
-                    _append_ledger(path, record)
-                    written.append(str(path))
+                written = locks.append(record)
                 conn.commit()
             except BaseException:
                 conn.rollback()
@@ -506,6 +577,8 @@ def restore(
             if path.exists():
                 path.unlink()
         raise
+    finally:
+        locks.__exit__(None, None, None)
     return {
         "target": str(target),
         "copy": str(copy),

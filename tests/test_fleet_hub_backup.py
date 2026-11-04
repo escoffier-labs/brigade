@@ -282,8 +282,11 @@ def test_cli_backup_and_plan(tmp_path, capsys):
 
 
 def _ledgers(tmp_path):
+    """Both ledger copies, created empty the way backup setup creates them."""
     store, host = tmp_path / "backups" / backup.LEDGER_NAME, tmp_path / "host" / backup.LEDGER_NAME
-    host.parent.mkdir(exist_ok=True)
+    for path in (store, host):
+        path.parent.mkdir(exist_ok=True)
+        path.touch()
     return [store, host]
 
 
@@ -360,6 +363,7 @@ def test_one_reachable_ledger_is_enough_and_its_records_count(tmp_path):
     db = _populated(tmp_path)
     copy = _copy(tmp_path, db)
     store = tmp_path / "backups" / backup.LEDGER_NAME
+    store.touch()
     first = backup.restore(copy, tmp_path / "a.db", ledgers=[store], now=T0)
     missing_host = tmp_path / "gone" / "dir" / backup.LEDGER_NAME
     second = backup.restore(copy, tmp_path / "b.db", ledgers=[store, missing_host], now=T0)
@@ -378,6 +382,56 @@ def test_restore_refuses_without_a_ledger_unless_the_operator_states_no_prior_re
     report = backup.restore(copy, target, ledgers=[nowhere], assert_no_prior_restore=True, now=T0)
     (record,) = backup.read_ledger(nowhere)
     assert record["no_prior_restore_asserted"] is True and report["ledgers_written"] == [str(nowhere)]
+
+
+def test_a_lost_ledger_in_a_writable_directory_does_not_count_as_reachable(tmp_path):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    ledgers = _ledgers(tmp_path)
+    first = backup.restore(copy, tmp_path / "a.db", ledgers=ledgers, now=T0)
+    for path in ledgers:
+        path.unlink()
+    with pytest.raises(backup.BackupError, match="no recovery ledger is reachable"):
+        backup.restore(copy, tmp_path / "b.db", ledgers=ledgers, now=T0)
+    # One surviving copy is enough, and the lost one gets the new record too.
+    ledgers[0].write_text(json.dumps({**first, "copy": {}}, default=str) + "\n", encoding="utf-8")
+    second = backup.restore(copy, tmp_path / "c.db", ledgers=ledgers, now=T0)
+    assert second["claim_floor"] > first["claim_floor"]
+    assert len(backup.read_ledger(ledgers[1])) == 1
+
+
+def test_concurrent_restores_sharing_a_ledger_allocate_distinct_ranges(tmp_path, monkeypatch):
+    import threading
+
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    ledgers = _ledgers(tmp_path)
+    real_base = backup.ledger_base
+
+    def slow_base(records):
+        # Widen the window between reading the ledger and appending to it.
+        base = real_base(records)
+        threading.Event().wait(0.5)
+        return base
+
+    monkeypatch.setattr(backup, "ledger_base", slow_base)
+    reports, errors = [], []
+
+    def run(name):
+        try:
+            reports.append(backup.restore(copy, tmp_path / f"{name}.db", ledgers=ledgers, now=T0))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    threads = [threading.Thread(target=run, args=(name,)) for name in ("x", "y")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert not errors and len(reports) == 2
+    for field in ("message_sequence", "claim_floor", "roster_revision", "policy_revision"):
+        assert reports[0][field] != reports[1][field], field
+    assert [len(backup.read_ledger(path)) for path in ledgers] == [2, 2]
 
 
 def test_restore_refuses_an_existing_target_and_a_corrupt_ledger(tmp_path):
@@ -431,6 +485,7 @@ def test_cli_restore_reports_and_refuses(tmp_path, capsys):
     db = _populated(tmp_path)
     copy = _copy(tmp_path, db)
     ledger = tmp_path / "backups" / backup.LEDGER_NAME
+    ledger.touch()
     target = tmp_path / "cli.db"
     args = ["fleet", "restore", "--copy", str(copy), "--db", str(target), "--ledger", str(ledger), "--json"]
     assert cli.main(args) == 0
