@@ -194,14 +194,32 @@ def one_namespace(result: Result) -> None:
     result.ok(marks.get("front") == holder, "front is in the holder's namespace", marks.get("front"))
 
 
-def clean_exit_logged(service: str = "hub", since: str | None = None, container: str | None = None) -> bool:
-    argv = ["docker", "logs"]
-    if since:
-        argv += ["--since", since]
+HUB_STARTED = "brigade fleet hub listening on"
+HUB_STOPPED = "brigade fleet hub stopped cleanly"
+
+
+def clean_exit_logged(service: str = "hub", container: str | None = None, *, before_current_run: bool = False) -> bool:
+    """Whether the hub run under test ended with its clean-exit line.
+
+    The log holds every run of the container, so a clean stop earlier (say from
+    `restart --case stop`) must not vouch for a later forced kill. The run under
+    test is the latest one in the log, or with `before_current_run` the one that
+    ended before the container's current start (a host shutdown or reboot). It
+    passed only if its clean-exit line follows its own listening line.
+    """
     # A stopped container is missing from plain `compose ps`, so look it up with -a.
     target = container or run(compose("ps", "-a", "-q", service)).stdout.strip() or service
-    done = run([*argv, target])
-    return "brigade fleet hub stopped cleanly" in done.stdout + done.stderr
+    argv = ["docker", "logs"]
+    if before_current_run:
+        started = inspect(target, "{{.State.StartedAt}}")
+        if not started:
+            return False
+        argv += ["--until", started]
+    # Both lines go to stdout, so their order there is the order they were written.
+    lines = run([*argv, target]).stdout.splitlines()
+    starts = [index for index, line in enumerate(lines) if HUB_STARTED in line]
+    stops = [index for index, line in enumerate(lines) if HUB_STOPPED in line]
+    return bool(starts) and bool(stops) and stops[-1] > starts[-1]
 
 
 # ------------------------------------------------------------------- checks
@@ -221,7 +239,11 @@ def check_ups(args: argparse.Namespace, result: Result) -> None:
     text = boots.stdout.lower()
     result.ok("forced shutdown" in text or "fsd" in text, "previous boot ended in the UPS monitor's forced shutdown")
     boot = run(["uptime", "-s"]).stdout.strip()
-    result.ok(bool(boot) and clean_exit_logged(), "hub logged a clean exit", f"current boot {boot}")
+    result.ok(
+        bool(boot) and clean_exit_logged(before_current_run=True),
+        "hub run before this boot logged a clean exit",
+        f"current boot {boot}",
+    )
     result.ok(wait_for_front(120) is not None, "hub answers through the front after the boot")
 
 
@@ -744,7 +766,7 @@ def check_restart(args: argparse.Namespace, result: Result) -> None:
             starts[service] = inspect(cid, "{{.State.StartedAt}}") if cid else "not running"
         result.add("INFO", "container start times", {"docker_active_monotonic_us": active, **starts})
         result.ok(wait_for_front(90) is not None, "request through the front answers")
-        result.ok(clean_exit_logged(), "hub logged a clean exit before the reboot")
+        result.ok(clean_exit_logged(before_current_run=True), "hub run before the reboot logged a clean exit")
         flush = run(["brigade", "fleet", "flush"])
         result.add("INFO", "dogfood node spool flush", (flush.stdout + flush.stderr).strip()[:400])
     one_namespace(result)

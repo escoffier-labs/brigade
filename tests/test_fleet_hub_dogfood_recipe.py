@@ -604,23 +604,53 @@ def test_restore_updates_the_hub_on_loopback_before_clients_reconnect():
     assert "`front` stays stopped" in restore[fenced_start:unfence]
 
 
-def test_clean_exit_check_reads_a_stopped_container(monkeypatch):
+def _log_fakes(monkeypatch, logs, started="2026-11-04T10:00:00.5Z"):
+    from types import SimpleNamespace
+
     calls = []
 
     def run(argv, **_):
         calls.append(argv)
-        from types import SimpleNamespace
-
         if argv[:2] == ["docker", "logs"]:
-            return SimpleNamespace(stdout="brigade fleet hub stopped cleanly\n", stderr="", returncode=0)
+            # `--until <start>` drops the current run's lines.
+            text = logs.split("CURRENT RUN\n")[0] if "--until" in argv else logs.replace("CURRENT RUN\n", "")
+            return SimpleNamespace(stdout=text, stderr="", returncode=0)
+        if argv[:2] == ["docker", "inspect"]:
+            return SimpleNamespace(stdout=started + "\n", stderr="", returncode=0)
         # `compose ps -a -q hub` still lists the stopped container.
         return SimpleNamespace(stdout="abc123\n" if "-a" in argv else "", stderr="", returncode=0)
 
     monkeypatch.setattr(checks, "run", run)
+    return calls
+
+
+START = "brigade fleet hub listening on 127.0.0.1:3774 (db x)\n"
+STOP = "brigade fleet hub stopped cleanly\n"
+
+
+def test_clean_exit_check_reads_a_stopped_container(monkeypatch):
+    calls = _log_fakes(monkeypatch, START + STOP)
     assert checks.clean_exit_logged(container="known") is True
     assert calls[-1][-1] == "known"
     assert checks.clean_exit_logged() is True
     assert calls[-1][-1] == "abc123"
+
+
+def test_an_earlier_clean_stop_does_not_vouch_for_a_killed_run(monkeypatch):
+    # Run 1 stopped cleanly; run 2 was killed in the shutdown; run 3 is the current one.
+    logs = START + STOP + START + "CURRENT RUN\n" + START
+    _log_fakes(monkeypatch, logs)
+    assert checks.clean_exit_logged(before_current_run=True) is False
+    assert checks.clean_exit_logged() is False
+
+
+def test_the_run_before_the_current_start_must_end_cleanly(monkeypatch):
+    logs = START + "\n" + START + STOP + "CURRENT RUN\n" + START
+    calls = _log_fakes(monkeypatch, logs)
+    assert checks.clean_exit_logged(before_current_run=True) is True
+    assert ["docker", "logs", "--until", "2026-11-04T10:00:00.5Z", "abc123"] in calls
+    # Without the boundary the current run, still serving, has not stopped.
+    assert checks.clean_exit_logged() is False
 
 
 def _hub_kill_fakes(monkeypatch, *, restarted: bool):
