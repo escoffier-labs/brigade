@@ -1213,3 +1213,95 @@ async fn slow_memory_syncs_leave_hub_writes_one_batch_behind_at_most() {
     drop(hub);
     crate::writer::powercut::DISK.with(|d| *d.borrow_mut() = Default::default());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn overload_keeps_the_writer_queue_bounded() {
+    let dir = temp_dir();
+    let hub = hub_fixture(&dir);
+    let memory = dir.join("fleet-hub-memory.db");
+    let db = worker::open_file(&memory, true).unwrap();
+    schema::migrate(&db, 1_800_000_000_000).unwrap();
+    // The Python upstream holds the hub lock, so every batch waits and fails.
+    let python = Connection::open(&hub).unwrap();
+    python.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut config = writer::Config::new(memory.clone(), hub.clone(), digest(ADMIN_TOKEN));
+    config.capacity = 4;
+    config.max_commands = 1;
+    config.hub_wait = Duration::from_millis(50);
+    let w = Arc::new(writer::Writer::start(config, db, Arc::default()).unwrap());
+    let mut tasks = Vec::new();
+    for i in 0..60 {
+        let w = w.clone();
+        let text = ids::normalize(&format!("card {i}"));
+        tasks.push(tokio::spawn(async move {
+            let command = Prepared {
+                credential: Credential::Admin,
+                action: Action::Put {
+                    scope: "fleet".into(),
+                    card_id: format!("card-{i}"),
+                    base: None,
+                    hash: ids::sha256_hex(text.as_bytes()),
+                    text,
+                    origin: None,
+                    scan: Scan::Unavailable,
+                    import: false,
+                },
+                client_event_id: ids::mint(1_800_000_000_000),
+                request_digest: format!("d{i}"),
+                now_ms: 1_800_000_000_000,
+            };
+            w.submit(command, Instant::now() + Duration::from_secs(10))
+                .await
+        }));
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let mut full = 0;
+    for t in tasks {
+        match t.await.unwrap() {
+            Err(writer::Failure {
+                reason: "memory-queue-full",
+                ..
+            }) => full += 1,
+            Err(writer::Failure {
+                reason: "authority-lock-timeout",
+                ..
+            }) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+    assert!(full > 0, "overload never reached the bounded channel");
+    assert!(w.metrics.lock().unwrap().pending_max <= 1);
+    python.execute_batch("ROLLBACK").unwrap();
+    drop(w);
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+#[tokio::test]
+async fn an_unreadable_policy_refuses_a_policy_bound_command() {
+    let h = Hub::new();
+    Connection::open(&h.hub)
+        .unwrap()
+        .execute_batch("DROP TABLE fleet_policy_revisions")
+        .unwrap();
+    let probe = Prepared {
+        credential: Credential::Admin,
+        action: Action::PolicyProbe,
+        client_event_id: h.id(),
+        request_digest: "probe".into(),
+        now_ms: h.now(),
+    };
+    let answer = h
+        .store
+        .as_ref()
+        .unwrap()
+        .writer
+        .submit(probe, Instant::now() + Duration::from_secs(5))
+        .await;
+    assert_eq!(
+        answer,
+        Err(writer::Failure {
+            status: 503,
+            reason: "policy-reread"
+        })
+    );
+}

@@ -87,6 +87,8 @@ pub struct Metrics {
     pub authority_timeouts: u64,
     pub commit_failures: u64,
     pub sweeps: u64,
+    /// The most commands ever held in the writer's own queue, beside the channel.
+    pub pending_max: u64,
 }
 pub enum Job {
     Write {
@@ -123,16 +125,19 @@ impl HubLock {
             Ok(Err(refusal)) => return Err(Ok(refusal)),
             Err(_) => return Err(Err(storage("credential-reread"))),
         }
+        // A policy that cannot be read under the lock refuses the command. No
+        // policy row at all means no policy is configured.
         let policy = if policy {
-            match tx.query(
-                "SELECT m.current_revision,r.digest FROM fleet_policy_meta m JOIN fleet_policy_revisions r ON r.revision=m.current_revision WHERE m.singleton=1",
-                &[],
-            ) {
-                Ok(rows) => rows.first().map(|r| match (&r[0], &r[1]) {
-                    (Value::Integer(rev), Value::Text(digest)) => (*rev, digest.clone()),
-                    _ => (0, String::new()),
-                }),
-                Err(_) => None,
+            let rows = tx
+                .query(
+                    "SELECT m.current_revision,r.digest FROM fleet_policy_meta m JOIN fleet_policy_revisions r ON r.revision=m.current_revision WHERE m.singleton=1",
+                    &[],
+                )
+                .map_err(|_| Err(storage("policy-reread")))?;
+            match rows.first().map(|r| (&r[0], &r[1])) {
+                None => None,
+                Some((Value::Integer(rev), Value::Text(digest))) => Some((*rev, digest.clone())),
+                Some(_) => return Err(Err(storage("policy-reread"))),
             }
         } else {
             None
@@ -314,8 +319,17 @@ pub(crate) fn run(
         }
     };
     loop {
-        while let Ok(job) = receiver.try_recv() {
+        // Take from the channel only what the next batch can use, so overload
+        // stays in the bounded channel and submitters get memory-queue-full.
+        while writes.len() < config.max_commands {
+            let Ok(job) = receiver.try_recv() else {
+                break;
+            };
             accept(job, &mut writes, &mut sweeps);
+        }
+        {
+            let mut m = metrics.lock().unwrap();
+            m.pending_max = m.pending_max.max(writes.len() as u64);
         }
         if writes.is_empty() {
             if let Some(now_ms) = sweeps.pop_front() {
