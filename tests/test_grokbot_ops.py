@@ -1217,7 +1217,7 @@ def test_new_grokbot_commands_appear_in_parser_derived_inventory():
 
     paths = _cli_command_paths()
     for command in ("setup", "doctor", "canary", "install-service", "reconcile-reports"):
-        assert f"brigade run-cloud grokbot {command}" in paths
+        assert f"brigade run cloud grokbot {command}" in paths
 
 
 @pytest.mark.parametrize("instance", ("operator", "repository-scout", "implementation-worker"))

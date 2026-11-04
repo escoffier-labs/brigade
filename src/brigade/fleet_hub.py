@@ -124,7 +124,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 48
+SCHEMA_VERSION = 49
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -742,10 +742,11 @@ def _apply_schema(
     ensure_ci_schema(conn)
     # v38 -> v39: MCP Events subscriptions, event outbox and delivery state.
     fleet_hub_events.ensure_schema(conn)
-    from . import fleet_hub_identity, fleet_hub_message_keys
+    from . import fleet_hub_findings, fleet_hub_identity, fleet_hub_message_keys
 
     fleet_hub_message_keys.ensure_schema(conn)
     fleet_hub_identity.ensure_schema(conn)
+    fleet_hub_findings.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 

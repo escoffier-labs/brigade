@@ -287,6 +287,7 @@ def databases(directory: Path):
 def generate(directory: Path) -> dict:
     snapshots = {name: snapshot(conn) for name, conn in databases(directory)}
     fresh = snapshots["fresh"]
+    assert {"fleet_findings", "fleet_finding_grants"} <= set(fresh["tables"])
     lazy = snapshots["lazy"]
     required = dict(fresh)
     required["optional"] = {

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import evidence_cmd, receipts_cmd, runs_diff, trust_gate
+from brigade import evidence_cmd, receipts_cmd, trust_gate
 from brigade.work_cmd import footprint, verification
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,7 +40,6 @@ FROZEN_IDENTIFIERS = [
     ("src/brigade/memory_cmd.py", '"miseledger://evidence/"'),
     ("src/brigade/work_cmd/verification.py", 'receipt["miseledger_indexing"]'),
     ("src/brigade/work_cmd/footprint.py", '("code_graph_delta", "graphtrail_delta")'),
-    ("src/brigade/runs_diff.py", '("code_graph_delta", "graphtrail_delta")'),
     ("src/brigade/code_graph_delta.py", 'payload["graphtrail_timeout_seconds"]'),
     ("src/brigade/code_graph_delta.py", 'compact["graphtrail_timeout_seconds"]'),
     ("engines/code-graph/src/query/graph.rs", '"__graphtrail_limit_truncated__"'),
@@ -91,4 +90,3 @@ def test_receipt_readers_keep_legacy_delta(tmp_path: Path) -> None:
     delta = {"status": "ok", "graphtrail_timeout_seconds": 17}
     assert footprint.receipt_graph_delta({"graphtrail_delta": delta}) == delta
     (tmp_path / "run.json").write_text(json.dumps({"graphtrail_delta": delta}))
-    assert runs_diff._graphtrail_source(tmp_path) == delta

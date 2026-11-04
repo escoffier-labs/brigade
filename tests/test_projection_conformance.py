@@ -5,7 +5,8 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from brigade.projection import fixture, kernel
+from brigade.projection import kernel
+from tests import projection_fixture as fixture
 
 
 def test_conformance_fixture_does_not_import_command_modules() -> None:

@@ -21,16 +21,13 @@ from typing import Any, Iterable, Mapping
 from urllib.parse import urlsplit
 
 from . import (
-    grokbot_backup,
     grokbot_cerebro,
     grokbot_fleet,
     grokbot_mcp,
-    grokbot_n8n,
     grokbot_obsidian,
     grokbot_operations_relay,
     grokbot_ops,
     grokbot_t3,
-    grokbot_wazuh,
     dot,
 )
 
@@ -70,21 +67,17 @@ DEFAULT_BINDS = {
     "repository-scout": "127.0.0.1:8767",
 }
 CONNECTOR_DEFAULT_BINDS = {
-    "backup-steward": "127.0.0.1:8772",
     "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
     "dot": "127.0.0.1:8779",
     "duet": "127.0.0.1:8780",
     "grokbot-memory": "127.0.0.1:8781",
-    "n8n-operator": "127.0.0.1:8775",
     "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
     "t3-dispatch": "127.0.0.1:8778",
-    "wazuh-triage": "127.0.0.1:8774",
 }
-STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward", "wazuh-triage"})
+STEWARD_PACK_IDS = frozenset({"fleet-steward"})
 OBSIDIAN_PACK_ID = "obsidian-operator"
-N8N_PACK_ID = "n8n-operator"
 OPERATIONS_RELAY_PACK_ID = "operations-relay"
 T3_DISPATCH_PACK_ID = "t3-dispatch"
 DOT_PACK_ID = "dot"
@@ -109,13 +102,6 @@ OBSIDIAN_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
         "excalidraw_bin",
         "upstream_url",
         "upstream_key",
-    }
-)
-N8N_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
-    {
-        "runtime_path",
-        "action_state_path",
-        "approval_dir",
     }
 )
 OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
@@ -150,24 +136,18 @@ def _queue_pack(instance: str) -> dict[str, Any]:
 
 
 def _connector_tools(pack_id: str) -> frozenset[str]:
-    if pack_id == "backup-steward":
-        return grokbot_backup.TOOLS
     if pack_id == "cerebro-memory":
         return grokbot_cerebro.TOOLS
     if pack_id == "fleet-steward":
         return grokbot_fleet.TOOLS
     if pack_id == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.TOOLS
-    if pack_id == N8N_PACK_ID:
-        return grokbot_n8n.TOOLS
     if pack_id == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.TOOLS
     if pack_id in DOT_FAMILY_PACK_IDS:
         return dot.profile_for(pack_id).tools
     if pack_id == T3_DISPATCH_PACK_ID:
         return grokbot_t3.TOOLS
-    if pack_id == "wazuh-triage":
-        return grokbot_wazuh.TOOLS
     return frozenset()
 
 
@@ -362,14 +342,8 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
         checks = grokbot_ops.doctor(target, pack["instance"])
     elif pack["id"] == "fleet-steward":
         checks = grokbot_fleet.doctor(target)
-    elif pack["id"] == "backup-steward":
-        checks = grokbot_backup.doctor(target)
     elif pack["id"] == OBSIDIAN_PACK_ID:
         checks = grokbot_obsidian.doctor(target)
-    elif pack["id"] == "wazuh-triage":
-        checks = grokbot_wazuh.doctor(target)
-    elif pack["id"] == N8N_PACK_ID:
-        checks = grokbot_n8n.doctor(target)
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         checks = grokbot_operations_relay.doctor(target)
     elif pack["id"] in DOT_FAMILY_PACK_IDS:
@@ -391,14 +365,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_ops.canary(target, pack["instance"])
     if pack["id"] == "fleet-steward":
         return grokbot_fleet.canary(target)
-    if pack["id"] == "backup-steward":
-        return grokbot_backup.canary(target)
     if pack["id"] == OBSIDIAN_PACK_ID:
         return grokbot_obsidian.canary(target)
-    if pack["id"] == "wazuh-triage":
-        return grokbot_wazuh.canary(target)
-    if pack["id"] == N8N_PACK_ID:
-        return grokbot_n8n.canary(target)
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.canary(target)
     if pack["id"] in DOT_FAMILY_PACK_IDS:
@@ -425,14 +393,8 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_ops.render_unit(config, python=sys.executable, exec_root=target)
         if pack["id"] == "fleet-steward":
             return grokbot_fleet.render_unit(target, python=sys.executable)
-        if pack["id"] == "backup-steward":
-            return grokbot_backup.render_unit(target, python=sys.executable)
         if pack["id"] == OBSIDIAN_PACK_ID:
             return grokbot_obsidian.render_unit(target, python=sys.executable)
-        if pack["id"] == "wazuh-triage":
-            return grokbot_wazuh.render_unit(target, python=sys.executable)
-        if pack["id"] == N8N_PACK_ID:
-            return grokbot_n8n.render_unit(target, python=sys.executable)
         if pack["id"] == OPERATIONS_RELAY_PACK_ID:
             return grokbot_operations_relay.render_unit(target, python=sys.executable)
         if pack["id"] in DOT_FAMILY_PACK_IDS:
@@ -449,15 +411,12 @@ def render_install_service(target: Path, pack_id: str) -> str:
         if isinstance(
             exc,
             (
-                grokbot_backup.BackupError,
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
-                grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
                 grokbot_t3.T3DispatchError,
                 dot.DotError,
-                grokbot_wazuh.WazuhError,
             ),
         ):
             raise PackError("unsafe-path") from exc
@@ -478,14 +437,8 @@ def apply_install_service(
             path = grokbot_ops.write_unit(config, out_dir, exec_root=target, force=force)
         elif pack["id"] == "fleet-steward":
             path = grokbot_fleet.write_unit(target, out_dir, force=force)
-        elif pack["id"] == "backup-steward":
-            path = grokbot_backup.write_unit(target, out_dir, force=force)
         elif pack["id"] == OBSIDIAN_PACK_ID:
             path = grokbot_obsidian.write_unit(target, out_dir, force=force)
-        elif pack["id"] == "wazuh-triage":
-            path = grokbot_wazuh.write_unit(target, out_dir, force=force)
-        elif pack["id"] == N8N_PACK_ID:
-            path = grokbot_n8n.write_unit(target, out_dir, force=force)
         elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
             path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
         elif pack["id"] in DOT_FAMILY_PACK_IDS:
@@ -503,15 +456,12 @@ def apply_install_service(
         if isinstance(
             exc,
             (
-                grokbot_backup.BackupError,
                 grokbot_cerebro.CerebroError,
                 grokbot_fleet.FleetError,
-                grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
                 grokbot_t3.T3DispatchError,
                 dot.DotError,
-                grokbot_wazuh.WazuhError,
             ),
         ):
             raise PackError("unsafe-path") from exc
@@ -613,17 +563,6 @@ def _setup(
             _obsidian_path_references(runtime_path, action_state_path, approval_dir, staging_dir, excalidraw_bin)
         )
         payload.update(_obsidian_upstream_references(upstream_url, upstream_key_env, upstream_key_file, upstream_key))
-    elif pack["id"] == N8N_PACK_ID:
-        if (
-            cli_executable is not None
-            or workdir is not None
-            or ledger_path is not None
-            or owner_workspace is not None
-            or any(path is not None for path in obsidian_paths)
-            or any(field is not None for field in upstream_fields)
-        ):
-            raise PackError("unexpected-key")
-        payload.update(_n8n_path_references(runtime_path, action_state_path, approval_dir))
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         if (
             cli_executable is not None
@@ -1060,12 +999,6 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
         except grokbot_obsidian.ObsidianError as exc:
             raise PackError("unsafe-path") from exc
         _validate_bearer_reference(payload.get("upstream_key"))
-    elif pack["id"] == N8N_PACK_ID:
-        _n8n_path_references(
-            payload.get("runtime_path"),
-            payload.get("action_state_path"),
-            payload.get("approval_dir"),
-        )
     elif pack["id"] in STEWARD_PACK_IDS:
         _steward_path_references(
             pack["id"],
@@ -1131,8 +1064,6 @@ def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
         return DOT_INSTANCE_KEYS
     if pack["id"] == T3_DISPATCH_PACK_ID:
         return T3_DISPATCH_INSTANCE_KEYS
-    if pack["id"] == N8N_PACK_ID:
-        return N8N_INSTANCE_KEYS
     if pack["id"] in STEWARD_PACK_IDS:
         return FLEET_INSTANCE_KEYS
     return CONNECTOR_INSTANCE_KEYS
@@ -1191,23 +1122,6 @@ def _obsidian_upstream_references(
     return {"upstream_url": url, "upstream_key": reference}
 
 
-def _n8n_path_references(
-    runtime_path: object,
-    action_state_path: object,
-    approval_dir: object,
-) -> dict[str, str]:
-    if any(value is None for value in (runtime_path, action_state_path, approval_dir)):
-        raise PackError("missing-path-reference")
-    try:
-        return grokbot_n8n.validate_disjoint_state_paths(
-            str(runtime_path),
-            str(action_state_path),
-            str(approval_dir),
-        )
-    except grokbot_n8n.N8nError as exc:
-        raise PackError("unsafe-path") from exc
-
-
 def _obsidian_path_references(
     runtime_path: object,
     action_state_path: object,
@@ -1239,27 +1153,13 @@ def _steward_path_references(
     if any(value is None for value in (runtime_path, ledger_path, action_state_path, approval_dir)):
         raise PackError("missing-path-reference")
     try:
-        if pack_id == "backup-steward":
-            return grokbot_backup.validate_disjoint_state_paths(
-                str(runtime_path),
-                str(ledger_path),
-                str(action_state_path),
-                str(approval_dir),
-            )
-        if pack_id == "wazuh-triage":
-            return grokbot_wazuh.validate_disjoint_state_paths(
-                str(runtime_path),
-                str(ledger_path),
-                str(action_state_path),
-                str(approval_dir),
-            )
         return grokbot_fleet.validate_disjoint_state_paths(
             str(runtime_path),
             str(ledger_path),
             str(action_state_path),
             str(approval_dir),
         )
-    except (grokbot_backup.BackupError, grokbot_fleet.FleetError, grokbot_wazuh.WazuhError) as exc:
+    except grokbot_fleet.FleetError as exc:
         raise PackError("unsafe-path") from exc
 
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import copy
 import hashlib
 import hmac
@@ -13,7 +15,7 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from . import fleet_client, toml_compat
+from . import fleet_client
 
 if TYPE_CHECKING:
     from .fleet_hub_sealed import StoragePolicy
@@ -59,7 +61,7 @@ def config() -> dict[str, Any]:
     """Deployment settings live only in the operator's fleet.toml."""
     path = fleet_client.brigade_home() / "fleet.toml"
     try:
-        payload = toml_compat.loads(path.read_text(encoding="utf-8"))
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
         section = payload.get("fleet", {}).get("stats", {})
         return section if isinstance(section, dict) else {}
     except (OSError, ValueError, AttributeError):

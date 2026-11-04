@@ -1,15 +1,13 @@
-"""Three-phase task footprint metadata (files, symbol_ids, snapshot_hash).
+"""Task footprint metadata (files, symbol_ids, snapshot_hash).
 
-Schema follows the #770 spike's validated shape. The same object is rewritten
-with increasing accuracy:
+New tasks receive a ``predicted`` footprint from ``brigade code impact`` when the
+binary and index are available, otherwise an empty degraded prediction.
+Completion writes a ``reconciled`` footprint from the verify receipt's
+``code_graph_delta`` / ``graphtrail_delta`` field.
 
-1. ``predicted`` at filing — GraphTrail ``impact`` of named symbols when the
-   binary and index are present; otherwise an empty predicted footprint
-   (fail-open degrade).
-2. ``refined`` at claim — plan-named concrete files.
-3. ``reconciled`` at completion — join of the verify receipt's
-   ``code_graph_delta`` / ``graphtrail_delta`` field (what was actually
-   touched).
+The ``refined`` phase and its normalizer remain compatible with persisted
+plan-named footprints. The removed task-claim command was its only writer.
+``work claim`` does not refine footprints.
 
 GraphTrail stays a read-only oracle; footprints live only on the task ledger.
 """

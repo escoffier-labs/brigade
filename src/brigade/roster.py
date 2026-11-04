@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import fnmatch
 import json
 import re
@@ -11,7 +13,7 @@ from pathlib import Path
 from typing import Literal, Protocol
 
 from . import agents as agent_adapters
-from . import toml_compat
+
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
@@ -395,7 +397,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
     if text is None and not path.exists():
         raise FileNotFoundError(f"roster not found: {path}")
 
-    data = toml_compat.loads(text if text is not None else path.read_text())
+    data = tomllib.loads(text if text is not None else path.read_text())
     if not isinstance(data, dict):
         raise ValueError("roster must be a TOML table")
 

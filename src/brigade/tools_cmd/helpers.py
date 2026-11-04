@@ -9,7 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import localio, toml_compat as tomllib
+from .. import localio
+from .. import toml_format
 from . import constants
 
 
@@ -76,11 +77,11 @@ def _path_within_target(target: Path, path: Path) -> bool:
 
 
 def _format_inline_list(values: list[str]) -> str:
-    return "[" + ", ".join(tomllib.format_toml_value(value) for value in values) + "]"
+    return "[" + ", ".join(toml_format.format_toml_value(value) for value in values) + "]"
 
 
 def _format_inline_table(values: dict[str, str]) -> str:
-    rendered = ", ".join(f"{key} = {tomllib.format_toml_value(value)}" for key, value in values.items())
+    rendered = ", ".join(f"{key} = {toml_format.format_toml_value(value)}" for key, value in values.items())
     return "{ " + rendered + " }"
 
 
@@ -248,7 +249,7 @@ def _format_runtimes_toml(runtimes: tuple[dict[str, Any], ...] | None = None) ->
             "log_path",
             "timeout",
         ):
-            lines.append(f"{key} = {tomllib.format_toml_value(runtime[key])}")
+            lines.append(f"{key} = {toml_format.format_toml_value(runtime[key])}")
         lines.append("")
     return "\n".join(lines)
 
@@ -262,7 +263,7 @@ def _format_policy_toml(policy: dict[str, Any] | None = None) -> str:
         f"allowed_effects = {_format_inline_list(list(policy['allowed_effects']))}",
         f"denied_effects = {_format_inline_list(list(policy['denied_effects']))}",
         f"required_approval_modes = {_format_inline_list(list(policy['required_approval_modes']))}",
-        f"max_timeout = {tomllib.format_toml_value(policy['max_timeout'])}",
+        f"max_timeout = {toml_format.format_toml_value(policy['max_timeout'])}",
         f"allowed_runtimes = {_format_inline_list(list(policy['allowed_runtimes']))}",
         f"env_bindings = {_format_inline_table(dict(policy['env_bindings']))}",
         "",

@@ -111,6 +111,7 @@ def test_hub_route_inventory_is_unchanged():
         "/deck/skills",
         "/enroll",
         "/events",
+        "/findings",
         "/grokbot",
         "/mcp/report",
         "/mesh/identity",

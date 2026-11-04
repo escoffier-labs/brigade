@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import toml_compat
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 PLUGIN = ROOT / "plugins" / "brigade"
@@ -20,7 +20,7 @@ HOOK = PLUGIN / "hooks" / "session-start.sh"
 
 
 def _version() -> str:
-    return toml_compat.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    return tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
 
 
 def _json(rel: str) -> dict:

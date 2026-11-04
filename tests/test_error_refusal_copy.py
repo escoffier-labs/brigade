@@ -19,7 +19,7 @@ from brigade.operator_cmd import lifecycle as operator_lifecycle
 from brigade.work_cmd import edges as edges_mod
 from brigade.work_cmd.session import briefing as briefing_mod
 
-from tests.work_cmd_test_helpers import _init_git_repo
+from tests.work_cmd_test_helpers import add_dependency_edge, _init_git_repo
 from tests._home import set_home
 
 
@@ -69,8 +69,7 @@ def test_task_done_open_children_refusal_is_structured_without_force(tmp_path, m
     parent = _add(tmp_path, "Parent epic")
     child = _add(tmp_path, "Open child")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
     capsys.readouterr()
 
@@ -294,8 +293,7 @@ def test_cli_open_children_and_mcp_init_contracts_via_main(tmp_path, monkeypatch
     parent = _add(tmp_path, "Epic")
     child = _add(tmp_path, "Child")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
     capsys.readouterr()
     assert cli.main(["work", "task", "done", parent["id"], "--target", str(tmp_path), "--json"]) == 2

@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import os
 import re
@@ -28,7 +30,6 @@ from .. import (
     notifications_cmd,
     phases_cmd,
     security_cmd,
-    toml_compat as tomllib,
     tools_cmd,
     work_cmd,
 )

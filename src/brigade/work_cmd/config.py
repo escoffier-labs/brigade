@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import re
 import shlex
@@ -9,7 +11,8 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from .. import toml_compat as tomllib
+
+from .. import toml_format
 from . import constants, helpers, ledger as ledger_mod
 
 
@@ -31,7 +34,7 @@ def _format_backup_toml(destinations: tuple[dict[str, Any], ...] = constants.BAC
             "restore_rehearsal_stale_days",
             "enabled",
         ):
-            lines.append(f"{key} = {tomllib.format_toml_value(destination[key])}")
+            lines.append(f"{key} = {toml_format.format_toml_value(destination[key])}")
         lines.append("")
     return "\n".join(lines)
 
@@ -40,11 +43,9 @@ def _load_backup_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
     path = helpers._backup_config_path(target)
     if not path.is_file():
         return [], [f"backup config missing: {path}"]
-    if tomllib is None:
-        return [], ["backup config requires Python tomllib support"]
     try:
         payload = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid backup config: {exc}"]
     values = payload.get("destination")
     if not isinstance(values, list):
@@ -544,7 +545,7 @@ def _format_scanner_toml(scanners: tuple[dict[str, Any], ...] = constants.SCANNE
         lines.append("[[scanner]]")
         for key in ("id", "source", "command", "cadence", "enabled", "timeout", "output_path", "conflict_window"):
             value = scanner[key]
-            lines.append(f"{key} = {tomllib.format_toml_value(value)}")
+            lines.append(f"{key} = {toml_format.format_toml_value(value)}")
         lines.append("")
     return "\n".join(lines)
 
@@ -552,7 +553,7 @@ def _format_scanner_toml(scanners: tuple[dict[str, Any], ...] = constants.SCANNE
 def _format_toml_array(values: object) -> str:
     if not isinstance(values, list):
         return "[]"
-    return "[" + ", ".join(tomllib.format_toml_value(item) for item in values) + "]"
+    return "[" + ", ".join(toml_format.format_toml_value(item) for item in values) + "]"
 
 
 def _format_review_toml(reviewers: tuple[dict[str, Any], ...] = constants.REVIEW_DEFAULTS) -> str:
@@ -574,7 +575,7 @@ def _format_review_toml(reviewers: tuple[dict[str, Any], ...] = constants.REVIEW
             "findings_path",
             "privacy_mode",
         ):
-            lines.append(f"{key} = {tomllib.format_toml_value(reviewer[key])}")
+            lines.append(f"{key} = {toml_format.format_toml_value(reviewer[key])}")
         lines.append(f"target_paths = {_format_toml_array(reviewer.get('target_paths'))}")
         lines.append(f"supported_modes = {_format_toml_array(reviewer.get('supported_modes'))}")
         lines.append("")
@@ -585,11 +586,9 @@ def _load_scanner_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]
     path = helpers._scanner_config_path(target)
     if not path.is_file():
         return [], [f"scanner config missing: {path}"]
-    if tomllib is None:
-        return [], ["scanner config requires Python tomllib support"]
     try:
         payload = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid scanner config: {exc}"]
     values = payload.get("scanner")
     if not isinstance(values, list):
@@ -687,11 +686,9 @@ def _load_review_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
     path = helpers._review_config_path(target)
     if not path.is_file():
         return [], [f"review config missing: {path}"]
-    if tomllib is None:
-        return [], ["review config requires Python tomllib support"]
     try:
         payload = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid review config: {exc}"]
     values = payload.get("reviewer")
     if not isinstance(values, list):

@@ -71,7 +71,7 @@ bd dependencies map onto the ledger's edge model:
 | `discovered-from` | provenance only, never blocks |
 
 The mirror owns the edges it created. When bd drops a dependency, the matching
-owned edge is removed. Edges added by hand with `brigade work task edge add`
+owned edge is removed. Edges created with `brigade work task add --deps`
 are never removed by a sync, even when they match a bd dependency. A sync that
 would create a cycle together with existing ledger edges is rejected whole.
 

@@ -11,7 +11,7 @@ def test_preference_alias_cache_and_overlay(tmp_path, key):
     assert pref.orchestrator == "planner"
     assert pref.payload() == {"orchestrator": "planner"}
     path = run_preference.write_cached(pref, tmp_path)
-    assert "chef" not in path.read_text()
+    assert "chef" not in path.read_text(encoding="utf-8")
     assert run_preference.load_cached(tmp_path) == pref
 
 
@@ -34,7 +34,7 @@ def test_v47_preference_column_upgrade_and_v1_response(tmp_path):
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 48
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert fleet_hub_preference.raw_run_preference(conn)["orchestrator"] == "planner"
     assert "chef" not in {row[1] for row in conn.execute("PRAGMA table_info(run_preference)")}
     assert fleet_hub.get_run_preference(conn)["chef"] == "planner"
@@ -42,8 +42,9 @@ def test_v47_preference_column_upgrade_and_v1_response(tmp_path):
     # The old-code version fence refuses this DB before touching its columns.
     from unittest.mock import patch
 
+    current_version = fleet_hub.SCHEMA_VERSION
     with patch.object(fleet_hub, "SCHEMA_VERSION", 47):
-        with pytest.raises(fleet_hub.FleetHubError, match="schema version 48"):
+        with pytest.raises(fleet_hub.FleetHubError, match=f"schema version {current_version}"):
             fleet_hub.init_db(path)
 
 

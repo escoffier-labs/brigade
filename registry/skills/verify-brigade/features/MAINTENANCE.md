@@ -159,7 +159,6 @@ friction             no feature file yet; extras surface
 governance           no feature file yet
 handoff-template     no feature file yet
 harness              no feature file yet
-hermes-fragments     no feature file yet; extras surface
 ingest               no feature file yet
 learn                no feature file yet; extras surface
 mcp                  no feature file yet
@@ -167,7 +166,6 @@ memory               no feature file yet
 model                no feature file yet
 node                 no feature file yet
 notifications        no feature file yet; extras surface
-openclaw-fragments   no feature file yet; extras surface
 operator             no feature file yet
 outcome              no feature file yet
 pantry               no feature file yet; extras surface
@@ -182,7 +180,6 @@ research             no feature file yet; extras surface
 roadmap              no feature file yet; extras surface
 roster               no feature file yet
 route                no feature file yet
-run-cloud            deprecated alias for run cloud; covered through run cloud when that is driven
 runbook              no feature file yet; extras surface
 runs                 no feature file yet
 scrub                stand-in only: tests/test_scrub.py; no drive

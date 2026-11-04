@@ -68,3 +68,20 @@ def test_generation_covers_legacy_builders_and_rejects_hybrids(tmp_path: Path) -
     hybrid["columns"] = required["tables"]["fleet_messages"]["columns"]
     actual["tables"]["fleet_messages"] = hybrid
     assert not lockstep["compatible"](actual, required)
+
+
+def test_findings_are_required_startup_objects(tmp_path: Path) -> None:
+    lockstep = runpy.run_path(str(LOCKSTEP))
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        actual = lockstep["snapshot"](conn)
+        import json
+
+        required = json.loads(lockstep["REQUIRED"].read_text(encoding="utf-8"))
+        for name in ("fleet_findings", "fleet_finding_grants"):
+            assert name in required["tables"]
+            assert name not in required["optional"]["tables"]
+            removed = {**actual, "tables": {k: v for k, v in actual["tables"].items() if k != name}}
+            assert not lockstep["compatible"](removed, required)
+    finally:
+        conn.close()

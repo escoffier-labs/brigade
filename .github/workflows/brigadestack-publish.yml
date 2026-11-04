@@ -58,7 +58,7 @@ jobs:
               metadata = BytesParser().parsebytes(archive.read(info + "METADATA"))
               assert metadata["Name"] == "brigadestack"
               assert metadata["Version"] == "0.30.0"
-              assert metadata["Requires-Python"] == ">=3.10"
+              assert metadata["Requires-Python"] == ">=3.11"
               assert metadata.get_all("Requires-Dist") == ["brigade-cli==0.30.0"]
               entrypoints = configparser.ConfigParser()
               entrypoints.read_string(archive.read(info + "entry_points.txt").decode())

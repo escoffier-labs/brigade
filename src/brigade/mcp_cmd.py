@@ -10,6 +10,8 @@ unless ``--force``); orphans are removed only with ``--prune`` and only when sti
 
 from __future__ import annotations
 
+import tomllib
+
 import copy
 import hashlib
 import json
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection, toml_compat as tomllib
+from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection
 from .component_bins import canonical_command
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit

@@ -2,7 +2,7 @@
  "parity_version": 1,
  "profiles": {
   "defaults": {
-   "digest": "3ebecf29af166c2b227eba0db3d21d7f6c51cb45f3328456a3aabef79d435c07",
+   "digest": "9ca61b47a9ae76a6fbefab023249bb0949f287f2fc0c6f2c3a8aae7e662daba9",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -457,6 +457,29 @@
       "producer",
       "seq",
       "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
      ],
      "rows": []
     },
@@ -1770,7 +1793,7 @@
    }
   },
   "migrated-v22": {
-   "digest": "224f55ce89b5266f95e6b8dcd21d582749c850310666bb83787a14f01275598d",
+   "digest": "103e22333b79e6d7cdc3a8ce25a05654a0a18917d70d28412b5d2ac73a17b999",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -2225,6 +2248,29 @@
       "producer",
       "seq",
       "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
      ],
      "rows": []
     },
@@ -3538,7 +3584,7 @@
    }
   },
   "migrated-v34": {
-   "digest": "224f55ce89b5266f95e6b8dcd21d582749c850310666bb83787a14f01275598d",
+   "digest": "103e22333b79e6d7cdc3a8ce25a05654a0a18917d70d28412b5d2ac73a17b999",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -3993,6 +4039,29 @@
       "producer",
       "seq",
       "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
      ],
      "rows": []
     },
@@ -5306,7 +5375,7 @@
    }
   },
   "outbox": {
-   "digest": "0c8177ff3cdca6a99dd8c526f5e5d8ec7565ef5a3a382d31299f3b272844dfe9",
+   "digest": "cf449b3b7873c797c2551328b9330599e48ab8e799223677e7317d7382414977",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -5818,6 +5887,29 @@
        "t:parity-a"
       ]
      ]
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
+     ],
+     "rows": []
     },
     "fleet_machine_telemetry": {
      "columns": [

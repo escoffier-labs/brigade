@@ -14,7 +14,6 @@ from .guide import (
     PROFILES,
     guide,
     guide_payload,
-    plan,
     plan_payload,
 )
 from .health import (
@@ -80,7 +79,6 @@ __all__ = [
     "migration_import_issues",
     "migration_status",
     "migration_status_payload",
-    "plan",
     "plan_payload",
     "quickstart",
     "scrub",
