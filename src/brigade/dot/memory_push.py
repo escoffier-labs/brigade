@@ -8,15 +8,24 @@ The query is derived from the shown item (message subject and body, or the diges
 inbox subjects and next work title). It runs through bounded recall in a killable
 child with the text on stdin, and the search log records only an HMAC of it
 (``memory_recall_log``). Push is fail-open: any problem omits the field.
+
+Each candidate hit is scanned before it is wrapped, with the interim prompt-load
+scan from ``prompt_scan`` (the local guard's default rules, the invisible and bidi
+character check and the instruction-override heuristics). A hit that fails is
+dropped, never redacted into the response. The drop is counted on a ``PushScan``
+the caller passes in (rule ids and a count, never the matched text). A scan that
+raises fails closed: no hits at all, and the error class goes on the same report.
 """
 
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ..untrusted import wrap_untrusted
+from .prompt_scan import blocked_rule
 
 MAX_PUSH_HITS = 3
 QUERY_SOURCE = "push"
@@ -25,7 +34,29 @@ MAX_TAGS = 8
 CARD_PATH_RE = re.compile(r"memory/cards/[A-Za-z0-9][A-Za-z0-9._-]{0,127}\.md")
 NEXT = "Read a card with memory_card(name=<path basename without .md>)."
 
+MAX_REPORTED_RULES = MAX_PUSH_HITS
+MAX_RULE_CHARS = 48
+
 Recall = Callable[..., dict[str, Any]]
+Scan = Callable[[Iterable[str]], str | None]
+
+
+@dataclass
+class PushScan:
+    """What the prompt-load scan did to one push, safe to log: counts and ids only."""
+
+    dropped: int = 0
+    rules: list[str] = field(default_factory=list)
+    error: str | None = None
+
+    def drop(self, rule: str) -> None:
+        self.dropped += 1
+        label = rule[:MAX_RULE_CHARS]
+        if label not in self.rules and len(self.rules) < MAX_REPORTED_RULES:
+            self.rules.append(label)
+
+    def summary(self) -> str:
+        return f"dropped={self.dropped} rules={','.join(self.rules) or '-'}"
 
 
 def _default_recall(**kwargs: Any) -> dict[str, Any]:
@@ -65,11 +96,22 @@ def _card_text(title: str, tags: Iterable[str]) -> str:
 
 
 class MemoryPush:
-    def __init__(self, workspace: Path, *, enabled: bool = True, recall: Recall = _default_recall) -> None:
-        self.workspace, self.enabled, self.recall = workspace, enabled, recall
+    def __init__(
+        self,
+        workspace: Path,
+        *,
+        enabled: bool = True,
+        recall: Recall = _default_recall,
+        scan: Scan = blocked_rule,
+    ) -> None:
+        self.workspace, self.enabled, self.recall, self.scan = workspace, enabled, recall, scan
 
-    def hits(self, query: str) -> dict[str, Any] | None:
-        """Up to three hits for ``query``, or None when push is off, empty or unavailable."""
+    def hits(self, query: str, report: PushScan | None = None) -> dict[str, Any] | None:
+        """Up to three scanned hits for ``query``, or None when push is off, empty or unavailable.
+
+        ``report`` collects the scan's drops and error class for the caller to log.
+        """
+        report = report if report is not None else PushScan()
         if not self.enabled or not query.strip():
             return None
         try:
@@ -97,9 +139,17 @@ class MemoryPush:
                 continue
             raw_tags = match.get("tags")
             tags = [tag for tag in raw_tags if isinstance(tag, str)][:MAX_TAGS] if isinstance(raw_tags, list) else []
-            card = wrap_untrusted(
-                _card_text(_text(match.get("title")), tags), source_kind="memory", max_chars=MAX_CARD_TEXT_CHARS
-            )
+            title = _text(match.get("title"))
+            try:
+                # The full title and tags, before the 300-character cap, so no cut can hide a hit.
+                rule = self.scan([path, title, *tags])
+            except Exception as error:
+                report.error = type(error).__name__
+                return None
+            if rule is not None:
+                report.drop(rule)
+                continue
+            card = wrap_untrusted(_card_text(title, tags), source_kind="memory", max_chars=MAX_CARD_TEXT_CHARS)
             hits.append({"path": path, "card": card})
         if not hits:
             return None
