@@ -280,16 +280,12 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         choices=(
             "cerebro-memory",
             "fleet-steward",
-            "backup-steward",
-            "n8n-operator",
             "obsidian-operator",
             "operations-relay",
             "t3-dispatch",
             "dot",
             "duet",
             "grokbot-memory",
-            "wazuh-triage",
-            "n8n-operator",
         ),
     )
     p_grokbot_serve.add_argument(
@@ -405,25 +401,25 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, n8n-operator, t3-dispatch, and dot.",
+        help="Absolute runtime JSON path. Required for fleet-steward, obsidian-operator, t3-dispatch, and dot.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
         type=Path,
         default=None,
-        help="Absolute steward ledger path. Required for fleet-steward, backup-steward, and wazuh-triage.",
+        help="Absolute steward ledger path. Required for fleet-steward.",
     )
     p_pack_setup.add_argument(
         "--action-state-path",
         type=Path,
         default=None,
-        help="Absolute action-state directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
+        help="Absolute action-state directory. Required for fleet-steward and obsidian-operator.",
     )
     p_pack_setup.add_argument(
         "--approval-dir",
         type=Path,
         default=None,
-        help="Absolute approval directory. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
+        help="Absolute approval directory. Required for fleet-steward and obsidian-operator.",
     )
     p_pack_setup.add_argument(
         "--staging-dir",
@@ -1118,14 +1114,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
 
                     fleet_config, fleet_tools = build_fleet_listener(target, **listener_kwargs)
                     run_fleet_listener(fleet_config, fleet_tools)
-                elif args.pack == "backup-steward":
-                    from ..grokbot_backup.lifecycle import (
-                        build_listener_from_target as build_backup_listener,
-                        run_listener as run_backup_listener,
-                    )
-
-                    backup_config, backup_tools = build_backup_listener(target, **listener_kwargs)
-                    run_backup_listener(backup_config, backup_tools)
                 elif args.pack == "obsidian-operator":
                     from ..grokbot_obsidian.lifecycle import (
                         build_listener_from_target as build_obsidian_listener,
@@ -1137,22 +1125,6 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     listener_kwargs["upstream_key_env"] = args.upstream_key_env
                     obsidian_config, obsidian_tools = build_obsidian_listener(target, **listener_kwargs)
                     run_obsidian_listener(obsidian_config, obsidian_tools)
-                elif args.pack == "wazuh-triage":
-                    from ..grokbot_wazuh.lifecycle import (
-                        build_listener_from_target as build_wazuh_listener,
-                        run_listener as run_wazuh_listener,
-                    )
-
-                    wazuh_config, wazuh_tools = build_wazuh_listener(target, **listener_kwargs)
-                    run_wazuh_listener(wazuh_config, wazuh_tools)
-                elif args.pack == "n8n-operator":
-                    from ..grokbot_n8n.lifecycle import (
-                        build_listener_from_target as build_n8n_listener,
-                        run_listener as run_n8n_listener,
-                    )
-
-                    n8n_config, n8n_tools = build_n8n_listener(target, **listener_kwargs)
-                    run_n8n_listener(n8n_config, n8n_tools)
                 elif args.pack == "operations-relay":
                     from .. import grokbot_operations_relay
 
@@ -1203,15 +1175,12 @@ def _dispatch_grokbot(args, target: Path) -> int:
             return 2
         except Exception as exc:
             from .. import (
-                grokbot_backup,
                 grokbot_cerebro,
                 grokbot_fleet,
-                grokbot_n8n,
                 grokbot_obsidian,
                 grokbot_operations_relay,
                 grokbot_packs,
                 grokbot_t3,
-                grokbot_wazuh,
                 dot,
             )
 
@@ -1221,16 +1190,13 @@ def _dispatch_grokbot(args, target: Path) -> int:
             if isinstance(
                 exc,
                 (
-                    grokbot_backup.BackupError,
                     grokbot_cerebro.CerebroError,
                     grokbot_fleet.FleetError,
-                    grokbot_n8n.N8nError,
                     grokbot_obsidian.ObsidianError,
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
                     grokbot_t3.T3DispatchError,
                     dot.DotError,
-                    grokbot_wazuh.WazuhError,
                 ),
             ):
                 print("error: Grok Bot listener configuration is invalid", file=sys.stderr)

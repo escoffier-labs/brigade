@@ -17,20 +17,17 @@ from tests.test_grokbot_ops import assert_listener_recovery_policy
 SECRET = "not-a-real-token"
 QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
 PACK_IDS = (
-    "backup-steward",
     "cerebro-memory",
     "dot",
     "duet",
     "fleet-steward",
     "grokbot-memory",
     "implementation-worker",
-    "n8n-operator",
     "obsidian-operator",
     "operations-relay",
     "operator",
     "repository-scout",
     "t3-dispatch",
-    "wazuh-triage",
 )
 CEREBRO_TOOLS = (
     "cerebro_health",
@@ -47,14 +44,6 @@ FLEET_TOOLS = (
     "propose_remediation",
     "service_health",
 )
-BACKUP_TOOLS = (
-    "backup_execute_action",
-    "backup_operation_status",
-    "backup_overview",
-    "backup_propose_action",
-    "backup_restore_readiness",
-    "backup_target_status",
-)
 OBSIDIAN_TOOLS = (
     "obsidian_action_status",
     "obsidian_capabilities",
@@ -62,22 +51,6 @@ OBSIDIAN_TOOLS = (
     "obsidian_propose_action",
     "obsidian_read",
     "obsidian_search",
-)
-WAZUH_TOOLS = (
-    "wazuh_action_status",
-    "wazuh_alert_status",
-    "wazuh_classify",
-    "wazuh_incident_bundle",
-    "wazuh_ingest",
-    "wazuh_propose_remediation",
-)
-N8N_TOOLS = (
-    "n8n_action_status",
-    "n8n_execute_action",
-    "n8n_execution_bundle",
-    "n8n_overview",
-    "n8n_propose_action",
-    "n8n_workflow_status",
 )
 OPERATIONS_RELAY_TOOLS = (
     "automation_finding_status",
@@ -150,11 +123,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
         if pack["id"] in QUEUE_PACK_IDS:
             assert pack["kind"] == "queue-role"
             assert set(shown["tools"]) == grokbot_mcp.tools_for_instance(pack["instance"])
-        elif pack["id"] == "backup-steward":
-            assert pack["kind"] == "connector"
-            assert shown["tools"] == list(BACKUP_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8772"
-            assert shown["public_route"] == ""
         elif pack["id"] == "cerebro-memory":
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(CEREBRO_TOOLS)
@@ -165,16 +133,6 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert shown["tools"] == list(OBSIDIAN_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8773"
             assert shown["public_route"] == "/mcp"
-        elif pack["id"] == "wazuh-triage":
-            assert pack["kind"] == "connector"
-            assert shown["tools"] == list(WAZUH_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8774"
-            assert shown["public_route"] == ""
-        elif pack["id"] == "n8n-operator":
-            assert pack["kind"] == "connector"
-            assert shown["tools"] == list(N8N_TOOLS)
-            assert shown["default_bind"] == "127.0.0.1:8775"
-            assert shown["public_route"] == ""
         elif pack["id"] == "operations-relay":
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
@@ -286,10 +244,7 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     assert queue_ports == {8766, 8767, 8768}
     assert grokbot_mcp.parse_bind(packs["cerebro-memory"]["default_bind"])[1] == 8770
     assert grokbot_mcp.parse_bind(packs["fleet-steward"]["default_bind"])[1] == 8771
-    assert grokbot_mcp.parse_bind(packs["backup-steward"]["default_bind"])[1] == 8772
     assert grokbot_mcp.parse_bind(packs["obsidian-operator"]["default_bind"])[1] == 8773
-    assert grokbot_mcp.parse_bind(packs["wazuh-triage"]["default_bind"])[1] == 8774
-    assert grokbot_mcp.parse_bind(packs["n8n-operator"]["default_bind"])[1] == 8775
     assert grokbot_mcp.parse_bind(packs["operations-relay"]["default_bind"])[1] == 8777
     assert packs["operations-relay"]["default_bind"] == "127.0.0.1:8777"
     assert grokbot_mcp.parse_bind(packs["t3-dispatch"]["default_bind"])[1] == 8778
@@ -797,29 +752,6 @@ def test_fleet_steward_pack_is_closed_connector_with_exact_inventory():
         grokbot_packs.show_pack("fleet")
 
 
-def test_backup_steward_pack_is_closed_connector_with_exact_inventory():
-    pack = grokbot_packs.show_pack("backup-steward")
-    assert pack["kind"] == "connector"
-    assert pack["instance"] == "backup-steward"
-    assert pack["default_bind"] == "127.0.0.1:8772"
-    assert pack["public_route"] == ""
-    assert pack["tools"] == list(BACKUP_TOOLS)
-    with _reject("unknown-pack"):
-        grokbot_packs.show_pack("backup")
-
-
-def test_n8n_operator_pack_is_closed_connector_with_exact_inventory():
-    pack = grokbot_packs.show_pack("n8n-operator")
-    assert pack["kind"] == "connector"
-    assert pack["instance"] == "n8n-operator"
-    assert pack["default_bind"] == "127.0.0.1:8775"
-    assert pack["public_route"] == ""
-    assert pack["tools"] == list(N8N_TOOLS)
-    assert "n8n-operator" not in grokbot_packs.STEWARD_PACK_IDS
-    with _reject("unknown-pack"):
-        grokbot_packs.show_pack("n8n")
-
-
 def test_cerebro_setup_preview_apply_and_queue_role_regression(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     executable, workdir = _cerebro_paths(tmp_path)
@@ -1113,7 +1045,7 @@ def test_fleet_setup_refuses_queue_and_cerebro_default_ports(tmp_path: Path, mon
         grokbot_packs.apply_setup(
             tmp_path,
             "fleet-steward",
-            bind="127.0.0.1:8772",
+            bind="127.0.0.1:8777",
             bearer_env="TEST_GROKBOT_BEARER",
             **paths,
         )
@@ -1129,7 +1061,7 @@ def test_fleet_setup_refuses_queue_and_cerebro_default_ports(tmp_path: Path, mon
         grokbot_packs.apply_setup(
             tmp_path,
             "fleet-steward",
-            bind="127.0.0.1:8774",
+            bind="127.0.0.1:8778",
             bearer_env="TEST_GROKBOT_BEARER",
             **paths,
         )
@@ -1137,120 +1069,11 @@ def test_fleet_setup_refuses_queue_and_cerebro_default_ports(tmp_path: Path, mon
         grokbot_packs.apply_setup(
             tmp_path,
             "fleet-steward",
-            bind="127.0.0.1:8775",
+            bind="127.0.0.1:8779",
             bearer_env="TEST_GROKBOT_BEARER",
             **paths,
         )
     assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
-
-
-def test_backup_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    paths = _fleet_paths(tmp_path)
-    preview = grokbot_packs.preview_setup(
-        tmp_path,
-        "backup-steward",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **paths,
-    )
-    assert preview["apply"] is False
-    assert preview["bind"] == "127.0.0.1:8772"
-    dumped = json.dumps(preview)
-    assert str(paths["runtime_path"]) not in dumped
-    assert str(paths["ledger_path"]) not in dumped
-    assert not grokbot_packs.instance_config_path(tmp_path, "backup-steward").exists()
-    assert not grokbot_ops.config_path(tmp_path, "backup-steward").exists()
-
-    applied = grokbot_packs.apply_setup(
-        tmp_path,
-        "backup-steward",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **paths,
-    )
-    pack_path = grokbot_packs.instance_config_path(tmp_path, "backup-steward")
-    assert applied["apply"] is True
-    assert pack_path.is_file()
-    assert pack_path.stat().st_mode & 0o777 == 0o600
-    assert not grokbot_ops.config_path(tmp_path, "backup-steward").exists()
-    config = json.loads(pack_path.read_text(encoding="utf-8"))
-    assert set(config) == grokbot_packs.FLEET_INSTANCE_KEYS
-    assert SECRET not in json.dumps(config)
-    assert "cli_executable" not in config
-    assert config["runtime_path"] == str(paths["runtime_path"])
-    assert config["bearer"] == {"kind": "env", "name": "TEST_GROKBOT_BEARER"}
-
-    executable, workdir = _cerebro_paths(tmp_path)
-    with _reject("unexpected-key"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "backup-steward",
-            bearer_env="TEST_GROKBOT_BEARER",
-            cli_executable=executable,
-            workdir=workdir,
-            **paths,
-        )
-    with _reject("missing-path-reference"):
-        grokbot_packs.preview_setup(tmp_path, "backup-steward", bearer_env="TEST_GROKBOT_BEARER")
-
-
-def test_backup_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    paths = _fleet_paths(tmp_path)
-    for bind in (
-        "127.0.0.1:8766",
-        "127.0.0.1:8770",
-        "127.0.0.1:8771",
-        "127.0.0.1:8773",
-        "127.0.0.1:8774",
-        "127.0.0.1:8775",
-    ):
-        with _reject("duplicate-port"):
-            grokbot_packs.apply_setup(
-                tmp_path,
-                "backup-steward",
-                bind=bind,
-                bearer_env="TEST_GROKBOT_BEARER",
-                **paths,
-            )
-    grokbot_packs.apply_setup(tmp_path, "operator", bearer_env="TEST_GROKBOT_BEARER")
-    with _reject("duplicate-port"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "operator",
-            bind="127.0.0.1:8772",
-            bearer_env="TEST_GROKBOT_BEARER",
-        )
-    assert grokbot_ops.load_config(tmp_path, "operator")["bind"] == "127.0.0.1:8766"
-
-
-def test_backup_setup_keeps_prior_config_on_failed_rewrite(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
-    paths = _fleet_paths(tmp_path)
-    grokbot_packs.apply_setup(
-        tmp_path,
-        "backup-steward",
-        bearer_env="TEST_GROKBOT_BEARER",
-        **paths,
-    )
-    pack_path = grokbot_packs.instance_config_path(tmp_path, "backup-steward")
-    prior = pack_path.read_bytes()
-    real_write = grokbot_ops._write_text_nofollow_atomic
-
-    def fail_updated_bind(path: Path, data: str, **kwargs: object) -> None:
-        if Path(path) == pack_path and "8791" in data:
-            raise OSError("disk full")
-        real_write(path, data, **kwargs)
-
-    monkeypatch.setattr(grokbot_ops, "_write_text_nofollow_atomic", fail_updated_bind)
-    with _reject("unsafe-path"):
-        grokbot_packs.apply_setup(
-            tmp_path,
-            "backup-steward",
-            bind="127.0.0.1:8791",
-            bearer_env="TEST_GROKBOT_BEARER",
-            **paths,
-        )
-    assert pack_path.read_bytes() == prior
 
 
 def _obsidian_paths(tmp_path: Path) -> dict[str, Path]:
@@ -1384,7 +1207,7 @@ def test_obsidian_setup_preview_apply_and_rejects_foreign_keys(tmp_path: Path, m
 def test_obsidian_setup_refuses_existing_default_ports(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("TEST_GROKBOT_BEARER", SECRET)
     kwargs = _obsidian_setup_kwargs(tmp_path, monkeypatch)
-    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771", "127.0.0.1:8772"):
+    for bind in ("127.0.0.1:8766", "127.0.0.1:8770", "127.0.0.1:8771", "127.0.0.1:8777"):
         with _reject("duplicate-port"):
             grokbot_packs.apply_setup(
                 tmp_path,
@@ -1946,3 +1769,9 @@ def test_dot_lifecycle_delegates(tmp_path, monkeypatch):
         ("render", tmp_path, sys.executable),
         ("write", tmp_path, tmp_path, True),
     ]
+
+
+@pytest.mark.parametrize("pack_id", ["wazuh-triage", "n8n-operator", "backup-steward"])
+def test_removed_packs_are_unknown(pack_id):
+    with pytest.raises(grokbot_packs.PackError, match="unknown-pack"):
+        grokbot_packs.show_pack(pack_id)
