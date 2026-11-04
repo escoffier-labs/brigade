@@ -313,12 +313,16 @@ class _ManagedExecutableSnapshot:
     existed: bool
     content: bytes | None = None
     mode: int | None = None
+    link_target: str | None = None
 
 
 def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecutableSnapshot, ...]:
     snapshots: list[_ManagedExecutableSnapshot] = []
     for path in paths:
-        if path.is_file():
+        if path.is_symlink():
+            # Keep an operator's link as a link; restoring its target bytes would replace it with a file.
+            snapshots.append(_ManagedExecutableSnapshot(path=path, existed=True, link_target=os.readlink(path)))
+        elif path.is_file():
             stat_result = path.stat()
             snapshots.append(
                 _ManagedExecutableSnapshot(
@@ -335,7 +339,9 @@ def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecut
 
 def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]) -> None:
     for snapshot in snapshots:
-        if snapshot.existed:
+        if snapshot.link_target is not None:
+            _restore_symlink_atomically(snapshot.path, snapshot.link_target)
+        elif snapshot.existed:
             if snapshot.content is None or snapshot.mode is None:
                 raise ComponentInstallError(f"invalid managed executable snapshot for {snapshot.path}")
             _restore_file_atomically(
@@ -345,6 +351,22 @@ def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]
             )
         elif snapshot.path.exists():
             snapshot.path.unlink()
+
+
+def _restore_symlink_atomically(path: Path, target: str) -> None:
+    if path.is_symlink() and os.readlink(path) == target:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".link")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    tmp_path.unlink()
+    try:
+        os.symlink(target, tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _restore_file_atomically(path: Path, *, content: bytes, mode: int) -> None:

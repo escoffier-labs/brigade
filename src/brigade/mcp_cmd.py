@@ -411,6 +411,8 @@ def _opencode_native_keys(
 def _native_record(
     harness: str, live: dict[str, Any], record: dict[str, Any] | None, server: CanonicalServer
 ) -> dict[str, Any]:
+    # The planner fingerprints the projected command, so the recorded fingerprint must match it.
+    server = replace(server, command=canonical_command(server.command))
     if harness in ("codex", "codex-user"):
         return _codex_auth_record(live, record, server)
     if harness in ("opencode", "opencode-user"):
