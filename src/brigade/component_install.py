@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import brigade
-from brigade import component_manifest, component_paths, component_state, localio, templates
+from brigade import component_manifest, component_paths, component_shims, component_state, localio, templates
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -245,12 +245,12 @@ def build_setup_plan(
         )
         managed_path = component_paths.managed_executable_path(
             roots.data_root,
-            component.executable,
+            component_manifest.family_id(component.executable),
         )
         for action in _SETUP_ACTIONS:
             plan.append(
                 SetupPlanAction(
-                    component_id=component_id,
+                    component_id=component_manifest.family_id(component_id),
                     action=action,
                     cache_path=cache_path,
                     managed_path=managed_path,
@@ -313,12 +313,16 @@ class _ManagedExecutableSnapshot:
     existed: bool
     content: bytes | None = None
     mode: int | None = None
+    link_target: str | None = None
 
 
 def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecutableSnapshot, ...]:
     snapshots: list[_ManagedExecutableSnapshot] = []
     for path in paths:
-        if path.is_file():
+        if path.is_symlink():
+            # Keep an operator's link as a link; restoring its target bytes would replace it with a file.
+            snapshots.append(_ManagedExecutableSnapshot(path=path, existed=True, link_target=os.readlink(path)))
+        elif path.is_file():
             stat_result = path.stat()
             snapshots.append(
                 _ManagedExecutableSnapshot(
@@ -335,7 +339,9 @@ def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecut
 
 def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]) -> None:
     for snapshot in snapshots:
-        if snapshot.existed:
+        if snapshot.link_target is not None:
+            _restore_symlink_atomically(snapshot.path, snapshot.link_target)
+        elif snapshot.existed:
             if snapshot.content is None or snapshot.mode is None:
                 raise ComponentInstallError(f"invalid managed executable snapshot for {snapshot.path}")
             _restore_file_atomically(
@@ -345,6 +351,22 @@ def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]
             )
         elif snapshot.path.exists():
             snapshot.path.unlink()
+
+
+def _restore_symlink_atomically(path: Path, target: str) -> None:
+    if path.is_symlink() and os.readlink(path) == target:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".link")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    tmp_path.unlink()
+    try:
+        os.symlink(target, tmp_path)
+        os.replace(tmp_path, path)
+    except BaseException:
+        tmp_path.unlink(missing_ok=True)
+        raise
 
 
 def _restore_file_atomically(path: Path, *, content: bytes, mode: int) -> None:
@@ -875,6 +897,27 @@ def _remove_transaction_managed_binaries(
         managed_path.unlink()
 
 
+def _remove_migrated_legacy_binaries(
+    *,
+    data_root: str,
+    current: component_state.InstalledState,
+    legacy_ids: Sequence[str],
+) -> None:
+    """Remove the recorded legacy executables that a canonical install replaces.
+
+    The setup transaction snapshotted these paths, and installed state names
+    them as managed, so they go even when their bytes no longer match. That
+    lets setup repair a corrupted legacy install and lay down the shim.
+    """
+    for component_id in legacy_ids:
+        managed_path = Path(component_paths.managed_executable_path(data_root, component_id))
+        if Path(current.components[component_id].executable) != managed_path:
+            continue
+        if managed_path.is_symlink() or not managed_path.is_file():
+            continue
+        managed_path.unlink()
+
+
 def _rollback_cache_paths(
     state: component_state.InstalledState,
     *,
@@ -933,9 +976,17 @@ def _setup_rollback(
     remove_paths = [
         Path(component_paths.managed_executable_path(roots.data_root, component_id)) for component_id in remove_ids
     ]
-    managed_snapshots = _snapshot_managed_executables([*managed_paths.values(), *remove_paths])
+    managed_snapshots = _snapshot_managed_executables(
+        [
+            *managed_paths.values(),
+            *remove_paths,
+            *component_shims.shim_paths(current_state, roots.data_root),
+            *component_shims.shim_paths(previous_state, roots.data_root),
+        ]
+    )
     state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
     try:
+        component_shims.remove_shims(current_state, roots.data_root, verify_cached_asset)
         for component_id in restore_ids:
             materialize_executable(
                 cache_path=cache_paths[component_id],
@@ -958,6 +1009,7 @@ def _setup_rollback(
             current=current_state,
             remove_ids=remove_ids,
         )
+        component_shims.create_shims(previous_state, roots.data_root, verify_cached_asset, materialize_executable)
         component_state.write_installed_state(current_state_path, previous_state)
         component_state.write_installed_state(previous_state_path, current_state)
     except (ComponentInstallError, OSError, ValueError) as exc:
@@ -1151,7 +1203,7 @@ def setup_native_components(
             raise ComponentInstallError(f"invalid installed state: {current_state_path}")
 
         for entry in assets:
-            asset = manifest.components[entry.component_id].assets[platform]
+            asset = component_manifest.resolve_asset(manifest, entry.component_id, platform)
             fetch_asset_to_cache(
                 asset,
                 cache_path=Path(entry.cache_path),
@@ -1160,12 +1212,27 @@ def setup_native_components(
             )
 
         managed_paths = {entry.component_id: Path(entry.managed_path) for entry in assets}
-        snapshots = _snapshot_managed_executables(list(managed_paths.values()))
+        snapshots = _snapshot_managed_executables(
+            [
+                *managed_paths.values(),
+                *[
+                    Path(component_paths.managed_executable_path(roots.data_root, cid))
+                    for cid in (current_state.components if current_state else ())
+                ],
+                *component_shims.shim_paths(current_state, roots.data_root),
+                *[
+                    Path(component_paths.managed_executable_path(roots.data_root, legacy))
+                    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items()
+                    if canonical in managed_paths
+                ],
+            ]
+        )
         state_paths = [current_state_path, previous_state_path]
         if auto_release is not None:
             state_paths.append(Path(component_paths.update_state_path(roots.data_root)))
         state_snapshots = _snapshot_managed_executables(state_paths)
         try:
+            component_shims.remove_shims(current_state, roots.data_root, verify_cached_asset)
             for entry in assets:
                 managed_path = managed_paths[entry.component_id]
                 if not _managed_executable_is_ready(
@@ -1193,7 +1260,7 @@ def setup_native_components(
             run_post_install_smoke(
                 {component_id: str(path) for component_id, path in managed_paths.items()},
                 runner=runner,
-                expected_components=component_manifest.published_component_ids(manifest),
+                expected_components=tuple(managed_paths),
             )
             next_state = component_state.InstalledState(
                 schema_version=component_state.SCHEMA_VERSION,
@@ -1213,6 +1280,18 @@ def setup_native_components(
                     for entry in assets
                 },
             )
+            if current_state is not None:
+                obsolete = tuple(cid for cid in current_state.components if cid not in next_state.components)
+                migrated = tuple(
+                    cid for cid in obsolete if component_manifest.COMPONENT_FAMILIES.get(cid) in next_state.components
+                )
+                _remove_transaction_managed_binaries(
+                    data_root=roots.data_root,
+                    current=current_state,
+                    remove_ids=tuple(cid for cid in obsolete if cid not in migrated),
+                )
+                _remove_migrated_legacy_binaries(data_root=roots.data_root, current=current_state, legacy_ids=migrated)
+            component_shims.create_shims(next_state, roots.data_root, verify_cached_asset, materialize_executable)
             if current_state is not None and component_state.should_rotate_previous(current_state, next_state):
                 component_state.write_installed_state(previous_state_path, current_state)
             component_state.write_installed_state(current_state_path, next_state)

@@ -126,7 +126,13 @@ def test_daily_status_keeps_work_counts_when_optional_snapshot_times_out(tmp_pat
     assert "timed out" in center["detail"]
 
 
-def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys):
+def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys, monkeypatch):
+    from brigade import cloud_tracker
+
+    # gh uses ambient credentials/config and subprocesses shared with xdist peers.
+    # Discovery can exhaust center-status's deadline and yield the work-only fallback.
+    # Keep real queue classification and sanitization, with an offline GitHub snapshot.
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
     _seed_ready_repo(tmp_path, capsys)
     now = datetime.now(timezone.utc)
     grokbot_jobs.enqueue(
@@ -148,7 +154,7 @@ def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys):
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["grokbot_cloud"]["job_count"] == 1
+    assert payload["grokbot_cloud"]["job_count"] == 1, payload["status_section_checks"]
     assert payload["grokbot_cloud"]["classification_counts"]["pending"] == 1
     assert "PRIVATE DAILY INSTRUCTIONS" not in json.dumps(payload)
 

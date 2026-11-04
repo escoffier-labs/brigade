@@ -209,7 +209,7 @@ def test_receipts_export_miseledger_emits_required_verify_fields_and_artifacts(t
         code_graph_delta={"status": "ok", "summary": "edge_churn=2", "changed_symbol_count": 2},
     )
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path)]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path)]) == 0
     rows = _jsonl(capsys.readouterr().out)
 
     assert len(rows) == 1
@@ -280,7 +280,7 @@ def test_receipts_export_miseledger_composes_graph_delta_code_references(tmp_pat
         stdout=subprocess.DEVNULL,
     )
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path)]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path)]) == 0
     row = _jsonl(capsys.readouterr().out)[0]
 
     assert row["item"]["metadata"]["code_references"] == [
@@ -334,7 +334,7 @@ def test_receipts_export_miseledger_keeps_compaction_candidate_accounting_and_sk
         stdout=subprocess.DEVNULL,
     )
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path)]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path)]) == 0
     row = _jsonl(capsys.readouterr().out)[0]
     metadata = row["item"]["metadata"]
     assert len(metadata["code_references"]) == 20
@@ -547,9 +547,9 @@ def test_receipts_export_miseledger_is_byte_identical_and_limit_uses_newest_firs
     )
     _write_run_export_receipt(tmp_path, "20260708-140000-new", started_at="2026-07-08T14:00:00Z")
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--limit", "1"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--limit", "1"]) == 0
     first = capsys.readouterr().out
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--limit", "1"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--limit", "1"]) == 0
     second = capsys.readouterr().out
 
     assert first == second
@@ -565,7 +565,7 @@ def test_receipts_export_miseledger_new_only_exports_once_and_records_cursor(tmp
     )
     _write_run_export_receipt(tmp_path, "20260708-140000-new", started_at="2026-07-08T14:00:00Z")
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     first_rows = _jsonl(capsys.readouterr().out)
     assert len(first_rows) == 2
 
@@ -573,7 +573,7 @@ def test_receipts_export_miseledger_new_only_exports_once_and_records_cursor(tmp
     cursor = json.loads(cursor_path.read_text())
     assert cursor["raw_hashes"] == sorted(row["raw"]["hash"] for row in first_rows)
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     second = capsys.readouterr()
     assert second.out == ""
     assert second.err == ""
@@ -662,7 +662,7 @@ print(json.dumps({{"inserted_items": 1, "already_known": 0, "status": "complete"
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--import"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--import"]) == 0
     captured = capsys.readouterr()
 
     assert captured.out == "miseledger import: inserted_items=1 already_known=0\n"
@@ -718,10 +718,10 @@ pathlib.Path(sys.argv[3]).parent.joinpath("import-argv.json").write_text("invoke
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     assert len(_jsonl(capsys.readouterr().out)) == 1
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only", "--import"]) == 0
     captured = capsys.readouterr()
 
     assert captured.out == "nothing new; import skipped\n"
@@ -739,7 +739,7 @@ def test_receipts_export_miseledger_import_all_malformed_exits_nonzero(tmp_path,
     _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker)
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--import"]) == 1
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--import"]) == 1
     captured = capsys.readouterr()
 
     assert captured.out == ""
@@ -755,7 +755,7 @@ def test_receipts_export_miseledger_new_only_import_mixed_skip_and_malformed_exi
         "20260708-120000-work-verify-seen",
         started_at="2026-07-08T12:00:00Z",
     )
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     capsys.readouterr()
     cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
     cursor = cursor_path.read_text()
@@ -1009,7 +1009,7 @@ def test_receipts_export_miseledger_json_nothing_new_is_idempotent(tmp_path, cap
         "20260708-120000-work-verify-once",
         started_at="2026-07-08T12:00:00Z",
     )
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     capsys.readouterr()
     cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
     cursor = cursor_path.read_text()
@@ -1049,7 +1049,7 @@ def test_receipts_export_miseledger_json_zero_row_import_emits_only_result_json(
         "20260708-120000-work-verify-once",
         started_at="2026-07-08T12:00:00Z",
     )
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     capsys.readouterr()
     out_path = tmp_path / "nothing-new.jsonl"
 
@@ -1202,14 +1202,14 @@ def test_receipts_export_miseledger_new_only_import_failure_keeps_cursor_pending
     monkeypatch.setenv("PATH", str(tmp_path / "bin"))
     cursor_path = tmp_path / ".brigade" / "work" / "miseledger-export-cursor.json"
 
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 1
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only", "--import"]) == 1
     captured = capsys.readouterr()
 
     assert "miseledger import failed" in captured.err
     assert not cursor_path.exists()
 
     _write_fake_miseledger(tmp_path / "bin" / "miseledger", marker)
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--new-only", "--import"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only", "--import"]) == 0
     capsys.readouterr()
     cursor = json.loads(cursor_path.read_text())
     assert len(cursor["raw_hashes"]) == 1
@@ -1340,7 +1340,7 @@ def test_receipts_export_miseledger_fleet_empty_and_nothing_new_are_healthy(tmp_
         "20260708-120000-work-verify-seen",
         started_at="2026-07-08T12:00:00Z",
     )
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(seen_repo), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(seen_repo), "--new-only"]) == 0
     capsys.readouterr()
     _write_repo_catalog(
         fleet,
@@ -1550,7 +1550,7 @@ def test_receipts_export_miseledger_fleet_new_only_counts_are_idempotent(tmp_pat
     )
     first_out = tmp_path / "first-run.jsonl"
     second_out = tmp_path / "second-run.jsonl"
-    args = ["receipts", "export", "miseledger", "--target", str(fleet), "--fleet", "--new-only", "--json"]
+    args = ["receipts", "export", "evidence", "--target", str(fleet), "--fleet", "--new-only", "--json"]
 
     assert cli.main([*args, "--out", str(first_out)]) == 0
     first_payload = json.loads(capsys.readouterr().out)
@@ -1614,7 +1614,7 @@ def test_receipts_export_miseledger_fleet_missing_enabled_path_fails_and_disable
 
 
 def test_receipts_export_miseledger_json_rejects_stdout_output(tmp_path, capsys):
-    assert cli.main(["receipts", "export", "miseledger", "--target", str(tmp_path), "--json", "--out", "-"]) == 2
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--json", "--out", "-"]) == 2
     captured = capsys.readouterr()
 
     assert captured.out == ""

@@ -56,13 +56,11 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			t.Run(tc.name, func(t *testing.T) {
 				legacy := runExecutable(t, bins[0], env, tc.args...)
 				canonical := runExecutable(t, bins[1], env, tc.args...)
-				// Until R5, Brigade and existing scripts still run the legacy
-				// name, so neither entry point adds a deprecation line. A stray
-				// stderr line fails PowerShell callers that use
-				// $ErrorActionPreference = 'Stop'.
-				if strings.Contains(legacy.err+canonical.err, "deprecated") {
-					t.Fatalf("entry point printed a deprecation notice: %#v / %#v", legacy, canonical)
+				notice := app.LegacyProgram + " is deprecated; use " + app.CanonicalProgram + "; removed in v0.33.0\n"
+				if !strings.HasPrefix(legacy.err, notice) || strings.Contains(canonical.err, "deprecated") {
+					t.Fatalf("incorrect entry point notices: %#v / %#v", legacy, canonical)
 				}
+				legacy.err = strings.TrimPrefix(legacy.err, notice)
 				if strings.Contains(canonical.out+canonical.err, app.LegacyProgram) {
 					t.Fatalf("canonical entry point named the legacy program: %#v", canonical)
 				}
@@ -146,7 +144,11 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			}
 			for _, bin := range ordered {
 				result := runExecutable(t, bin, env, "init")
-				if result.code != 0 || result.err != "" {
+				expectedErr := ""
+				if bin == bins[0] {
+					expectedErr = app.LegacyProgram + " is deprecated; use " + app.CanonicalProgram + "; removed in v0.33.0\n"
+				}
+				if result.code != 0 || result.err != expectedErr {
 					t.Fatalf("init: %#v", result)
 				}
 				var payload struct {
@@ -162,7 +164,7 @@ func TestEvidenceExecutableCompatibility(t *testing.T) {
 			}
 			legacy := runExecutable(t, bins[0], env, "status", "--json")
 			canonical := runExecutable(t, bins[1], env, "status", "--json")
-			if legacy.code != 0 || legacy.err != "" || canonical.err != "" || canonical.out != legacy.out {
+			if legacy.code != 0 || legacy.err != app.LegacyProgram+" is deprecated; use "+app.CanonicalProgram+"; removed in v0.33.0\n" || canonical.err != "" || canonical.out != legacy.out {
 				t.Fatalf("shared archive status: %#v / %#v", legacy, canonical)
 			}
 			if _, err := os.Stat(want["db_path"]); err != nil {

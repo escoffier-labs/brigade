@@ -28,6 +28,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
+from brigade import engine_deprecation
+
 Source = Literal["explicit", "canonical", "legacy", "new"]
 
 CODE_GRAPH_DB = Path(".brigade") / "code-graph" / "code-graph.db"
@@ -85,6 +87,7 @@ def code_graph_db_paths(target: Path) -> tuple[Path, Path]:
 def _explicit_db(explicit: str | os.PathLike[str] | None, environment: Mapping[str, str]) -> str | None:
     if explicit is not None and str(explicit):
         return str(explicit)
+    engine_deprecation.environment(LEGACY_CODE_GRAPH_DB_ENV, CODE_GRAPH_DB_ENV, environment)
     canonical = environment.get(CODE_GRAPH_DB_ENV) or None
     legacy = environment.get(LEGACY_CODE_GRAPH_DB_ENV) or None
     if canonical and legacy and canonical != legacy:

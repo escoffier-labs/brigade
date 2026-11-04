@@ -325,7 +325,9 @@ def test_bundled_manifest_pins_miseledger_and_graphtrail_assets():
     assert manifest.brigade_version == __version__
     assert manifest.manifest_revision == "2026-07-19"
     assert manifest.supported_platforms == component_manifest.SUPPORTED_PLATFORMS
-    assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS)
+    assert set(manifest.components) == {
+        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.KNOWN_COMPONENT_IDS
+    }
     assert manifest.components["miseledger"].component_revision == "v0.6.0"
     assert manifest.components["miseledger"].source.release_tag == "v0.6.0"
     asset = manifest.components["miseledger"].assets["linux-amd64"]
@@ -408,7 +410,7 @@ def test_schema_contract_requires_exact_platform_order_and_known_components():
 
     components = schema["properties"]["components"]
     assert components["required"] == list(component_manifest.KNOWN_COMPONENT_IDS)
-    for component_id in ("miseledger", "sessionfind"):
+    for component_id in ("brigade-evidence", "sessionfind"):
         component_schema = components["properties"][component_id]
         assert component_schema["allOf"][0]["$ref"] == "#/$defs/known_component"
         assert component_schema["allOf"][1]["properties"]["executable"]["const"] == component_id
@@ -428,7 +430,7 @@ def test_schema_contract_requires_exact_platform_order_and_known_components():
             "required": ["source", "assets"],
         },
     ]
-    for component_id in ("graphtrail", "graphtrail-mcp"):
+    for component_id in ("brigade-code-graph", "brigade-code-graph-mcp"):
         component_schema = components["properties"][component_id]
         base = component_schema["allOf"][0]
         assert base["type"] == "object"
@@ -446,18 +448,18 @@ def test_schema_contract_requires_exact_platform_order_and_known_components():
         "assets",
     }
 
-    graphtrail_revision = schema["$defs"]["graphtrail_component_revision"]
+    graphtrail_revision = schema["$defs"]["brigade-code-graph_component_revision"]
     assert graphtrail_revision["pattern"] == "^[0-9a-f]{40}$"
-    for component_id in ("graphtrail", "graphtrail-mcp"):
+    for component_id in ("brigade-code-graph", "brigade-code-graph-mcp"):
         revision = components["properties"][component_id]["allOf"][0]["properties"]["component_revision"]
-        assert revision == {"$ref": "#/$defs/graphtrail_component_revision"}
+        assert revision == {"$ref": "#/$defs/brigade-code-graph_component_revision"}
 
     platform_keys = list(component_manifest.SUPPORTED_PLATFORMS)
     published_assets = schema["$defs"]["published_assets"]
     assert published_assets["required"] == platform_keys
     assert set(published_assets["properties"]) == set(platform_keys)
     assert published_assets["additionalProperties"] is False
-    for component_id in ("miseledger", "sessionfind"):
+    for component_id in ("brigade-evidence", "sessionfind"):
         assets = components["properties"][component_id]["allOf"][1]["properties"]["assets"]
         assert assets == {"$ref": "#/$defs/published_assets"}
         source = components["properties"][component_id]["allOf"][1]["properties"]["source"]
@@ -601,7 +603,7 @@ def test_manifest_ignores_unknown_components_with_deterministic_diagnostic(tmp_p
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
     )
 
 
@@ -617,7 +619,7 @@ def test_manifest_ignores_unknown_components_regardless_of_value_shape(tmp_path,
     assert "future-tool" not in manifest.components
     assert manifest.unknown_component_diagnostics == (
         "component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
     )
 
 
@@ -881,7 +883,9 @@ def test_compatible_stable_manifest_tolerates_missing_unpublished_agent_notify(t
     manifest = component_manifest.load(path, allow_compatible_stable_manifest=True)
 
     assert "agent-notify" not in manifest.components
-    assert set(manifest.components) == set(component_manifest.KNOWN_COMPONENT_IDS) - {"agent-notify"}
+    assert set(manifest.components) == {
+        component_manifest.wire_id(manifest.components, cid) for cid in component_manifest.KNOWN_COMPONENT_IDS
+    } - {"agent-notify", None}
     assert component_manifest.published_component_ids(manifest) == (
         "graphtrail",
         "graphtrail-mcp",
@@ -897,7 +901,7 @@ def test_compatible_stable_manifest_rejects_missing_published_component(tmp_path
     del base["components"]["miseledger"]
     path.write_text(json.dumps(base))
 
-    with pytest.raises(ValueError, match="missing required components: miseledger"):
+    with pytest.raises(ValueError, match="missing required components: brigade-evidence"):
         component_manifest.load(path, allow_compatible_stable_manifest=True)
 
 
@@ -930,7 +934,7 @@ def test_compatible_stable_manifest_rejects_unknown_extras(tmp_path):
     with pytest.raises(
         ValueError,
         match="component manifest lists unknown component 'future-tool'; known components: "
-        "agent-notify, graphtrail, graphtrail-mcp, miseledger, sessionfind",
+        "agent-notify, brigade-code-graph, brigade-code-graph-mcp, brigade-evidence, sessionfind",
     ):
         component_manifest.load(path, allow_compatible_stable_manifest=True)
 
@@ -982,12 +986,7 @@ def test_canonical_family_retains_strict_release_validation(tmp_path, fault):
 
     path = tmp_path / "release.json"
     raw = json.loads(write_release_manifest(path, brigade_version="1.2.3", target_commit="a" * 40))
-    record = raw["components"].pop("miseledger")
-    record["executable"] = "brigade-evidence"
-    for asset in record["assets"].values():
-        asset["asset_name"] = asset["asset_name"].replace("miseledger", "brigade-evidence", 1)
-        asset["download_url"] = asset["download_url"].rsplit("/", 1)[0] + "/" + asset["asset_name"]
-    raw["components"]["brigade-evidence"] = record
+    record = raw["components"]["brigade-evidence"]
 
     def validate():
         content = json.dumps(raw).encode()

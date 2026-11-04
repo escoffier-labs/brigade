@@ -162,7 +162,7 @@ async fn overload_and_durable_reserve_are_bounded() {
     let mut config = Config::new(path);
     config.capacity = 6;
     config.durable_reserve = 2;
-    let writer = Writer::start(config, arbiter).unwrap();
+    let writer = start_fixture(config, arbiter).unwrap();
     let mut accepted = Vec::new();
     let mut rejected = 0;
     for _ in 0..18 {
@@ -201,7 +201,7 @@ async fn python_lock_for_three_seconds_delays_durable_command() {
     use std::io::{BufRead, BufReader};
     use std::process::{Command as Process, Stdio};
     let path = fixture();
-    let writer = Writer::start(Config::new(path.to_path_buf()), Arc::default()).unwrap();
+    let writer = start_fixture(Config::new(path.to_path_buf()), Arc::default()).unwrap();
     let mut child = Process::new("python3").arg("-c").arg("import sqlite3,sys,time\nc=sqlite3.connect(sys.argv[1]); c.execute('BEGIN IMMEDIATE'); print('locked',flush=True); time.sleep(3); c.rollback()")
         .arg(&path).stdout(Stdio::piped()).spawn().unwrap();
     let mut line = String::new();
@@ -259,7 +259,7 @@ fn kill_child() {
                 Ok(Json::Null)
             }
         }
-        let writer = Writer::start(Config::new(path), Arc::default()).unwrap();
+        let writer = start_fixture(Config::new(path), Arc::default()).unwrap();
         for base in (0..100000).step_by(64) {
             let mut in_flight = Vec::new();
             for i in base..base + 64 {
@@ -347,7 +347,7 @@ async fn expired_and_expensive_commands_do_not_commit() {
         }
     }
     let path = fixture();
-    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let writer = start_fixture(Config::new(path.clone()), Arc::default()).unwrap();
     let mut b = budget(true);
     b.deadline = Instant::now() + Duration::from_millis(20);
     let reply = writer.submit(Expensive, b).await.unwrap();
@@ -392,7 +392,7 @@ async fn overload_three_times_default_capacity_records_rss() {
     let turn = arbiter
         .acquire(Lane::Memory, Instant::now() + Duration::from_secs(2))
         .unwrap();
-    let writer = Writer::start(Config::new(path), arbiter).unwrap();
+    let writer = start_fixture(Config::new(path), arbiter).unwrap();
     let before = rss();
     let mut replies = Vec::new();
     let mut rejected = 0;
@@ -478,7 +478,7 @@ async fn byte_admission_and_begin_deadline() {
         .unwrap();
     let mut config = Config::new(path.clone());
     config.queue_bytes = 1024;
-    let writer = Writer::start(config, arbiter).unwrap();
+    let writer = start_fixture(config, arbiter).unwrap();
     let mut b = budget(false);
     b.bytes = 600;
     let first = writer
@@ -521,7 +521,7 @@ async fn domain_refusal_rolls_back_partial_command() {
         }
     }
     let path = fixture();
-    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let writer = start_fixture(Config::new(path.clone()), Arc::default()).unwrap();
     let reply = writer.submit(Refuse, budget(false)).await.unwrap();
     assert_eq!(
         reply.await.unwrap(),
@@ -594,7 +594,7 @@ async fn interrupted_write_abort_keeps_durable_timeout_status() {
         }
     }
     let path = fixture();
-    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let writer = start_fixture(Config::new(path.clone()), Arc::default()).unwrap();
     let mut b = budget(true);
     b.deadline = Instant::now() + Duration::from_millis(20);
     let reply = writer.submit(ExpensiveWrite, b).await.unwrap();
@@ -640,4 +640,50 @@ fn opener_refuses_symlinked_database_and_sidecars() {
     drop(db);
     std::fs::remove_file(parent_alias).unwrap();
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+// Storage fault fixtures intentionally have a tiny schema. Production startup
+// always checks the full Python-owned contract before starting its worker.
+fn start_fixture(config: Config, arbiter: Arc<Arbiter>) -> rusqlite::Result<Writer> {
+    let connection = worker::open(&config.path)?;
+    Writer::start_connection(config, arbiter, connection)
+}
+
+#[test]
+fn startup_refuses_unrecognized_schema() {
+    assert!(Writer::start(Config::new(fixture()), Arc::default()).is_err());
+}
+
+#[test]
+fn maintenance_commands_use_writer_and_refuse_unsupported_work() {
+    use crate::maintenance::{Sweep, WriterCommands};
+    let path = fixture();
+    let writer = start_fixture(Config::new(path.clone()), Arc::default()).unwrap();
+    let sweeps = writer.sweeps(|sweep| match sweep {
+        Sweep::HubRetention => {
+            Some(Box::new(Sql("INSERT INTO rows(value) VALUES('sweep')")) as Box<dyn Command>)
+        }
+        _ => None,
+    });
+    assert!(!sweeps.schedule(Sweep::MemoryRetention));
+    assert!(!sweeps.schedule(Sweep::VectorCleanup));
+    assert!(sweeps.schedule(Sweep::HubRetention));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while values(&path) == 0 {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn maintenance_admission_is_bounded_and_releases_partial_permits() {
+    use crate::maintenance::{Sweep, WriterCommands};
+    let mut config = Config::new(fixture());
+    config.queue_bytes = 1024;
+    let writer = start_fixture(config, Arc::default()).unwrap();
+    let sweeps = writer.sweeps(|_| Some(Box::new(Sql("SELECT 1")) as Box<dyn Command>));
+    assert!(!sweeps.schedule(Sweep::HubRetention));
+    assert_eq!(writer.slots.available_permits(), 4096);
+    assert_eq!(writer.regular.available_permits(), 3584);
+    assert_eq!(writer.bytes.available_permits(), 1024);
 }

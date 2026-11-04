@@ -405,7 +405,7 @@ def test_record_dispatch_stage_stamps_schema_on_legacy_run_json(tmp_path):
 
 
 def test_verify_receipt_emits_null_identity_tuple_outside_git(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     rc = verify_mod.verify_run(
         target=tmp_path,
         commands=[f"{sys.executable} -c \"print('ok')\""],
@@ -426,7 +426,7 @@ def test_verify_receipt_emits_null_identity_tuple_outside_git(tmp_path, capsys, 
 
 
 def test_verify_receipt_emits_tree_fingerprint_head_inside_git(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     _init_git_repo(tmp_path)
     rc = verify_mod.verify_run(
         target=tmp_path,

@@ -26,8 +26,8 @@ def _use_home(monkeypatch, home: Path) -> None:
 @pytest.mark.parametrize(
     ("legacy_key", "canonical_key"),
     [
-        ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN"),
-        ("MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"),
+        ("BRIGADE_CODE_GRAPH_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN"),
+        ("BRIGADE_EVIDENCE_BIN", "BRIGADE_EVIDENCE_BIN"),
     ],
 )
 @pytest.mark.parametrize("mode", ["conflicting", "empty", "missing"])
@@ -37,7 +37,12 @@ def test_cursor_user_install_refuses_bad_engine_override_before_writes(
     _use_home(monkeypatch, tmp_path)
     set_home(monkeypatch, str(tmp_path))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
-    for key in ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN", "MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"):
+    for key in (
+        "BRIGADE_CODE_GRAPH_MCP_BIN",
+        "BRIGADE_CODE_GRAPH_MCP_BIN",
+        "BRIGADE_EVIDENCE_BIN",
+        "BRIGADE_EVIDENCE_BIN",
+    ):
         monkeypatch.delenv(key, raising=False)
     if mode == "conflicting":
         monkeypatch.setenv(legacy_key, str(tmp_path / "legacy"))

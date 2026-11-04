@@ -39,9 +39,10 @@ pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
     #[cfg(not(test))]
     let vfs: Option<&str> = None;
     let db = match vfs {
-        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs)?,
-        None => Connection::open_with_flags(path, flags)?,
-    };
+        Some(vfs) => crate::schema::audit::open_with_vfs(path, flags, Some(vfs)),
+        None => crate::schema::audit::open(path, flags),
+    }
+    .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
     db.busy_timeout(Duration::ZERO)?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;")?;
     let level: i64 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
@@ -160,7 +161,7 @@ pub(super) fn run(
 ) {
     let mut pending = None;
     let mut directory_synced = false;
-    let mut last_version: Option<i64> = None;
+    let mut version = crate::schema::DataVersion::new(&db).ok();
     while let Some(first) = pending.take().or_else(|| receiver.blocking_recv()) {
         let lock_deadline = (Instant::now() + config.begin_wait.min(Duration::from_secs(5)))
             .min(first.budget.deadline);
@@ -186,11 +187,10 @@ pub(super) fn run(
             }
             directory_synced = true;
         }
-        let version: i64 = db
-            .query_row("PRAGMA data_version", [], |r| r.get(0))
-            .unwrap_or_default();
-        let mut external_change = last_version.is_some_and(|old| old != version);
-        last_version = Some(version);
+        let mut external_change = version
+            .as_mut()
+            .map(|v| v.changed(&db).unwrap_or(true))
+            .unwrap_or(true);
         let started = Instant::now();
         let mut batch: Vec<(Envelope, Answer)> = Vec::new();
         let (mut events, mut bytes) = (0, 0);
@@ -217,11 +217,10 @@ pub(super) fn run(
                     break;
                 }
                 replayed = true;
-                if let Ok(version) = db.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0))
-                {
-                    external_change |= last_version.is_some_and(|old| old != version);
-                    last_version = Some(version);
-                }
+                external_change |= version
+                    .as_mut()
+                    .map(|v| v.changed(&db).unwrap_or(true))
+                    .unwrap_or(true);
                 for (earlier, result) in &mut batch {
                     if result.is_ok() {
                         *result = apply(&db, earlier);
@@ -256,7 +255,7 @@ pub(super) fn run(
                 Ok(reopened) => {
                     db = reopened;
                     directory_synced = false;
-                    last_version = None;
+                    version = crate::schema::DataVersion::new(&db).ok();
                 }
                 Err(_) => {
                     receiver.close();
@@ -283,7 +282,6 @@ pub(super) fn run(
             }
         }
     }
-    let _ = db.execute_batch("PRAGMA wal_checkpoint(PASSIVE)");
 }
 
 #[cfg(test)]

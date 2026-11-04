@@ -1196,7 +1196,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "invalid json\n"
     );
     const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
-    // Neither entry point nor the legacy variable prints a deprecation line until R5.
+    // Legacy entry points and variables each print a deprecation notice.
     for (binary, server_name) in [
         (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
         (
@@ -1255,7 +1255,12 @@ fn canonical_and_legacy_mcp_process_contracts() {
                 .unwrap();
             let output = child.wait_with_output().unwrap();
             assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert!(output.stderr.is_empty(), "{output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stderr).contains("deprecated"),
+                server_name == "graphtrail"
+                    || (env_var == LEGACY_DB_ENV && !args.iter().any(|v| v.starts_with("--db="))),
+                "{output:?}"
+            );
             let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
                 .unwrap()
                 .lines()

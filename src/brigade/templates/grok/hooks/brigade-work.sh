@@ -216,7 +216,7 @@ has_new_receipt() {
 close_out_work() {
   [[ -f "$state_dir/substantive" ]] || return 0
   if has_new_receipt; then
-    "$brigade_bin" receipts export miseledger --target "$target" --new-only --import >>"$log_file" 2>&1 || true
+    "$brigade_bin" receipts export evidence --target "$target" --new-only --import >>"$log_file" 2>&1 || true
     rm -f "$state_dir/substantive" "$state_dir/friction.reported"
   elif [[ "$work_mode" == "yolo" ]]; then
     rm -f "$state_dir/substantive"

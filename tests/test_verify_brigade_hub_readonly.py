@@ -473,3 +473,23 @@ def test_prod_readonly_runbook_names_the_only_production_drive_run():
     for op in hr.ALLOWED_OPERATIONS:
         method, path, *action = op.split(" ")
         assert f"`{method} {path}`" in feature or (action and f"`{action[0]}`" in feature), op
+
+
+def test_autocheckpoint_setting_is_local_but_checkpoint_is_a_write():
+    records = []
+
+    class Recorder:
+        def emit(self, kind, **fields):
+            records.append((kind, fields))
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.set_authorizer(audit_launcher._authorizer(Recorder()))
+        conn.execute("PRAGMA wal_autocheckpoint=0")
+        assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 0
+        assert records == []
+        conn.execute("PRAGMA wal_checkpoint")
+        assert records[0][0] == "write"
+        assert records[0][1]["target"] == "wal_checkpoint"
+    finally:
+        conn.close()

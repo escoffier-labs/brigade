@@ -4,11 +4,7 @@
 //! v0.31 and v0.32. Both set to different values is refused, which matches Brigade's
 //! `component_bins` and `engine_paths` helpers. An empty value counts as unset.
 //!
-//! Reading a legacy variable prints nothing. Its stderr deprecation line lands in R5 together
-//! with the legacy entry point notice: Brigade's callers and Windows PowerShell 5.1 callers that
-//! run with `$ErrorActionPreference = 'Stop'` treat any native stderr as an error, so stderr stays
-//! unchanged until Brigade no longer depends on legacy names. `brigade doctor` reports the
-//! legacy variable instead.
+//! Reading a legacy variable prints one stderr deprecation notice per process.
 
 use std::ffi::OsString;
 
@@ -45,8 +41,20 @@ pub fn read_renamed_with(
     }
 }
 
-/// Read a renamed variable from the process environment. Never prints (see the module notes).
+/// Read a renamed variable and report legacy use once per process.
 pub fn read_renamed(canonical: &'static str, legacy: &'static str) -> Result<Option<OsString>> {
+    if std::env::var_os(legacy).is_some_and(|v| !v.is_empty()) {
+        use std::sync::{Mutex, OnceLock};
+        static SEEN: OnceLock<Mutex<std::collections::HashSet<&'static str>>> = OnceLock::new();
+        if SEEN
+            .get_or_init(Default::default)
+            .lock()
+            .unwrap()
+            .insert(legacy)
+        {
+            eprintln!("{legacy} is deprecated; use {canonical}; removed in v0.33.0");
+        }
+    }
     let found = read_renamed_with(canonical, legacy, |name| std::env::var_os(name))?;
     Ok(found.map(|found| found.value))
 }

@@ -42,14 +42,26 @@ def _healthy_report(managed_bin):
     return {
         "components": [
             _component(component_id, managed_bin / component_id)
-            for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+            for component_id in (
+                "agent-notify",
+                "brigade-code-graph",
+                "brigade-code-graph-mcp",
+                "brigade-evidence",
+                "sessionfind",
+            )
         ]
     }
 
 
 def _write_managed_binaries(managed_bin):
     managed_bin.mkdir(parents=True)
-    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+    for component_id in (
+        "agent-notify",
+        "brigade-code-graph",
+        "brigade-code-graph-mcp",
+        "brigade-evidence",
+        "sessionfind",
+    ):
         executable = managed_bin / component_id
         executable.write_text("#!/bin/sh\nexit 0\n")
         executable.chmod(0o755)
@@ -57,7 +69,7 @@ def _write_managed_binaries(managed_bin):
 
 def test_component_report_rejects_relative_executable_before_resolving(acceptance_module, tmp_path):
     report = _healthy_report(tmp_path / "xdg-data" / "brigade" / "bin")
-    report["components"][0]["recorded_executable"] = "graphtrail"
+    report["components"][0]["recorded_executable"] = "brigade-code-graph"
 
     with pytest.raises(acceptance_module.AcceptanceError, match="absolute"):
         acceptance_module.validate_component_report(report, tmp_path / "xdg-data" / "brigade" / "bin")
@@ -92,7 +104,7 @@ def test_component_report_rejects_symlink_outside_managed_root(acceptance_module
     _write_managed_binaries(managed_bin)
     outside = tmp_path / "outside"
     outside.write_text("not managed")
-    linked = managed_bin / "graphtrail"
+    linked = managed_bin / "brigade-code-graph"
     linked.unlink()
     linked.symlink_to(outside)
     report = _healthy_report(managed_bin)
@@ -382,7 +394,7 @@ def test_smoke_uses_only_absolute_managed_executables(acceptance_module, tmp_pat
     def runner(argv, **kwargs):
         calls.append(argv)
         assert Path(argv[0]).is_absolute()
-        if Path(argv[0]).name == "graphtrail-mcp":
+        if Path(argv[0]).name == "brigade-code-graph-mcp":
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
@@ -409,7 +421,7 @@ def test_smoke_accepts_sessionfind_command_list_help(acceptance_module, tmp_path
     _write_managed_binaries(managed_bin)
 
     def runner(argv, **kwargs):
-        if Path(argv[0]).name == "graphtrail-mcp":
+        if Path(argv[0]).name == "brigade-code-graph-mcp":
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "\n  sessionfind query [PATH]...\n", "")
@@ -434,7 +446,7 @@ def test_smoke_rejects_sessionfind_unrelated_success_output(acceptance_module, t
     _write_managed_binaries(managed_bin)
 
     def runner(argv, **kwargs):
-        if Path(argv[0]).name == "graphtrail-mcp":
+        if Path(argv[0]).name == "brigade-code-graph-mcp":
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "commands available", "no help text")
@@ -643,7 +655,7 @@ def test_smoke_managed_components_rejects_agent_notify_bare_build_output(accepta
     _write_managed_binaries(managed_bin)
 
     def runner(argv, **kwargs):
-        if Path(argv[0]).name == "graphtrail-mcp":
+        if Path(argv[0]).name == "brigade-code-graph-mcp":
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if Path(argv[0]).name == "sessionfind":
             return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
@@ -694,7 +706,7 @@ def _rosetta_runner(tmp_path, agent_notify_stdout):
         assert argv[0] == "arch"
         assert argv[1] == "-x86_64"
         name = Path(argv[2]).name
-        if name.startswith("graphtrail-mcp"):
+        if name.startswith("brigade-code-graph-mcp"):
             return subprocess.CompletedProcess(argv, 0, '{"jsonrpc":"2.0","id":1,"result":{}}', "")
         if name.startswith("sessionfind"):
             return subprocess.CompletedProcess(argv, 0, "usage: sessionfind", "")
@@ -964,11 +976,11 @@ def test_smoke_import_and_search_uses_json_search_and_imported_ids(acceptance_mo
             out = Path(argv[argv.index("--out") + 1])
             out.write_text("{}\n", encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, "ok", "")
-        if name == "miseledger" and "import" in argv:
+        if name == "brigade-evidence" and "import" in argv:
             return subprocess.CompletedProcess(argv, 0, '{"inserted_items": 1, "already_known": false}', "")
-        if name == "miseledger" and "sql" in argv:
+        if name == "brigade-evidence" and "sql" in argv:
             return subprocess.CompletedProcess(argv, 0, '{"rows": [{"id": "73a4dea0caf74b08af5e0f59"}]}', "")
-        if name == "miseledger" and "search" in argv:
+        if name == "brigade-evidence" and "search" in argv:
             assert "--json" in argv
             return subprocess.CompletedProcess(
                 argv,
@@ -993,7 +1005,7 @@ def test_smoke_import_and_search_uses_json_search_and_imported_ids(acceptance_mo
     brigade = tmp_path / "brigade"
     brigade.write_text("#!/bin/sh\nexit 0\n")
     brigade.chmod(0o755)
-    miseledger = tmp_path / "miseledger"
+    miseledger = tmp_path / "brigade-evidence"
     miseledger.write_text("#!/bin/sh\nexit 0\n")
     miseledger.chmod(0o755)
 
@@ -1005,7 +1017,7 @@ def test_smoke_import_and_search_uses_json_search_and_imported_ids(acceptance_mo
         env={"HOME": str(tmp_path / "profile")},
     )
 
-    search = next(argv for argv in calls if Path(argv[0]).name == "miseledger" and "search" in argv)
+    search = next(argv for argv in calls if Path(argv[0]).name == "brigade-evidence" and "search" in argv)
     assert "--json" in search
     assert any("sql" in argv for argv in calls)
 
@@ -1020,11 +1032,11 @@ def _import_search_runner(calls, *, export_lines="{}\n"):
             out = Path(argv[argv.index("--out") + 1])
             out.write_text(export_lines, encoding="utf-8")
             return subprocess.CompletedProcess(argv, 0, "ok", "")
-        if name == "miseledger" and "import" in argv:
+        if name == "brigade-evidence" and "import" in argv:
             return subprocess.CompletedProcess(argv, 0, '{"inserted_items": 1, "already_known": false}', "")
-        if name == "miseledger" and "sql" in argv:
+        if name == "brigade-evidence" and "sql" in argv:
             return subprocess.CompletedProcess(argv, 0, '{"rows": [{"id": "73a4dea0caf74b08af5e0f59"}]}', "")
-        if name == "miseledger" and "search" in argv:
+        if name == "brigade-evidence" and "search" in argv:
             return subprocess.CompletedProcess(
                 argv,
                 0,
@@ -1040,7 +1052,7 @@ def _import_search_binaries(tmp_path):
     brigade = tmp_path / "brigade"
     brigade.write_text("#!/bin/sh\nexit 0\n")
     brigade.chmod(0o755)
-    miseledger = tmp_path / "miseledger"
+    miseledger = tmp_path / "brigade-evidence"
     miseledger.write_text("#!/bin/sh\nexit 0\n")
     miseledger.chmod(0o755)
     return brigade, miseledger
@@ -1100,8 +1112,8 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
 
 def _release_fixture(*, additive=True):
     base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
-    legacy = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
-    aliases = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+    legacy = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+    aliases = ("graphtrail", "graphtrail-mcp", "miseledger")
     platforms = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
     bodies = {}
     components = {}
@@ -1144,7 +1156,13 @@ def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_retu
     result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
     assert len(list((tmp_path / "release-assets").iterdir())) == 42
     assert set(result) == {"manifest", "native_paths"}
-    assert set(result["native_paths"]) == {"agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    assert set(result["native_paths"]) == {
+        "agent-notify",
+        "brigade-code-graph",
+        "brigade-code-graph-mcp",
+        "brigade-evidence",
+        "sessionfind",
+    }
     for name, body in bodies.items():
         assert (tmp_path / "release-assets" / name).read_bytes() == body
 
@@ -1221,11 +1239,11 @@ def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
 ):
     base, bodies, checksums = _release_fixture(additive=additive)
     manifest = json.loads(bodies["component-manifest-v1.json"])
-    asset = manifest["components"]["graphtrail"]["assets"]["linux-amd64"]
+    asset = manifest["components"]["brigade-code-graph"]["assets"]["linux-amd64"]
     if mutation == "url":
         asset["download_url"] = base.replace("v1.2.3", "latest") + asset["asset_name"]
     elif mutation == "platform":
-        assets = manifest["components"]["graphtrail"]["assets"]
+        assets = manifest["components"]["brigade-code-graph"]["assets"]
         assets["linux-riscv64"] = assets.pop("linux-arm64")
     elif mutation == "basename":
         asset["asset_name"] = "../graphtrail-linux-amd64"
@@ -1234,7 +1252,7 @@ def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
     else:
         # Pass an actual duplicate line through the production parser.
         checksum_text = "".join(f"{digest}  {name}\n" for name, digest in checksums.items())
-        checksum_text += f"{'a' * 64}  graphtrail-linux-amd64\n"
+        checksum_text += f"{'a' * 64}  brigade-code-graph-linux-amd64\n"
         with pytest.raises(acceptance_module.AcceptanceError, match="repeats"):
             acceptance_module.verify_release_assets(
                 "1.2.3",
@@ -1260,9 +1278,9 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
     for component in manifest["components"].values():
         component["component_revision"] = "a" * 40
     if case == "revision":
-        manifest["components"]["graphtrail"]["component_revision"] = "invalid"
+        manifest["components"]["brigade-code-graph"]["component_revision"] = "invalid"
     if case == "mixed":
-        manifest["components"]["graphtrail"]["component_revision"] = "b" * 40
+        manifest["components"]["brigade-code-graph"]["component_revision"] = "b" * 40
     bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
     checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
     monkeypatch.setattr(module, "host_platform_key", lambda: "linux-amd64")
@@ -1296,7 +1314,9 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
         (Path(kwargs["env"]["PIPX_BIN_DIR"]) / "brigade").touch()
 
     monkeypatch.setattr(module, "install_brigade_cli", install)
-    monkeypatch.setattr(module, "validate_component_report", lambda *a: {"miseledger": tmp_path / "miseledger"})
+    monkeypatch.setattr(
+        module, "validate_component_report", lambda *a: {"brigade-evidence": tmp_path / "brigade-evidence"}
+    )
     secrets = ("GITHUB_TOKEN", "GH_TOKEN", "ACTIONS_ID_TOKEN_REQUEST_TOKEN", "ACTIONS_RUNTIME_TOKEN")
     for key in secrets:
         monkeypatch.setenv(key, "fixture-only")

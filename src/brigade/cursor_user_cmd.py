@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -129,9 +130,9 @@ def _mcp_servers(
             "args": ["memory", "serve-mcp", "--stdio", "--target", "."],
             "timeout": 60,
         },
-        keys["brigade-code-graph"]: {"command": _absolute("brigade-code-graph-mcp", "graphtrail-mcp")},
+        keys["brigade-code-graph"]: {"command": _absolute("brigade-code-graph-mcp", "brigade-code-graph-mcp")},
         keys["brigade-evidence"]: {
-            "command": _absolute("brigade-evidence", "miseledger"),
+            "command": _absolute("brigade-evidence", "brigade-evidence"),
             "args": ["mcp"],
             "timeout": 60,
         },
@@ -196,7 +197,7 @@ def _desired_files(root: Path, servers: dict[str, dict[str, Any]] | None = None)
         ),
     }
     for name in ("SKILL.md", "skill.json", "CHANGELOG.md"):
-        desired[skill / name] = ((package / name).read_text(), False, "skill")
+        desired[skill / name] = ((package / name).read_text(encoding="utf-8"), False, "skill")
     return desired
 
 
@@ -233,6 +234,12 @@ def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _executable_mode_current(path: Path) -> bool:
+    # Windows chmod/stat do not represent POSIX execute bits. hooks.json runs
+    # the managed command directly; this script is a compatibility file only.
+    return sys.platform == "win32" or bool(path.stat().st_mode & 0o111)
+
+
 def _file_item(
     root: Path, path: Path, text: str, executable: bool, surface: str, state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -244,8 +251,8 @@ def _file_item(
         status, action = "conflict", "skip"
     else:
         try:
-            live = _digest_text(path.read_text())
-            mode_current = not executable or bool(path.stat().st_mode & 0o111)
+            live = _digest_text(path.read_text(encoding="utf-8"))
+            mode_current = not executable or _executable_mode_current(path)
         except (OSError, UnicodeError) as exc:
             return {
                 "surface": surface,
@@ -276,7 +283,7 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return {}, None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return None, str(exc)
     if not isinstance(payload, dict):
@@ -761,7 +768,7 @@ def uninstall(*, write: bool = False, json_output: bool = False) -> int:
             item.update(status="absent", action="none")
         elif path.is_file():
             try:
-                live_fingerprint = _digest_text(path.read_text())
+                live_fingerprint = _digest_text(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError) as exc:
                 item.update(status="conflict", action="preserve", detail=str(exc))
                 conflicts.append(item)
@@ -870,7 +877,7 @@ def doctor(*, json_output: bool = False) -> int:
     skill_dir = root / "skills" / "brigade-work"
     hook_script = root / "hooks" / "brigade-session-start"
     hooks_doc, _ = _read_json_object(root / "hooks.json")
-    hook_ok = _file_matches(hook_script, desired[hook_script][0]) and bool(hook_script.stat().st_mode & 0o111)
+    hook_ok = _file_matches(hook_script, desired[hook_script][0]) and _executable_mode_current(hook_script)
     desired_hook = _hook_entry()
     if hooks_doc is not None and not _hooks_document_error(hooks_doc) and isinstance(hooks_doc.get("hooks"), dict):
         for event in _MANAGED_HOOK_EVENTS:

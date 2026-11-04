@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Build this commit's engines and verify installer transitions in temporary homes.
+set -euo pipefail
+fixture_root="$(mktemp -d)"
+trap 'rm -rf "$fixture_root"' EXIT
+export BRIGADE_R5_NATIVE_BIN="$fixture_root/native"
+export BRIGADE_R5_V030_ASSETS="$fixture_root/v030"
+mkdir -p "$BRIGADE_R5_NATIVE_BIN" "$BRIGADE_R5_V030_ASSETS"
+cargo build --manifest-path engines/code-graph/Cargo.toml --locked --bin brigade-code-graph --bin brigade-code-graph-mcp
+cp engines/code-graph/target/debug/brigade-code-graph "$BRIGADE_R5_NATIVE_BIN/"
+cp engines/code-graph/target/debug/brigade-code-graph-mcp "$BRIGADE_R5_NATIVE_BIN/"
+go -C engines/evidence-ledger build -o "$BRIGADE_R5_NATIVE_BIN/brigade-evidence" ./cmd/brigade-evidence
+git fetch origin tag v0.30.0 --depth=1
+gh release download v0.30.0 --repo escoffier-labs/brigade --dir "$BRIGADE_R5_V030_ASSETS" -p '*linux-amd64' -p checksums.txt -p component-manifest-v1.json
+python -m pytest -q tests/test_engine_rename_installer.py

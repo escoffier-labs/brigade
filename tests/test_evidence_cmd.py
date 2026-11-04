@@ -253,14 +253,14 @@ def test_crawl_plan_prints_memory_when_namespace_is_declared(tmp_path):
 def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatch):
     """Each printed argv must run on the in-tree engine at engines/evidence-ledger/bin/."""
     binary = _bundled_miseledger()
-    monkeypatch.setenv("MISELEDGER_BIN", str(binary))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(binary))
     monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
     workspace.mkdir()
     payload = evidence_cmd.crawl_plan_payload(target=workspace)
     assert all(cmd[1:3] != ["crawl", "memory"] for cmd in payload["commands"])
     env = _isolated_miseledger_env(tmp_path / "home")
-    env["MISELEDGER_BIN"] = str(binary)
+    env["BRIGADE_EVIDENCE_BIN"] = str(binary)
     _exec_printed_commands(payload["commands"], env)
 
 

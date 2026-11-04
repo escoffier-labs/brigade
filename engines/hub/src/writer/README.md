@@ -2,15 +2,25 @@
 
 S4a adds a library API. The transport binary still proxies every route to
 Python. S5 will submit domain commands and connect their wakeups to
-`Command::post_commit`. S4b owns readers, schema checks and maintenance.
+`Command::post_commit`. S4b provides readers, schema checks and maintenance.
 
-`Writer::start` opens an existing database, without DDL. Its private opener
+`Writer::start` opens through the shared audit adapter and checks the full
+`required.json` structure before starting its thread. Its private opener
 sets WAL, FULL (and verifies level 2), foreign keys, zero automatic checkpoint
 and a statement cache. It refuses symlinks and non-regular database or sidecar
 files, matching Python, while allowing relocated parent directories. It syncs
 the canonical database directory after the first BEGIN,
 so a newly created WAL has a durable directory entry before any answer.
 Every reopened connection gets these settings and passes `quick_check`.
+Change detection uses `schema::DataVersion` on the writer connection.
+
+Pass `Writer::sweeps` a mapping from `maintenance::Sweep` to bounded domain
+commands, then pass the adapter to `Maintenance::start`. Unsupported sweeps
+return false for retry. Domain retention SQL remains with the route and memory
+owners. S4b has no checkpoint command variant: its maintenance thread owns
+checkpoints on independent connections. The writer issues no explicit checkpoint.
+The managed upstream keeps `BRIGADE_HUB_CHECKPOINT_OWNER=rust`, disabling the
+Python interim checkpoint thread.
 
 Commands use `ReadTx` and `WriteTx`, run all decision reads and credential
 checks inside their transaction, and have no external side effects. They must

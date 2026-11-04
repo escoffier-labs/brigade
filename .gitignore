@@ -54,6 +54,7 @@ Thumbs.db
 /hooks/
 /memory/
 /scripts/*
+!/scripts/verify-engine-rename-installer
 !/scripts/windows-native-acceptance.ps1
 !/scripts/published-artifact-acceptance.py
 !/scripts/generate_component_manifest.py

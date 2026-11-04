@@ -112,6 +112,15 @@ impl Writer {
             config.capacity > config.durable_reserve && config.queue_bytes <= u32::MAX as usize
         );
         let connection = worker::open(&config.path)?;
+        crate::schema::check(&connection)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
+        Self::start_connection(config, arbiter, connection)
+    }
+    fn start_connection(
+        config: Config,
+        arbiter: Arc<Arbiter>,
+        connection: rusqlite::Connection,
+    ) -> rusqlite::Result<Self> {
         let (sender, receiver) = mpsc::channel(config.capacity);
         let writer = Self {
             sender,
@@ -195,3 +204,59 @@ impl Writer {
 mod powercut;
 #[cfg(test)]
 mod tests;
+
+/// Maps maintenance requests to replayable domain commands. Unsupported work is
+/// refused for a later tick, including memory work until its owner is wired.
+pub struct SweepWriter<F> {
+    writer: Writer,
+    command: F,
+}
+impl Writer {
+    pub fn sweeps<F>(&self, command: F) -> SweepWriter<F>
+    where
+        F: Fn(crate::maintenance::Sweep) -> Option<Box<dyn Command>> + Send + Sync + 'static,
+    {
+        SweepWriter {
+            writer: self.clone(),
+            command,
+        }
+    }
+}
+impl<F> crate::maintenance::WriterCommands for SweepWriter<F>
+where
+    F: Fn(crate::maintenance::Sweep) -> Option<Box<dyn Command>> + Send + Sync + 'static,
+{
+    fn schedule(&self, sweep: crate::maintenance::Sweep) -> bool {
+        let Some(command) = (self.command)(sweep) else {
+            return false;
+        };
+        let mut permits = Vec::new();
+        // A bounded maintenance command must fit one ordinary queue slot and
+        // the same byte reservation as other work. It never waits for admission.
+        for (semaphore, count) in [
+            (&self.writer.regular, 1),
+            (&self.writer.slots, 1),
+            (&self.writer.bytes, 8 * 1024 * 1024),
+        ] {
+            let Ok(permit) = semaphore.clone().try_acquire_many_owned(count) else {
+                return false;
+            };
+            permits.push(permit);
+        }
+        self.writer
+            .sender
+            .try_send(Envelope {
+                command,
+                budget: Budget {
+                    events: 4096,
+                    bytes: 8 * 1024 * 1024,
+                    durable: false,
+                    deadline: Instant::now() + Duration::from_millis(250),
+                },
+                reply: None,
+                _permits: permits,
+                arbiter: self.writer.arbiter.clone(),
+            })
+            .is_ok()
+    }
+}

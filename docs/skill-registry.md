@@ -33,18 +33,22 @@ Non-React and non-Node projects work. The CLI needs one more file,
 ## Install a skill
 
 ```bash
-npx shadcn@latest add @brigade/check
+npx shadcn@latest add @brigade/bug-hunt
 ```
 
-This writes `.claude/skills/check/SKILL.md`. Claude Code discovers it on the
-next session. Available skills: `check`, `refire`, `bug-hunt`, `latent-premises`, `retry-safety`, `reduce`,
-`taste`.
+This writes `.claude/skills/bug-hunt/SKILL.md`. Claude Code discovers it on the
+next session. Available skills: `bug-hunt`, `latent-premises`, `retry-safety`, `reduce`.
+
+The `check`, `refire`, and `taste` skills were retired and are no longer in the
+registry. Use `superpowers:verification-before-completion`,
+`superpowers:systematic-debugging`, and `superpowers:test-driven-development`
+instead.
 
 If you run Brigade, project the skill into other harnesses afterward:
 
 ```bash
-brigade skills import .claude/skills/check
-brigade skills install check --target all
+brigade skills import .claude/skills/bug-hunt
+brigade skills install bug-hunt --target all
 ```
 
 Brigade's own bundled skills use a separate canonical source identity. A named
