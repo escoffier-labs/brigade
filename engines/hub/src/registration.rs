@@ -28,11 +28,17 @@ pub fn digest(token: &str) -> String {
     }
     output
 }
+/// Python's str.strip(): Rust's White_Space set plus U+001C..U+001F, which
+/// Python's isspace() also counts.
+pub fn py_trim(s: &str) -> &str {
+    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
+}
 pub fn quote(s: &str) -> String {
     let encoded = serde_json::to_string(s).unwrap();
     let mut out = String::new();
     for c in encoded.chars() {
-        if c.is_ascii() {
+        // json.dumps(ensure_ascii=True) escapes everything outside ' '..'~', DEL included.
+        if c.is_ascii() && c != '\x7f' {
             out.push(c);
         } else {
             let mut buf = [0; 2];
@@ -213,11 +219,8 @@ fn mutate_node(tx: &dyn WriteTx, raw: &Json, stamp: &str, token: &str) -> Result
     if !matches!(action, "add" | "revoke") {
         return refuse("node field 'action' must be one of: add, revoke");
     }
-    let id = raw
-        .get("node_id")
-        .and_then(Json::as_str)
-        .unwrap_or("")
-        .trim();
+    let id = raw.get("node_id").and_then(Json::as_str).unwrap_or("");
+    let id = py_trim(id);
     if !valid_node(id) {
         return refuse(
             "field 'node_id' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')",
@@ -230,7 +233,7 @@ fn mutate_node(tx: &dyn WriteTx, raw: &Json, stamp: &str, token: &str) -> Result
         }
         let label = label
             .as_str()
-            .map(str::trim)
+            .map(py_trim)
             .filter(|s| !s.is_empty())
             .map(text)
             .unwrap_or(Value::Null);
@@ -542,6 +545,12 @@ mod tests {
         assert_eq!(at("1.25"), "1970-01-01T00:00:01.250000+00:00");
         assert_eq!(at("1700000000"), "2023-11-14T22:13:20+00:00");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn python_strip_and_ascii_escapes() {
+        assert_eq!(py_trim("\u{1c}n1\u{1f} "), "n1");
+        assert_eq!(py_trim("\u{85}x\u{3000}"), "x");
+        assert_eq!(quote("a\u{7f}b"), r#""a\u007fb""#);
     }
     #[test]
     fn python_json_spacing_unicode_and_bounds() {

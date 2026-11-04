@@ -706,7 +706,11 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
     };
     if let Some(native) = native {
-        return native.handle(&parts, &body).await;
+        // serde_json rejects NaN, Infinity, 1e400 and lone surrogate escapes that
+        // Python's json.loads accepts. Python answers those bodies itself.
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            return native.handle(&parts, &body).await;
+        }
     }
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
     if let Some(slot) = parts.extensions.get::<FamilySlot>() {

@@ -24,7 +24,7 @@ fn opaque(s: &Json, min: usize) -> bool {
 }
 fn field<'a>(raw: &'a Json, key: &str, limit: usize) -> Result<&'a str> {
     match raw.get(key).and_then(Json::as_str) {
-        Some(s) if !s.trim().is_empty() && s.len() <= limit => Ok(s),
+        Some(s) if !crate::registration::py_trim(s).is_empty() && s.len() <= limit => Ok(s),
         _ => refuse(&format!(
             "{key} must be a non-empty UTF-8 string of at most {limit} bytes"
         )),

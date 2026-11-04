@@ -98,6 +98,13 @@ class Registration(unittest.TestCase):
                     {"action": "add", "node_id": "byte-node", "label": "café 🎉"},
                     {"action": "add", "node_id": "byte-node"},
                     {"action": "revoke", "node_id": "missing-node"},
+                    # Python's strip() also removes U+001C..U+001F.
+                    {"action": "add", "node_id": "\x1csep-node\x1f"},
+                    {"action": "add", "node_id": "blank-label", "label": "\x1c\x1f"},
+                    # json.dumps escapes DEL as \u007f.
+                    {"action": "add", "node_id": "del-node", "label": "a\x7fb"},
+                    # json.loads accepts NaN, which serde_json rejects.
+                    {"action": "revoke", "node_id": "sep-node", "note": float("nan")},
                 ):
                     compare("POST", "/nodes", body)
                 compare("GET", "/nodes")
@@ -124,6 +131,8 @@ class Registration(unittest.TestCase):
                         "expected_enrollment_id": "request_0123456789",
                     },
                     enrollment,
+                    dict(enrollment, name="sep-agent", label="\x1c"),
+                    dict(enrollment, name="surrogate-agent", label="\ud800"),
                 ):
                     compare("POST", "/message-principals", body)
                 compare("POST", "/nodes", {"action": "revoke", "node_id": "byte-node"})
