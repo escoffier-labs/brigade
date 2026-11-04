@@ -331,6 +331,29 @@ mod tests {
         let guard = lookup.connection.clone().lock_owned().await;
         assert!(guard.is_autocommit());
         assert!(lookup.credential(Some("Bearer fake-node")).await.is_err());
+        let mut app = crate::App::new(
+            format!("http://{}:1", std::net::Ipv4Addr::LOCALHOST),
+            crate::Client::builder(crate::TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
+        app.lookup = Some(lookup.clone());
+        let reply = crate::handle(
+            crate::State(app),
+            crate::Request::builder()
+                .method("POST")
+                .uri("/events")
+                .header("authorization", "Bearer fake-node")
+                .header("content-length", 8388608)
+                .body(crate::Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(reply.status(), 503);
+        assert_eq!(reply.headers()["retry-after"], "1");
+        let bytes = axum::body::to_bytes(reply.into_body(), 1024).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["reason"], "credential-lookup");
         drop(guard);
         assert!(
             lookup

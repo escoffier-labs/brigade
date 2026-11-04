@@ -143,8 +143,10 @@ class Admission(unittest.TestCase):
                     "INSERT INTO nodes(node_id,token_sha256,created_at) VALUES (?,?,?)",
                     (node, hashlib.sha256(token.encode()).hexdigest(), "2026-01-01T00:00:00Z"),
                 )
+            held = []
             for i in range(24):
                 sock = stack.enter_context(connect(port))
+                held.append(sock)
                 sock.sendall(
                     (
                         f"POST /enroll HTTP/1.1\r\nHost: example.invalid\r\nSec-Fetch-Site: same-origin\r\nAuthorization: Bearer fake-{i}\r\nContent-Length: 6\r\n\r\nc"
@@ -178,6 +180,54 @@ class Admission(unittest.TestCase):
             self.assertEqual(json.loads(answer[2])["accepted"], 1)
             with sqlite3.connect(db) as conn:
                 self.assertEqual(conn.execute("SELECT count(*) FROM events WHERE run_id='fake-run'").fetchone()[0], 1)
+
+            # Two real 30-second cycles. A single-byte trickle must not move
+            # either the body deadline or credential capacity.
+            for cycle in range(2):
+                if cycle:
+                    for sock in held:
+                        sock.close()
+                    held = []
+                    for i in range(24):
+                        sock = stack.enter_context(connect(port))
+                        sock.sendall(
+                            (
+                                f"POST /enroll HTTP/1.1\r\nHost: example.invalid\r\nSec-Fetch-Site: same-origin\r\nAuthorization: Bearer fake-cycle-{i}\r\nContent-Length: 6\r\n\r\nc"
+                            ).encode()
+                        )
+                        held.append(sock)
+                for phase in range(3):
+                    tick = time.monotonic()
+                    decision = fleet_client.acquire_claim(
+                        f"fake-soak-{cycle}-{phase}", hub_url=f"http://{HOST}:{public}", token=token, node_id=node
+                    )
+                    self.assertTrue(decision.granted)
+                    self.assertLess(time.monotonic() - tick, 2.5)
+                    for path in ("/ready", "/deck"):
+                        self.assertEqual(
+                            request(public, path, headers={"Tailscale-User-Login": "viewer@example.invalid"})[0], 200
+                        )
+                    if phase == 0:
+                        # These declarations never enter the request byte budget.
+                        for path in ("/enroll",) * 4 + ("/deck",) * 4:
+                            sock = stack.enter_context(connect(port))
+                            sock.sendall(
+                                (
+                                    f"POST {path} HTTP/1.1\r\nHost: example.invalid\r\nSec-Fetch-Site: same-origin\r\nContent-Type: application/x-www-form-urlencoded\r\nContent-Length: 8388608\r\n\r\n"
+                                ).encode()
+                            )
+                            try:
+                                sock.sendall(b"x" * (8388608 - 1))
+                            except OSError:
+                                pass  # Header-only refusal may close before upload.
+                    remaining = 10 - (time.monotonic() - tick)
+                    if remaining > 0:
+                        time.sleep(remaining)
+                    for sock in held:
+                        try:
+                            sock.sendall(b"c")
+                        except OSError:
+                            pass  # Excess requests get 503, admitted bodies expire at 30 s.
 
     def test_25_requests_one_credential_hold_only_four_proxy_slots(self):
         import hashlib
