@@ -15,13 +15,10 @@ ROLE = "implementation-worker"
 ALPHA_UUID = "00000000-0000-4000-8000-000000000001"
 BETA_UUID = "00000000-0000-4000-8000-000000000002"
 CONNECTOR_PACK_IDS = (
-    "backup-steward",
     "cerebro-memory",
     "fleet-steward",
-    "n8n-operator",
     "obsidian-operator",
     "operations-relay",
-    "wazuh-triage",
 )
 
 

@@ -26,10 +26,7 @@ RENDERERS = (
     "pack-relay",
     "cerebro",
     "operations-relay",
-    "wazuh",
     "obsidian",
-    "backup",
-    "n8n",
     "fleet",
 )
 pytestmark = pytest.mark.skipif(sys.platform == "win32", reason="systemd service renderers require POSIX")

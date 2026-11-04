@@ -219,27 +219,6 @@ def _load_runtime(target: Path) -> tuple[FleetListenerConfig, str]:
     return config, bearer
 
 
-def _optional_wazuh_source(target: Path) -> Any:
-    try:
-        from .. import grokbot_packs
-        from ..grokbot_wazuh.store import WazuhStore
-
-        payload = grokbot_packs._load_instance_config(target, "wazuh-triage")
-        store = WazuhStore(str(payload["ledger_path"]))
-        store.ready()
-    except Exception:
-        return None
-
-    class _Source:
-        def current_finding(self, finding_id: str) -> dict[str, Any] | None:
-            return store.get_finding(finding_id)
-
-        def suppressions(self) -> list[dict[str, str]]:
-            return store.suppressions()
-
-    return _Source()
-
-
 def build_tools_from_config(
     config: FleetListenerConfig,
     *,
@@ -318,7 +297,6 @@ def build_tools_from_config(
         create_nonce=_opaque_id,
         create_receipt_id=_opaque_id,
         secrets=secret_list,
-        wazuh_source=_optional_wazuh_source(config.target),
         remediator=remediator,
         claims=FleetHubClaims(),
     )
