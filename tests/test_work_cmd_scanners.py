@@ -9,6 +9,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import cli
 from brigade import dirfd
 from brigade import dogfood_cmd
@@ -4861,14 +4863,14 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     src_root = Path(__file__).parents[1] / "src"
     descendant_pid_path = tmp_path / "descendant.pid"
     descendant_code = (
-        "import os, sys, time\n"
+        PUBLISH_SOURCE + "import os, sys, time\n"
         "from pathlib import Path\n"
         f"sys.path.insert(0, {str(src_root)!r})\n"
         "from brigade.work_cmd import inbox_lock\n"
         f"target = Path({str(tmp_path)!r})\n"
         f"pid_path = Path({str(descendant_pid_path)!r})\n"
         "with inbox_lock.inbox_writer_lock(target):\n"
-        "    pid_path.write_text(str(os.getpid()))\n"
+        "    publish(str(pid_path), str(os.getpid()))\n"
         "    time.sleep(120)\n"
     )
     script = tmp_path / "forker.py"
@@ -4898,14 +4900,16 @@ def test_scanner_run_reaps_silent_descendant_holding_writer_lock(tmp_path):
     assert receipt["status"] == "completed", receipt
     assert receipt.get("descendants_reaped") is True, receipt
 
+    published = wait_for_text(descendant_pid_path, timeout=5)
+    assert published is not None, "scanner descendant did not publish its PID"
+    descendant_pid = int(published)
     deadline = time_mod.monotonic() + 10
     while descendant_pid_path.is_file() and time_mod.monotonic() < deadline:
         try:
-            os.kill(int(descendant_pid_path.read_text()), 0)
+            os.kill(descendant_pid, 0)
         except (ProcessLookupError, ValueError):
             break
         time_mod.sleep(0.02)
-    descendant_pid = int(descendant_pid_path.read_text())
     try:
         os.kill(descendant_pid, 0)
     except ProcessLookupError:
