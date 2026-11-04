@@ -771,24 +771,29 @@ def test_doctor_detail_includes_expected_and_installed_revisions(tmp_path, monke
     assert "installed revision none" in detail
 
 
-def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy,canonical", component_manifest.COMPONENT_FAMILIES.items())
+def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, monkeypatch, legacy, canonical):
     env = _install_fixture_manifest(tmp_path, monkeypatch)
-    _write_healthy_install(env, component_manifest.manifest_path())
+    manifest_path = component_manifest.manifest_path()
+    _write_healthy_install(env, manifest_path)
     roots = resolve_roots(env=env, system="linux")
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     raw = json.loads(state_path.read_text())
-    record = raw["components"].pop("brigade-evidence")
-    old = Path(record["executable"])
-    new = old.with_name("brigade-evidence")
-    old.rename(new)
-    record["executable"] = str(new)
-    raw["components"]["brigade-evidence"] = record
+    manifest = json.loads(manifest_path.read_text())
+    component = manifest["components"].pop(canonical)
+    component["executable"] = legacy
+    for asset in component["assets"].values():
+        asset["asset_name"] = asset["asset_name"].replace(canonical, legacy, 1)
+        asset["download_url"] = asset["download_url"].rsplit("/", 1)[0] + "/" + asset["asset_name"]
+    manifest["components"][legacy] = component
+    manifest_path.write_text(json.dumps(manifest))
+    raw["components"][canonical]["asset_name"] = component["assets"]["linux-amd64"]["asset_name"]
     state_path.write_text(json.dumps(raw))
     report = component_report.inspect_components(env=env, system="linux")
     assert report.state_file_status == "valid"
-    rows = [
-        row for row in component_report.render_json(report)["components"] if row["component_id"] == "brigade-evidence"
-    ]
+    rows = [row for row in report.components if row.component_id == legacy]
     assert len(rows) == 1
-    assert rows[0]["installed_component_id"] == "brigade-evidence"
-    assert rows[0]["recorded_executable"] == str(new)
+    assert rows[0].installed_component_id == canonical
+    assert rows[0].recorded_executable == raw["components"][canonical]["executable"]
+    assert rows[0].managed_executable_path == raw["components"][canonical]["executable"]
+    assert rows[0].status == "healthy", rows[0].detail
