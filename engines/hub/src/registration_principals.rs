@@ -85,10 +85,69 @@ fn replace(
     )?;
     Ok(())
 }
+// Match the publisher's fixed ISO timestamp grammar without floating-point
+// rounding. SQLite's julianday loses microseconds at revocation boundaries.
+fn timestamp_micros(stamp: &str) -> rusqlite::Result<i128> {
+    let invalid = || rusqlite::Error::InvalidQuery;
+    let number = |start, end| -> rusqlite::Result<i128> {
+        stamp
+            .get(start..end)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())
+    };
+    let mut year = number(0, 4)?;
+    let month = number(5, 7)?;
+    let day = number(8, 10)?;
+    year -= i128::from(month <= 2);
+    let era = year.div_euclid(400);
+    let y = year - era * 400;
+    let m = month + if month > 2 { -3 } else { 9 };
+    let days = era * 146097 + y * 365 + y / 4 - y / 100 + (153 * m + 2) / 5 + day - 1 - 719468;
+    let mut rest = stamp.get(19..).ok_or_else(invalid)?;
+    let mut micros = 0;
+    if let Some(fraction) = rest.strip_prefix('.') {
+        let count = fraction.bytes().take_while(u8::is_ascii_digit).count();
+        if !matches!(count, 3 | 6) {
+            return Err(invalid());
+        }
+        micros = fraction[..count].parse::<i128>().map_err(|_| invalid())?
+            * if count == 3 { 1000 } else { 1 };
+        rest = &fraction[count..];
+    }
+    let offset = if rest == "Z" {
+        0
+    } else {
+        if rest.len() != 6 || !matches!(rest.as_bytes()[0], b'+' | b'-') {
+            return Err(invalid());
+        }
+        let hours = rest[1..3].parse::<i128>().map_err(|_| invalid())?;
+        let minutes = rest[4..6].parse::<i128>().map_err(|_| invalid())?;
+        (hours * 3600 + minutes * 60) * if rest.starts_with('-') { -1 } else { 1 }
+    };
+    Ok(
+        (days * 86400 + number(11, 13)? * 3600 + number(14, 16)? * 60 + number(17, 19)? - offset)
+            * 1_000_000
+            + micros,
+    )
+}
 pub fn revoke_keys(tx: &dyn WriteTx, id: &str, stamp: &str) -> rusqlite::Result<()> {
-    tx.execute("UPDATE fleet_message_keys SET state='revoked',revoked_at=COALESCE(revoked_at,?1),compromised_from=CASE WHEN compromised_from IS NOT NULL AND julianday(compromised_from)<=julianday(created_at) THEN compromised_from ELSE created_at END WHERE principal_id=?2",&[text(stamp),text(id)])?;
+    for row in tx.query(
+        "SELECT kid,created_at,compromised_from FROM fleet_message_keys WHERE principal_id=?1",
+        &[text(id)],
+    )? {
+        let cutoff = if row[2] != Value::Null
+            && timestamp_micros(string(&row[2]))? <= timestamp_micros(string(&row[1]))?
+        {
+            &row[2]
+        } else {
+            &row[1]
+        };
+        tx.execute("UPDATE fleet_message_keys SET state='revoked',revoked_at=COALESCE(revoked_at,?1),compromised_from=?2 WHERE kid=?3", &[text(stamp),cutoff.clone(),row[0].clone()])?;
+    }
     Ok(())
 }
+
 pub fn audit(
     tx: &dyn WriteTx,
     id: &str,
@@ -368,4 +427,49 @@ pub fn handle(
         ])),
         201,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    struct Tx(rusqlite::Connection);
+    impl ReadTx for Tx {
+        fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+            super::super::ConnectionRead(&self.0).query(sql, params)
+        }
+    }
+    impl WriteTx for Tx {
+        fn execute(&self, sql: &str, params: &[Value]) -> rusqlite::Result<usize> {
+            self.0.execute(sql, rusqlite::params_from_iter(params))
+        }
+    }
+    #[test]
+    fn timestamp_comparison_accounts_for_offsets_and_fractions() {
+        assert_eq!(timestamp_micros("1970-01-01T00:00:00Z").unwrap(), 0);
+        assert_eq!(
+            timestamp_micros("2026-01-01T01:00:00.123456+01:00").unwrap(),
+            timestamp_micros("2026-01-01T00:00:00.123456Z").unwrap()
+        );
+        assert!(
+            timestamp_micros("2026-01-01T00:00:00.000001Z").unwrap()
+                < timestamp_micros("2026-01-01T00:00:00.000002Z").unwrap()
+        );
+        assert_eq!(
+            timestamp_micros("2024-03-01T00:00:00.123Z").unwrap()
+                - timestamp_micros("2024-02-29T00:00:00.123Z").unwrap(),
+            86_400_000_000
+        );
+    }
+    #[test]
+    fn revocation_preserves_earliest_cutoff_at_microsecond_precision() {
+        let tx = Tx(rusqlite::Connection::open_in_memory().unwrap());
+        tx.0.execute_batch("CREATE TABLE fleet_message_keys(principal_id TEXT,kid TEXT,created_at TEXT,compromised_from TEXT,state TEXT,revoked_at TEXT); INSERT INTO fleet_message_keys VALUES('test-node','test-key','2026-01-01T00:00:00.000001Z','2026-01-01T00:00:00.000002Z','active',NULL);").unwrap();
+        revoke_keys(&tx, "test-node", "2026-01-02T00:00:00Z").unwrap();
+        let cutoff: String =
+            tx.0.query_row("SELECT compromised_from FROM fleet_message_keys", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(cutoff, "2026-01-01T00:00:00.000001Z");
+    }
 }

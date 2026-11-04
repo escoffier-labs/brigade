@@ -20,10 +20,13 @@ use subtle::ConstantTimeEq;
 mod principals;
 
 pub fn digest(token: &str) -> String {
-    Sha256::digest(token.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    let mut output = String::with_capacity(64);
+    const HEX: &[u8] = b"0123456789abcdef";
+    for b in Sha256::digest(token.as_bytes()) {
+        output.push(HEX[(b >> 4) as usize] as char);
+        output.push(HEX[(b & 15) as usize] as char);
+    }
+    output
 }
 pub fn quote(s: &str) -> String {
     let encoded = serde_json::to_string(s).unwrap();
