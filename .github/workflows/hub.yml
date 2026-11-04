@@ -36,6 +36,12 @@ jobs:
       - run: cargo build --locked --release
       - name: Proxy transport integration
         run: python tests/transport.py
+      - name: Front admission through HTTPS
+        run: python tests/admission.py
+      - name: V1 claim client failure modes
+        run: python tests/claims.py
+      - name: Credential body share memory peak
+        run: python tests/memory_peak.py
       - name: Frozen wire contract through managed front
         working-directory: .
         run: >-
