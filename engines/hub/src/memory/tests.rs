@@ -1167,22 +1167,34 @@ async fn slow_memory_syncs_leave_hub_writes_one_batch_behind_at_most() {
             }
         })
     };
+    // A hub write waits behind at most one memory batch: count the memory
+    // batches that finish while it waits. Wall time on a loaded host also
+    // includes the hub file's own FULL sync, so it is reported, not asserted.
+    let batches = || h.store.as_ref().unwrap().metrics().batches;
+    let behind = |before: u64| batches().saturating_sub(before);
     let mut waits = Vec::new();
     while !writes.is_finished() {
+        let before = batches();
         let (waited, answer) =
             hub_write(&hub, "INSERT INTO claims_probe(value) VALUES('claim')").await;
         assert!(answer.is_ok(), "{answer:?}");
-        waits.push(waited);
+        waits.push((behind(before), waited));
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     writes.await.unwrap();
     let elapsed = started.elapsed().as_secs_f64();
     let m = h.store.as_ref().unwrap().metrics();
-    // One memory batch at most ahead of any hub write, with scheduling slack.
-    let worst = waits.iter().max().unwrap();
+    assert!(waits.len() > 2, "too few hub writes overlapped: {waits:?}");
+    let worst = waits.iter().map(|(n, _)| *n).max().unwrap();
     assert!(
-        *worst < delay * 2 + Duration::from_millis(150),
-        "hub write waited {worst:?}"
+        worst <= 1,
+        "a hub write waited behind {worst} memory batches: {waits:?}"
+    );
+    eprintln!(
+        "200 ms memory syncs: {} hub writes, longest wait {:?}, memory batches {}",
+        waits.len(),
+        waits.iter().map(|(_, w)| *w).max().unwrap(),
+        m.batches
     );
     // The bucket bound over the whole run: 250 ms + 0.25 W + one batch.
     assert!(
@@ -1190,15 +1202,14 @@ async fn slow_memory_syncs_leave_hub_writes_one_batch_behind_at_most() {
         "residence {} over {elapsed} s",
         m.residence_sum
     );
+    let before = batches();
     let (revoke, ok) = hub_write(
         &hub,
         "UPDATE nodes SET revoked_at='2026-02-01' WHERE node_id='node-1'",
     )
     .await;
-    assert!(
-        ok.is_ok() && revoke < Duration::from_millis(500),
-        "{revoke:?}"
-    );
+    assert!(ok.is_ok() && behind(before) <= 1, "{revoke:?}");
+    eprintln!("revocation after the run committed in {revoke:?}");
     drop(hub);
     crate::writer::powercut::DISK.with(|d| *d.borrow_mut() = Default::default());
 }

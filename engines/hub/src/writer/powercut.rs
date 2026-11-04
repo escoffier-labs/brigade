@@ -427,7 +427,8 @@ pub(crate) fn restore() {
 #[test]
 #[ignore = "storage fault matrix, run alone with --ignored --exact writer::powercut::power_cut_matrix"]
 fn power_cut_matrix() {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     let mut normal_losses = 0;
     let mut sync_losses = [0usize; 2];
@@ -715,7 +716,8 @@ fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
 }
 
 fn writer_creation_schedule(long: bool) {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     for skip in [false, true] {
         let (operations, ack, lost) = writer_creation_cut(0, skip);
