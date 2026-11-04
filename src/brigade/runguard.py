@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import contextlib
-import enum
 import errno
 import hashlib
 import json
@@ -12,9 +11,8 @@ import os
 import shlex
 import shutil
 import stat
-import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -25,6 +23,9 @@ from time import sleep as _sleep
 from uuid import uuid4
 
 from . import dirfd, localio, proc, receipt_schema, run_dirfd
+from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
+from .runguard_gate import _recovery_gate_path as _recovery_gate_path  # re-exported for tests
+from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor  # re-exported for tests
 
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
@@ -339,86 +340,6 @@ def _lock_fingerprint(path: Path) -> tuple[int, int, object] | None:
     return info.st_dev, info.st_ino, owner.get("owner_token") if owner is not None else None
 
 
-def _recovery_gate_path(path: Path) -> Path:
-    return path.with_name(f".{path.name}.recovery-gate")
-
-
-class _RecoveryGate(enum.Enum):
-    BUSY = "busy"
-
-
-def _try_lock_descriptor(descriptor: int) -> bool:
-    if sys.platform == "win32":
-        import msvcrt
-
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        try:
-            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
-        except OSError as exc:
-            # Only a lock violation means another handle holds the gate; anything else is a broken gate.
-            if exc.errno not in {errno.EACCES, errno.EDEADLK}:
-                raise
-            return False
-        return True
-    import fcntl
-
-    try:
-        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        return False
-    return True
-
-
-def _unlock_descriptor(descriptor: int) -> None:
-    if sys.platform == "win32":
-        import msvcrt
-
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
-        return
-    import fcntl
-
-    fcntl.flock(descriptor, fcntl.LOCK_UN)
-
-
-@contextlib.contextmanager
-def _stale_recovery_gate(path: Path) -> Iterator[bool]:
-    """Hold the recovery gate for the lock at ``path``; yield False when another recoverer holds it.
-
-    The gate is an OS file lock on a sibling file, so the kernel drops it when
-    its holder exits. It never needs aging out by pid, so no recoverer can reap
-    it from under a live one. Each call opens its own descriptor, which makes
-    threads of one process exclude each other too. The gate file stays beside
-    the lock: unlinking it would let two recoverers lock different inodes.
-    """
-    gate = _recovery_gate_path(path)
-    try:
-        descriptor = os.open(gate, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
-    except OSError as exc:
-        raise _recovery_gate_error("open", gate, path, exc) from exc
-    try:
-        try:
-            acquired = _try_lock_descriptor(descriptor)
-        except OSError as exc:
-            raise _recovery_gate_error("lock", gate, path, exc) from exc
-        if not acquired:
-            yield False
-            return
-        try:
-            yield True
-        finally:
-            _unlock_descriptor(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _recovery_gate_error(action: str, gate: Path, path: Path, exc: OSError) -> RunLockError:
-    return RunLockError(
-        f"could not {action} run lock recovery gate {gate}: {exc}. Stale lock recovery cannot proceed: "
-        f"remove {gate} or fix its permissions (file locking must work here); the dead lock is {path}"
-    )
-
-
 def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | None] | None:
     """``_claim_stale_lock``, waiting a bounded time while another recoverer holds the gate."""
     deadline: float | None = None  # read the clock only once the gate is busy
@@ -426,7 +347,7 @@ def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | N
         now = time.monotonic()
         deadline = now + _RECOVERY_GATE_BUSY_RETRY_SECONDS if deadline is None else deadline
         if now >= deadline:
-            raise RunLockError(f"stale lock recovery in progress: {path}. Another process holds the gate; retry.")
+            raise _recovery_gate_busy_error(path)
         time.sleep(_RECOVERY_GATE_BUSY_POLL_SECONDS)
     return result
 
@@ -1123,7 +1044,8 @@ def recover_stale_run(
         if owner is not None and _owner_matches_run(owner, run_dir):
             stale = _claim_stale_lock_patiently(path)
             if stale is None:
-                if _lock_path_is_directory(path) is not None:
+                # A gate holder may have recovered this run's lock and published its own during the wait.
+                if _lock_path_is_directory(path) is not None and _owner_matches_run(_read_lock_owner(path), run_dir):
                     raise RunLockError(f"run owner process is still active: {path}")
             else:
                 claimed, claimed_owner = stale

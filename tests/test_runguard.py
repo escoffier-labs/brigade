@@ -614,8 +614,33 @@ def test_busy_recovery_gate_reports_recovery_in_progress_not_a_live_owner(tmp_pa
             runguard._acquire_lock(lock_path)
         assert "appears active" not in str(acquiring.value)
 
+    message = str(recovering.value)
+    assert f"recovery gate {runguard._recovery_gate_path(lock_path)}" in message
+    assert "share without byte-range locks" in message
     assert json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))["owner_token"] == dead_token
     assert runguard._stale_claims(lock_path) == []
+
+
+def test_recovery_does_not_blame_another_runs_live_lock_after_the_wait(tmp_path, monkeypatch):
+    """A gate holder recovers the dead lock and publishes its own run's lock while recover waits."""
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    other_run = run_dir.parent / "20260823-130000-other123"
+    other_run.mkdir()
+    other_recoverer = contextlib.ExitStack()
+    assert other_recoverer.enter_context(runguard._stale_recovery_gate(lock_path))
+
+    def other_recoverer_takes_over(seconds):
+        lock_path.rename(runguard._recovery_claim_path(lock_path))
+        other_recoverer.close()
+        runguard._publish_lock(lock_path, run_dir=other_run)
+
+    monkeypatch.setattr(runguard.time, "sleep", other_recoverer_takes_over)
+
+    with pytest.raises(runguard.RunLockError, match="stale run lock recovery is still active") as raised:
+        runguard.recover_stale_run(repo, run_dir)
+
+    assert "run owner process is still active" not in str(raised.value)
+    assert runguard._owner_matches_run(runguard._read_lock_owner(lock_path), other_run.resolve())
 
 
 def test_recovery_waits_out_a_briefly_busy_gate(tmp_path, monkeypatch):
@@ -653,21 +678,26 @@ def test_unopenable_recovery_gate_names_the_gate_and_the_dead_lock(tmp_path, mon
     assert runguard._read_lock_owner(lock_path)["owner_token"] == dead.owner_token
 
 
-@pytest.mark.parametrize(
-    ("error", "expected"),
-    [(errno.EACCES, False), (errno.EDEADLK, False), (errno.ENOLCK, "raises"), (errno.EBADF, "raises")],
-)
-def test_windows_gate_treats_only_a_lock_violation_as_busy(tmp_path, monkeypatch, error, expected):
+def _failing_msvcrt(error):
     def locking(descriptor, mode, nbytes):
         raise OSError(error, os.strerror(error))
 
-    fake_msvcrt = types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+    return types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(errno.EACCES, False), (errno.EBADF, "raises"), (errno.EINVAL, "raises")],
+)
+def test_windows_gate_treats_only_the_crt_lock_failure_errno_as_busy(tmp_path, monkeypatch, error, expected):
+    """The CRT maps every failed non-blocking LockFile to EACCES; only its argument checks raise."""
+
     gate = tmp_path / "gate"
     descriptor = os.open(gate, os.O_RDWR | os.O_CREAT, 0o600)
     try:
         with monkeypatch.context() as patched:
-            patched.setitem(sys.modules, "msvcrt", fake_msvcrt)
-            patched.setattr(runguard.sys, "platform", "win32")
+            patched.setitem(sys.modules, "msvcrt", _failing_msvcrt(error))
+            patched.setattr(sys, "platform", "win32")
             if expected == "raises":
                 with pytest.raises(OSError) as raised:
                     runguard._try_lock_descriptor(descriptor)
@@ -676,6 +706,26 @@ def test_windows_gate_treats_only_a_lock_violation_as_busy(tmp_path, monkeypatch
                 assert runguard._try_lock_descriptor(descriptor) is expected
     finally:
         os.close(descriptor)
+
+
+def test_windows_gate_that_never_locks_times_out_naming_the_gate(tmp_path, monkeypatch):
+    """A share without byte-range locks gives EACCES forever; the timeout must point at the gate file."""
+    lock_path = tmp_path / "tasks.json.lock"
+    _dead_holder_lock(lock_path, monkeypatch)
+    monkeypatch.setattr(runguard, "_RECOVERY_GATE_BUSY_RETRY_SECONDS", 0.05)
+    gate = runguard._recovery_gate_path(lock_path)
+
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "msvcrt", _failing_msvcrt(errno.EACCES))
+        patched.setattr(sys, "platform", "win32")
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as raised:
+            runguard._claim_stale_lock_patiently(lock_path)
+
+    message = str(raised.value)
+    assert f"recovery gate {gate}" in message
+    assert f"{gate} can never be locked" in message
+    assert "share without byte-range locks" in message
+    assert lock_path.is_dir()
 
 
 _DEAD_HOLDER_CHILD = r"""
