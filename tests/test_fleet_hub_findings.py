@@ -106,7 +106,7 @@ def test_fingerprints_use_only_findings_domain(tmp_path):
     body = {"action": "observe", "kind": "email", "key": "<Secret@Example.Test>"}
     result = f.handle(conn, body, caller="agent:one", owners={}, now=0)
     master = (tmp_path / "hub.db.findings-key").read_bytes()
-    key = hmac.digest(master, b"brigade.findings.v1", "sha256")
+    key = hmac.digest(master, b"brigade.findings.fingerprint.v1", "sha256")
     expected = hmac.new(key, b"email:secret@example.test", hashlib.sha256).hexdigest()
     assert conn.execute("SELECT fingerprint FROM fleet_findings").fetchone()[0] == expected
     assert result["reservation"] is None
@@ -248,3 +248,164 @@ def test_pull_request_alias_shares_one_finding_and_reservation(tmp_path):
 )
 def test_job_url_keeps_ports_and_blank_parameters(raw, expected):
     assert f.canonical_key("job", raw) == expected
+
+
+def _reserve(conn):
+    owners = {"w": {"match": {"findings": ["email"], "principals": ["a", "b"]}}}
+    first = f.handle(conn, {"action": "observe", "kind": "email", "key": "x@y"}, caller="agent:a", owners=owners, now=0)
+    return (
+        owners,
+        first,
+        {"action": "reported", "finding_id": first["finding_id"], **first["reservation"], "report_ref": "issue:1"},
+    )
+
+
+def test_review_live_holder_blocks_other_resolver(tmp_path):
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        owners, first, report = _reserve(conn)
+        with pytest.raises(f.FindingError) as error:
+            f.handle(
+                conn, {"action": "resolve", "finding_id": first["finding_id"]}, caller="agent:b", owners=owners, now=5
+            )
+        assert (error.value.status, error.value.code) == (409, "finding_reserved")
+        assert f.handle(conn, report, caller="agent:a", owners=owners, now=6)["report_ref"] == "issue:1"
+
+
+def test_review_admin_resolution_has_clear_report_error(tmp_path):
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        owners, first, report = _reserve(conn)
+        f.handle(
+            conn,
+            {"action": "resolve", "finding_id": first["finding_id"]},
+            caller="admin",
+            owners=owners,
+            now=5,
+            admin=True,
+        )
+        with pytest.raises(f.FindingError) as error:
+            f.handle(conn, report, caller="agent:a", owners=owners, now=6)
+        assert (error.value.status, error.value.code) == (409, "finding_resolved")
+
+
+@pytest.mark.parametrize("now", [600, 1000000])
+def test_review_former_holder_loses_resolve_authority(tmp_path, now):
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        _, first, _ = _reserve(conn)
+        owners = {"w": {"match": {"findings": ["email"], "principals": ["c"]}}}
+        # Reassignment preserves a live lease, but not authority after its expiry.
+        f.handle(
+            conn, {"action": "resolve", "finding_id": first["finding_id"]}, caller="agent:a", owners=owners, now=599
+        )
+        conn.execute("UPDATE fleet_findings SET state='open'")
+        conn.commit()
+        with pytest.raises(f.FindingError) as error:
+            f.handle(
+                conn, {"action": "resolve", "finding_id": first["finding_id"]}, caller="agent:a", owners=owners, now=now
+            )
+        assert error.value.status == 403
+        assert (
+            f.handle(
+                conn, {"action": "resolve", "finding_id": first["finding_id"]}, caller="agent:c", owners=owners, now=now
+            )["state"]
+            == "resolved"
+        )
+
+
+def test_review_pr_charter_alias_reserves_and_attributes(tmp_path):
+    from brigade import fleet_hub_policy, fleet_policy, fleet_owners
+
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        document = fleet_policy.empty_document()
+        document["owners"] = {"w": {"label": "Watcher", "match": {"findings": ["pr"], "principals": ["a"]}}}
+        fleet_hub_policy.save_policy(
+            conn,
+            document,
+            expected_version=fleet_hub_policy.current_policy(conn)["revision"],
+            actor="admin",
+            reason="fixture",
+        )
+        first = f.handle(
+            conn, {"action": "observe", "kind": "pr", "key": "o/r#1"}, caller="agent:a", owners=None, now=0
+        )
+        assert first["reservation"] is not None
+        assert [item.ref for item in fleet_owners.load_view(conn, now_epoch=0).by_owner["w"]] == [first["finding_id"]]
+
+
+def test_review_hmac_domains_do_not_overlap(tmp_path):
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        _, first, _ = _reserve(conn)
+        other = f.handle(
+            conn,
+            {"action": "observe", "kind": "report", "key": first["finding_id"]},
+            caller="agent:a",
+            owners={},
+            now=1,
+        )
+        fingerprint = conn.execute(
+            "SELECT fingerprint FROM fleet_findings WHERE finding_id=?", (other["finding_id"],)
+        ).fetchone()[0]
+        assert fingerprint != first["reservation"]["report_key"]
+
+
+def test_review_key_crash_before_sync_does_not_publish(tmp_path, monkeypatch):
+    import os
+
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        original = os.fsync
+
+        def crash(fd):
+            raise OSError("simulated crash before sync")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(f.os, "fsync", crash)
+            with pytest.raises(OSError, match="simulated crash"):
+                f._key(conn)
+        assert not (tmp_path / "hub.db.findings-key").exists()
+        assert not list(tmp_path.glob("*.tmp"))
+        assert f._key(conn)
+        assert original is os.fsync
+
+
+def test_review_key_directory_is_synced(tmp_path, monkeypatch):
+    from brigade import dirfd
+
+    synced = []
+    monkeypatch.setattr(dirfd, "fsync_directory", lambda fd: synced.append(fd))
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        f._key(conn)
+    assert len(synced) == 1
+
+
+def test_review_key_docs_describe_windows_acl():
+    from pathlib import Path
+
+    text = Path("docs/hub-findings.md").read_text(encoding="utf-8")
+    assert "Windows" in text and "ACL" in text
+
+
+def test_review_port_zero_is_preserved():
+    assert f.canonical_key("job", "https://example.test:0/x") == "https://example.test:0/x"
+
+
+@pytest.mark.parametrize("populated", [False, True])
+def test_short_key_is_not_silently_regenerated(tmp_path, populated):
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        if populated:
+            _reserve(conn)
+        path = tmp_path / "hub.db.findings-key"
+        path.write_bytes(b"short")
+        path.chmod(0o600)
+        with pytest.raises(f.FindingError, match="invalid findings key file"):
+            f._key(conn)
+        assert path.read_bytes() == b"short"
+
+
+def test_key_publication_recovers_interrupted_extra_link(tmp_path):
+    import os
+
+    with fleet_hub.init_db(tmp_path / "hub.db") as conn:
+        expected = f._key(conn)
+        path = tmp_path / "hub.db.findings-key"
+        os.link(path, path.with_name(path.name + ".tmp"))
+        assert f._key(conn) == expected
+        assert path.stat().st_nlink == 1
