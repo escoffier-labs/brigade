@@ -152,7 +152,7 @@ exists.
 If brigade-code-graph is missing, the DB is absent, or `brigade code …` fails:
 
 - Propose **no** derived edges (`proposed_edges: []`).
-- Set `brigade-code-graph.available` to `false` and state plainly in both JSON and
+- Set the artifact's `graphtrail.available` field (its name is unchanged) to `false` and state plainly in both JSON and
   plan.md: "brigade-code-graph unavailable. No derived dependency edges proposed."
 - Still write the plan from the ready set, outcome rank, and ROADMAP parse.
 - Do not invent edges from prose guesswork.

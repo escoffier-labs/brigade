@@ -4,6 +4,8 @@ This smoke covers the standalone public release installer as a one-release compa
 
 It does not import private session logs.
 
+The pinned standalone release installs the legacy `miseledger` executable, so commands on this path use that name.
+
 ```bash
 tmp_home="$(mktemp -d)"
 export HOME="$tmp_home"
@@ -18,40 +20,40 @@ curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/i
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 
-brigade-evidence version
+miseledger version
 
-brigade-evidence init
-brigade-evidence doctor --mcp --json
+miseledger init
+miseledger doctor --mcp --json
 
 repo=/path/to/brigade/engines/evidence-ledger
-brigade-evidence import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json
-brigade-evidence import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
-brigade-evidence import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
-brigade-evidence import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
-brigade-evidence import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
-brigade-evidence import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
-brigade-evidence import grok "$repo/testdata/harnesses/grok-sessions.fixture" --json
+miseledger import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json
+miseledger import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
+miseledger import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
+miseledger import claude "$repo/testdata/harnesses/claude-project.fixture.jsonl" --json
+miseledger import hermes "$repo/testdata/harnesses/session_hermes-demo.fixture.json" --json
+miseledger import hermes "$repo/testdata/harnesses/hermes-trajectory.fixture.jsonl" --json
+miseledger import grok "$repo/testdata/harnesses/grok-sessions.fixture" --json
 
-brigade-evidence status --json
-brigade-evidence stats --json
-brigade-evidence relations backfill --json
-brigade-evidence compact --json
-brigade-evidence doctor --archive --json
-brigade-evidence scans list --json
-brigade-evidence search "adapter contract" --json
-brigade-evidence evidence "Claude native import" --project brigade-evidence --json
-brigade-evidence explain "adapter contract" --json
+miseledger status --json
+miseledger stats --json
+miseledger relations backfill --json
+miseledger compact --json
+miseledger doctor --archive --json
+miseledger scans list --json
+miseledger search "adapter contract" --json
+miseledger evidence "Claude native import" --project miseledger --json
+miseledger explain "adapter contract" --json
 ```
 
 Expected results:
 
 - `install.sh` installs release binaries and verifies sha256 checksums against the release `checksums.txt`
-- downloaded release assets can be provenance-checked with `gh attestation verify <asset> --repo escoffier-labs/brigade-evidence`
-- `brigade-evidence doctor --mcp --json` returns `ok: true`
-- `brigade-evidence status --json` reports FTS as `ok`
-- `brigade-evidence stats --json` reports nonzero source and item totals
-- `brigade-evidence compact --json` returns `ok: true`
-- `brigade-evidence doctor --archive --json` returns `ok: true`
+- downloaded release assets can be provenance-checked with `gh attestation verify <asset> --repo escoffier-labs/miseledger`
+- `miseledger doctor --mcp --json` returns `ok: true`
+- `miseledger status --json` reports FTS as `ok`
+- `miseledger stats --json` reports nonzero source and item totals
+- `miseledger compact --json` returns `ok: true`
+- `miseledger doctor --archive --json` returns `ok: true`
 - search returns at least one result
 - evidence returns `untrusted_context: true` and a stable bundle ID
 - eligible evidence result `artifacts` fields encode as arrays, including empty arrays. Quarantined results contain only an opaque `id`, `eligibility_status`, and `reason_code`

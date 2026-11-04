@@ -234,8 +234,8 @@ External crawler binaries can emit adapter JSONL directly or run through the evi
 
 ```bash
 brigade-evidence crawl discord --limit 100 --json
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --numbers 34,35 --limit 2 --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
 brigade-evidence crawl slack --workspace T123 --json
 brigade-evidence crawl granola --json
 brigade-evidence crawl notion --json

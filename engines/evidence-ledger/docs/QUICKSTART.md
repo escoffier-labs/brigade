@@ -22,8 +22,10 @@ MISELEDGER_VERSION=v0.6.0
 curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
-brigade-evidence version
+miseledger version
 ```
+
+The pinned standalone release installs the legacy `miseledger` executable, so commands on this path use that name. Run the commands below as `miseledger` instead of `brigade-evidence` on a standalone install.
 
 Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`.
 

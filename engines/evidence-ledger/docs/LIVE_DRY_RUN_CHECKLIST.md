@@ -48,7 +48,7 @@ Do not paste private transcript content into issues or docs. If parser work need
 Use narrow external dry-runs before importing provider data:
 
 ```bash
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --numbers 34 --limit 1 --dry-run --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --numbers 34 --limit 1 --dry-run --json
 brigade-evidence crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:brigade-evidence" --limit 1 --metadata-only --dry-run --json
 scripts/smoke_gmail_metadata.sh
 ```

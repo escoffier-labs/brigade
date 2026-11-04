@@ -46,7 +46,7 @@ Common paths:
 brigade-evidence crawl sessions --json
 brigade-evidence crawl docs ./notes --json
 brigade-evidence crawl gitlog . --json
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --json
 brigade-evidence crawl telegram --chat "brigade-evidence" --json
 brigade-evidence import adapter discrawl.adapter.jsonl --json
 ```

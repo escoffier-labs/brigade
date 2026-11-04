@@ -43,13 +43,15 @@ MISELEDGER_VERSION=v0.6.0
 curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
-brigade-evidence init
-brigade-evidence crawl sessions
-brigade-evidence search "cookie rotation"
-brigade-evidence evidence "cookie rotation" --json
+miseledger init
+miseledger crawl sessions
+miseledger search "cookie rotation"
+miseledger evidence "cookie rotation" --json
 ```
 
-Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/brigade-evidence`.
+The pinned standalone release installs the legacy `miseledger` executable, so commands on this path use that name.
+
+Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/miseledger`.
 
 Or from source:
 
@@ -365,8 +367,8 @@ External crawler binaries can be called through domain wrappers when installed o
 
 ```bash
 brigade-evidence crawl discord --limit 100 --json
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
-brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --numbers 34,35 --limit 2 --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --json
+brigade-evidence crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
 brigade-evidence crawl slack --workspace T123 --json
 brigade-evidence crawl granola --json
 brigade-evidence crawl notion --json
