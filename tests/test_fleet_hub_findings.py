@@ -140,7 +140,7 @@ def test_upgrade_from_48_adds_findings(tmp_path):
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 49
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert conn.execute("SELECT count(*) FROM fleet_findings").fetchone()[0] == 0
     assert conn.execute("SELECT count(*) FROM fleet_finding_grants").fetchone()[0] == 0
     conn.close()
@@ -409,3 +409,36 @@ def test_key_publication_recovers_interrupted_extra_link(tmp_path):
         os.link(path, path.with_name(path.name + ".tmp"))
         assert f._key(conn) == expected
         assert path.stat().st_nlink == 1
+
+
+def test_secret_key_file_is_used_read_only_and_never_created(tmp_path, monkeypatch):
+    import hashlib
+    import hmac
+    import os
+
+    secret = tmp_path / "secrets" / "findings_key"
+    secret.parent.mkdir(mode=0o700)
+    monkeypatch.setenv(f.KEY_FILE_ENV, str(secret))
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    body = {"action": "observe", "kind": "email", "key": "<Secret@Example.Test>"}
+    with pytest.raises(f.FindingError, match="key file missing"):
+        f.handle(conn, body, caller="admin", owners={}, now=0)
+    assert not secret.exists()
+    master = bytes(range(32))
+    secret.write_bytes(master)
+    os.chmod(secret, 0o444)
+    f.handle(conn, body, caller="agent:one", owners={}, now=0)
+    key = hmac.digest(master, b"brigade.findings.fingerprint.v1", "sha256")
+    expected = hmac.new(key, b"email:secret@example.test", hashlib.sha256).hexdigest()
+    assert conn.execute("SELECT fingerprint FROM fleet_findings").fetchone()[0] == expected
+    assert not (tmp_path / "hub.db.findings-key").exists()
+    if os.name == "posix":
+        os.chmod(secret, 0o666)
+        with pytest.raises(f.FindingError, match="unsafe"):
+            f.handle(conn, body, caller="agent:one", owners={}, now=0)
+        os.chmod(secret, 0o400)
+    secret.chmod(0o600)
+    secret.write_bytes(b"short")
+    with pytest.raises(f.FindingError, match="invalid"):
+        f.handle(conn, body, caller="agent:one", owners={}, now=0)
+    conn.close()

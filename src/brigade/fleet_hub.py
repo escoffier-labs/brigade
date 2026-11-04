@@ -124,7 +124,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 49
+SCHEMA_VERSION = 50  # v50: claim recovery floor (fleet_hub_claims.recovery_floor), no DDL
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 

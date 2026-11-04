@@ -10,6 +10,7 @@ import argparse
 import dataclasses
 import ipaddress
 import os
+import signal
 import sqlite3
 import sys
 import threading
@@ -210,6 +211,7 @@ def run(
         stop=sweeper_stop,
         storage_policy=getattr(getattr(server, "RequestHandlerClass", None), "message_storage_policy", None),
     )
+    previous = _stop_on_sigterm()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -220,4 +222,23 @@ def run(
         stats_thread.join(timeout=5)
         events_thread.join(timeout=5)
         server.server_close()
+        if previous is not None:
+            signal.signal(signal.SIGTERM, previous)
+    # Container recipes check for this line after `docker stop` and a host shutdown.
+    print("brigade fleet hub stopped cleanly", flush=True)
     return 0
+
+
+def _stop_on_sigterm():
+    """Turn SIGTERM (``docker stop``, a unit stop) into the same shutdown as Ctrl-C.
+
+    Without it the default action ends the process at once and the sweepers
+    never stop. Only the main thread may install a handler.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return None
+
+    def stop(signum, frame):
+        raise KeyboardInterrupt
+
+    return signal.signal(signal.SIGTERM, stop)

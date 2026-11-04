@@ -110,12 +110,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_events import register as register_events
     from .fleet_campaign import register as register_campaign
     from .fleet_ci import register as register_ci
+    from .fleet_backup import register as register_backup
 
     register_dot(fleet_sub)
     register_actions(fleet_sub)
     register_events(fleet_sub)
     register_campaign(fleet_sub)
     register_ci(fleet_sub)
+    register_backup(fleet_sub)
 
     p_serve = fleet_sub.add_parser(
         "serve",

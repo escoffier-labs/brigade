@@ -47,6 +47,12 @@ tables, including their complete indexes and constraints. Rust proxies findings
 until S12h and must accept these Python-owned objects after rollback. They have
 no fresh/upgrade variants.
 
+Schema v50 adds no DDL. The restore tool writes a claim recovery floor as a
+`recovery` row of `hub_meta`, and claim generations are allocated as
+`max(current, floor) + 1`. The bump makes a Python or Rust hub that predates
+that rule refuse a restored file. S7's native claims must read the floor
+before they allocate a generation.
+
 Lazy families remain optional only by absence: fleet_mcp_reports,
 fleet_model_inventory_{observations,projections,aliases},
 fleet_skill_{reports,review_drafts,review_events}, fleet_project_boards,
