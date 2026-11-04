@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -233,6 +234,12 @@ def _relative(root: Path, path: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def _executable_mode_current(path: Path) -> bool:
+    # Windows chmod/stat do not represent POSIX execute bits. hooks.json runs
+    # the managed command directly; this script is a compatibility file only.
+    return sys.platform == "win32" or bool(path.stat().st_mode & 0o111)
+
+
 def _file_item(
     root: Path, path: Path, text: str, executable: bool, surface: str, state: dict[str, Any]
 ) -> dict[str, Any]:
@@ -245,7 +252,7 @@ def _file_item(
     else:
         try:
             live = _digest_text(path.read_text(encoding="utf-8"))
-            mode_current = not executable or bool(path.stat().st_mode & 0o111)
+            mode_current = not executable or _executable_mode_current(path)
         except (OSError, UnicodeError) as exc:
             return {
                 "surface": surface,
@@ -870,7 +877,7 @@ def doctor(*, json_output: bool = False) -> int:
     skill_dir = root / "skills" / "brigade-work"
     hook_script = root / "hooks" / "brigade-session-start"
     hooks_doc, _ = _read_json_object(root / "hooks.json")
-    hook_ok = _file_matches(hook_script, desired[hook_script][0]) and bool(hook_script.stat().st_mode & 0o111)
+    hook_ok = _file_matches(hook_script, desired[hook_script][0]) and _executable_mode_current(hook_script)
     desired_hook = _hook_entry()
     if hooks_doc is not None and not _hooks_document_error(hooks_doc) and isinstance(hooks_doc.get("hooks"), dict):
         for event in _MANAGED_HOOK_EVENTS:
