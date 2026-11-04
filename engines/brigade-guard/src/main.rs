@@ -220,6 +220,21 @@ mod tests {
         }
     }
 
+    /// The pcre2-sys release this crate pins vendors PCRE2 10.46. Bump these
+    /// together with the `=` pins in Cargo.toml and the version in README.md.
+    const PINNED_PCRE2_VERSION: &str = "10.46 2025-08-27";
+    const PINNED_UNICODE_VERSION: &str = "16.0.0";
+
+    #[test]
+    fn linked_pcre2_is_the_pinned_bundled_release() {
+        // Fails when a build links a system libpcre2 (the root
+        // .cargo/config.toml forces the vendored copy) or when a crate bump
+        // changes the vendored release without updating the pin above.
+        let engine = engine().unwrap();
+        assert_eq!(engine.pcre2_version, PINNED_PCRE2_VERSION);
+        assert_eq!(engine.unicode_version, PINNED_UNICODE_VERSION);
+    }
+
     fn request(json: &str) -> Request {
         serde_json::from_str(json).unwrap()
     }
