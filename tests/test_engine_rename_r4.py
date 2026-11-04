@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 
 import pytest
 
@@ -597,8 +598,6 @@ def test_doctor_legacy_config_key_message_matches_what_load_config_reads(tmp_pat
 
 
 def test_evidence_doctor_timeout_hint_names_the_resolved_executable(monkeypatch):
-    from pathlib import Path
-
     from brigade import managed
     from brigade.station import DoctorContext
 
@@ -612,3 +611,17 @@ def test_evidence_doctor_timeout_hint_names_the_resolved_executable(monkeypatch)
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     set_home(monkeypatch, str(tmp_path))
+
+
+def test_cursor_owned_skill_reinstall_with_windows_default_encoding(tmp_path, monkeypatch, capsys):
+    original_read = Path.read_text
+
+    def windows_read(path, encoding=None, errors=None):
+        return original_read(path, encoding=encoding or "cp1252", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", windows_read)
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: tmp_path)
+    assert _cursor_install() == 0
+    capsys.readouterr()
+    assert _cursor_install() == 0
+    assert json.loads(capsys.readouterr().out)["conflicts"] == []

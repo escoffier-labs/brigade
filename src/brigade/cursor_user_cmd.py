@@ -196,7 +196,7 @@ def _desired_files(root: Path, servers: dict[str, dict[str, Any]] | None = None)
         ),
     }
     for name in ("SKILL.md", "skill.json", "CHANGELOG.md"):
-        desired[skill / name] = ((package / name).read_text(), False, "skill")
+        desired[skill / name] = ((package / name).read_text(encoding="utf-8"), False, "skill")
     return desired
 
 
@@ -244,7 +244,7 @@ def _file_item(
         status, action = "conflict", "skip"
     else:
         try:
-            live = _digest_text(path.read_text())
+            live = _digest_text(path.read_text(encoding="utf-8"))
             mode_current = not executable or bool(path.stat().st_mode & 0o111)
         except (OSError, UnicodeError) as exc:
             return {
@@ -276,7 +276,7 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     if not path.exists():
         return {}, None
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         return None, str(exc)
     if not isinstance(payload, dict):
@@ -761,7 +761,7 @@ def uninstall(*, write: bool = False, json_output: bool = False) -> int:
             item.update(status="absent", action="none")
         elif path.is_file():
             try:
-                live_fingerprint = _digest_text(path.read_text())
+                live_fingerprint = _digest_text(path.read_text(encoding="utf-8"))
             except (OSError, UnicodeError) as exc:
                 item.update(status="conflict", action="preserve", detail=str(exc))
                 conflicts.append(item)
