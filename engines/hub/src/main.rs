@@ -1103,13 +1103,16 @@ async fn run(mut config: Config) -> Result<(), String> {
     let readers = Arc::new(readers);
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     if state.modes.get("registration") == brigade_hub::modes::Mode::Native {
+        let writer = brigade_hub::writer::Writer::start(
+            brigade_hub::writer::Config::new(path.clone()),
+            Arc::default(),
+        )
+        .map_err(|_| "registration writer unavailable")?;
+        // The first native family that starts a writer owns the writer metrics.
+        state.telemetry.attach_writer(writer.stats());
         state.registration = Some(registration::Registration {
             readers,
-            writer: brigade_hub::writer::Writer::start(
-                brigade_hub::writer::Config::new(path.clone()),
-                Arc::default(),
-            )
-            .map_err(|_| "registration writer unavailable")?,
+            writer,
             admin: registration::digest(&admin),
             clock: config.test_clock_file.clone(),
         });
