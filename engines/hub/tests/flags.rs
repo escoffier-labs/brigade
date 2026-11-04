@@ -101,3 +101,44 @@ fn invalid_upstream_key_is_refused_before_listening() {
         assert!(!error.contains(key), "must not print the key");
     }
 }
+
+#[test]
+fn native_memory_needs_the_managed_upstream() {
+    let host = Ipv4Addr::LOCALHOST.to_string();
+    let upstream = format!("http://{}:1", Ipv4Addr::LOCALHOST);
+    let token = [("BRIGADE_FLEET_TOKEN", "fake-test-token")];
+    let out = hub(
+        &[
+            "--host",
+            &host,
+            "--upstream",
+            &upstream,
+            "--route-mode",
+            "memory=native",
+        ],
+        &token,
+    );
+    assert_eq!(out.status.code(), Some(2));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        error.contains("memory=native requires the managed upstream"),
+        "{error}"
+    );
+    assert!(!error.contains("listening on"), "{error}");
+    // memory=proxy starts no memory writer, so it needs no maintenance owner.
+    let out = hub(
+        &[
+            "--host",
+            &host,
+            "--upstream",
+            &upstream,
+            "--route-mode",
+            "memory=proxy",
+            "--port",
+            "70000",
+        ],
+        &token,
+    );
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("port must be 0-65535"), "{error}");
+}

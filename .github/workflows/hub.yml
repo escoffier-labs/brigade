@@ -50,6 +50,8 @@ jobs:
         run: python tests/memory_peak.py
       - name: Native registration wire parity and revocation
         run: python tests/registration.py
+      - name: Memory route availability and restart
+        run: python tests/memory.py
       - name: Native claims wire parity, fencing and contention
         run: python tests/claims_native.py
       - name: Frozen wire contract through managed front
@@ -68,3 +70,13 @@ jobs:
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile prod-readonly
           --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode claims=native'
+      - name: Memory profile through managed front
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --route-mode memory=native'
+      - name: Memory profile on a hub without memory
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py hub-contract --profile memory --memory-absent
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'

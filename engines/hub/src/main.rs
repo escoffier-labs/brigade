@@ -1,6 +1,7 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
 mod claims_route;
+mod memory_route;
 mod registration;
 mod response;
 
@@ -117,7 +118,15 @@ fn expand_user(path: &str) -> String {
 
 impl Config {
     fn validate(&self) -> Result<(), String> {
-        brigade_hub::modes::Modes::parse(&self.route_mode)?;
+        let modes = brigade_hub::modes::Modes::parse(&self.route_mode)?;
+        // Only managed mode starts the maintenance thread that checkpoints the
+        // memory file and schedules its retention sweeps. An external upstream
+        // checkpoints the hub file alone, so the memory WAL would grow unchecked.
+        if self.upstream.is_some()
+            && modes.configured("memory") == Some(brigade_hub::modes::Mode::Native)
+        {
+            return Err("--route-mode memory=native requires the managed upstream: with --upstream nothing checkpoints or sweeps the memory file".into());
+        }
         u16::try_from(self.port).map_err(|_| "port must be 0-65535")?;
         if self.host.is_empty() {
             return Err(
@@ -224,6 +233,8 @@ struct App {
     lookup: Option<admission::Lookup>,
     registration: Option<registration::Registration>,
     claims: Option<claims_route::Claims>,
+    /// None: memory is not configured and `/memory` is proxied like any unknown path.
+    memory: Option<memory_route::MemoryRoute>,
     trust_identity: bool,
     trust_proto: bool,
     storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
@@ -246,6 +257,7 @@ impl App {
             lookup: None,
             registration: None,
             claims: None,
+            memory: None,
             trust_identity,
             trust_proto,
             storage: None,
@@ -574,6 +586,20 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         } else {
             text += "brigade_hub_checkpoint_stall_frames NaN\n";
         }
+        if let Some(memory_route::MemoryRoute::Store(store)) = &app.memory {
+            let m = store.metrics();
+            text += &format!(
+                "brigade_hub_memory_batches_total {}\nbrigade_hub_memory_hub_lock_residence_seconds_last {}\nbrigade_hub_memory_hub_lock_residence_seconds_max {}\nbrigade_hub_memory_hub_lock_residence_seconds_sum {}\nbrigade_hub_memory_hub_lock_wait_seconds_max {}\nbrigade_hub_memory_authority_timeouts_total {}\nbrigade_hub_memory_commit_failures_total {}\nbrigade_hub_memory_residence_bucket_seconds {}\n",
+                m.batches,
+                m.residence_last,
+                m.residence_max,
+                m.residence_sum,
+                m.wait_max,
+                m.authority_timeouts,
+                m.commit_failures,
+                store.bucket()
+            );
+        }
         return Response::builder()
             .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
             .header("cache-control", "no-store")
@@ -598,8 +624,12 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             serde_json::json!({"ready":ready}),
         );
     }
-    if req.headers().contains_key("transfer-encoding")
-        || req.headers().get_all("content-length").iter().count() > 1
+    // Native memory answers framing and size refusals itself, each with its
+    // memory error code (D21), in `MemoryRoute::admit`.
+    let memory_request = app.memory.is_some() && req.uri().path() == "/memory";
+    if !memory_request
+        && (req.headers().contains_key("transfer-encoding")
+            || req.headers().get_all("content-length").iter().count() > 1)
     {
         return json(
             StatusCode::BAD_REQUEST,
@@ -612,7 +642,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    if length > BODY_LIMIT as u64 {
+    if length > BODY_LIMIT as u64 && !memory_request {
         return body_too_large();
     }
     if let Some(storage) = &app.storage {
@@ -621,6 +651,8 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
         // S6's event/session writes are non-durable admission classes. Other
         // families adopt the gate with their writer commands as they go native.
+        // Memory reads stay available under pressure; memory writes are
+        // refused after the body shows the action.
         if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
             if let Err(reason) = storage.disk.admit(false) {
                 return busy(reason);
@@ -692,6 +724,18 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    // Native memory authenticates and checks size before any body byte is read.
+    let memory = match app
+        .memory
+        .as_ref()
+        .filter(|_| parts.uri.path() == "/memory")
+    {
+        Some(route) => match route.admit(&parts).await {
+            Ok(credential) => Some((route, credential)),
+            Err(refusal) => return *refusal,
+        },
+        None => None,
+    };
     let _budget = if headers_only {
         vec![]
     } else {
@@ -706,6 +750,10 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
     let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
         Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) if memory.is_some() => {
+            return memory_route::body_refusal(e.is::<http_body_util::LengthLimitError>());
+        }
+        Err(_) if memory.is_some() => return memory_route::timeout(),
         Ok(Err(e)) if e.is::<http_body_util::LengthLimitError>() => return body_too_large(),
         Ok(Err(_)) => {
             return json(
@@ -720,6 +768,16 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             );
         }
     };
+    if let Some((route, credential)) = memory {
+        if let Some(reason) = app
+            .storage
+            .as_ref()
+            .and_then(|s| brigade_hub::memory::pressure_refusal(&s.disk, &body))
+        {
+            return busy(reason);
+        }
+        return route.handle(&credential, &body).await;
+    }
     if let Some(native) = native {
         // serde_json rejects NaN, Infinity, 1e400 and lone surrogate escapes that
         // Python's json.loads accepts. Python answers those bodies itself.
@@ -1060,53 +1118,7 @@ async fn run(mut config: Config) -> Result<(), String> {
         listener.local_addr().map_err(|e| e.to_string())?
     );
     let path = std::path::PathBuf::from(&database);
-    let storage = if config.upstream.is_none() {
-        Some(brigade_hub::maintenance::Maintenance::start(
-            &path,
-            &path.with_file_name("fleet-hub-memory.db"),
-            Arc::new(brigade_hub::maintenance::NoSweeps),
-        )?)
-    } else {
-        None
-    };
-    let readers = brigade_hub::read::ReaderPool::open(
-        &path,
-        brigade_hub::read::hub_threads(),
-        brigade_hub::read::HUB_QUEUE,
-    )?;
-    let reader_probes = vec![readers.queue_probe()];
-    let memory_path = path.with_file_name("fleet-hub-memory.db");
-    let memory_readers = if memory_path.exists() {
-        Some(brigade_hub::read::ReaderPool::open_unchecked(
-            &memory_path,
-            brigade_hub::read::MEMORY_THREADS,
-            brigade_hub::read::MEMORY_QUEUE,
-            brigade_hub::read::READ_LIMIT,
-        )?)
-    } else {
-        None
-    };
-    let cpu = brigade_hub::read::CpuPool::default();
-    let mut state = App::new(
-        upstream,
-        client,
-        config.trust_tailscale_identity,
-        config.trust_forwarded_proto,
-    );
-    for probe in reader_probes
-        .into_iter()
-        .chain(memory_readers.as_ref().map(|pool| pool.queue_probe()))
-    {
-        state.telemetry.attach_readers(probe);
-    }
-    state.telemetry.attach_cpu(cpu.queue_probe());
-    // No writer is started here: the Python upstream commits every write, so the
-    // writer metrics stay NaN until a native handler starts one and attaches it.
-    state.modes = brigade_hub::modes::Modes::parse(&config.route_mode)?;
-    state.shadow_db = Some(path.clone());
-    state.storage = storage.map(Arc::new);
-    state.upstream_key = parsed_key;
-    state.front_bind = address.ip().is_loopback();
+    let modes = brigade_hub::modes::Modes::parse(&config.route_mode)?;
     let admin = std::env::var("BRIGADE_FLEET_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -1119,18 +1131,83 @@ async fn run(mut config: Config) -> Result<(), String> {
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
+    let readers = Arc::new(brigade_hub::read::ReaderPool::open(
+        &path,
+        brigade_hub::read::hub_threads(),
+        brigade_hub::read::HUB_QUEUE,
+    )?);
+    // Shared by every writer of the hub file, the memory writer included (D23).
+    let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
+    let memory_path = path.with_file_name("fleet-hub-memory.db");
+    let memory =
+        match modes.configured("memory") {
+            None => None,
+            Some(brigade_hub::modes::Mode::Native) => Some(match brigade_hub::memory::Store::open(
+                brigade_hub::memory::Options {
+                    memory: memory_path.clone(),
+                    hub: path.clone(),
+                    admin_digest: registration::digest(&admin),
+                    clock: brigade_hub::memory::ids::Clock {
+                        file: config.test_clock_file.clone().map(Into::into),
+                    },
+                    scanner: Arc::new(brigade_hub::memory::scan::Unavailable),
+                    arbiter: arbiter.clone(),
+                    hook: None,
+                },
+                readers.clone(),
+            ) {
+                Ok(store) => memory_route::MemoryRoute::Store(Arc::new(store)),
+                Err(e) => {
+                    eprintln!("memory unavailable: {e}");
+                    memory_route::MemoryRoute::Unavailable
+                }
+            }),
+            Some(_) => Some(memory_route::MemoryRoute::Unavailable),
+        };
+    let storage = if config.upstream.is_none() {
+        let sweeps: Arc<dyn brigade_hub::maintenance::WriterCommands> = match &memory {
+            Some(memory_route::MemoryRoute::Store(store)) => Arc::new(MemorySweeps(store.clone())),
+            _ => Arc::new(brigade_hub::maintenance::NoSweeps),
+        };
+        Some(brigade_hub::maintenance::Maintenance::start(
+            &path,
+            &memory_path,
+            sweeps,
+        )?)
+    } else {
+        None
+    };
+    let cpu = brigade_hub::read::CpuPool::default();
+    let mut state = App::new(
+        upstream,
+        client,
+        config.trust_tailscale_identity,
+        config.trust_forwarded_proto,
+    );
+    state.telemetry.attach_readers(readers.queue_probe());
+    if let Some(memory_route::MemoryRoute::Store(store)) = &memory {
+        state.telemetry.attach_readers(store.reader_probe());
+    }
+    state.telemetry.attach_cpu(cpu.queue_probe());
+    // Only a native family's writer commits here. Without one the writer
+    // metrics stay NaN, because the Python upstream commits every write.
+    state.modes = modes;
+    state.memory = memory;
+    state.shadow_db = Some(path.clone());
+    state.storage = storage.map(Arc::new);
+    state.upstream_key = parsed_key;
+    state.front_bind = address.ip().is_loopback();
     {
         use sha2::Digest;
         state.admin_digest = Some(sha2::Sha256::digest(admin.as_bytes()).into());
     }
-    let readers = Arc::new(readers);
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
     // One S4a writer per file, shared by every native family. It owns the writer metrics.
     let writer = if native("registration") || native("claims") {
         let writer = brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
-            Arc::default(),
+            arbiter.clone(),
         )
         .map_err(|_| "native writer unavailable")?;
         state.telemetry.attach_writer(writer.stats());
@@ -1227,6 +1304,13 @@ async fn run(mut config: Config) -> Result<(), String> {
         let _ = child.wait().await;
     }
     Ok(())
+}
+/// Maintenance asks for retention every second; only memory retention is native.
+struct MemorySweeps(Arc<brigade_hub::memory::Store>);
+impl brigade_hub::maintenance::WriterCommands for MemorySweeps {
+    fn schedule(&self, sweep: brigade_hub::maintenance::Sweep) -> bool {
+        sweep == brigade_hub::maintenance::Sweep::MemoryRetention && self.0.sweep()
+    }
 }
 fn front_peer(bind: IpAddr, peer: IpAddr) -> bool {
     bind.is_loopback() && peer.is_loopback()

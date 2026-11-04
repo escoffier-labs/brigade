@@ -929,7 +929,7 @@ fn only_the_memory_writer_holds_both_locks() {
 }
 
 #[test]
-fn sweeps_are_bounded_and_skip_the_hub_lock() {
+fn sweeps_are_bounded_drain_the_backlog_and_skip_the_hub_lock() {
     let dir = temp_dir();
     let memory = dir.join("fleet-hub-memory.db");
     let db = worker::open_file(&memory, true).unwrap();
@@ -964,8 +964,10 @@ fn sweeps_are_bounded_and_skip_the_hub_lock() {
         .unwrap()
         .query_row("SELECT count(*) FROM memory_idempotency", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(left, 44);
-    assert_eq!(metrics.lock().unwrap().sweeps, 1);
+    // One request drains all 300 expired rows in bounded transactions: a full
+    // batch of 256, then the remaining 44.
+    assert_eq!(left, 0);
+    assert_eq!(metrics.lock().unwrap().sweeps, 2);
     blocker.execute_batch("ROLLBACK").unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -1304,4 +1306,30 @@ async fn an_unreadable_policy_refuses_a_policy_bound_command() {
             reason: "policy-reread"
         })
     );
+}
+
+#[test]
+fn disk_pressure_refuses_memory_writes_but_not_reads() {
+    let disk = crate::maintenance::DiskPressure::default();
+    let put = br#"{"action":"put","scope":"fleet","card_id":"x","text":"x"}"#;
+    assert_eq!(pressure_refusal(&disk, put), None);
+    // A WAL past 1 GiB turns pressure on.
+    disk.update(2 * 1024 * 1024 * 1024, None);
+    for read in ["card", "log", "status"] {
+        let body = format!(r#"{{"action":"{read}"}}"#);
+        assert_eq!(pressure_refusal(&disk, body.as_bytes()), None, "{read}");
+    }
+    for write in [
+        "put", "import", "retire", "handoff", "capture", "grant", "search", "nope",
+    ] {
+        let body = format!(r#"{{"action":"{write}"}}"#);
+        assert_eq!(
+            pressure_refusal(&disk, body.as_bytes()),
+            Some("disk-pressure"),
+            "{write}"
+        );
+    }
+    // A body that does not parse is not a read.
+    assert_eq!(pressure_refusal(&disk, b"{"), Some("disk-pressure"));
+    assert_eq!(pressure_refusal(&disk, b"[]"), Some("disk-pressure"));
 }

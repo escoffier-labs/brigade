@@ -232,21 +232,29 @@ fn answer(p: Pending, result: Answer) {
     let _ = p.reply.send(result);
 }
 
-fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
+/// Rows one retention transaction deletes at most.
+const SWEEP_BATCH: usize = 256;
+pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     worker::begin(db, Instant::now() + Duration::from_millis(250))?;
     // At most 256 rows or 20 ms per transaction, never under the hub lock.
     let deadline = Instant::now() + Duration::from_millis(20);
     let _ = db.progress_handler(1000, Some(move || Instant::now() >= deadline));
     let deleted = db.execute(
-        "DELETE FROM memory_idempotency WHERE (principal,client_event_id) IN (SELECT principal,client_event_id FROM memory_idempotency WHERE created_ms < ?1 ORDER BY created_ms LIMIT 256)",
-        [now_ms - super::ids::RETENTION_MS],
+        "DELETE FROM memory_idempotency WHERE (principal,client_event_id) IN (SELECT principal,client_event_id FROM memory_idempotency WHERE created_ms < ?1 ORDER BY created_ms LIMIT ?2)",
+        rusqlite::params![now_ms - super::ids::RETENTION_MS, SWEEP_BATCH as i64],
     );
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
-        Ok(n) => {
-            db.execute_batch("COMMIT")?;
-            Ok(n)
-        }
+        Ok(n) => match db.execute_batch("COMMIT") {
+            Ok(()) => Ok(n),
+            // SQLite can leave the transaction open after a failed COMMIT
+            // (SQLITE_FULL, an I/O error). End it, as the batch path does, or
+            // every later BEGIN IMMEDIATE on this connection fails.
+            Err(e) => {
+                let _ = db.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        },
         Err(e) => {
             let _ = db.execute_batch("ROLLBACK");
             Err(e)
@@ -333,8 +341,13 @@ pub(crate) fn run(
         }
         if writes.is_empty() {
             if let Some(now_ms) = sweeps.pop_front() {
-                if sweep(&db, now_ms).is_ok() {
+                if let Ok(deleted) = sweep(&db, now_ms) {
                     metrics.lock().unwrap().sweeps += 1;
+                    // A full batch can leave expired rows behind. Run the next
+                    // bounded batch while the writer is idle; writes still go first.
+                    if deleted == SWEEP_BATCH {
+                        sweeps.push_front(now_ms);
+                    }
                 }
                 continue;
             }
