@@ -277,7 +277,9 @@ def _compose(project, *profiles):
     return json.loads(done.stdout)
 
 
-@pytest.mark.skipif(shutil.which("docker") is None, reason="docker compose not installed")
+@pytest.mark.skipif(
+    shutil.which("docker") is None or os.name == "nt", reason="needs docker compose on a Linux-container host"
+)
 def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(project, tmp_path):
     assert _init(project, tmp_path) == 0
     default = _compose(project)

@@ -379,7 +379,8 @@ def report(decision: Decision) -> str:
 
 def _base_env(args: argparse.Namespace) -> dict[str, str]:
     backup_dir = Path(args.backup_dir).expanduser().resolve()
-    owner = args.backup_owner or f"{os.getuid()}:{os.getgid()}"
+    # The recipe targets Linux hosts; on other platforms name the owner explicitly.
+    owner = args.backup_owner or (f"{os.getuid()}:{os.getgid()}" if hasattr(os, "getuid") else "0:0")
     values = {
         "COMPOSE_PROJECT_NAME": args.project_name,
         "BRIGADE_HUB_IMAGE": args.hub_image,
