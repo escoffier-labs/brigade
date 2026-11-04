@@ -59,7 +59,8 @@ def test_top_level_help_does_not_dump_flat_subcommand_list():
     help_text = parser.format_help()
     # The grouped epilog owns the command listing; argparse's default
     # indented dump would repeat every command a second time.
-    assert help_text.count("hermes-fragments") == 1
+    assert "hermes-fragments" not in help_text
+    assert help_text.count("\n  harness ") == 1
     assert help_text.count("reconfigure") == 1
 
 

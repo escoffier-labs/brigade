@@ -9,7 +9,7 @@ import sys
 
 import pytest
 
-from brigade import claude_cloud, cli, cloud_tracker, fleet_client
+from brigade import cli, cloud_tracker, fleet_client
 from brigade.claude_cloud_identity import normalize_claude_cloud_identity
 
 NOW = datetime(2026, 10, 6, 12, tzinfo=timezone.utc)
@@ -183,7 +183,6 @@ def offline(monkeypatch):
         pytest.fail(f"adoption/status/doctor invoked {operation}: args={args!r}, kwargs={kwargs!r}")
 
     monkeypatch.setattr(cloud_tracker.subprocess, "run", partial(forbidden, "subprocess.run"))
-    monkeypatch.setattr(claude_cloud, "list_agents", partial(forbidden, "claude_cloud.list_agents"))
     for name in ("admit_cloud", "bind_cloud", "renew_cloud", "release_cloud", "fetch_cloud"):
         monkeypatch.setattr(fleet_client, name, partial(forbidden, f"fleet_client.{name}"))
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
@@ -381,7 +380,6 @@ def test_doctor_and_status_are_offline_and_branch_discovery_is_unbound(tmp_path,
         )[0]["state"]
         == "unknown"
     )
-    assert not claude_cloud.launch_agent(REPO, "fixture").ok
 
 
 def test_branch_match_in_another_repository_cannot_establish_artifact_landing(tmp_path):

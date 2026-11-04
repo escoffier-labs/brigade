@@ -687,7 +687,7 @@ def test_parser_inventory_includes_pack_lifecycle_and_legacy_commands():
         "canary",
         "install-service",
     ):
-        assert f"brigade run-cloud grokbot {command}" in paths
+        assert f"brigade run cloud grokbot {command}" in paths
 
 
 def test_legacy_lifecycle_stays_compatible_with_pack_config(tmp_path: Path, monkeypatch):

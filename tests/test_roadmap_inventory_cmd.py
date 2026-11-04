@@ -25,7 +25,7 @@ def test_roadmap_commands_writes_and_checks_inventory(tmp_path, capsys):
     text = inventory.read_text()
     assert "# Brigade Command Inventory" in text
     assert "`brigade roadmap audit`" in text
-    assert "`brigade run-cloud status` (deprecated; use `brigade run cloud status`)" in text
+    assert "`brigade run-cloud status`" not in text
     assert "private-root" not in text
     assert "private-repo" not in text.casefold()
 

@@ -21,15 +21,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Operator profile to describe.",
     )
     p_operator_guide.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_operator_plan = operator_sub.add_parser("plan", help="Plan local operator config bootstrap.")
-    p_operator_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_operator_plan.add_argument(
-        "--profile",
-        choices=["local-operator", "internal-dogfood"],
-        default="local-operator",
-        help="Bootstrap profile to inspect.",
-    )
-    p_operator_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_adopt = operator_sub.add_parser(
         "adopt", help="Inspect an existing operator workspace before Brigade adoption."
     )
@@ -181,22 +172,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_operator_surfaces_import.add_argument("--dry-run", action="store_true", help="Report without writing imports.")
     p_operator_surfaces_import.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_operator_init = operator_sub.add_parser("init", help="Write missing gitignored local operator config defaults.")
-    p_operator_init.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_operator_init.add_argument(
-        "--profile",
-        choices=["local-operator", "internal-dogfood"],
-        default="local-operator",
-        help="Bootstrap profile to apply.",
-    )
-    p_operator_init.add_argument("--force", action="store_true", help="Overwrite existing local config files.")
-    p_operator_init.add_argument("--dry-run", action="store_true", help="Show planned writes without changing files.")
-    p_operator_init.add_argument(
-        "--waive-public-release",
-        action="store_true",
-        help="Write a local waiver for public release readiness when using an internal profile.",
-    )
-    p_operator_init.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator_status = operator_sub.add_parser("status", help="Show repo and machine wiring for local operator use.")
     p_operator_status.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_operator_status.add_argument(
@@ -339,25 +314,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         "the default tool packs into tools/ and scripts/. Default is the minimal footprint.",
     )
     p_operator_quickstart.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_operator_bootstrap_portable = operator_sub.add_parser(
-        "bootstrap-portable", help="Import optional portable packs and sync tools across local harnesses."
-    )
-    p_operator_bootstrap_portable.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_operator_bootstrap_portable.add_argument(
-        "--tool-pack", type=Path, default=None, help="Optional `brigade tools pack build` directory to import first."
-    )
-    p_operator_bootstrap_portable.add_argument(
-        "--skill-pack", type=Path, default=None, help="Optional `brigade skills pack build` directory to import first."
-    )
-    p_operator_bootstrap_portable.add_argument(
-        "--dry-run", action="store_true", help="Plan projection writes without changing files."
-    )
-    p_operator_bootstrap_portable.add_argument(
-        "--force", action="store_true", help="Overwrite conflicting imported entries or projection files."
-    )
-    p_operator_bootstrap_portable.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_operator.set_defaults(func=dispatch)
 
 
@@ -372,8 +328,6 @@ def _dispatch_impl(args) -> int:
 
     if args.operator_command == "guide":
         return operator_cmd.guide(profile=args.profile, json_output=args.json)
-    if args.operator_command == "plan":
-        return operator_cmd.plan(target=args.target, profile=args.profile, json_output=args.json)
     if args.operator_command == "adopt":
         if args.operator_adopt_command == "plan":
             return operator_cmd.adoption_plan(target=args.target, json_output=args.json)
@@ -424,15 +378,6 @@ def _dispatch_impl(args) -> int:
             return operator_cmd.surfaces_import_issues(target=args.target, dry_run=args.dry_run, json_output=args.json)
         args._brigade_parser.error(f"unknown operator surfaces command: {args.operator_surfaces_command}")
         return 2
-    if args.operator_command == "init":
-        return operator_cmd.init(
-            target=args.target,
-            profile=args.profile,
-            force=args.force,
-            dry_run=args.dry_run,
-            waive_public_release=args.waive_public_release,
-            json_output=args.json,
-        )
     if args.operator_command == "status":
         return operator_cmd.status(target=args.target, profile=args.profile, json_output=args.json)
     if args.operator_command == "doctor":
@@ -474,15 +419,6 @@ def _dispatch_impl(args) -> int:
             dry_run=args.dry_run,
             force=args.force,
             full=args.full,
-            json_output=args.json,
-        )
-    if args.operator_command == "bootstrap-portable":
-        return operator_cmd.bootstrap_portable(
-            target=args.target,
-            tool_pack=args.tool_pack,
-            skill_pack=args.skill_pack,
-            dry_run=args.dry_run,
-            force=args.force,
             json_output=args.json,
         )
     args._brigade_parser.error(f"unknown operator command: {args.operator_command}")

@@ -318,3 +318,31 @@ def _chat_finding(provider, surface_id, issue_id="issue-1", **extra):
     }
     item.update(extra)
     return item
+
+
+def add_dependency_edge(*, target, edge_type, source, target_id, json_output=False):
+    """Set up a dependency through the retained ledger primitives."""
+    import json
+    from brigade.work_cmd import ledger as ledger_mod, edges as edges_mod
+
+    try:
+        with ledger_mod._task_ledger_lock(target):
+            source_task, ledger = ledger_mod._find_task(target, source)
+            target_task, _ = ledger_mod._find_task(target, target_id)
+            if source_task is None:
+                raise edges_mod.EdgeError("unknown source", reason=edges_mod.REASON_UNKNOWN_SOURCE)
+            if target_task is None:
+                raise edges_mod.EdgeError("unknown target", reason=edges_mod.REASON_UNKNOWN_TARGET)
+            edge, created = edges_mod.add_edge_to_ledger(
+                ledger, source=str(source_task["id"]), target=str(target_task["id"]), edge_type=edge_type
+            )
+            ledger_mod._write_task_ledger(target, ledger)
+    except ledger_mod.TaskLedgerError as exc:
+        return ledger_mod.emit_task_ledger_error(exc, json_output=json_output)
+    except edges_mod.EdgeError as exc:
+        if json_output:
+            print(json.dumps(exc.as_dict()))
+        return 2
+    if json_output:
+        print(json.dumps({"edge": edge, "created": created}))
+    return 0
