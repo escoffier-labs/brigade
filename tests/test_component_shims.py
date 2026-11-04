@@ -114,9 +114,10 @@ def test_corrupted_hardlink_is_still_removed_for_repair(installed):
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink creation needs privileges on Windows")
 def test_snapshot_restore_keeps_an_operator_symlink(tmp_path):
-    target = tmp_path / "operator-graphtrail"
+    legacy = next(iter(manifest.COMPONENT_FAMILIES))
+    target = tmp_path / "operator-tool"
     target.write_bytes(b"operator tool")
-    link = tmp_path / "bin" / "graphtrail"
+    link = tmp_path / "bin" / legacy
     link.parent.mkdir()
     link.symlink_to(target)
     snapshots = install._snapshot_managed_executables([link])
