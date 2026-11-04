@@ -68,8 +68,8 @@ Dead code in one commit, duplication in the next, guard clauses in the next. Eac
 `reduce` applies changes; it is not an audit and it does not hunt for defects.
 
 - Borrows from `superpowers:test-driven-development` for characterization tests, `superpowers:verification-before-completion` for evidence before claims, and `superpowers:systematic-debugging` when a reduction surfaces a real bug: stop, do not "simplify" the bug away, switch to debugging.
-- Hands accepted report findings to [expedite](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/expedite/SKILL.md) to drive to done.
-- Hands correctness issues to [bug-hunt](../bug-hunt/SKILL.md), security issues to [security-sweep](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/security-sweep/SKILL.md), and repo-wide quality to [line-check](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/line-check/SKILL.md). Finding a bug is not in scope here; routing it is.
+- Hands accepted report findings to [fix-findings](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/fix-findings/SKILL.md) to drive to done.
+- Hands correctness issues to [bug-hunt](../bug-hunt/SKILL.md), security issues to [security-sweep](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/security-sweep/SKILL.md), and repo-wide quality to [repo-audit](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/repo-audit/SKILL.md). Finding a bug is not in scope here; routing it is.
 
 ## Output shape
 
@@ -90,10 +90,10 @@ Baseline: <command> -> <result>
 After:    <command> -> <result>   (must match)
 
 ### Handed off
-- correctness/security/design items routed to bug-hunt / security-sweep / line-check
+- correctness/security/design items routed to bug-hunt / security-sweep / repo-audit
 ```
 
-In report mode, findings may also be written in the [audit report format](https://github.com/escoffier-labs/skillet/blob/main/docs/audit-report-format.md) so [expedite](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/expedite/SKILL.md) can consume them later.
+In report mode, findings may also be written in the [audit report format](https://github.com/escoffier-labs/skillet/blob/main/docs/audit-report-format.md) so [fix-findings](https://github.com/escoffier-labs/skillet/blob/main/skillet/skills/fix-findings/SKILL.md) can consume them later.
 
 ## Common mistakes
 

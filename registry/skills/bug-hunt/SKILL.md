@@ -38,7 +38,7 @@ When tests can be run safely (no external dependencies, sandboxed), a failing re
 
 ## Report contract
 
-Same spine as line-check so findings compose. Severity: **critical** (data loss, corruption, security-adjacent) / **high** (wrong results on common inputs, crashes) / **medium** (wrong on edge cases) / **low** (latent, needs unlikely conditions) / **info**. Effort is the fix cost: S / M / L.
+Same spine as repo-audit so findings compose. Severity: **critical** (data loss, corruption, security-adjacent) / **high** (wrong results on common inputs, crashes) / **medium** (wrong on edge cases) / **low** (latent, needs unlikely conditions) / **info**. Effort is the fix cost: S / M / L.
 
 ```markdown
 # bug-hunt report: <repo> (<date>)

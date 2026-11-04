@@ -1,6 +1,6 @@
 # aicrawl Adapter
 
-`aicrawl` remains a source family for MiseLedger, not a dependency.
+`aicrawl` remains a source family for brigade-evidence, not a dependency.
 
 No local aicrawl JSONL export shape was available beyond the existing `miseledger.adapter.v1` fixture in `testdata/adapters/aicrawl.fixture.jsonl`. Native import should wait for a real redacted aicrawl export sample rather than guessing a schema.
 

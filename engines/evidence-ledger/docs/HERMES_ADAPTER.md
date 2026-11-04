@@ -1,21 +1,21 @@
 # Hermes Adapter
 
-Hermes is an agent-session source family for MiseLedger.
+Hermes is an agent-session source family for brigade-evidence.
 
-MiseLedger natively supports local Hermes `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`:
+brigade-evidence natively supports local Hermes `session_*.json` snapshots and trajectory JSONL under `~/.hermes/sessions`:
 
 ```bash
-miseledger adapter hermes ~/.hermes/sessions --out -
-miseledger import hermes ~/.hermes/sessions --json
+brigade-evidence adapter hermes ~/.hermes/sessions --out -
+brigade-evidence import hermes ~/.hermes/sessions --json
 ```
 
 Archived StationTrail exports used the same shared adapter contract. If you already have one of those JSONL files, import it through the adapter path:
 
 ```bash
-miseledger import adapter hermes.adapter.jsonl --source hermes --json
+brigade-evidence import adapter hermes.adapter.jsonl --source hermes --json
 ```
 
-Hermes `state.db` remains an observed storage surface, but MiseLedger does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.
+Hermes `state.db` remains an observed storage surface, but brigade-evidence does not parse it directly. Native support is intentionally limited to readable snapshot and trajectory files with stable JSON shapes.
 
 Expected adapter export shape:
 
@@ -68,4 +68,4 @@ Direct `state.db` adapter criteria, if this is ever needed:
 
 - Provide redacted Hermes SQLite samples.
 - Identify timestamp, session ID, actor role, event type, message/tool/artifact fields, and raw source references.
-- Justify coupling MiseLedger to that SQLite storage surface.
+- Justify coupling brigade-evidence to that SQLite storage surface.

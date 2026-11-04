@@ -18,7 +18,7 @@ Brigade is designed so agents run the control plane (install, setup, verify, han
 
 Treat setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service.
 
-Built-in engines use public names **code map** (`brigade code`) and **evidence log** (`brigade evidence`). Historical product names GraphTrail and MiseLedger may still appear in engine paths and MCP entry labels.
+Built-in engines use public names **code map** (`brigade code`) and **evidence log** (`brigade evidence`). The canonical binaries are `brigade-code-graph` and `brigade-evidence`. Existing legacy paths and owned MCP entry labels remain readable through v0.32.
 
 ## Agent entry point
 

@@ -312,7 +312,7 @@ Default briefs, context packs, citations, and promotion omit `unknown` and `quar
 
 ### Read verification
 
-Public read surfaces recompute `hashes.content` (and `hashes.raw` when materialized) against the exact stored bytes. Search suppresses a mismatched snippet and sets `integrity_mismatch: true`. Direct `miseledger show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed. `--forensic-content` never changes trust and only reveals a body when injection status is the explicit known-safe value `clean`; empty, unknown, and parse-lost statuses block. MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. One idempotent downgrade event is appended per item/hash/mismatch; the row is never deleted.
+Public read surfaces recompute `hashes.content` (and `hashes.raw` when materialized) against the exact stored bytes. Search suppresses a mismatched snippet and sets `integrity_mismatch: true`. Direct `brigade-evidence show` / `brigade evidence show` hide a mismatched or synthesized-legacy body unless `--forensic-content` is passed. `--forensic-content` never changes trust and only reveals a body when injection status is the explicit known-safe value `clean`; empty, unknown, and parse-lost statuses block. MCP, HTTP, bundles, briefs, and context stay metadata-only on mismatch. One idempotent downgrade event is appended per item/hash/mismatch; the row is never deleted.
 
 ### Origin-scoped redaction (#498)
 

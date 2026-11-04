@@ -76,12 +76,12 @@ Brigade Stack connects agent coordination, shared context, tools, skills, and ve
 
 Public names for the built-in engines:
 
-| Public | Commands | Historical |
+| Public | Commands | Binary |
 |---|---|---|
-| Code map | `brigade code …` | GraphTrail |
-| Evidence log | `brigade evidence …` | MiseLedger |
+| Code map | `brigade code …` | brigade-code-graph |
+| Evidence log | `brigade evidence …` | brigade-evidence |
 
-Standalone GraphTrail or MiseLedger installs are replaced by `brigade setup`. Some binary and path names still use the historical labels; the operator surface is the public table above.
+Standalone brigade-code-graph or brigade-evidence installs are replaced by `brigade setup`. New installs use the canonical binaries listed above. Legacy entry points are deprecated and removed in v0.33.0. See the [engine wiring guide](wiring-code-graph-evidence.md) for MCP setup.
 
 ## Start Small
 
@@ -396,8 +396,8 @@ Safety and operations tools:
 
 Evidence log and code map (built in):
 
-- **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger) (historically MiseLedger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [miseledger](https://github.com/escoffier-labs/miseledger) is a history mirror only.
-- **Code map** (`brigade code …`): local symbol graph (callers, impact, context). Engine lives under the monorepo engines tree (historically GraphTrail). Archived standalone [graphtrail](https://github.com/escoffier-labs/graphtrail) is a history mirror only.
+- **Evidence log** (`brigade evidence …`): local-first ledger of runs, crawls, and imports. Engine lives at [`engines/evidence-ledger/`](https://github.com/escoffier-labs/brigade/tree/main/engines/evidence-ledger). Crawls sessions, files, git, and chat into SQLite with FTS5. Archived standalone [brigade-evidence](https://github.com/escoffier-labs/miseledger) is a history mirror only.
+- **Code map** (`brigade code …`): local symbol graph (callers, impact, context). Engine lives under the monorepo engines tree. Archived standalone [brigade-code-graph](https://github.com/escoffier-labs/graphtrail) is a history mirror only.
 - Brigade Stack CLI (process boundary):
   - `brigade setup` installs the code-map engine, its MCP bridge, the evidence engine, SessionFind, and `agent-notify` (when published on the release manifest) from the exact release manifest
   - `brigade add evidence` / `brigade add graphtrail` remain one-release compatibility shims
