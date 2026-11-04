@@ -53,6 +53,16 @@
     }
   },
   {
+    "path": "RELEASE.md",
+    "kind": "shim",
+    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "literals": {
+      "graphtrail": 2,
+      "miseledger": 1
+    },
+    "remove_in": "0.33.0"
+  },
+  {
     "path": "benchmarks/model-ratings-2026-07/README.md",
     "kind": "history",
     "reason": "Historical plan, changelog or captured research; original identities remain unchanged.",

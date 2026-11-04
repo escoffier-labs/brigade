@@ -76,8 +76,8 @@ Fetch `origin/main`, confirm its declared version, create an annotated tag on th
 )
 ```
 
-The next publish workflow builds the five managed components (`agent-notify`, `brigade-code-graph`,
-`brigade-code-graph-mcp`, `brigade-evidence`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
+The next publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
+`graphtrail-mcp`, `miseledger`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
 `darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It also builds the canonical aliases
 `brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` as separate targets
 for every platform. It creates one Brigade release with exactly 40 native assets
