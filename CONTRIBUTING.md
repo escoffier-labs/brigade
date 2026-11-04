@@ -72,7 +72,11 @@ The release cut runs `python3 scripts/changelog_fragments.py assemble` to append
 
 ## Command-path deprecations
 
-Keep a command path as a working deprecated alias for at least one stable release before removing it. The alias must print a one-line notice that names its replacement, appear as deprecated in the generated command inventory, and have a `CHANGELOG.md` release-note entry. The deprecation PR must cite usage evidence, such as a receipt, runbook reference, or `brigade evidence search` result. If no evidence is found, say so explicitly in the PR.
+Brigade has few users, so command paths do not carry long deprecation windows. If you depend on a command path or want this policy changed, speak up in an issue or on the removal PR.
+
+- A command path with no callers can be removed at the next release without an alias. Show that it has no callers: cite a `brigade evidence search` result, a search of runbooks, scheduled units, hooks and agent transcripts, or state that the search found nothing. Put that evidence in the PR.
+- A command path that still has callers keeps a deprecated alias. The alias prints a one-line notice that names its replacement and is marked deprecated in the generated command inventory. It is removed no later than the next major release. While Brigade is on 0.x, the release notes say which minor releases count as major.
+- Every removal or deprecation adds a `changelog.d/` fragment that names the replacement, or says there is none.
 
 ## What kinds of changes land easily
 

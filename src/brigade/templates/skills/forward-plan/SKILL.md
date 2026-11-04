@@ -27,7 +27,7 @@ Work only through this allowlist:
 - `brigade outcome rank --json` (optional `--by-capability` / `--recency`)
 - Read of repo-root `ROADMAP.md` under the parse contract below
 - `brigade code …` for brigade-code-graph footprint / impact / doctor checks
-- `brigade work task edge …` / `brigade work task add --graph …` only after an
+- `brigade work task add --graph …` only after an
   operator confirms derived edges (never auto-apply. See Safety gates)
 - `brigade work plans` to list existing plan artifacts
 - Write only under `.brigade/work/plans/` (the plan JSON + plan.md pair)
@@ -50,7 +50,7 @@ nodes while applying **zero** proposed edges from `proposed_edges`.
 confirmation is an operator-in-the-loop gate. The broad
 `Bash(brigade work task:*)` allowed-tool pattern does not enforce it, so this
 recipe must not run any mutating `brigade work task …` or
-`brigade work task edge …` command before the operator gives explicit
+`brigade work task add --graph …` command before the operator gives explicit
 confirmation.
 
 ## Inputs
@@ -60,10 +60,10 @@ confirmation.
    empty so blocked paths are visible. Ready items may carry optional
    `seat_class` (`mechanical` | `judgment` | `review`) and `spend_by`
    (ISO-8601 deadline) annotations for quota-driven dispatch routing. Pass those
-   through when proposing or filing work; never invent a model id. When creating
-   or annotating tasks after confirmation, emit them with
+   through when proposing or filing work; never invent a model id. When filing
+   tasks after confirmation, emit them with
    `brigade work task add … --seat-class … --spend-by …` or
-   `brigade work task annotate <id> …`, or as `metadata.seat_class` /
+   `metadata.seat_class` /
    `metadata.spend_by` on `--graph` nodes. Absent annotations change nothing.
 2. **Outcome rank** - `brigade outcome rank --json`. Use ranking only as a
    soft priority signal for ordering proposed work, never as a substitute for
@@ -134,7 +134,7 @@ When brigade-code-graph is available (`brigade code doctor` / impact / neighbors
    (`def-use` or `write-overlap`), and a `snapshot_hash` (or graph identity).
    Set `confirmed: false`.
 4. Derived edges **require confirmation** before they become real ledger edges.
-   Do not call `work task edge add` or `--graph` apply for derived edges until
+   Do not call `--graph` apply for derived edges until
    an operator confirms them.
 5. Only derived edges may be auto-retracted by a later reconcile recipe (see
    scheduled-care / outcome reconcile docs). Authored (human-confirmed) edges

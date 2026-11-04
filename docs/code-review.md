@@ -67,7 +67,7 @@ Imported findings use source `code-review`. Brigade preserves reviewer id, revie
 
 `brigade work review closeout <run-id>` writes `closeout.json` next to the review receipt and records a compact closeout summary back on the receipt. A finding is treated as resolved when its import was dismissed with a reason or its promoted task is done. Pending imports, promoted but incomplete tasks, not-imported current findings, malformed current findings, and changed source fingerprints keep the closeout unresolved.
 
-When closeout includes completed promoted tasks, Brigade stores review evidence on those task records under `metadata.review_closeouts`. `brigade work task show <task-id>` displays the review run id, finding count, unresolved count, and resolved flag for each attached closeout. The latest work session receives the same compact closeout reference when a session artifact is available.
+When closeout includes completed promoted tasks, Brigade stores review evidence on those task records under `metadata.review_closeouts`. Each attached closeout records the review run id, finding count, unresolved count, and resolved flag. The latest work session receives the same compact closeout reference when a session artifact is available.
 
 `brigade work brief` surfaces the latest unclosed review run and top unresolved review finding. `brigade work doctor` warns when completed review runs have not been closed out, or when review evidence is stale, missing, failed, or malformed under an enabled review config.
 

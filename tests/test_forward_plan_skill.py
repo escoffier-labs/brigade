@@ -192,7 +192,7 @@ def test_forward_plan_documents_dispatch_annotations():
     assert re.search(r"mechanical", text)
     assert re.search(r"judgment", text)
     assert re.search(r"\breview\b", text)
-    assert re.search(r"(?i)work task annotate", text)
+    assert re.search(r"(?i)work task add.*--seat-class.*--spend-by", text)
     assert re.search(r"(?i)never invent a model id", text)
     metadata = _skill_metadata()
     assert metadata.get("version") == "0.1.1"

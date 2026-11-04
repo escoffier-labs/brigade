@@ -136,3 +136,10 @@ def test_a_scoped_policy_form_edit_keeps_the_owners_section():
     edited = fleet_policy_form.build_document(copy.deepcopy(current), submission)
     assert edited["owners"] == current["owners"]
     assert edited["defaults"]["data"]["allow_free"] is True
+
+
+def test_findings_alias_normalized_when_parsing():
+    from brigade.fleet_policy_owners import parse_owners
+
+    owners = parse_owners({"w": {"label": "Watcher", "match": {"findings": ["pr", "pull-request"]}}})
+    assert owners["w"]["match"]["findings"] == ["pull-request"]

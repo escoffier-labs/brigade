@@ -2179,7 +2179,8 @@ Privacy:
 - The hub keeps one key in a 0600 file beside the token file, never in the
   database. The recall log stores HMAC-SHA256 of the normalized query under
   `HMAC(key, "brigade.memory.recall.v1")`, and the findings ledger uses
-  `HMAC(key, "brigade.findings.v1")`. A database copy alone cannot test
+  `HMAC(key, "brigade.findings.fingerprint.v1")`. Report keys use
+  `HMAC(key, "brigade.findings.report.v1")` as a separate derived key. A database copy alone cannot test
   guesses, and a recall-log dump cannot be joined with a findings dump.
 - The hub never stores raw query text, including for explicit searches. The
   local log keeps its #2196 rules.
@@ -2438,12 +2439,12 @@ agent sees a real event (an email, a job post, a pull request)
             other tracking parameters, no trailing slash), or the ATS job id
        pull request: owner/repo#number
   -> POST /findings {action: "observe", kind, key}
-  -> hub stores HMAC(findings key, kind + ":" + key), never the key itself
+  -> hub stores HMAC(fingerprint key, kind + ":" + key), never the key itself
   -> answer: {finding_id, first_seen, owner, state, report_ref, reservation}
        reservation is set only for the owner principal, only while no report
        exists and no other reservation is live:
        {reservation_id, generation, expires_at, report_key}, 10 minutes by default,
-       where the hub computes report_key = HMAC(findings key, "report:" + finding_id)
+       where the hub computes report_key = HMAC(report key, "report:" + finding_id)
   -> the holder reports externally, carrying report_key wherever the
      destination can hold it
   -> POST /findings {action: "reported", finding_id, reservation_id, generation, report_ref}
@@ -2469,7 +2470,14 @@ agent sees a real event (an email, a job post, a pull request)
   grants. It is the same value for every generation of one finding, and only a
   reservation holder receives it.
 - Owner reassignment: a charter change applies to new reservations, and a
-  live reservation runs to its expiry.
+  live reservation runs to its expiry. A former holder may resolve only while
+  its reservation is live, unless the current charter still authorizes it.
+  Non-holder resolution during a live reservation returns `finding_reserved`
+  (409), except for the administrator. Reporting after resolution returns
+  `finding_resolved` (409).
+- Fingerprint and report keys use separate HMAC-SHA256 derivations from the
+  master key, labeled `brigade.findings.fingerprint.v1` and
+  `brigade.findings.report.v1`.
 - Authentication: node tokens, and message-principal tokens with a `findings`
   grant (added with the ledger through the Python schema). The admin token
   holds it. A principal whose charter names no finding kind can observe and

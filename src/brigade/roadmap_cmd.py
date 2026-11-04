@@ -23,13 +23,10 @@ DOC_COMMAND_TOP_LEVELS = {
     "handoff",
     "handoff-template",
     "harness",
-    "hermes-fragments",
     "ingest",
     "init",
     "learn",
     "memory",
-    "openclaw-fragments",
-    "run-cloud",
     "projects",
     "reconfigure",
     "release",
@@ -46,7 +43,6 @@ DOC_COMMAND_TOP_LEVELS = {
 }
 COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
 COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = (
-    ("brigade run-cloud", "brigade run cloud"),
     ("brigade receipts export miseledger", "brigade receipts export evidence"),
 )
 # Every deprecated path is also an alias, so the parser and the inventory agree
@@ -56,7 +52,7 @@ COMMAND_ALIASES: tuple[tuple[str, str], ...] = (
     ("brigade openclaw-fragments", "brigade harness fragments"),
     ("brigade hermes-fragments", "brigade harness fragments"),
     ("brigade import", "brigade work import"),
-    *(pair for pair in COMMAND_DEPRECATIONS if pair[0] != "brigade run-cloud"),
+    *COMMAND_DEPRECATIONS,
 )
 ROADMAP_ARCHIVE_RELATIVE_PATH = Path("docs") / "roadmap-archive.md"
 ROADMAP_VERSION_HEADLINE_RE = re.compile(r"\*\*v(\d+)\.(\d+)\.(?:x|\d+) on main\*\*")

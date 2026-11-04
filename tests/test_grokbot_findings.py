@@ -641,7 +641,7 @@ def test_cli_rejects_invalid_limit_without_writing(tmp_path: Path, capsys):
 def test_reconcile_findings_appears_in_parser_inventory():
     from brigade.roadmap_cmd import _cli_command_paths
 
-    assert "brigade run-cloud grokbot reconcile-findings" in _cli_command_paths()
+    assert "brigade run cloud grokbot reconcile-findings" in _cli_command_paths()
 
 
 def _apply_in_process(queue: str, owner: str, manifest: str, connection) -> None:
@@ -1153,7 +1153,7 @@ def test_convert_live_findings_refuses_symlinked_intermediate_output_parent_and_
 def test_convert_findings_appears_in_parser_inventory():
     from brigade.roadmap_cmd import _cli_command_paths
 
-    assert "brigade run-cloud grokbot convert-findings" in _cli_command_paths()
+    assert "brigade run cloud grokbot convert-findings" in _cli_command_paths()
 
 
 def test_apply_entries_matches_path_apply_without_a_temp_manifest(tmp_path: Path):

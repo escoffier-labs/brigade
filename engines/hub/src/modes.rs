@@ -21,7 +21,9 @@ impl Modes {
                 "proxy" => Mode::Proxy,
                 _ => return Err("unknown route mode".into()),
             };
-            let implemented = matches!(family, "health" | "metrics");
+            let native = matches!(family, "health" | "metrics" | "registration");
+            // Only health has a shadow comparator and housekeeping audit so far.
+            let shadow = family == "health";
             if !matches!(
                 family,
                 "health"
@@ -35,7 +37,7 @@ impl Modes {
             ) {
                 return Err("unknown route family".into());
             }
-            if !implemented && mode != Mode::Proxy {
+            if (mode == Mode::Native && !native) || (mode == Mode::Shadow && !shadow) {
                 return Err(format!(
                     "{family} has no native handler or shadow read audit yet"
                 ));
@@ -85,6 +87,14 @@ pub fn family(method: &str, path: &str, action: &str) -> &'static str {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn registration_accepts_native_and_proxy_but_not_shadow() {
+        let modes = Modes::parse(&["registration=native".into()]).unwrap();
+        assert_eq!(modes.get("registration"), Mode::Native);
+        assert_eq!(Modes::default().get("registration"), Mode::Proxy);
+        assert!(Modes::parse(&["registration=shadow".into()]).is_err());
+        assert!(Modes::parse(&["claims=native".into()]).is_err());
+    }
     use super::*;
     #[test]
     fn modes_reject_unimplemented_handlers_and_keep_last_override() {

@@ -342,7 +342,7 @@ A checkpoint is resolved only when `selected`, `rationale`, and `evidence_ref`
 are all non-empty and `selected` is one of the non-empty `options`. Every
 decision entry must include a present, non-empty `options` array of non-empty
 strings. `options: null`, `options: []`, or missing `options` fail closed.
-Unresolved checkpoints block plan `--accept`, `work task claim`, `work claim`,
+Unresolved checkpoints block plan `--accept`, `work claim`,
 and `work task done`. Corrupt `decisions` data (non-list, non-object entry,
 invalid/missing id, duplicate id, wrong field types) must fail closed with exit code 2 /
 `malformed_plan_decisions` rather than being silently dropped.
@@ -1186,52 +1186,7 @@ unknown future record types. `brigade runs events` keeps its own
 - `final` text is one-lined and bounded through the same `_clean_str`
   chokepoint. A value that cannot be rendered safely is omitted.
 
-<a id="brigaderun-diffv1--brigade-runs-diff-child-other---json"></a>
 
-### `brigade.run-diff.v1`: `brigade runs diff <child> [other] --json`
-
-Read-only comparison of a durable child against its recorded parent
-(one-argument form) or two sibling runs that share a parent (explicit
-two-run form). The command never writes to either run directory.
-Unknown, corrupt, or parentless run IDs fail closed with no JSON.
-
-```json
-{
-  "schema": "brigade.run-diff.v1",
-  "relation": "child-parent",
-  "left": {},
-  "right": {},
-  "parent_run_id": "",
-  "branch_point_event_id": "",
-  "lifecycle": {},
-  "workers": {},
-  "verification": {},
-  "outcome": {},
-  "graphtrail": {}
-}
-```
-
-- `relation`: `child-parent` or `siblings`. Left is the child (or first
-  sibling). Right is the parent (or second sibling).
-- `lifecycle`, `workers`, `verification`, and `outcome` each carry
-  `changed`, optional `changes` (`field` / `left` / `right`), and the
-  compared left/right views. Compared strings use the same `_clean_str`
-  chokepoint as list/show/latest/watch. Verification `changed` is the
-  ordered `{status, command, exit_code}` sequence across every receipt
-  and command. `run_id` and the `final.txt` digest are display-only.
-- `graphtrail` compares Brigade Code snapshot attestations only when both
-  sides have compatible snapshots (`ok`/`status=ok` plus a before or
-  after snapshot sha256). Absent or incompatible snapshots set
-  `status: skipped` and a `reason` (`absent snapshots` or
-  `incompatible snapshots`) instead of guessing.
-
----
-
-## `brigade.attestation.sshsig-dsse.v1`
-
-**Path:** `<run-dir>/attestation.json` (exported via `brigade receipts export attestation`)
-
-An additive envelope profile packaging a verify receipt (`brigade.work_verify_receipt`) as a detached, portable in-toto Statement v1 inside a DSSE (Dead Simple Signing Envelope) v1 structure signed with OpenSSH (`ssh-keygen -Y sign`).
 
 ### DSSE Envelope
 

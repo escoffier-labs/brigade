@@ -710,17 +710,6 @@ def _dispatch_impl(args) -> int:
             if_status=args.if_status,
             json_output=args.json,
         )
-    if args.work_command == "reassign":
-        return work_cmd.reassign(
-            target=args.target,
-            task_id=args.task_id,
-            to_actor=args.to_actor,
-            claim_id=args.claim_id,
-            new_claim_id=args.new_claim_id,
-            if_actor=args.if_actor,
-            if_status=args.if_status,
-            json_output=args.json,
-        )
     if args.work_command == "tasks":
         return work_cmd.tasks(target=args.target, all_tasks=args.all, json_output=args.json)
     if args.work_command == "task":
@@ -744,18 +733,6 @@ def _dispatch_impl(args) -> int:
                 dry_run=args.dry_run,
                 json_output=args.json,
             )
-        if args.task_command == "annotate":
-            return work_cmd.task_annotate(
-                target=args.target,
-                task_id=args.task_id,
-                seat_class=args.seat_class,
-                spend_by=args.spend_by,
-                clear_seat_class=args.clear_seat_class,
-                clear_spend_by=args.clear_spend_by,
-                json_output=args.json,
-            )
-        if args.task_command == "show":
-            return work_cmd.task_show(target=args.target, task_id=args.task_id, json_output=args.json)
         if args.task_command == "plan":
             return work_cmd.task_plan(
                 target=args.target,
@@ -779,26 +756,9 @@ def _dispatch_impl(args) -> int:
                 rationale=args.rationale,
                 evidence_ref=args.evidence_ref,
             )
-        if args.task_command == "claim":
-            return work_cmd.task_claim(
-                target=args.target,
-                task_id=args.task_id,
-                actor=args.actor,
-                files=args.files,
-                from_plan=args.from_plan,
-                json_output=args.json,
-            )
         if args.task_command == "done":
             return work_cmd.task_done(target=args.target, task_id=args.task_id, force=args.force, json_output=args.json)
         if args.task_command == "edge":
-            if args.edge_command == "add":
-                return work_cmd.task_edge_add(
-                    target=args.target,
-                    edge_type=args.edge_type,
-                    source=args.source,
-                    target_id=args.target_id,
-                    json_output=args.json,
-                )
             if args.edge_command == "remove":
                 return work_cmd.task_edge_remove(
                     target=args.target,
@@ -808,8 +768,6 @@ def _dispatch_impl(args) -> int:
                     edge_type=args.edge_type,
                     json_output=args.json,
                 )
-            if args.edge_command == "list":
-                return work_cmd.task_edge_list(target=args.target, task_id=args.task_id, json_output=args.json)
             args._brigade_parser.error(f"unknown task edge command: {args.edge_command}")
             return 2
         args._brigade_parser.error(f"unknown task command: {args.task_command}")

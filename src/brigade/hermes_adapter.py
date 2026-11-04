@@ -30,7 +30,7 @@ def inspect_hermes_adapter(target: Path, inbox_rel: str | None = None) -> list[d
                     "status": "warn",
                     "id": "fragment",
                     "fragment": name,
-                    "detail": f"missing at {path}; run `brigade hermes-fragments --out .brigade/hermes`",
+                    "detail": f"missing at {path}; run `brigade harness fragments --harness hermes --out .brigade/hermes`",
                 }
             )
 

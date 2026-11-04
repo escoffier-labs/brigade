@@ -15,11 +15,8 @@ _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
 
 
-_RUN_CLOUD_ALIAS_NOTICE = "note: `brigade run-cloud` is deprecated; use `brigade run cloud`."
-
-
 def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
-    """Attach the cloud dispatch subcommands to `run cloud` or the `run-cloud` alias."""
+    """Attach the cloud dispatch subcommands to `run cloud`."""
     cloud_sub = parser.add_subparsers(dest="run_cloud_command", metavar="<cloud-command>")
     cloud_sub.required = True
 
@@ -516,17 +513,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     parser.set_defaults(func=dispatch)
 
 
-def register(sub: argparse._SubParsersAction) -> None:
-    p = sub.add_parser(
-        "run-cloud",
-        help="Deprecated alias for `brigade run cloud`.",
-    )
-    add_cloud_subcommands(p)
-
-
 def dispatch(args) -> int:
-    if getattr(args, "command", None) == "run-cloud":
-        print(_RUN_CLOUD_ALIAS_NOTICE, file=sys.stderr)
     command = getattr(args, "run_cloud_command", None)
     target = Path(args.target).expanduser().resolve()
     if not target.is_dir():
