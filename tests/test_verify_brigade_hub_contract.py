@@ -696,3 +696,83 @@ def test_hub_contract_deadline_holds_against_a_trickling_hub():
         listener.close()
     assert resp.error is not None and "deadline" in resp.error
     assert elapsed < 3, elapsed
+
+
+def _port_stub(tmp_path):
+    """A hub stand-in: `serve PORT` answers /health; `die PORT` exits 3 with no address error."""
+    script = tmp_path / "stub_hub.py"
+    script.write_text(
+        "import sys\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "mode, port = sys.argv[1], int(sys.argv[2])\n"
+        "if mode == 'die':\n"
+        "    print('boom: bad configuration', file=sys.stderr)\n"
+        "    sys.exit(3)\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', '2')\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(b'{}')\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "HTTPServer(('127.0.0.1', port), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _held_port():
+    """A listening socket, so the port is taken until the caller closes it."""
+    import socket
+
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    return held, held.getsockname()[1]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows lets a second socket share a port with SO_REUSEADDR")
+def test_hub_contract_launch_retries_when_the_port_was_taken(tmp_path, monkeypatch):
+    hub_contract = _load_hub_contract()
+    stub = _port_stub(tmp_path)
+    held, taken = _held_port()
+    ports = []
+    real_free_port = hub_contract.free_port
+
+    def free_port():
+        ports.append(taken if not ports else real_free_port())
+        return ports[-1]
+
+    monkeypatch.setattr(hub_contract, "free_port", free_port)
+    state = tmp_path / "state"
+    state.mkdir()
+    template = " ".join([shlex.quote(sys.executable), shlex.quote(str(stub)), "serve", "{port}"])
+    try:
+        hub = hub_contract.launch_hub(template, brigade=["brigade"], state_dir=state, startup_timeout=30.0)
+        try:
+            assert len(ports) == 2 and ports[0] == taken and ports[1] != taken
+            assert hub.url.endswith(f":{ports[1]}")
+        finally:
+            hub_contract.stop_hub(hub)
+    finally:
+        held.close()
+
+
+def test_hub_contract_launch_does_not_retry_another_early_exit(tmp_path, monkeypatch):
+    hub_contract = _load_hub_contract()
+    stub = _port_stub(tmp_path)
+    ports = []
+    real_free_port = hub_contract.free_port
+
+    def free_port():
+        ports.append(real_free_port())
+        return ports[-1]
+
+    monkeypatch.setattr(hub_contract, "free_port", free_port)
+    state = tmp_path / "state"
+    state.mkdir()
+    template = " ".join([shlex.quote(sys.executable), shlex.quote(str(stub)), "die", "{port}"])
+    with pytest.raises(hub_contract.ContractError, match="the hub exited with 3 before it was healthy: .*boom"):
+        hub_contract.launch_hub(template, brigade=["brigade"], state_dir=state, startup_timeout=30.0)
+    assert len(ports) == 1
