@@ -498,3 +498,15 @@ def test_restore_check_creates_its_ledger_and_passes_against_the_real_tool(tmp_p
         {"status": "PENDING", "name": "full drive against a restored copy", "detail": "rerun with --drive"}
     ]
     assert any(item["name"] == "ledger holds one record per restore" for item in result.items)
+
+
+def test_drive_mount_keeps_control_brigade_repo_root_depth():
+    # control-brigade.py resolves REPO_ROOT as parents[3]. Mounted at /drive it
+    # raised IndexError before any probe ran; the mount must keep the checkout's depth.
+    from pathlib import PurePosixPath
+
+    script = PurePosixPath(checks.DRIVE) / "control-brigade.py"
+    in_repo = (ROOT / "registry" / "skills" / "verify-brigade" / "control-brigade.py").relative_to(ROOT)
+    assert script.relative_to(script.parents[3]).as_posix() == in_repo.as_posix()
+    source = (RECIPE / "checks" / "s31_checks.py").read_text(encoding="utf-8")
+    assert ":/drive:ro" not in source and "/drive/control-brigade.py" not in source

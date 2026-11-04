@@ -32,6 +32,9 @@ from typing import Any
 
 RECIPE = Path(__file__).resolve().parents[1]
 REPO = RECIPE.parents[1]
+# control-brigade.py finds the repository root at parents[3], so the drive is
+# mounted at the same depth it has in the checkout.
+DRIVE = "/repo/registry/skills/verify-brigade"
 CGROUP = Path("/sys/fs/cgroup")
 HUB_PORT = 3774
 ECHO_PORT = 3775
@@ -771,7 +774,7 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
             script = (
                 "brigade fleet serve --host 127.0.0.1 --port 3774 --db /data/fleet-hub.db --token-file /data/token & "
                 "sleep 5; BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=$(cat /data/token) "
-                "python /drive/control-brigade.py hub-contract --hub-url http://127.0.0.1:3774"
+                f"python {DRIVE}/control-brigade.py hub-contract --hub-url http://127.0.0.1:3774"
             )
             done = run(
                 [
@@ -787,7 +790,7 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
                     "-v",
                     f"{data}:/data",
                     "-v",
-                    f"{REPO / 'registry' / 'skills' / 'verify-brigade'}:/drive:ro",
+                    f"{REPO / 'registry' / 'skills' / 'verify-brigade'}:{DRIVE}:ro",
                     "--entrypoint",
                     "sh",
                     image,
@@ -868,7 +871,7 @@ def check_probe(args: argparse.Namespace, result: Result) -> None:
                 "--network",
                 f"container:{holder}",
                 "-v",
-                f"{REPO / 'registry' / 'skills' / 'verify-brigade'}:/drive:ro",
+                f"{REPO / 'registry' / 'skills' / 'verify-brigade'}:{DRIVE}:ro",
                 "-e",
                 "BRIGADE_HUB_PROBE_NODE_TOKEN",
                 "-e",
@@ -876,7 +879,7 @@ def check_probe(args: argparse.Namespace, result: Result) -> None:
                 "--entrypoint",
                 "python",
                 image,
-                "/drive/control-brigade.py",
+                f"{DRIVE}/control-brigade.py",
                 "hub-contract",
                 "--profile",
                 "prod-readonly",
