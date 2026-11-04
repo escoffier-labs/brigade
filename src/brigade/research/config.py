@@ -1,9 +1,11 @@
 from __future__ import annotations
+
+import tomllib
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Dict, List
 
-from .. import toml_compat as tomllib
+
 from .types import BUILTIN_PROFILES, ResearchProfile
 
 _LANE_FIELDS = ("discovery", "planner", "extractor", "synthesizer", "reviewer")

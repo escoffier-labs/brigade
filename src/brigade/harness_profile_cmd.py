@@ -23,8 +23,8 @@ from .harness_profile_doctor import (
     _uninstall_receipt_conflict,
 )
 from .projection import kernel as projection
-from .toml_compat import TOMLDecodeError as _TOMLDecodeError
-from .toml_compat import loads as _toml_loads
+from tomllib import TOMLDecodeError as _TOMLDecodeError
+from tomllib import loads as _toml_loads
 
 _RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --help"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")

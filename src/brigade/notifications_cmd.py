@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import os
 import time
 from pathlib import Path
 from typing import Any, cast
 
-from . import component_bins, proc, toml_compat as tomllib
+from . import component_bins, proc
 
 CHANNEL_ENVS = {
     "discord": ("DISCORD_WEBHOOK_URL",),

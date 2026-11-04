@@ -9,7 +9,7 @@ from brigade import cli
 from brigade import model_inventory
 from brigade import roster
 from brigade import roster_cmd
-from brigade import toml_compat
+import tomllib
 
 
 @pytest.fixture(autouse=True)
@@ -57,7 +57,7 @@ def test_preset_roster_paths_returns_four_packaged_presets():
 
 def test_review_heavy_ships_daybreak_codex_security_seat():
     path = next(item for item in roster_cmd.preset_roster_paths() if item.name == "review-heavy.toml")
-    raw = toml_compat.loads(path.read_text())
+    raw = tomllib.loads(path.read_text())
     loaded = roster.load_roster(path)
     daybreak = loaded.agents["daybreak"]
     raw_seat = raw["agents"]["daybreak"]
@@ -101,7 +101,7 @@ def test_render_roster_toml_includes_cloud_safe_mode():
 @pytest.mark.parametrize("preset_name", EXPECTED_PRESET_NAMES)
 def test_packaged_presets_parse(preset_name):
     path = next(item for item in roster_cmd.preset_roster_paths() if item.name == preset_name)
-    raw = toml_compat.loads(path.read_text())
+    raw = tomllib.loads(path.read_text())
     loaded = roster.load_roster(path)
     assert loaded.orchestrator in loaded.agents
     if preset_name != "full-multi-lane.toml":

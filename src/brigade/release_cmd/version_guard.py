@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import tomllib
+
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .. import toml_compat
+
 from .paths import OK, WARN, _git
 
 VERSION_TAG_CHECK_NAME = "declared_version_without_git_tag"
@@ -20,7 +22,7 @@ def declared_project_version(target: Path) -> str | None:
     if not pyproject.is_file():
         return None
     try:
-        data = toml_compat.loads(pyproject.read_text())
+        data = tomllib.loads(pyproject.read_text())
     except Exception:
         return None
     project = data.get("project")

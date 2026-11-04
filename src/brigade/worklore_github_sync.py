@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import os
 import re
@@ -14,7 +16,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import urlparse
 
-from . import toml_compat as tomllib
+
 from . import worklore_client, worklore_store
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 from .worklore_github import (

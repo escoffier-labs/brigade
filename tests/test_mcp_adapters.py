@@ -102,9 +102,9 @@ def test_codex_write_preserves_foreign_tables_and_comments():
     assert "[model_providers.openai]" in out
     assert "[mcp_servers.github]" in out
     # round-trips through the reader and is byte-valid TOML
-    from brigade import toml_compat
+    import tomllib
 
-    parsed = toml_compat.loads(out)
+    parsed = tomllib.loads(out)
     assert parsed["mcp_servers"]["github"]["command"] == "npx"
     assert parsed["model"] == "gpt-5.5"
 
@@ -117,9 +117,9 @@ def test_grok_write_preserves_foreign_tables_and_comments():
     assert 'model = "grok-4"' in out
     assert "[model_providers.xai]" in out
     assert "[mcp_servers.github]" in out
-    from brigade import toml_compat
+    import tomllib
 
-    parsed = toml_compat.loads(out)
+    parsed = tomllib.loads(out)
     assert parsed["mcp_servers"]["github"]["command"] == "npx"
     assert parsed["model"] == "grok-4"
 
@@ -141,9 +141,9 @@ def test_grok_read_then_remove():
 
 
 def toml_loads(text):
-    from brigade import toml_compat
+    import tomllib
 
-    return toml_compat.loads(text)
+    return tomllib.loads(text)
 
 
 def test_json_merge_preserves_foreign_server():

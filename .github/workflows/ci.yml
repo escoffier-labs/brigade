@@ -573,10 +573,10 @@ jobs:
       fail-fast: false
       matrix:
         # Pull requests run the Python 3.12 shards, which also carry coverage.
-        # Merge groups and pushes to main run every supported Python, so 3.10
-        # and 3.11 run on the combined change in the queue (and again on the
+        # Merge groups and pushes to main run every supported Python, so 3.11
+        # runs on the combined change in the queue (and again on the
         # push to main) rather than on every pull request push.
-        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.10", "3.11", "3.12"]') }}
+        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.11", "3.12"]') }}
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
@@ -683,7 +683,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        python: ["3.11", "3.12"]
     steps:
       - name: Note Python shards deferred to the merge queue
         if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}
