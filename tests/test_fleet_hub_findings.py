@@ -206,3 +206,29 @@ def test_key_file_is_opened_in_binary_mode(tmp_path, monkeypatch):
     # Both the create and the read must avoid text-mode newline translation.
     assert len(opened) == 2
     assert all(flags & binary for flags in opened)
+
+
+def test_pull_request_alias_shares_one_finding_and_reservation(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    owners = {"watcher": {"match": {"findings": ["pull-request", "pr"], "principals": ["watcher"]}}}
+    try:
+        first = f.handle(
+            conn,
+            {"action": "observe", "kind": "pull-request", "key": "Owner/Repo#12"},
+            caller="agent:watcher",
+            owners=owners,
+            now=100,
+        )
+        alias = f.handle(
+            conn,
+            {"action": "observe", "kind": "pr", "key": "owner/repo#012"},
+            caller="agent:watcher",
+            owners=owners,
+            now=101,
+        )
+        assert alias["finding_id"] == first["finding_id"]
+        assert first["reservation"] is not None
+        assert alias["reservation"] is None
+        assert conn.execute("SELECT COUNT(*), MIN(kind) FROM fleet_findings").fetchone() == (1, "pull-request")
+    finally:
+        conn.close()

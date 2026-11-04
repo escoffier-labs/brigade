@@ -57,6 +57,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_findings_open ON fleet_findings(state,first_seen)")
 
 
+# Accepted spellings that name the same kind. Only the canonical name is stored.
+KIND_ALIASES = {"pr": "pull-request"}
+
+
 def canonical_key(kind: str, key: str) -> str:
     if kind == "email":
         return key.strip().strip("<>").lower()
@@ -213,6 +217,8 @@ def handle(
             kind = _text(raw, "kind", 64)
             if not re.fullmatch(r"[a-z][a-z0-9-]*", kind):
                 raise FindingError("invalid kind")
+            # One external event must map to one fingerprint, owner and reservation.
+            kind = KIND_ALIASES.get(kind, kind)
             canonical = canonical_key(kind, _text(raw, "key"))
             if not canonical:
                 raise FindingError("empty canonical key")
