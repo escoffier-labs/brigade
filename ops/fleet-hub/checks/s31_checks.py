@@ -559,6 +559,35 @@ def check_front(args: argparse.Namespace, result: Result) -> None:
         run(["docker", "rm", "-f", "s31-header-echo"])
 
 
+def outcome_name(exc: BaseException) -> str:
+    """Name a failed request. urlopen wraps a refused connect in URLError, so unwrap it."""
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, ConnectionRefusedError):
+        return "refused"
+    return type(reason).__name__ if isinstance(reason, BaseException) else type(exc).__name__
+
+
+def bench_summary(stdout: str) -> Any:
+    """The load harness report without its per-attempt records, which would crowd out
+    the summary and conditions. Falls back to the raw tail if no report parses."""
+    text = stdout.strip()
+    decoder = json.JSONDecoder()
+    starts = [0] + [i + 1 for i, ch in enumerate(text) if ch == "\n"]
+    for start in reversed(starts):
+        if not text.startswith("{", start):
+            continue
+        try:
+            report, _ = decoder.raw_decode(text, start)
+        except ValueError:
+            continue
+        if isinstance(report, dict):
+            attempts = report.pop("attempts", None)
+            if isinstance(attempts, list):
+                report["attempt_count"] = len(attempts)
+            return report
+    return text[-2000:]
+
+
 def check_load(args: argparse.Namespace, result: Result) -> None:
     """Concurrent GET /health through the real front: refused connections and latency at the fleet's concurrency."""
     url = front_url() + "/health"
@@ -568,10 +597,8 @@ def check_load(args: argparse.Namespace, result: Result) -> None:
         try:
             status, _ = get(url, timeout=10)
             return ("ok" if status == 200 else f"http-{status}"), (time.perf_counter() - started) * 1000
-        except ConnectionRefusedError:
-            return "refused", 0.0
         except (OSError, http.client.HTTPException) as exc:
-            return type(exc).__name__, 0.0
+            return outcome_name(exc), 0.0
 
     outcomes: dict[str, int] = {}
     latencies = []
@@ -845,7 +872,7 @@ def check_commit(args: argparse.Namespace, result: Result) -> None:
         )
         result.ok(done.returncode == 0, "throwaway hub load run", done.stderr.strip()[-300:])
         result.add("INFO", "load average during the run", round(os.getloadavg()[0], 1))
-        result.add("INFO", "load harness report", done.stdout.strip()[-2000:])
+        result.add("INFO", "load harness report", bench_summary(done.stdout))
     finally:
         for process in busy:
             process.kill()

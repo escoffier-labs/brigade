@@ -510,3 +510,25 @@ def test_drive_mount_keeps_control_brigade_repo_root_depth():
     assert script.relative_to(script.parents[3]).as_posix() == in_repo.as_posix()
     source = (RECIPE / "checks" / "s31_checks.py").read_text(encoding="utf-8")
     assert ":/drive:ro" not in source and "/drive/control-brigade.py" not in source
+
+
+def test_refused_connections_are_counted_through_urlerror():
+    import urllib.error
+
+    assert checks.outcome_name(urllib.error.URLError(ConnectionRefusedError(111, "refused"))) == "refused"
+    assert checks.outcome_name(ConnectionRefusedError()) == "refused"
+    assert checks.outcome_name(urllib.error.URLError(TimeoutError())) == "TimeoutError"
+
+
+def test_bench_summary_keeps_conditions_and_drops_attempts():
+    report = {
+        "summary": {"p99_ms": 12.5, "errors": 0},
+        "conditions": {"clients": 8},
+        "attempts": [{"n": i} for i in range(500)],
+    }
+    stdout = "server log line\n" + json.dumps(report, indent=2) + "\n"
+    kept = checks.bench_summary(stdout)
+    assert kept["summary"] == {"p99_ms": 12.5, "errors": 0}
+    assert kept["conditions"] == {"clients": 8}
+    assert kept["attempt_count"] == 500 and "attempts" not in kept
+    assert checks.bench_summary("no json here") == "no json here"
