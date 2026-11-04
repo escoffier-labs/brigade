@@ -204,6 +204,35 @@ pub fn health_shape() -> Value {
 
 #[cfg(test)]
 mod health_body_tests {
+    #[tokio::test]
+    async fn watch_connection_is_read_only_and_query_only() {
+        let path = std::env::temp_dir().join(format!(
+            "brigade-hub-watch-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        rusqlite::Connection::open(&path)
+            .unwrap()
+            .execute_batch("CREATE TABLE t (x INTEGER);")
+            .unwrap();
+        let watch = super::Watch::open(path.clone()).await.expect("watch opens");
+        {
+            let c = watch.0.lock().unwrap();
+            // Each safeguard is checked on its own, so removing either one fails here.
+            assert!(c.is_readonly(rusqlite::MAIN_DB).unwrap());
+            let query_only: i64 = c
+                .pragma_query_value(None, "query_only", |r| r.get(0))
+                .unwrap();
+            assert_eq!(query_only, 1);
+            assert!(c.execute("INSERT INTO t VALUES (1)", []).is_err());
+        }
+        drop(watch);
+        let _ = std::fs::remove_file(&path);
+    }
+
     #[test]
     fn native_health_bytes_match_the_shadow_shape() {
         let parsed: serde_json::Value = serde_json::from_str(super::HEALTH_BODY).unwrap();
