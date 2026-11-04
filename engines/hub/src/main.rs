@@ -118,7 +118,15 @@ fn expand_user(path: &str) -> String {
 
 impl Config {
     fn validate(&self) -> Result<(), String> {
-        brigade_hub::modes::Modes::parse(&self.route_mode)?;
+        let modes = brigade_hub::modes::Modes::parse(&self.route_mode)?;
+        // Only managed mode starts the maintenance thread that checkpoints the
+        // memory file and schedules its retention sweeps. An external upstream
+        // checkpoints the hub file alone, so the memory WAL would grow unchecked.
+        if self.upstream.is_some()
+            && modes.configured("memory") == Some(brigade_hub::modes::Mode::Native)
+        {
+            return Err("--route-mode memory=native requires the managed upstream: with --upstream nothing checkpoints or sweeps the memory file".into());
+        }
         u16::try_from(self.port).map_err(|_| "port must be 0-65535")?;
         if self.host.is_empty() {
             return Err(
