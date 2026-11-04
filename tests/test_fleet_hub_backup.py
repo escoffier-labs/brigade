@@ -159,6 +159,10 @@ def test_backup_writes_an_integrity_checked_private_copy(tmp_path):
     manifest = json.loads((copy / backup.MANIFEST).read_text(encoding="utf-8"))
     (entry,) = manifest["files"]
     assert entry["integrity_check"] == "ok" and entry["user_version"] == fleet_hub.SCHEMA_VERSION
+    # The manifest leaves the host in the off-host backup set, so it names the
+    # source by file name only and never carries a host path.
+    assert entry["source"] == db.name
+    assert str(tmp_path) not in (copy / backup.MANIFEST).read_text(encoding="utf-8")
     restored = sqlite3.connect(copy / db.name)
     try:
         assert restored.execute("PRAGMA journal_mode").fetchone()[0] == "delete"
@@ -393,11 +397,178 @@ def test_a_lost_ledger_in_a_writable_directory_does_not_count_as_reachable(tmp_p
         path.unlink()
     with pytest.raises(backup.BackupError, match="no recovery ledger is reachable"):
         backup.restore(copy, tmp_path / "b.db", ledgers=ledgers, now=T0)
-    # One surviving copy is enough, and the lost one gets the new record too.
+    # One surviving copy is enough. The lost one stays absent: without the
+    # assertion the tool never creates a ledger file, because its directory
+    # may be the mount point of an unmounted volume.
     ledgers[0].write_text(json.dumps({**first, "copy": {}}, default=str) + "\n", encoding="utf-8")
     second = backup.restore(copy, tmp_path / "c.db", ledgers=ledgers, now=T0)
     assert second["claim_floor"] > first["claim_floor"]
-    assert len(backup.read_ledger(ledgers[1])) == 1
+    assert not ledgers[1].exists()
+    assert second["ledgers_unreachable"] == [str(ledgers[1])]
+    assert second["ledgers_written"] == [str(ledgers[0])]
+
+
+def test_a_missing_ledger_beside_a_surviving_one_is_created_only_under_the_assertion(tmp_path):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    store = tmp_path / "backups" / backup.LEDGER_NAME
+    store.touch()
+    mount_point = tmp_path / "unmounted-volume"
+    mount_point.mkdir()
+    hidden = mount_point / backup.LEDGER_NAME
+    report = backup.restore(copy, tmp_path / "a.db", ledgers=[store, hidden], now=T0)
+    assert not hidden.exists() and list(mount_point.iterdir()) == []
+    assert report["ledgers_unreachable"] == [str(hidden)]
+    asserted = backup.restore(copy, tmp_path / "b.db", ledgers=[store, hidden], assert_no_prior_restore=True, now=T0)
+    assert asserted["ledgers_unreachable"] == []
+    (record,) = backup.read_ledger(hidden)
+    assert record["no_prior_restore_asserted"] is True and record["claim_floor"] == asserted["claim_floor"]
+
+
+def test_ledger_records_name_the_copy_relative_to_the_backup_directory(tmp_path):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    dest = tmp_path / "backups"
+    ledgers = _ledgers(tmp_path)
+    backup.restore(copy, tmp_path / "r.db", ledgers=ledgers, now=T0)
+    for ledger in ledgers:
+        text = ledger.read_text(encoding="utf-8")
+        assert str(tmp_path) not in text
+        (record,) = backup.read_ledger(ledger)
+        assert record["copy"]["path"] == f"{copy.parent.name}/{copy.name}"
+        assert (dest / record["copy"]["path"]).samefile(copy)
+
+
+def test_a_copy_outside_a_dated_directory_is_recorded_by_file_name(tmp_path):
+    db = _populated(tmp_path)
+    loose = tmp_path / "elsewhere" / "fleet-hub.db"
+    loose.parent.mkdir()
+    shutil.copyfile(_copy(tmp_path, db), loose)
+    ledgers = _ledgers(tmp_path)
+    backup.restore(loose, tmp_path / "r.db", ledgers=ledgers, now=T0)
+    (record,) = backup.read_ledger(ledgers[0])
+    assert record["copy"]["path"] == "fleet-hub.db"
+
+
+def test_ledger_records_with_absolute_copy_paths_still_parse_and_count(tmp_path):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    ledgers = _ledgers(tmp_path)
+    older = {
+        "time": "2026-11-01T00:00:00Z",
+        "copy": {"path": "/srv/hub-backups/20261101T000000Z/fleet-hub.db", "sha256": "0" * 64},
+        "message_sequence": 7 * ADV,
+        "claim_floor": 7 * ADV,
+        "roster_revision": 7 * ADV,
+        "policy_revision": 7 * ADV,
+        "no_prior_restore_asserted": False,
+    }
+    ledgers[0].write_text(json.dumps(older) + "\n", encoding="utf-8")
+    (parsed,) = backup.read_ledger(ledgers[0])
+    assert parsed["copy"]["path"] == older["copy"]["path"]
+    report = backup.restore(copy, tmp_path / "r.db", ledgers=ledgers, now=T0)
+    for field in backup.LEDGER_FIELDS:
+        assert report[field] >= 8 * ADV, field
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])
+def test_restore_refuses_any_hub_file_already_at_the_target(tmp_path, suffix):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    target = tmp_path / "r.db"
+    leftover = target.with_name(target.name + suffix)
+    leftover.write_bytes(b"left over")
+    with pytest.raises(backup.BackupError, match="already exists"):
+        backup.restore(copy, target, ledgers=_ledgers(tmp_path), now=T0)
+    assert leftover.read_bytes() == b"left over"
+    assert all(len(backup.read_ledger(path)) == 0 for path in _ledgers(tmp_path))
+
+
+def test_restore_clears_every_stale_staging_sidecar_including_the_journal(tmp_path, monkeypatch):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    target = tmp_path / "r.db"
+    staging = target.with_name(target.name + ".restoring")
+    sidecars = [staging.with_name(staging.name + suffix) for suffix in ("", "-wal", "-shm", "-journal")]
+    for path in sidecars:
+        path.write_bytes(b"stale")
+    real_copy = backup._online_copy
+    seen = []
+
+    def checked_copy(source, destination):
+        # A stale hot journal beside the staging name would be rolled into it.
+        seen.append([path.name for path in sidecars if path.exists()])
+        return real_copy(source, destination)
+
+    monkeypatch.setattr(backup, "_online_copy", checked_copy)
+    backup.restore(copy, target, ledgers=_ledgers(tmp_path), now=T0)
+    assert seen == [[]]
+    assert not any(path.exists() for path in sidecars)
+    assert backup._integrity(target) == "ok"
+
+
+@pytest.mark.parametrize("suffix", ["", "-wal", "-shm", "-journal"])
+def test_publish_refuses_a_hub_file_that_appeared_during_the_restore(tmp_path, monkeypatch, suffix):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    target = tmp_path / "r.db"
+    staging = target.with_name(target.name + ".restoring")
+    appeared = target.with_name(target.name + suffix)
+    real_fsync = backup._fsync_file
+
+    def hub_restarts(path):
+        # The crash-looping hub comes back between the advances and the publish.
+        real_fsync(path)
+        if Path(path) == staging:
+            appeared.write_bytes(b"live hub")
+
+    monkeypatch.setattr(backup, "_fsync_file", hub_restarts)
+    with pytest.raises(backup.BackupError, match="appeared during the restore"):
+        backup.restore(copy, target, ledgers=_ledgers(tmp_path), now=T0)
+    assert appeared.read_bytes() == b"live hub"
+    assert not staging.exists()
+
+
+def test_publish_never_replaces_a_target_created_after_the_last_check(tmp_path, monkeypatch):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    target = tmp_path / "r.db"
+    real_refuse = backup._refuse_existing_hub_files
+    calls = []
+
+    def racing_hub(path, message):
+        real_refuse(path, message)
+        calls.append(path)
+        if len(calls) == 2:
+            # The hub creates its file right after the pre-publish check.
+            target.write_bytes(b"live hub")
+
+    monkeypatch.setattr(backup, "_refuse_existing_hub_files", racing_hub)
+    with pytest.raises(backup.BackupError, match="appeared during the restore"):
+        backup.restore(copy, target, ledgers=_ledgers(tmp_path), now=T0)
+    assert len(calls) == 2
+    assert target.read_bytes() == b"live hub"
+    assert not target.with_name(target.name + ".restoring").exists()
+
+
+def test_a_second_restore_to_the_same_target_waits_for_the_staging_lock_and_leaves_the_first_alone(
+    tmp_path, monkeypatch
+):
+    from brigade import inbox_lock
+
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    target = tmp_path / "r.db"
+    staging = target.with_name(target.name + ".restoring")
+    monkeypatch.setattr(backup, "RESTORE_LOCK_DEADLINE_SECONDS", 0.2)
+    # The first restore holds the staging lock and has its staging file in progress.
+    with inbox_lock.held_file_lock(backup.staging_lock_path(target), deadline_seconds=1):
+        staging.write_bytes(b"first restore in progress")
+        with pytest.raises(backup.BackupError, match="another restore"):
+            backup.restore(copy, target, ledgers=_ledgers(tmp_path), now=T0)
+        assert staging.read_bytes() == b"first restore in progress"
+    assert all(len(backup.read_ledger(path)) == 0 for path in _ledgers(tmp_path))
+    assert not target.exists()
 
 
 def test_concurrent_restores_sharing_a_ledger_allocate_distinct_ranges(tmp_path, monkeypatch):

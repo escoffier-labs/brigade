@@ -67,7 +67,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_restore.add_argument(
         "--assert-no-prior-restore",
         action="store_true",
-        help="State that no earlier restore from this copy happened, when no ledger can be reached.",
+        help=(
+            "State that no earlier restore from this copy happened, when no ledger can be reached. "
+            "Only this flag lets the tool create a named ledger file that does not exist."
+        ),
     )
     p_restore.add_argument("--json", action="store_true", help="Emit JSON.")
     p_restore.set_defaults(func=_dispatch_restore)
