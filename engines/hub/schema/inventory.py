@@ -32,6 +32,9 @@ for source, snap in snapshots.items():
                     break
             else:
                 entries.append({"sources": [source], "differences": fields})
+# Record convergence for the required findings family as well as differences.
+for name in ("fleet_findings", "fleet_finding_grants"):
+    inventory.setdefault(name, [{"sources": ["fresh", *snapshots], "differences": {}}])
 (root / "engines/hub/schema/variant-inventory.json").write_text(
     json.dumps(inventory, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 )
