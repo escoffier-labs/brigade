@@ -191,19 +191,24 @@ pub(super) fn run(
     mut receiver: mpsc::Receiver<Envelope>,
     config: Config,
     arbiter: Arc<Arbiter>,
+    stats: Arc<WriterStats>,
 ) {
     let mut pending = None;
     let mut directory_synced = false;
     let mut version = crate::schema::DataVersion::new(&db).ok();
     while let Some(first) = pending.take().or_else(|| receiver.blocking_recv()) {
+        let dequeued = Instant::now();
         let lock_deadline = (Instant::now() + config.begin_wait.min(Duration::from_secs(5)))
             .min(first.budget.deadline);
         let Some(turn) = arbiter.acquire(Lane::Hub, lock_deadline) else {
+            stats.lock_wait(dequeued.elapsed());
             let durable = first.budget.durable;
             answer(first, Err(Failure::timeout(durable)));
             continue;
         };
-        if let Err(error) = begin(&db, lock_deadline) {
+        let began = begin(&db, lock_deadline);
+        stats.lock_wait(dequeued.elapsed());
+        if let Err(error) = began {
             let failure = if error.sqlite_error_code() == Some(ErrorCode::DatabaseBusy) {
                 Failure::timeout(first.budget.durable)
             } else {
@@ -230,6 +235,7 @@ pub(super) fn run(
         let mut next = Some(first);
         let mut replayed = false;
         let mut broken = false;
+        let mut aborted = false;
         while let Some(e) = next.take() {
             if !batch.is_empty()
                 && (batch.len() >= 256
@@ -244,6 +250,7 @@ pub(super) fn run(
             bytes += e.budget.bytes;
             let result = apply(&db, &e);
             if db.is_autocommit() {
+                aborted = true;
                 answer(e, result);
                 if replayed || begin(&db, lock_deadline).is_err() {
                     broken = true;
@@ -271,7 +278,15 @@ pub(super) fn run(
             }
             next = receiver.try_recv().ok();
         }
+        let applied = started.elapsed();
+        let commit_started = Instant::now();
         let committed = !broken && db.execute_batch("COMMIT").is_ok();
+        stats.batch(
+            batch.len(),
+            applied,
+            (!broken).then(|| commit_started.elapsed()),
+            aborted || !committed,
+        );
         if !committed {
             let _ = db.execute_batch("ROLLBACK");
             for (e, _) in batch {

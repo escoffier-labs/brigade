@@ -32,6 +32,11 @@ class Ops(unittest.TestCase):
             status, _, body = request(port, "/metrics", headers={"Authorization": "Bearer fake-admin-token"})
             self.assertEqual(status, 200)
             self.assertIn(b'brigade_hub_shadow_comparisons_total{family="health",result="match"}', body)
+            # The front owns reader and CPU pools but no writer: the Python upstream commits.
+            self.assertIn(b"\nbrigade_hub_reader_queue_depth 0\n", body)
+            self.assertIn(b"\nbrigade_hub_cpu_queue_depth 0\n", body)
+            self.assertIn(b"\nbrigade_hub_writer_queue_depth NaN\n", body)
+            self.assertNotIn(b"Not yet wired", body)
 
 
 if __name__ == "__main__":

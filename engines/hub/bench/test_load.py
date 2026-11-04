@@ -15,7 +15,7 @@ import matrix
 
 
 @contextlib.contextmanager
-def hub(status=200, delay=0, truncated=False):
+def hub(status=200, delay=0, truncated=False, metrics_text=None):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -29,11 +29,14 @@ def hub(status=200, delay=0, truncated=False):
 
         def answer(self):
             metrics = self.path == "/metrics"
-            body = json.dumps(
-                {"proxy_buffer_fallback_total": 0}
-                if metrics
-                else {"error": "hub busy", "reason": "proxy-inflight-full"}
-            ).encode()
+            if metrics and metrics_text is not None:
+                body = metrics_text().encode()
+            else:
+                body = json.dumps(
+                    {"proxy_buffer_fallback_total": 0}
+                    if metrics
+                    else {"error": "hub busy", "reason": "proxy-inflight-full"}
+                ).encode()
             self.send_response(200 if metrics else status)
             self.send_header(
                 "Content-Length",
@@ -105,6 +108,66 @@ class Driver(unittest.TestCase):
                     result["telemetry"]["samples"][0]["value"],
                     {"proxy_buffer_fallback_total": 0},
                 )
+
+    def test_metrics_text_fills_the_telemetry_columns(self):
+        # Each scrape sees a larger queue, batch and stall count, as under writes.
+        scrapes = iter(range(1, 1000))
+
+        def exposition():
+            n = next(scrapes)
+            return (
+                "# HELP brigade_hub_writer_queue_depth Commands waiting.\n"
+                f"brigade_hub_writer_queue_depth {n}\n"
+                f"brigade_hub_writer_batch_size {n * 10}\n"
+                "brigade_hub_writer_apply_seconds 0.002\n"
+                "brigade_hub_reader_queue_depth 0\n"
+                "brigade_hub_cpu_queue_depth NaN\n"
+                f"brigade_hub_checkpoint_busy_total {n // 2}\n"
+                f"brigade_hub_checkpoint_stall_frames {n * 100}\n"
+                'brigade_hub_requests_total{family="health",status_class="2xx"} 1\n'
+            )
+
+        with hub(metrics_text=exposition) as url:
+            result = self.run_load(url, "--sample-interval", ".05")
+        telemetry = result["telemetry"]
+        sample = telemetry["samples"][0]
+        self.assertEqual(sample["status"], 200)
+        self.assertIsNone(sample["value"]["brigade_hub_cpu_queue_depth"])
+        queue = telemetry["queue_depth"]
+        self.assertEqual(set(queue), {"writer_queue_depth", "reader_queue_depth"})
+        self.assertEqual(queue["writer_queue_depth"]["metric"], "brigade_hub_writer_queue_depth")
+        self.assertGreater(queue["writer_queue_depth"]["samples"], 1)
+        self.assertGreater(queue["writer_queue_depth"]["max"], queue["writer_queue_depth"]["min"])
+        self.assertEqual(queue["reader_queue_depth"]["max"], 0)
+        sizes = telemetry["batch_sizes"]["writer_batch_size"]
+        self.assertEqual(sizes["values"][0], 10)
+        self.assertEqual(sizes["last"], sizes["values"][-1])
+        stalls = telemetry["checkpoint_stalls"]
+        self.assertEqual(set(stalls), {"checkpoint_busy_total", "checkpoint_stall_frames"})
+        self.assertGreater(stalls["checkpoint_stall_frames"]["last"], stalls["checkpoint_stall_frames"]["first"])
+        json.dumps(result, allow_nan=False)
+
+    def test_nan_metrics_stay_unavailable(self):
+        # A proxy front exports NaN for the writer and no checkpoint stall value.
+        text = (
+            "brigade_hub_writer_queue_depth NaN\n"
+            "brigade_hub_writer_batch_size NaN\n"
+            "brigade_hub_checkpoint_stall_frames NaN\n"
+        )
+        with hub(metrics_text=lambda: text) as url:
+            result = self.run_load(url)
+        telemetry = result["telemetry"]
+        for column in ("queue_depth", "batch_sizes", "checkpoint_stalls"):
+            self.assertEqual(telemetry[column], load.UNAVAILABLE)
+        self.assertEqual(telemetry["samples"][0]["status"], 200)
+
+    def test_parse_metrics(self):
+        raw = b'# HELP x y\nbrigade_hub_a 3\nbrigade_hub_b NaN\nbrigade_hub_c{l="v w"} 1.5\nbad line\n'
+        self.assertEqual(
+            load.parse_metrics(raw),
+            {"brigade_hub_a": 3.0, "brigade_hub_b": None, 'brigade_hub_c{l="v w"}': 1.5},
+        )
+        self.assertEqual(load.parse_metrics(b'{"a": 1}'), {"a": 1})
 
     def test_open_loop_does_not_hide_client_overload(self):
         with hub(delay=0.1) as url:

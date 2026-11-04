@@ -673,7 +673,13 @@ fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
         .unwrap_or_else(|_| panic!("queue"));
     drop(sender);
     match worker::open(&path) {
-        Ok(db) => worker::run(db, receiver, Config::new(path.clone()), arbiter),
+        Ok(db) => worker::run(
+            db,
+            receiver,
+            Config::new(path.clone()),
+            arbiter,
+            Arc::default(),
+        ),
         Err(_) => drop(receiver),
     }
     let acknowledged = matches!(result.blocking_recv(), Ok(Ok(_)));
