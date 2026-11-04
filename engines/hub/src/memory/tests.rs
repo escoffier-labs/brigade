@@ -929,7 +929,7 @@ fn only_the_memory_writer_holds_both_locks() {
 }
 
 #[test]
-fn sweeps_are_bounded_and_skip_the_hub_lock() {
+fn sweeps_are_bounded_drain_the_backlog_and_skip_the_hub_lock() {
     let dir = temp_dir();
     let memory = dir.join("fleet-hub-memory.db");
     let db = worker::open_file(&memory, true).unwrap();
@@ -964,8 +964,10 @@ fn sweeps_are_bounded_and_skip_the_hub_lock() {
         .unwrap()
         .query_row("SELECT count(*) FROM memory_idempotency", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(left, 44);
-    assert_eq!(metrics.lock().unwrap().sweeps, 1);
+    // One request drains all 300 expired rows in bounded transactions: a full
+    // batch of 256, then the remaining 44.
+    assert_eq!(left, 0);
+    assert_eq!(metrics.lock().unwrap().sweeps, 2);
     blocker.execute_batch("ROLLBACK").unwrap();
     std::fs::remove_dir_all(&dir).unwrap();
 }
