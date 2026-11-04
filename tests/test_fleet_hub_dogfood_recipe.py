@@ -190,6 +190,7 @@ def test_secrets_are_private_and_never_overwritten(project, tmp_path):
         assert stat.S_IMODE(folder.stat().st_mode) == 0o700
         assert stat.S_IMODE((folder / "findings-key").stat().st_mode) == 0o444
         assert stat.S_IMODE((tmp_path / "backups").stat().st_mode) == 0o700
+        assert stat.S_IMODE((tmp_path / "backups" / "recovery-ledger.jsonl").stat().st_mode) == 0o600
     assert _init(project, tmp_path) == 0
     assert {name: (folder / name).read_bytes() for name in setup.SECRET_FILES} == first
 
@@ -284,8 +285,11 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert _init(project, tmp_path) == 0
     default = _compose(project)
     assert set(default["services"]) == {"netns", "hub", "front"}
-    full = _compose(project, "gpu", "backup")
-    assert set(full["services"]) == {"netns", "hub", "front", "embedder", "backup"}
+    full = _compose(project, "gpu", "backup", "model-pull")
+    assert set(full["services"]) == {"netns", "hub", "front", "embedder", "backup", "model-pull"}
+    # The embedder has no egress; only the one-shot pull reaches a registry.
+    assert set(full["services"]["model-pull"]["networks"]) == {"default"}
+    assert "deploy" not in full["services"]["model-pull"]
     for name, service in full["services"].items():
         assert not service.get("ports"), name
     assert full["services"]["hub"]["network_mode"] == "service:netns"
@@ -295,7 +299,7 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert set(full["services"]["embedder"]["networks"]) == {"embed"}
     devices = full["services"]["embedder"]["deploy"]["resources"]["reservations"]["devices"]
     assert devices[0]["capabilities"] == ["gpu"]
-    for name in ("netns", "hub", "front", "backup"):
+    for name in ("netns", "hub", "front", "backup", "model-pull"):
         assert "deploy" not in full["services"][name] and not full["services"][name].get("devices"), name
     hub = full["services"]["hub"]
     assert hub["command"][:2] == ["--host", "127.0.0.1"]

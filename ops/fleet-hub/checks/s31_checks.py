@@ -309,11 +309,17 @@ def check_io(args: argparse.Namespace, result: Result) -> None:
 
 
 def check_fdatasync(args: argparse.Namespace, result: Result) -> None:
-    """The fdatasync probe: 4 KiB writes, each followed by fdatasync, for --seconds, --runs times."""
+    """The fdatasync probe: 4 KiB writes, each followed by fdatasync, for --seconds, --runs times.
+
+    With --slice, only the probe runs in that slice (through `sudo systemd-run
+    --scope`). The --writer process stays in this invocation's own cgroup, the
+    caller's user session, so it competes as agent traffic outside the slice.
+    Run it as the compose account, not under systemd-run.
+    """
     folder = Path(args.path)
     writer = None
     if args.writer:
-        # A synthetic agent writer outside the hub slice, for the I/O weight test.
+        # A synthetic agent writer in the caller's cgroup, outside the measured slice.
         writer = subprocess.Popen(
             [
                 sys.executable,
@@ -324,6 +330,34 @@ def check_fdatasync(args: argparse.Namespace, result: Result) -> None:
             ]
         )
     try:
+        if args.slice:
+            inner = [
+                "sudo",
+                "systemd-run",
+                "--scope",
+                "--quiet",
+                f"--slice={args.slice}",
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--record",
+                str(Path(args.record).resolve()),
+                "fdatasync",
+                "--path",
+                str(folder),
+                "--seconds",
+                str(args.seconds),
+                "--runs",
+                str(args.runs),
+            ]
+            done = run(inner, timeout=args.runs * (args.seconds + 30) + 60)
+            print(done.stdout, end="")
+            result.ok(
+                done.returncode == 0,
+                f"probe ran in {args.slice} with the writer outside it",
+                done.stderr.strip()[-200:],
+            )
+            result.add("INFO", "writer", "on" if writer else "off")
+            return
         for index in range(args.runs):
             samples = []
             fd, name = tempfile.mkstemp(prefix="s31-fdatasync-", dir=folder)
@@ -728,9 +762,9 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
             data = Path(scratch) / "data"
             data.mkdir()
             (Path(scratch) / "restored-2.db").rename(data / "fleet-hub.db")
-            os.chmod(scratch, 0o755)
-            os.chmod(data, 0o777)
             (data / "token").write_text("fake-restore-drive-token\n", encoding="utf-8")
+            # The restored file belongs to this account and is mode 0600, so the
+            # throwaway hub runs as this account rather than the image's UID.
             script = (
                 "brigade fleet serve --host 127.0.0.1 --port 3774 --db /data/fleet-hub.db --token-file /data/token & "
                 "sleep 5; BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=$(cat /data/token) "
@@ -743,6 +777,10 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
                     "--rm",
                     "--network",
                     "none",
+                    "--user",
+                    f"{os.getuid()}:{os.getgid()}",
+                    "-e",
+                    "HOME=/data",
                     "-v",
                     f"{data}:/data",
                     "-v",
@@ -923,6 +961,7 @@ def parser() -> argparse.ArgumentParser:
             q.add_argument("--seconds", type=float, default=6)
             q.add_argument("--runs", type=int, default=2)
             q.add_argument("--writer", default=None, help="Directory for a synthetic agent writer during the runs.")
+            q.add_argument("--slice", default=None, help="Run only the probe in this slice, e.g. brigade-hub.slice.")
         elif name == "setup":
             q.add_argument(
                 "--remote", nargs=argparse.REMAINDER, default=[], help="--remote-url URL --remote-token-file FILE"

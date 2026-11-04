@@ -423,6 +423,11 @@ def cmd_init(args: argparse.Namespace, run: Runner, post: Poster) -> int:
     created = ensure_secrets(project, remote_token=token)
     backup_dir = Path(env_updates["BRIGADE_BACKUP_DIR"])
     _private_dir(backup_dir)
+    # `brigade fleet restore` counts only a ledger file that exists, so a lost
+    # ledger is never mistaken for a store that never saw a restore.
+    ledger = backup_dir / "recovery-ledger.jsonl"
+    if not ledger.exists():
+        os.close(os.open(ledger, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600))
     apply(project, decision, env_updates)
     print(report(decision))
     if created:

@@ -136,6 +136,28 @@ services:
     oom_score_adj: -800
     cgroup_parent: ${BRIGADE_EMBED_SLICE:-brigade-embed.slice}
 
+  # One-shot model download into the models volume. The embedder sits only on
+  # the internal network and cannot reach a registry, so this runs on the
+  # default network, with no GPU and no published port:
+  # `docker compose --profile model-pull run --rm model-pull`.
+  model-pull:
+    profiles: [model-pull]
+    image: ${BRIGADE_EMBED_IMAGE:-ollama/ollama:0.18.0@sha256:e23e6499890325d31f3454cdc83f7a613a2423c8a9e167bbafea0b0e3c27d7c6}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - ollama serve >/dev/null 2>&1 & sleep 3 && ollama pull "$$BRIGADE_EMBED_MODEL" && kill %1
+    environment:
+      OLLAMA_HOST: 127.0.0.1:11434
+      OLLAMA_MODELS: /models
+      BRIGADE_EMBED_MODEL: ${BRIGADE_EMBED_MODEL:-qwen3-embedding:8b}
+    volumes:
+      - models:/models
+    networks:
+      - default
+    restart: "no"
+    security_opt:
+      - no-new-privileges:true
+
   # One-shot copy job: `docker compose --profile backup run --rm backup`,
   # started hourly by systemd/brigade-hub-backup.timer. Root inside the
   # container with three capabilities: it reads the hub's files, SQLite gives

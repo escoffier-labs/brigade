@@ -44,7 +44,8 @@ Conventions:
 - Installs or changes: `ops/fleet-hub/secrets/` (mode 0700) with
   `admin-token.txt`, `findings-key` (32 random bytes) and `front-authkey`,
   each mode 0444, plus `embed-token` for a remote embedder. Also `.env`,
-  `config/hub.toml` and the backup directory (mode 0700). All ignored by Git.
+  `config/hub.toml`, the backup directory (mode 0700) and the empty recovery
+  ledger in it (mode 0600). All ignored by Git or outside the checkout.
 - Why: the recipe's two secrets. The admin token is a Docker secret, and the
   findings and recall-log HMAC key is a second secret off the state volume, so a
   volume copy alone cannot test guesses. The front needs its private-network
@@ -57,6 +58,8 @@ Conventions:
   chmod 0644 secrets/front-authkey && "${EDITOR:-vi}" secrets/front-authkey && chmod 0444 secrets/front-authkey
   ```
 
+  Create the hub-host ledger copy too:
+  `install -D -m 0600 /dev/null "$HOME/.brigade/hub-recovery-ledger.jsonl"`.
   Then copy `admin-token.txt` and `findings-key` to the password manager.
   They are backed up apart from the database copies.
 - Verify: `stat -c '%a %n' secrets secrets/* "$HOME/brigade-hub-backups"`
@@ -298,9 +301,11 @@ Conventions:
 - Command: `lsblk -o NAME,MAJ:MIN` for the device, then
   `echo '<MAJ:MIN> enable=1 ctrl=auto' | sudo tee /sys/fs/cgroup/io.cost.qos`.
 - Verify: `checks/s31_checks.py io --device-id <MAJ:MIN>` reports the cost
-  model enabled. Then compare
-  `sudo systemd-run --scope --slice=brigade-hub.slice python3 checks/s31_checks.py fdatasync --path <DIR_ON_DATA_ROOT> --writer <DIR_ON_SAME_DEVICE>`
-  with and without the setting. Record both, or record "latency target only"
+  model enabled. Then, as the compose account, compare
+  `checks/s31_checks.py fdatasync --slice brigade-hub.slice --path <DIR_ON_DATA_ROOT> --writer <DIR_ON_SAME_DEVICE>`
+  with and without the setting. Only the probe enters the hub slice (through
+  `sudo systemd-run --scope`), and the writer stays outside it in the caller's
+  session, like agent traffic. Record both, or record "latency target only"
   if the action is declined.
 - Undo: `echo '<MAJ:MIN> enable=0' | sudo tee /sys/fs/cgroup/io.cost.qos`, or
   reboot.

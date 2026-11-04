@@ -27,6 +27,7 @@ each one before anyone runs it. The scripted acceptance checks are in
 | `front` | `service:netns` | The private network's HTTPS front. Terminates HTTPS with the certificate the private network issues for its own name and forwards to `127.0.0.1:3774`, so the hub's peer is loopback, as on the LXC hub host. SSH stays off. |
 | `embedder` | `embed` only (internal) | Only under the `gpu` profile. One GPU through a device reservation, its own model volume, no published port. The hub reaches it as `http://embedder:11434`. |
 | `backup` | none | One-shot `brigade fleet backup`, started hourly by a timer. |
+| `model-pull` | compose default network | One-shot download of the R1 model into the model volume, under the `model-pull` profile. The embedder itself cannot reach a registry. |
 
 No service publishes a port. A process on the host, outside the hub's
 namespace and without Docker rights or `sudo`, cannot reach the hub port or
@@ -183,8 +184,8 @@ BM25 to hybrid:
 
 ```bash
 bin/hub-setup.py switch --to hybrid           # probes the GPU or the remote endpoint again
+docker compose --profile model-pull run --rm model-pull   # once per model volume: the embedder has no egress
 docker compose up -d --no-build               # starts the embedder under the gpu profile
-docker compose --profile gpu exec embedder ollama pull <R1_MODEL>   # once per model volume
 ```
 
 If no embedder passes its probe, `switch --to hybrid` changes nothing and says
@@ -266,6 +267,11 @@ moving forward.
      --json
    ```
 
+   Setup creates the ledger beside the backups. Create the hub-host copy
+   once with `install -m 0600 /dev/null "$HOME/.brigade/hub-recovery-ledger.jsonl"`.
+   Only a ledger file that exists counts: a missing file may be a lost
+   ledger, so the tool refuses rather than start from nothing.
+
    The tool advances the message sequence, the roster and policy revisions and
    the claim recovery floor, each 2^32 above the higher of the copy's value and
    the newest ledger record. It ends every claim, so every holder from the
@@ -338,7 +344,7 @@ After the matching host actions are done, run each check from
 | UPS monitor and simulated low battery | `checks/s31_checks.py ups --phase before`, then `sudo upsmon -c fsd`, then after the boot `checks/s31_checks.py ups --phase after` |
 | GPU toolkit, embedder sees the GPU, hub has none | `checks/s31_checks.py gpu` |
 | cgroup readbacks | `checks/s31_checks.py cgroups --hub-cpus <...> --embed-cpus <...> --service <agent-service> ...` |
-| I/O weight or latency target only | `checks/s31_checks.py io --device-id <MAJ:MIN>`, then `sudo systemd-run --scope --slice=brigade-hub.slice python3 checks/s31_checks.py fdatasync --path <dir on the data root> --writer <dir on the same device>` |
+| I/O weight or latency target only | `checks/s31_checks.py io --device-id <MAJ:MIN>`, then, as the compose account, `checks/s31_checks.py fdatasync --slice brigade-hub.slice --path <dir on the data root> --writer <dir on the same device>`. Only the probe enters the slice, and the writer stays in the caller's session |
 | Setup on throwaway projects | `checks/s31_checks.py setup [--remote --remote-url <URL> --remote-token-file <FILE>]` |
 | Access from the host | `checks/s31_checks.py access` |
 | Front: forged header, SSH off, forwarded-for | `checks/s31_checks.py front` (starts a header echo for the test only) |
