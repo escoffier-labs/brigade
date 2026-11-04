@@ -21,7 +21,10 @@ impl Modes {
                 "proxy" => Mode::Proxy,
                 _ => return Err("unknown route mode".into()),
             };
-            let native = matches!(family, "health" | "metrics" | "registration" | "memory");
+            let native = matches!(
+                family,
+                "health" | "metrics" | "registration" | "claims" | "memory"
+            );
             // Only health has a shadow comparator and housekeeping audit so far.
             let shadow = family == "health";
             if !matches!(
@@ -102,7 +105,14 @@ mod tests {
         assert_eq!(modes.get("registration"), Mode::Native);
         assert_eq!(Modes::default().get("registration"), Mode::Proxy);
         assert!(Modes::parse(&["registration=shadow".into()]).is_err());
-        assert!(Modes::parse(&["claims=native".into()]).is_err());
+        assert!(Modes::parse(&["heartbeat=native".into()]).is_err());
+    }
+    #[test]
+    fn claims_accept_native_and_proxy_but_not_shadow() {
+        let modes = Modes::parse(&["claims=native".into()]).unwrap();
+        assert_eq!(modes.get("claims"), Mode::Native);
+        assert_eq!(Modes::default().get("claims"), Mode::Proxy);
+        assert!(Modes::parse(&["claims=shadow".into()]).is_err());
     }
     use super::*;
     #[test]
