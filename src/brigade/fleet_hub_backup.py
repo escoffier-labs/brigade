@@ -14,10 +14,23 @@ above the higher of the copy's value and the newest value in the recovery
 ledger. The ledger is an append-only JSON-lines file kept outside every
 database and copy, so two restores from the same copy never hand out the same
 range.
+
+A restore never creates a ledger file unless the operator passes
+``--assert-no-prior-restore``. Backup setup creates the ledger beside the
+copies and HOST-ACTIONS 1 creates the one on the hub host. Without the
+assertion, a named ledger that does not exist is reported unreachable and left
+alone, because its directory may be the empty mount point of an unmounted
+volume, and a record written there would be hidden again once the volume
+returns.
+
+Copy manifests and ledger records name files relative to the backup
+directory, never by an absolute host path, because the backup directory is in
+the off-host backup set.
 """
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -25,13 +38,13 @@ import re
 import shutil
 import sqlite3
 import stat
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import fleet_hub, fleet_hub_claims
+from . import fleet_hub, fleet_hub_claims, inbox_lock
 
 ADVANCE = 2**32
 DEFAULT_KEEP_HOURLY = 48
@@ -45,6 +58,11 @@ STAMP_FORMAT = "%Y%m%dT%H%M%SZ"
 _STAMP = re.compile(r"^\d{8}T\d{6}Z$")
 LEDGER_FIELDS = ("message_sequence", "claim_floor", "roster_revision", "policy_revision")
 RESTORE_ACTOR = "fleet-restore"
+# A SQLite file's sidecars. A hot rollback journal is played into its main
+# file on first open, so a leftover -journal counts like a -wal.
+HUB_FILE_SUFFIXES = ("", "-wal", "-shm", "-journal")
+# A second restore to the same target waits this long for the first to finish.
+RESTORE_LOCK_DEADLINE_SECONDS = 5.0
 
 
 class BackupError(Exception):
@@ -277,7 +295,8 @@ def take_backup(
             entries.append(
                 {
                     "name": item.name,
-                    "source": str(item),
+                    # The file name only: the manifest leaves the host.
+                    "source": item.name,
                     "bytes": target.stat().st_size,
                     "sha256": _sha256(target),
                     "user_version": version,
@@ -487,6 +506,70 @@ def _advance_roster(conn: sqlite3.Connection, base: int, *, policy_revision: int
     return revision
 
 
+def _hub_files(path: Path) -> list[Path]:
+    return [path.with_name(path.name + suffix) for suffix in HUB_FILE_SUFFIXES]
+
+
+def _refuse_existing_hub_files(path: Path, message: str) -> None:
+    for item in _hub_files(path):
+        if os.path.lexists(item):
+            raise BackupError(f"{item} {message}")
+
+
+def _remove_hub_files(path: Path) -> None:
+    for item in _hub_files(path):
+        if os.path.lexists(item):
+            item.unlink()
+
+
+def staging_lock_path(target: Path) -> Path:
+    """The lock file that owns ``<target>.restoring`` for one restore at a time."""
+    return target.with_name(target.name + ".restoring.lock")
+
+
+@contextlib.contextmanager
+def _staging_lock(target: Path) -> Iterator[None]:
+    lock = staging_lock_path(target)
+    held = inbox_lock.held_file_lock(lock, deadline_seconds=RESTORE_LOCK_DEADLINE_SECONDS)
+    try:
+        held.__enter__()
+    except inbox_lock.InboxLockTimeout as exc:
+        raise BackupError(f"another restore to {target} holds {lock}; refusing") from exc
+    try:
+        yield
+    finally:
+        held.__exit__(None, None, None)
+
+
+def _publish(staging: Path, target: Path) -> None:
+    """Give the staged file the target's name without replacing anything already there.
+
+    A crash-looping hub can create a fresh database at the target while the
+    restore runs, so the target and its sidecars are checked again here, and
+    the publish itself fails rather than overwrite a file that appears after
+    that check. POSIX uses ``os.link``, which refuses an existing name, then
+    removes the staging name. Windows uses ``os.rename``, which is
+    ``MoveFileExW`` without ``MOVEFILE_REPLACE_EXISTING`` and refuses an
+    existing name the same way.
+    """
+    message = "appeared during the restore; refusing to replace it"
+    _refuse_existing_hub_files(target, message)
+    try:
+        if os.name == "nt":
+            os.rename(staging, target)
+        else:
+            os.link(staging, target)
+            os.unlink(staging)
+    except FileExistsError as exc:
+        raise BackupError(f"{target} {message}") from exc
+
+
+def _copy_label(copy: Path) -> str:
+    """The copy's path relative to the backup directory, ``<stamp>/<file>``, or its file name."""
+    folder = copy.absolute().parent.name
+    return f"{folder}/{copy.name}" if _STAMP.match(folder) else copy.name
+
+
 def restore(
     copy: Path,
     target: Path,
@@ -502,11 +585,23 @@ def restore(
         raise BackupError("name at least one recovery ledger with --ledger (beside the copies and on the hub host)")
     if not copy.is_file():
         raise BackupError(f"copy {copy} is not a file")
-    for path in (target, target.with_name(target.name + "-wal"), target.with_name(target.name + "-shm")):
-        if path.exists():
-            raise BackupError(f"{path} already exists; restore only into an absent hub file")
     if not target.parent.is_dir():
         raise BackupError(f"target directory {target.parent} does not exist")
+    # Two restores to one target share the staging name, so the second waits
+    # for the first (and then finds its target) instead of deleting its files.
+    with _staging_lock(target):
+        return _restore_locked(copy, target, ledger_paths, assert_no_prior_restore=assert_no_prior_restore, now=now)
+
+
+def _restore_locked(
+    copy: Path,
+    target: Path,
+    ledger_paths: list[Path],
+    *,
+    assert_no_prior_restore: bool,
+    now: datetime | None,
+) -> dict[str, Any]:
+    _refuse_existing_hub_files(target, "already exists; restore only into an absent hub file")
     check = _integrity(copy)
     if check != "ok":
         raise BackupError(f"integrity_check failed on copy {copy}: {check}")
@@ -520,15 +615,18 @@ def restore(
             "when backups are set up. If no earlier restore from this copy happened, say so with "
             "--assert-no-prior-restore and the statement is recorded in the new ledger record"
         )
-    writable = [path for path in ledger_paths if path in existing or assert_no_prior_restore or path.parent.is_dir()]
+    # A new ledger file is created only under the assertion. Setup and
+    # HOST-ACTIONS 1 create the initial ledgers; a missing one beside a
+    # surviving one is reported, never recreated, since its directory may be
+    # an unmounted volume's mount point.
+    writable = list(ledger_paths) if assert_no_prior_restore else existing
     unreachable = [str(path) for path in ledger_paths if path not in writable]
     copy_digest = _sha256(copy)
     taken = _utc(now)
     stamp = taken.isoformat().replace("+00:00", "Z")
     staging = target.with_name(target.name + ".restoring")
-    for path in (staging, staging.with_name(staging.name + "-wal"), staging.with_name(staging.name + "-shm")):
-        if path.exists():
-            path.unlink()
+    # The staging lock is held, so anything here is a crashed restore's leftover.
+    _remove_hub_files(staging)
     locks = _LockedLedgers(writable)
     try:
         locks.__enter__()
@@ -550,7 +648,10 @@ def restore(
                 roster = _advance_roster(conn, base["roster_revision"], policy_revision=policy, now=stamp)
                 record = {
                     "time": stamp,
-                    "copy": {"path": str(copy), "sha256": copy_digest},
+                    # Relative to the backup directory: the ledger beside the
+                    # copies leaves the host. Older records hold an absolute
+                    # path; nothing reads this field back, so both parse.
+                    "copy": {"path": _copy_label(copy), "sha256": copy_digest},
                     "message_sequence": sequence,
                     "claim_floor": floor,
                     "roster_revision": roster,
@@ -570,12 +671,10 @@ def restore(
         if _integrity(staging) != "ok":
             raise BackupError("the restored file failed integrity_check after the advances")
         _fsync_file(staging)
-        os.replace(staging, target)
+        _publish(staging, target)
         _fsync_dir(target.parent)
     except BaseException:
-        for path in (staging, staging.with_name(staging.name + "-wal"), staging.with_name(staging.name + "-shm")):
-            if path.exists():
-                path.unlink()
+        _remove_hub_files(staging)
         raise
     finally:
         locks.__exit__(None, None, None)
