@@ -82,7 +82,7 @@ def canonical_key(kind: str, key: str) -> str:
         query = urlencode(
             sorted(
                 (k, v)
-                for k, v in parse_qsl(url.query)
+                for k, v in parse_qsl(url.query, keep_blank_values=True)
                 if not k.lower().startswith("utm_") and k.lower() not in TRACKING
             )
         )

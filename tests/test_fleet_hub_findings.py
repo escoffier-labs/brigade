@@ -242,7 +242,9 @@ def test_pull_request_alias_shares_one_finding_and_reservation(tmp_path):
         ("https://example.test:80/jobs/1", "https://example.test:80/jobs/1"),
         ("http://example.test:443/jobs/1", "https://example.test:443/jobs/1"),
         ("https://example.test:8443/jobs/1", "https://example.test:8443/jobs/1"),
+        # A blank non-tracking parameter is part of the key; a blank tracking one is not.
+        ("https://example.test/jobs?b=2&remote=&utm_source=", "https://example.test/jobs?b=2&remote="),
     ],
 )
-def test_job_url_keeps_ports_that_are_not_the_scheme_default(raw, expected):
+def test_job_url_keeps_ports_and_blank_parameters(raw, expected):
     assert f.canonical_key("job", raw) == expected
