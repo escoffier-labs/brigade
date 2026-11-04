@@ -201,10 +201,11 @@ def _route_modules() -> tuple[Any, ...]:
     The CI, action and audit modules stay function-level imports, as they were
     before the seam, so importing this module does not load them.
     """
-    from . import fleet_action_http, fleet_ci_http, fleet_hub_audit_http
+    from . import fleet_action_http, fleet_ci_http, fleet_hub_audit_http, fleet_hub_findings_http
 
     return (
         fleet_hub_audit_http,
+        fleet_hub_findings_http,
         fleet_ci_http,
         fleet_action_http,
         fleet_admin_stats_http,

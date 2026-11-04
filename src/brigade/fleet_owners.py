@@ -45,6 +45,7 @@ class Holding:
     conductor: str = ""
     session_harness: str = ""
     adapter: str = ""
+    finding_kind: str = ""
 
     def public(self) -> dict[str, str]:
         return {
@@ -86,6 +87,7 @@ def _matches(match: Mapping[str, Any], item: Holding) -> bool:
         ("conductors", item.conductor),
         ("session_harnesses", item.session_harness),
         ("adapters", item.adapter),
+        ("findings", item.finding_kind),
     ):
         if value and value in (match.get(key) or ()):
             return True
@@ -249,6 +251,7 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bo
     truncated: list[str] = []
     items: list[Holding] = []
     loaders: tuple[tuple[str, Callable[[], list[Holding]]], ...] = (
+        ("findings", lambda: _findings(conn)),
         ("claims", lambda: _claims(conn, labels, now_epoch)),
         *((("grokbot-jobs", lambda: _grokbot_jobs(conn, labels)),) if include_grokbot else ()),
         ("sessions", lambda: _sessions(conn, labels, now_epoch)),
@@ -356,3 +359,22 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
     for owner in payload["owners"]:
         fill(owner["holdings"], [item.public() for item in view.by_owner.get(owner["name"], ())[:JSON_HOLDINGS_LIMIT]])
     return payload
+
+
+def _findings(conn: sqlite3.Connection) -> list[Holding]:
+    return [
+        Holding(
+            kind="finding",
+            ref=fid,
+            repo="",
+            node_label="",
+            detail=kind,
+            since=datetime.fromtimestamp(seen, tz=timezone.utc).isoformat(),
+            finding_kind=kind,
+        )
+        for fid, kind, seen in conn.execute(
+            "SELECT finding_id,kind,first_seen FROM fleet_findings WHERE state != 'resolved' "
+            "ORDER BY first_seen DESC,finding_id LIMIT ?",
+            (SOURCE_LIMIT + 1,),
+        )
+    ]

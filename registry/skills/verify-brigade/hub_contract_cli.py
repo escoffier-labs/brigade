@@ -155,6 +155,8 @@ def _fail_cases(cases: list[dict], problems: list[dict]) -> None:
 
 def command(args: Any, helper: Any) -> int:
     """Drive a Fleet Hub over HTTP and compare it to the recorded wire contract and goldens."""
+    if getattr(args, "profile", "contract") == "findings":
+        return helper.load_sibling("hub_findings").command(args, helper)
     if getattr(args, "profile", "contract") == "prod-readonly":
         return helper.load_sibling("hub_readonly").command(args, helper)
     root = helper.state_root(args)

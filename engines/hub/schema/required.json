@@ -4263,6 +4263,245 @@
       },
       "sql": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"
     },
+    "fleet_finding_grants": {
+      "autoincrement": false,
+      "checks": [],
+      "column_order": [
+        "principal_id",
+        "granted_at",
+        "enrollment_epoch"
+      ],
+      "columns": [
+        [
+          "enrollment_epoch",
+          "TEXT",
+          1,
+          null,
+          0,
+          0
+        ],
+        [
+          "granted_at",
+          "REAL",
+          1,
+          null,
+          0,
+          0
+        ],
+        [
+          "principal_id",
+          "TEXT",
+          0,
+          null,
+          1,
+          0
+        ]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_finding_grants_1": {
+          "columns": [
+            [
+              0,
+              "principal_id",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      },
+      "sql": "CREATE TABLE fleet_finding_grants ( principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
+    },
+    "fleet_findings": {
+      "autoincrement": false,
+      "checks": [
+        "generation >= 0",
+        "state IN ('open','reported','resolved')"
+      ],
+      "column_order": [
+        "finding_id",
+        "fingerprint",
+        "kind",
+        "first_seen",
+        "state",
+        "report_ref",
+        "reservation_id",
+        "generation",
+        "holder",
+        "expires_at"
+      ],
+      "columns": [
+        [
+          "expires_at",
+          "REAL",
+          0,
+          null,
+          0,
+          0
+        ],
+        [
+          "finding_id",
+          "TEXT",
+          0,
+          null,
+          1,
+          0
+        ],
+        [
+          "fingerprint",
+          "TEXT",
+          1,
+          null,
+          0,
+          0
+        ],
+        [
+          "first_seen",
+          "REAL",
+          1,
+          null,
+          0,
+          0
+        ],
+        [
+          "generation",
+          "INTEGER",
+          1,
+          "0",
+          0,
+          0
+        ],
+        [
+          "holder",
+          "TEXT",
+          0,
+          null,
+          0,
+          0
+        ],
+        [
+          "kind",
+          "TEXT",
+          1,
+          null,
+          0,
+          0
+        ],
+        [
+          "report_ref",
+          "TEXT",
+          0,
+          null,
+          0,
+          0
+        ],
+        [
+          "reservation_id",
+          "TEXT",
+          0,
+          null,
+          0,
+          0
+        ],
+        [
+          "state",
+          "TEXT",
+          1,
+          null,
+          0,
+          0
+        ]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_findings_open": {
+          "columns": [
+            [
+              0,
+              "state",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              "first_seen",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              2,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_findings_open ON fleet_findings(state,first_seen)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_findings_1": {
+          "columns": [
+            [
+              0,
+              "finding_id",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_findings_2": {
+          "columns": [
+            [
+              0,
+              "fingerprint",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      },
+      "sql": "CREATE TABLE fleet_findings ( finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
+    },
     "fleet_machine_telemetry": {
       "autoincrement": false,
       "checks": [],
@@ -12120,7 +12359,7 @@
     "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
     "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
   },
-  "user_version": 48,
+  "user_version": 49,
   "variants": {
     "action_broker_grants": [
       {
@@ -17913,6 +18152,249 @@
           }
         },
         "sql": "CREATE TABLE fleet_events ( seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL, subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL, producer TEXT NOT NULL DEFAULT '')"
+      }
+    ],
+    "fleet_finding_grants": [
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "principal_id",
+          "granted_at",
+          "enrollment_epoch"
+        ],
+        "columns": [
+          [
+            "enrollment_epoch",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "granted_at",
+            "REAL",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "principal_id",
+            "TEXT",
+            0,
+            null,
+            1,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_finding_grants_1": {
+            "columns": [
+              [
+                0,
+                "principal_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_finding_grants ( principal_id TEXT PRIMARY KEY, granted_at REAL NOT NULL, enrollment_epoch TEXT NOT NULL)"
+      }
+    ],
+    "fleet_findings": [
+      {
+        "autoincrement": false,
+        "checks": [
+          "generation >= 0",
+          "state IN ('open','reported','resolved')"
+        ],
+        "column_order": [
+          "finding_id",
+          "fingerprint",
+          "kind",
+          "first_seen",
+          "state",
+          "report_ref",
+          "reservation_id",
+          "generation",
+          "holder",
+          "expires_at"
+        ],
+        "columns": [
+          [
+            "expires_at",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "finding_id",
+            "TEXT",
+            0,
+            null,
+            1,
+            0
+          ],
+          [
+            "fingerprint",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "first_seen",
+            "REAL",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "generation",
+            "INTEGER",
+            1,
+            "0",
+            0,
+            0
+          ],
+          [
+            "holder",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "kind",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "report_ref",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "reservation_id",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "state",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "fleet_findings_open": {
+            "columns": [
+              [
+                0,
+                "state",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "first_seen",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 0,
+            "sql": "CREATE INDEX fleet_findings_open ON fleet_findings(state,first_seen)",
+            "unique": 0
+          },
+          "sqlite_autoindex_fleet_findings_1": {
+            "columns": [
+              [
+                0,
+                "finding_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          },
+          "sqlite_autoindex_fleet_findings_2": {
+            "columns": [
+              [
+                0,
+                "fingerprint",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "u",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_findings ( finding_id TEXT PRIMARY KEY, fingerprint TEXT NOT NULL UNIQUE, kind TEXT NOT NULL, first_seen REAL NOT NULL, state TEXT NOT NULL CHECK(state IN ('open','reported','resolved')), report_ref TEXT, reservation_id TEXT, generation INTEGER NOT NULL DEFAULT 0, holder TEXT, expires_at REAL, CHECK(generation >= 0))"
       }
     ],
     "fleet_machine_telemetry": [

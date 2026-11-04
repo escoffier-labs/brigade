@@ -42,6 +42,11 @@ claim expiry, lease, routing, message, question, paging, audit, policy and
 Worklore indexes/triggers. CHECK constraints also converge, including the
 retired-holder rebuild. No independent optional index exemption is added.
 
+Schema v49 adds `fleet_findings` and `fleet_finding_grants` as required startup
+tables, including their complete indexes and constraints. Rust proxies findings
+until S12h and must accept these Python-owned objects after rollback. They have
+no fresh/upgrade variants.
+
 Lazy families remain optional only by absence: fleet_mcp_reports,
 fleet_model_inventory_{observations,projections,aliases},
 fleet_skill_{reports,review_drafts,review_events}, fleet_project_boards,
