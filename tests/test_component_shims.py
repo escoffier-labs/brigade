@@ -97,3 +97,16 @@ def test_external_record_cannot_authorize_shim_removal(installed, tmp_path):
     assert shim.exists()
     with pytest.raises(ValueError, match="outside managed bin"):
         create(external, root)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows shims are verified copies, not hardlinks")
+def test_corrupted_hardlink_is_still_removed_for_repair(installed):
+    current, root, source, shim = installed
+    create(current, root)
+    # An in-place write through either name corrupts both, since they share an inode.
+    with source.open("r+b") as handle:
+        handle.write(b"CORRUPT")
+    assert shim.read_bytes() == source.read_bytes()
+    shims.remove_shims(current, root, install.verify_cached_asset)
+    assert not shim.exists()
+    assert source.exists()
