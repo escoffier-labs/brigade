@@ -86,6 +86,12 @@ pub fn python_only(raw: &Json) -> bool {
     raw.get("target")
         .and_then(Json::as_str)
         .is_some_and(|t| !t.is_ascii())
+        // serde_json reads both `-0` and `-0.0` as -0.0. Python accepts the
+        // integer `-0` as 0 and refuses the float, so Python answers both.
+        || raw
+            .get("generation")
+            .and_then(Json::as_f64)
+            .is_some_and(|g| g == 0.0 && g.is_sign_negative())
 }
 /// Python `repr()` of an ASCII string with no controls.
 pub(crate) fn repr(s: &str) -> String {
@@ -449,6 +455,12 @@ pub fn pack((status, body): Reply) -> Json {
 }
 impl Command for Claim {
     fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+        if crate::schema::newer_than_supported(tx)? {
+            return Err(ApplyError::Refused(pack(error(
+                503,
+                crate::schema::NEWER_SCHEMA,
+            ))));
+        }
         let node = match caller(tx, &self.key, &self.admin, true, self.allow_admin_writes)? {
             Ok(node) => node,
             Err(reply) => return Ok(pack(reply)),

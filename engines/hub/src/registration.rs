@@ -251,6 +251,11 @@ struct Mutation {
 }
 impl writer::Command for Mutation {
     fn apply(&self, tx: &dyn WriteTx) -> std::result::Result<Json, writer::ApplyError> {
+        if brigade_hub::schema::newer_than_supported(tx)? {
+            return Err(writer::ApplyError::Refused(
+                Reply::error(503, brigade_hub::schema::NEWER_SCHEMA).packed(),
+            ));
+        }
         if let Some(reply) = authorize(tx, &self.key, &self.admin, &self.path)? {
             return Ok(reply.packed());
         }

@@ -137,6 +137,61 @@ fn python_repr_quotes_and_non_ascii_bodies() {
     assert!(python_only(&json!({"target": "café"})));
     assert!(!python_only(&json!({"target": "repo", "role": "café"})));
     assert!(!python_only(&json!({"target": 5})));
+    // `-0` must reach Python, which reads the integer as 0; other zeros stay native.
+    let negative_zero: Json = serde_json::from_str(r#"{"target":"t","generation":-0}"#).unwrap();
+    assert!(python_only(&negative_zero));
+    assert!(!python_only(&json!({"target": "t", "generation": 0})));
+    assert!(!python_only(&json!({"target": "t", "generation": 0.0})));
+}
+struct Memory(rusqlite::Connection);
+impl crate::writer::ReadTx for Memory {
+    fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+        let mut statement = self.0.prepare(sql)?;
+        let width = statement.column_count();
+        let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            (0..width).map(|i| row.get::<_, Value>(i)).collect()
+        })?;
+        rows.collect()
+    }
+}
+impl crate::writer::WriteTx for Memory {
+    fn execute(&self, sql: &str, params: &[Value]) -> rusqlite::Result<usize> {
+        self.0
+            .execute(sql, rusqlite::params_from_iter(params.iter()))
+    }
+}
+#[test]
+fn a_newer_schema_inside_the_transaction_refuses_with_python_text() {
+    use crate::writer::{ApplyError, Command};
+    let tx = Memory(rusqlite::Connection::open_in_memory().unwrap());
+    let claim = Claim {
+        request: validate(
+            &json!({"action": "acquire", "target": "t", "node_id": "n", "holder": "h"}),
+        )
+        .unwrap(),
+        key: "k".into(),
+        admin: "a".into(),
+        allow_admin_writes: false,
+        clock: None,
+        events: false,
+    };
+    let newer = crate::schema::supported_version() + 1;
+    tx.0.pragma_update(None, "user_version", newer).unwrap();
+    match claim.apply(&tx) {
+        Err(ApplyError::Refused(reply)) => assert_eq!(
+            reply,
+            pack(error(
+                503,
+                "fleet hub database schema is newer than supported"
+            ))
+        ),
+        other => panic!(
+            "expected a 503 refusal, got {:?}",
+            other.map(|_| ()).err().is_some()
+        ),
+    }
+    tx.0.pragma_update(None, "user_version", newer - 1).unwrap();
+    assert!(!crate::schema::newer_than_supported(&tx).unwrap());
 }
 #[test]
 fn forbidden_names_the_token_node() {

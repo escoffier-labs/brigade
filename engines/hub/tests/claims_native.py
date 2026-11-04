@@ -154,6 +154,19 @@ class Claims(unittest.TestCase):
                 # json.loads accepts NaN, which serde_json rejects.
                 compare("POST", "/claims", "node-a", raw=b'{"action": "inspect", "target": "repo", "node_id": "node-a", "x": NaN}')
                 compare("POST", "/claims", "node-a", raw=b"{")
+                # json.loads reads -0 as integer 0; both hubs must grant generation 1.
+                compare(
+                    "POST",
+                    "/claims",
+                    "node-a",
+                    raw=b'{"action": "acquire", "target": "negzero", "node_id": "node-a", "holder": "h", "generation": -0}',
+                )
+                compare(
+                    "POST",
+                    "/claims",
+                    "node-a",
+                    raw=b'{"action": "inspect", "target": "negzero", "node_id": "node-a", "generation": -0.0}',
+                )
 
                 granted = claim(
                     "node-a",
