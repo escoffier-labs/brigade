@@ -7,7 +7,7 @@ name = "brigadestack"
 version = "0.30.0"
 description = "Brigade Stack command alias for the stable Brigade CLI"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = ["brigade-cli==0.30.0"]
 classifiers = [

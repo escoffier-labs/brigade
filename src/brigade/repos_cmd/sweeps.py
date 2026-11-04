@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from .. import actionqueue, config as brigade_config, reportstore, toml_compat as tomllib, work_cmd
+from .. import actionqueue, config as brigade_config, reportstore, work_cmd
 from ..budgets import HANDOFF_BACKLOG_STALE_DAYS
 from ..install import apply_gitignore
 from ..isolated_exec import module_argv, trusted_cwd

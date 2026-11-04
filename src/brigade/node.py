@@ -7,6 +7,8 @@ platform are snapshots from the first init; they are not a security identity.
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import socket
 import sys
@@ -15,7 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
-from . import localio, toml_compat as tomllib
+from . import localio
 from .fleet_center_links import CenterURLStatus, center_url_status, validate_center_url
 
 NODE_REL_PATH = Path(".brigade") / "node.toml"

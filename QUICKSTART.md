@@ -32,7 +32,7 @@ On that route, replace `brigadestack` at the start of **every** command below wi
 
 ### Python with pipx
 
-Requires Python 3.10 or newer. Install pipx using its [platform install guide](https://pipx.pypa.io/latest/installation/), then:
+Requires Python 3.11 or newer. Install pipx using its [platform install guide](https://pipx.pypa.io/latest/installation/), then:
 
 ```bash
 pipx install brigadestack==0.30.0

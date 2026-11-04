@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import os
 import re
@@ -10,7 +12,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
-from . import toml_compat
 
 MANIFEST_REL = Path(".brigade") / "version-sync.toml"
 
@@ -90,7 +91,7 @@ def load_manifest(target: Path) -> Manifest:
     manifest_path = target / MANIFEST_REL
     if not manifest_path.is_file():
         raise FileNotFoundError(manifest_path)
-    data = toml_compat.loads(manifest_path.read_text())
+    data = tomllib.loads(manifest_path.read_text())
     src = data.get("source")
     if not isinstance(src, dict):
         raise ValueError("[source] table is required")
@@ -122,7 +123,7 @@ def resolve_source(manifest: Manifest, target: Path) -> str:
             raise ValueError(f"source regex found no version in {manifest.source.file}")
         return match.group(1)
     source_key = cast(str, manifest.source.key)
-    data = toml_compat.loads(text) if src_path.suffix == ".toml" else json.loads(text)
+    data = tomllib.loads(text) if src_path.suffix == ".toml" else json.loads(text)
     value: object = data
     for part in source_key.split("."):
         if not isinstance(value, dict) or part not in value:

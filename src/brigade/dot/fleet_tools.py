@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 from dataclasses import dataclass
 import os
 import json
@@ -23,7 +25,7 @@ from brigade.grokbot_t3.fleet import (
     child_env,
 )
 
-from .. import toml_compat as tomllib
+
 from .contracts import MAX_PROMPT_BYTES, DotError, require
 from .process import CommandRunner, child_environment, child_path
 from .runtime_config import OwnerAuthorization, Runtime

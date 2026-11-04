@@ -189,10 +189,17 @@ def _inner_session(tmp_path: Path, *, guard: bool, test_source: str = INNER_TEST
 
 
 @requires_unprivileged_posix
-def test_unreadable_sidecar_aborts_the_combine_without_the_guard(tmp_path):
+def test_unreadable_sidecar_without_the_guard_aborts_or_is_skipped_by_coverage(tmp_path):
+    # Older coverage aborts the combine on an unreadable sidecar, which is why the
+    # guard exists. coverage 7.17.2 (2026-11-04) skips such a file with a warning
+    # instead. Accept either upstream behavior; the guard test below covers ours.
     result = _inner_session(tmp_path, guard=False)
-    assert result.returncode == 3, result.stdout + result.stderr
-    assert "attempt to write a readonly database" in result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    if result.returncode == 3:
+        assert "attempt to write a readonly database" in output
+    else:
+        assert result.returncode == 0, output
+        assert "isn't a coverage data file" in output
 
 
 @requires_unprivileged_posix

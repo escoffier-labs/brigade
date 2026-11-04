@@ -1051,8 +1051,9 @@ async fn run(mut config: Config) -> Result<(), String> {
         brigade_hub::read::hub_threads(),
         brigade_hub::read::HUB_QUEUE,
     )?;
+    let reader_probes = vec![readers.queue_probe()];
     let memory_path = path.with_file_name("fleet-hub-memory.db");
-    let _memory_readers = if memory_path.exists() {
+    let memory_readers = if memory_path.exists() {
         Some(brigade_hub::read::ReaderPool::open_unchecked(
             &memory_path,
             brigade_hub::read::MEMORY_THREADS,
@@ -1062,13 +1063,22 @@ async fn run(mut config: Config) -> Result<(), String> {
     } else {
         None
     };
-    let _cpu = brigade_hub::read::CpuPool::default();
+    let cpu = brigade_hub::read::CpuPool::default();
     let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
+    for probe in reader_probes
+        .into_iter()
+        .chain(memory_readers.as_ref().map(|pool| pool.queue_probe()))
+    {
+        state.telemetry.attach_readers(probe);
+    }
+    state.telemetry.attach_cpu(cpu.queue_probe());
+    // No writer is started here: the Python upstream commits every write, so the
+    // writer metrics stay NaN until a native handler starts one and attaches it.
     state.modes = brigade_hub::modes::Modes::parse(&config.route_mode)?;
     state.shadow_db = Some(path.clone());
     state.storage = storage.map(Arc::new);
@@ -1093,13 +1103,16 @@ async fn run(mut config: Config) -> Result<(), String> {
     let readers = Arc::new(readers);
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     if state.modes.get("registration") == brigade_hub::modes::Mode::Native {
+        let writer = brigade_hub::writer::Writer::start(
+            brigade_hub::writer::Config::new(path.clone()),
+            Arc::default(),
+        )
+        .map_err(|_| "registration writer unavailable")?;
+        // The first native family that starts a writer owns the writer metrics.
+        state.telemetry.attach_writer(writer.stats());
         state.registration = Some(registration::Registration {
             readers,
-            writer: brigade_hub::writer::Writer::start(
-                brigade_hub::writer::Config::new(path.clone()),
-                Arc::default(),
-            )
-            .map_err(|_| "registration writer unavailable")?,
+            writer,
             admin: registration::digest(&admin),
             clock: config.test_clock_file.clone(),
         });
