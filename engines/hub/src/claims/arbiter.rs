@@ -402,7 +402,13 @@ fn record_expired(
         json_value(expires_at)
     );
     let digest = Sha256::digest(id.as_bytes());
-    let hex: String = digest[..16].iter().map(|b| format!("{b:02x}")).collect();
+    let hex = digest[..16]
+        .iter()
+        .fold(String::with_capacity(32), |mut out, b| {
+            use std::fmt::Write;
+            let _ = write!(out, "{b:02x}");
+            out
+        });
     let data = format!(
         "{{\"owner_node\":{},\"target\":{},\"expired_at\":{}}}",
         quote(owner),
