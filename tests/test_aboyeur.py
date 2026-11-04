@@ -1,6 +1,7 @@
 import json
 import os
 import signal
+import shlex
 import subprocess
 import sys
 import time
@@ -12,6 +13,7 @@ import pytest
 from brigade import aboyeur
 from brigade import agents
 from brigade import context_eval
+from brigade import component_manifest
 from brigade import evidence_brief
 from brigade import proc
 from brigade import provenance
@@ -855,7 +857,9 @@ def _stamp_default_untrusted(payload: dict | str) -> dict | str:
 
 
 def _write_fake_miseledger(tmp_path, payload: dict | str) -> Path:
-    script = tmp_path / "fake-miseledger.py"
+    legacy = next(key for key, value in component_manifest.COMPONENT_FAMILIES.items() if value == "brigade-evidence")
+    script = tmp_path / f"fake-{legacy}.py"
+    args_path = tmp_path / f"{legacy}-args.json"
     rendered = json.dumps(_stamp_default_untrusted(payload))
     script.write_text(
         f"""
@@ -863,19 +867,21 @@ import json
 import sys
 from pathlib import Path
 
-Path(sys.argv[-1]).write_text(json.dumps(sys.argv[1:-1]))
-payload = {rendered}
+Path({str(args_path)!r}).write_text(json.dumps(sys.argv[1:]), encoding="utf-8")
+payload = json.loads({rendered!r})
 if isinstance(payload, str):
     print(payload)
 else:
     print(json.dumps(payload))
-"""
+""",
+        encoding="utf-8",
     )
-    script.chmod(0o755)
-    wrapper = tmp_path / "miseledger"
-    wrapper.write_text(
-        f'#!/bin/sh\nexec {os.environ.get("PYTHON", "python3")} {script} "$@" "{tmp_path / "miseledger-args.json"}"\n'
-    )
+    wrapper = tmp_path / (f"{legacy}.cmd" if os.name == "nt" else legacy)
+    if os.name == "nt":
+        launcher = f'@echo off\n"{sys.executable}" "{script}" %*\n'
+    else:
+        launcher = f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "$@"\n'
+    wrapper.write_text(launcher, encoding="utf-8")
     wrapper.chmod(0o755)
     return wrapper
 
