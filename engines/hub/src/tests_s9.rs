@@ -103,6 +103,38 @@ async fn metrics_require_admin_and_keep_health_and_ready_shapes() {
     let body = axum::body::to_bytes(response.into_body(), 65536)
         .await
         .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("brigade_hub_writer_queue_depth NaN"));
-    assert!(!String::from_utf8_lossy(&body).contains("fake-admin"));
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("brigade_hub_writer_queue_depth NaN"));
+    assert!(text.contains("No writer in this process"));
+    assert!(!text.contains("Not yet wired"));
+    assert!(!text.contains("fake-admin"));
+}
+#[tokio::test]
+async fn metrics_report_attached_pools() {
+    use sha2::Digest;
+    let mut app = App::new(
+        "http://localhost:1".into(),
+        Client::builder(TokioExecutor::new()).build_http(),
+        false,
+        false,
+    );
+    app.admin_digest = Some(sha2::Sha256::digest(b"fake-admin").into());
+    app.telemetry.attach_readers(Box::new(|| 4));
+    app.telemetry.attach_cpu(Box::new(|| 1));
+    let response = handle(
+        State(app),
+        Request::builder()
+            .uri("/metrics")
+            .header("authorization", "Bearer fake-admin")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    let body = axum::body::to_bytes(response.into_body(), 65536)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&body);
+    assert!(text.contains("\nbrigade_hub_reader_queue_depth 4\n"));
+    assert!(text.contains("\nbrigade_hub_cpu_queue_depth 1\n"));
+    assert!(text.contains("\nbrigade_hub_writer_batch_size NaN\n"));
 }

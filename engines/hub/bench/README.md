@@ -81,11 +81,21 @@ writer and metrics slices land:
 | `host_load_average.start`, `.end` | Host 1, 5 and 15 minute load averages |
 | `conditions` | Target, allotment, transport, TLS gate status, mode, connection, duration, warmup, workers, backlog, rate, think time, timeout, sample interval, method, path, payload fingerprint, database sizes and flags |
 | `summary` | Measured attempt and error counts, completed/s, mean service time and p50/p90/p95/p99/p100 latency in ms |
-| `telemetry.queue_depth` | `not available until S4a/S9` |
-| `telemetry.batch_sizes` | `not available until S4a/S9` |
-| `telemetry.checkpoint_stalls` | `not available until S4a/S9` |
-| `telemetry.samples` | Timestamped `/metrics` status and raw JSON, including today's `proxy_buffer_fallback_total`. Python may return 404 |
+| `telemetry.queue_depth` | Per-metric summaries of `brigade_hub_writer_queue_depth`, `reader_queue_depth` and `cpu_queue_depth`, or the marker string `not available until S4a/S9` when no sample held a finite value |
+| `telemetry.batch_sizes` | The same summary for `brigade_hub_writer_batch_size`, or the marker |
+| `telemetry.checkpoint_stalls` | The same summary for `brigade_hub_checkpoint_busy_total` and `brigade_hub_checkpoint_stall_frames`, or the marker |
+| `telemetry.samples` | Timestamped `/metrics` status and decoded value: a JSON body as is, metrics text as a map from each sample line (labels included) to its number, with `NaN` stored as `null`. Python may return 404 |
 | `attempts` | Every warmup and measured arrival, including unsent ones |
+
+A telemetry summary is keyed by the metric name without `brigade_hub_`. Each holds
+`metric`, `samples`, `min`, `max`, `first`, `last` and `values`, the finite readings in
+sample order. Writer gauges report the last batch finished, so `batch_sizes` is only
+as fine as `--sample-interval`, and a batch that starts and ends between two samples
+is not seen. A counter such as `checkpoint_busy_total` is read as `last - first`. The
+marker keeps its original text so reports stay comparable. It now means "no finite
+value in any sample": a Python target, or a Rust front with no writer, which exports
+`NaN`. The columns went from marker-only to marker or summary without a change to
+their names or to the other fields, so `schema_version` stays 1.
 
 Each attempt records its id, phase, scheduled and started offsets, HTTP status,
 reason, complete error body, Retry-After, payload bytes, service time, dispatch
