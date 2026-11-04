@@ -5,6 +5,28 @@ use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const REQUIRED: &str = include_str!("../../schema/required.json");
+/// Python's `FleetHubUnsupportedSchema.public_message`, sent with 503.
+pub const NEWER_SCHEMA: &str = "fleet hub database schema is newer than supported";
+/// The newest hub schema this build supports: required.json's `user_version`.
+pub fn supported_version() -> i64 {
+    static VERSION: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *VERSION.get_or_init(|| {
+        serde_json::from_str::<Value>(REQUIRED)
+            .ok()
+            .and_then(|v| v.get("user_version").and_then(Value::as_i64))
+            .expect("required.json records user_version")
+    })
+}
+/// Python re-checks the schema after BEGIN IMMEDIATE, because another hub can
+/// migrate between admission and the write lock. Commands call this first.
+pub fn newer_than_supported<T: crate::writer::ReadTx + ?Sized>(tx: &T) -> rusqlite::Result<bool> {
+    let rows = tx.query("PRAGMA user_version", &[])?;
+    let version = match rows.first().and_then(|row| row.first()) {
+        Some(rusqlite::types::Value::Integer(v)) => *v,
+        _ => 0,
+    };
+    Ok(version > supported_version())
+}
 fn normalize(sql: &str) -> String {
     sql.split_whitespace().collect::<Vec<_>>().join(" ")
 }

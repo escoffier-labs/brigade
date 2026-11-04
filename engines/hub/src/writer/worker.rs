@@ -153,8 +153,9 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         });
     }
     let result = match result {
-        Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
-        Ok(Ok(_)) => Err(Failure::timeout(e.budget.durable)),
+        Ok(Ok(value)) if Instant::now() < deadline => Ok((value, true)),
+        Ok(Err(ApplyError::Refused(value))) if Instant::now() < deadline => Ok((value, false)),
+        Ok(Ok(_) | Err(ApplyError::Refused(_))) => Err(Failure::timeout(e.budget.durable)),
         Ok(Err(ApplyError::Sqlite(error)))
             if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) =>
         {
@@ -163,7 +164,7 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         Ok(Err(ApplyError::Rejected(failure))) => Err(failure),
         _ => Err(Failure::storage("command-failed")),
     };
-    let finish = if result.is_ok() {
+    let finish = if matches!(result, Ok((_, true))) {
         "RELEASE command"
     } else {
         "ROLLBACK TO command; RELEASE command"
@@ -172,7 +173,7 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         let _ = db.execute_batch("ROLLBACK");
         return Err(Failure::storage("storage-error"));
     }
-    result
+    result.map(|(value, _)| value)
 }
 
 pub(super) fn run(

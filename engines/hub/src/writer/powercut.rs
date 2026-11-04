@@ -715,3 +715,183 @@ fn writer_wal_creation_short() {
 fn writer_wal_creation_matrix() {
     writer_creation_schedule(true);
 }
+
+// S7: native claim writes through the real worker, one commit per command, with
+// cuts across the short schedule's storage operations. The fence never moves
+// behind an acknowledged decision, and recovery never reissues a generation a
+// client was told about.
+fn claim_template() -> PathBuf {
+    let path = super::tests::fixture();
+    std::fs::remove_file(&path).unwrap();
+    let python = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+    let status = std::process::Command::new(python)
+        .args(["-c", "from pathlib import Path; import sys; from brigade.fleet_hub import init_db; init_db(Path(sys.argv[1])).close()"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "INSERT INTO nodes(node_id,token_sha256,label,created_at,revoked_at) VALUES('cut-node',?1,NULL,'2026-01-01T00:00:00+00:00',NULL)",
+        [CUT_KEY],
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(db);
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    path
+}
+/// The node token digest the template enrolls.
+const CUT_KEY: &str = "cut-node-token-digest";
+fn claim(action: &str, holder: &str) -> crate::claims::Claim {
+    let raw = serde_json::json!({"action": action, "target": "cut-repo", "node_id": "cut-node", "holder": holder});
+    crate::claims::Claim {
+        request: crate::claims::validate(&raw).unwrap_or_else(|_| panic!("valid claim")),
+        key: CUT_KEY.into(),
+        admin: "admin-digest".into(),
+        allow_admin_writes: false,
+        clock: None,
+        events: false,
+    }
+}
+/// Fence values after each acknowledged command of the schedule.
+const CLAIM_SCHEDULE: [(&str, &str, i64); 4] = [
+    ("acquire", "holder-one", 1),
+    ("renew", "holder-one", 1),
+    ("release", "holder-one", 2),
+    ("acquire", "holder-two", 3),
+];
+/// One claim command through the real worker, committed on its own.
+fn run_claim(path: &std::path::Path, action: &str, holder: &str) -> Option<serde_json::Value> {
+    use super::*;
+    let arbiter = std::sync::Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(1);
+    let (reply, result) = oneshot::channel();
+    sender
+        .try_send(Envelope {
+            command: Box::new(claim(action, holder)),
+            budget: Budget {
+                events: 1,
+                bytes: 100,
+                durable: false,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+            reply: Some(reply),
+            _permits: vec![],
+            arbiter: arbiter.clone(),
+        })
+        .unwrap_or_else(|_| panic!("queue"));
+    drop(sender);
+    match worker::open(path) {
+        Ok(db) => worker::run(
+            db,
+            receiver,
+            Config::new(path.to_path_buf()),
+            arbiter,
+            Arc::default(),
+        ),
+        Err(_) => drop(receiver),
+    }
+    result.blocking_recv().ok()?.ok()
+}
+fn claim_cut(template: &std::path::Path, cut: usize) -> (usize, i64) {
+    let path = super::tests::fixture();
+    std::fs::copy(template, &path).unwrap();
+    seed(&path, false);
+    DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.writer = true;
+        d.cut = cut;
+        d.active = Some(8);
+        d.phase = 8;
+    });
+    let mut acknowledged = 0;
+    for (action, holder, fence) in CLAIM_SCHEDULE {
+        let Some(answer) = run_claim(&path, action, holder) else {
+            break;
+        };
+        assert_eq!(answer["status"], 200, "{answer}");
+        acknowledged = fence;
+    }
+    let count = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.crashed = true;
+        d.writer = false;
+        d.count
+    });
+    restore();
+    DISK.with(|d| *d.borrow_mut() = Disk::default());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let fence: i64 = db
+        .query_row(
+            "SELECT COALESCE((SELECT generation FROM claim_fences WHERE target='cut-repo'),0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        fence >= acknowledged,
+        "cut {cut}: fence {fence} behind acknowledged {acknowledged}"
+    );
+    // At most one live holder, and it holds the generation the fence names.
+    let holders: Vec<(String, i64)> = db
+        .prepare(
+            "SELECT c.holder_token, f.generation FROM claims c JOIN claim_fences f USING(target)",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(holders.len() <= 1 && holders.iter().all(|(_, g)| *g == fence));
+    drop(db);
+    // Recovery issues a fresh generation above everything acknowledged, and a
+    // released holder stays retired.
+    let after = |action, holder| {
+        let answer = run_claim(&path, action, holder).expect("recovered writer answers");
+        serde_json::from_str::<serde_json::Value>(answer["body"].as_str().unwrap()).unwrap()
+    };
+    if acknowledged >= 2 {
+        assert_eq!(after("renew", "holder-one")["reason"], "stale-holder");
+    }
+    let granted = after("acquire", "holder-three");
+    if granted["granted"] == true {
+        assert!(granted["claim"]["generation"].as_i64().unwrap() > acknowledged);
+    } else {
+        assert_eq!(granted["owner"]["generation"].as_i64().unwrap(), fence);
+    }
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    (count, acknowledged)
+}
+#[test]
+fn claim_writes_short_schedule() {
+    let _lock = VFS_LOCK.lock().unwrap();
+    let _vfs = unsafe { Registration::new() };
+    let template = claim_template();
+    let (operations, acknowledged) = claim_cut(&template, 0);
+    assert_eq!(acknowledged, 3, "uncut schedule acknowledges every command");
+    let mut cuts = vec![
+        1,
+        2,
+        operations / 4,
+        operations / 2,
+        operations - 1,
+        operations,
+    ];
+    cuts.sort();
+    cuts.dedup();
+    let mut partial = 0;
+    for cut in cuts {
+        let (_, acknowledged) = claim_cut(&template, cut);
+        partial += usize::from(acknowledged < 3);
+    }
+    assert!(partial > 0, "the schedule must cut inside the claim writes");
+    std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
+}

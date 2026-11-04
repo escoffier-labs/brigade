@@ -51,6 +51,9 @@ impl Failure {
 pub enum ApplyError {
     Sqlite(rusqlite::Error),
     Rejected(Failure),
+    /// A domain answer whose writes roll back, as a Python exception would.
+    /// It is delivered as a successful reply, so post_commit still runs.
+    Refused(Json),
 }
 impl From<rusqlite::Error> for ApplyError {
     fn from(error: rusqlite::Error) -> Self {

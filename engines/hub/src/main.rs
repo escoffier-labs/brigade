@@ -1,5 +1,6 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
+mod claims_route;
 mod registration;
 mod response;
 
@@ -222,6 +223,7 @@ struct App {
     budgets: admission::Budgets,
     lookup: Option<admission::Lookup>,
     registration: Option<registration::Registration>,
+    claims: Option<claims_route::Claims>,
     trust_identity: bool,
     trust_proto: bool,
     storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
@@ -243,6 +245,7 @@ impl App {
             budgets: admission::Budgets::default(),
             lookup: None,
             registration: None,
+            claims: None,
             trust_identity,
             trust_proto,
             storage: None,
@@ -677,6 +680,18 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             return refusal;
         }
     }
+    let claims = app
+        .claims
+        .as_ref()
+        .filter(|_| claims_route::Claims::route(parts.method.as_str(), parts.uri.path()))
+        .filter(|_| !query_names_token(parts.uri.query()));
+    let claims = match claims {
+        Some(claims) => match claims.auth(&parts).await {
+            Ok(node) => Some((claims, node)),
+            Err(refusal) => return *refusal,
+        },
+        None => None,
+    };
     let _budget = if headers_only {
         vec![]
     } else {
@@ -710,6 +725,14 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         // Python's json.loads accepts. Python answers those bodies itself.
         if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
             return native.handle(&parts, &body).await;
+        }
+    }
+    if let Some((claims, node)) = claims {
+        // The same serde_json gap as registration: Python answers those bodies.
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            if let Some(response) = claims.handle(&parts, node, &body).await {
+                return response;
+            }
         }
     }
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
@@ -1102,19 +1125,35 @@ async fn run(mut config: Config) -> Result<(), String> {
     }
     let readers = Arc::new(readers);
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
-    if state.modes.get("registration") == brigade_hub::modes::Mode::Native {
+    let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
+    // One S4a writer per file, shared by every native family. It owns the writer metrics.
+    let writer = if native("registration") || native("claims") {
         let writer = brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
             Arc::default(),
         )
-        .map_err(|_| "registration writer unavailable")?;
-        // The first native family that starts a writer owns the writer metrics.
+        .map_err(|_| "native writer unavailable")?;
         state.telemetry.attach_writer(writer.stats());
+        Some(writer)
+    } else {
+        None
+    };
+    if native("registration") {
         state.registration = Some(registration::Registration {
-            readers,
-            writer,
+            readers: readers.clone(),
+            writer: writer.clone().unwrap(),
             admin: registration::digest(&admin),
             clock: config.test_clock_file.clone(),
+        });
+    }
+    if native("claims") {
+        state.claims = Some(claims_route::Claims {
+            readers,
+            writer: writer.unwrap(),
+            admin: registration::digest(&admin),
+            clock: config.test_clock_file.clone(),
+            allow_admin_writes: config.allow_admin_writes,
+            events: brigade_hub::claims::events_enabled(),
         });
     }
     let probe = state.clone();
