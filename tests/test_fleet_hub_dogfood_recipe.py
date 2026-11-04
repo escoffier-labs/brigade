@@ -566,11 +566,31 @@ def test_model_pull_stops_the_server_by_pid_and_keeps_the_pull_status(tmp_path):
 def test_restore_drive_gives_the_hub_and_the_drive_the_same_operator():
     import shlex
 
-    script = checks.restore_drive_script("agent:restore-drive-ab12cd34")
+    script = checks.restore_drive_script("agent:restore-drive-ab12cd34", 8589934592)
     serve, drive = script.split(" & ", 1)
     assert shlex.split(serve)[0] == "BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:restore-drive-ab12cd34"
     words = shlex.split(drive)
     assert words[words.index("--operator-recipient") + 1] == "agent:restore-drive-ab12cd34"
+    # A restore raised the claim recovery floor, so the drive must be told it.
+    assert words[words.index("--claim-floor") + 1] == "8589934592"
+
+
+def test_restore_drive_reads_the_floor_the_restore_wrote(tmp_path):
+    from brigade import fleet_hub, fleet_hub_claims
+
+    fresh = tmp_path / "fresh.db"
+    fleet_hub.init_db(fresh).close()
+    assert checks.claim_floor(fresh) == 0
+    restored = tmp_path / "restored.db"
+    conn = fleet_hub.init_db(restored)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        floor = fleet_hub_claims.write_recovery_floor(conn, 0, advance=2**32, restored_at="t", copy_sha256="x")
+        conn.commit()
+        assert fleet_hub_claims.recovery_floor(conn) == floor
+    finally:
+        conn.close()
+    assert checks.claim_floor(restored) == floor == 2**32
 
 
 @pytest.mark.skipif(os.name == "nt", reason="runs the watchdog under /bin/sh")

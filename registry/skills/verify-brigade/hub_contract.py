@@ -1053,6 +1053,9 @@ class Ctx:
     kid_a: str = ""
     kid_b: str = ""
     held_target: str = ""
+    # The claim recovery floor of the hub under test: 0 on a fresh hub, the
+    # value a restore wrote on a restored one. New targets start at floor + 1.
+    claim_floor: int = 0
 
 
 def _claim_body(action: str, target: str, node: str, holder: str | None, **extra: Any) -> dict:
@@ -1062,8 +1065,17 @@ def _claim_body(action: str, target: str, node: str, holder: str | None, **extra
     return body
 
 
+# The largest floor whose highest generation the claim drive sends, floor + 7,
+# still fits the hub's generation range [0, 2**63 - 1].
+MAX_CLAIM_FLOOR = 2**63 - 1 - 7
+
+
 def drive_claim_fencing(d: Drive, x: Ctx) -> None:
-    """Holder, node, and force scopes, lease supersession, generations, and expiry."""
+    """Holder, node, and force scopes, lease supersession, generations, and expiry.
+
+    Every generation is relative to the hub's claim recovery floor, so `gen(1)`
+    is 1 on a fresh hub and floor + 1 on a restored one.
+    """
     target = f"repo:example-org/fenced-{x.tag}"
     lease = {
         "token": f"contract-lease-{x.tag}",
@@ -1077,8 +1089,11 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
     def refused(key: str, reason: str, owner: Any) -> dict:
         return {key: Eq(False), "reason": Eq(reason), "error": Eq(f"claim operation refused: {reason}"), "owner": owner}
 
-    def at(generation: int, **pins: Any) -> dict:
-        return {**CLAIM, "target": Eq(target), "generation": Eq(generation), **pins}
+    def gen(step: int) -> int:
+        return x.claim_floor + step
+
+    def at(step: int, **pins: Any) -> dict:
+        return {**CLAIM, "target": Eq(target), "generation": Eq(gen(step)), **pins}
 
     free = d.call(
         "claims inspect an unseen target",
@@ -1125,7 +1140,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         "POST",
         "/claims",
         status=200,
-        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600, generation=0),
+        body=claim("acquire", x.node_a, "fence-holder-1", ttl_seconds=600, generation=gen(0)),
         token=x.a,
         shape={"granted": Eq(True), "claim": at(1)},
     )
@@ -1134,7 +1149,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         "POST",
         "/claims",
         status=409,
-        body=claim("acquire", x.node_b, "fence-holder-b", ttl_seconds=600, generation=7),
+        body=claim("acquire", x.node_b, "fence-holder-b", ttl_seconds=600, generation=gen(7)),
         token=x.b,
         shape=refused("granted", "stale-generation", at(1, owner_node=Eq(x.node_a))),
     )
@@ -1143,7 +1158,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         "POST",
         "/claims",
         status=409,
-        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=2),
+        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=gen(2)),
         token=x.a,
         shape=refused("renewed", "stale-generation", at(1)),
     )
@@ -1152,7 +1167,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         "POST",
         "/claims",
         status=200,
-        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=1),
+        body=claim("renew", x.node_a, "fence-holder-1", ttl_seconds=600, generation=gen(1)),
         token=x.a,
         shape={"renewed": Eq(True), "claim": at(1)},
     )
@@ -1163,14 +1178,20 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=claim("inspect", x.node_a, None),
         token=x.a,
-        shape={"inspected": Eq(True), "owned": Eq(True), "generation": Eq(1), "claim": at(1), "lock_run_dir": NONE},
+        shape={
+            "inspected": Eq(True),
+            "owned": Eq(True),
+            "generation": Eq(gen(1)),
+            "claim": at(1),
+            "lock_run_dir": NONE,
+        },
     )
     d.call(
         "claims release with a stale generation",
         "POST",
         "/claims",
         status=409,
-        body=claim("release", x.node_a, "fence-holder-1", generation=5),
+        body=claim("release", x.node_a, "fence-holder-1", generation=gen(5)),
         token=x.a,
         shape=refused("released", "stale-generation", at(1)),
     )
@@ -1179,7 +1200,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         "POST",
         "/claims",
         status=200,
-        body=claim("release", x.node_a, "fence-holder-1", generation=1),
+        body=claim("release", x.node_a, "fence-holder-1", generation=gen(1)),
         token=x.a,
         shape={"released": Eq(True)},
     )
@@ -1193,7 +1214,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=claim("inspect", x.node_b, None),
         token=x.b,
-        shape={"inspected": Eq(True), "claim": NONE, "owned": Eq(False), "generation": Eq(2)},
+        shape={"inspected": Eq(True), "claim": NONE, "owned": Eq(False), "generation": Eq(gen(2))},
     )
     d.call(
         "claims acquire by a retired holder",
@@ -1229,7 +1250,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=claim("inspect", x.node_a, None),
         token=x.a,
-        shape={"owned": Eq(True), "generation": Eq(3), "lock_run_dir": Eq(lease["run_dir"])},
+        shape={"owned": Eq(True), "generation": Eq(gen(3)), "lock_run_dir": Eq(lease["run_dir"])},
     )
     other = d.call(
         "claims inspect hides the run dir from other nodes",
@@ -1238,7 +1259,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=claim("inspect", x.node_b, None),
         token=x.b,
-        shape={"owned": Eq(False), "generation": Eq(3), "claim": at(3)},
+        shape={"owned": Eq(False), "generation": Eq(gen(3)), "claim": at(3)},
     )
     d.invariant(
         "claims inspect hides the run dir from other nodes",
@@ -1362,7 +1383,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=claim("inspect", x.node_b, None),
         token=x.b,
-        shape={"claim": NONE, "owned": Eq(False), "generation": Eq(6)},
+        shape={"claim": NONE, "owned": Eq(False), "generation": Eq(gen(6))},
     )
     for case, body, message in (
         (
@@ -1397,7 +1418,10 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         status=200,
         body=_claim_body("acquire", short, x.node_a, "fence-holder-1", ttl_seconds=1),
         token=x.a,
-        shape={"granted": Eq(True), "claim": {**CLAIM, "target": Eq(short), "generation": Eq(1), "ttl_seconds": Eq(1)}},
+        shape={
+            "granted": Eq(True),
+            "claim": {**CLAIM, "target": Eq(short), "generation": Eq(gen(1)), "ttl_seconds": Eq(1)},
+        },
     )
     # Expiry is the hub's clock against expires_at, so sleeping longer than the
     # lease can only make the case more certain under load.
@@ -1442,7 +1466,7 @@ def drive_claim_fencing(d: Drive, x: Ctx) -> None:
         token=x.b,
         shape={
             "granted": Eq(True),
-            "claim": {**CLAIM, "target": Eq(short), "owner_node": Eq(x.node_b), "generation": Eq(3)},
+            "claim": {**CLAIM, "target": Eq(short), "owner_node": Eq(x.node_b), "generation": Eq(gen(3))},
         },
     )
     x.held_target = short
@@ -2215,8 +2239,13 @@ def drive_questions(d: Drive, x: Ctx, operator: str) -> None:
     )
 
 
-def run_contract(hub: Hub) -> dict:
-    """Drive every case against a running hub and return the findings."""
+def run_contract(hub: Hub, *, claim_floor: int = 0) -> dict:
+    """Drive every case against a running hub and return the findings.
+
+    `claim_floor` is the hub's claim recovery floor (0 unless it was restored).
+    """
+    if type(claim_floor) is not int or not 0 <= claim_floor <= MAX_CLAIM_FLOOR:
+        raise ContractError(f"the claim floor must be an integer in [0, {MAX_CLAIM_FLOOR}], not {claim_floor!r}")
     d = Drive(hub)
     admin = hub.admin_token
     tag = secrets.token_hex(3)
@@ -2925,6 +2954,7 @@ def run_contract(hub: Hub) -> dict:
         m1=m1,
         m2=m2,
         c1=f"c1-{tag}",
+        claim_floor=claim_floor,
     )
     drive_claim_fencing(d, ctx)
     drive_keys_and_sealed(d, ctx)
@@ -2970,6 +3000,7 @@ def drive(
     admin_token: str | None,
     startup_timeout: float,
     operator: str | None = None,
+    claim_floor: int = 0,
 ) -> tuple[Hub, dict]:
     """Start (or attach to) a hub, run the contract, and always stop what it started."""
     if hub_url is not None:
@@ -2981,7 +3012,9 @@ def drive(
             mode="external",
             operator=guard_operator(operator) if operator else new_operator(),
         )
-        return hub, run_contract(hub)
+        return hub, run_contract(hub, claim_floor=claim_floor)
+    if claim_floor:
+        raise ContractError("a launched hub is fresh, so its claim floor is 0; a floor needs --hub-url")
     if state_dir is None:
         raise ContractError("a launched hub needs a state directory")
     hub = launch_hub(hub_cmd or DEFAULT_HUB_CMD, brigade=brigade, state_dir=state_dir, startup_timeout=startup_timeout)

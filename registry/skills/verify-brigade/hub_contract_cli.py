@@ -52,6 +52,13 @@ def add_parser(sub: Any, helper: Any, add_dry_run: Callable[[Any, str], None]) -
         help="For --hub-url: the agent:<name> the hub has in BRIGADE_FLEET_OPERATOR_RECIPIENT. "
         "The drive enrolls it, so use a fresh name per run.",
     )
+    p.add_argument(
+        "--claim-floor",
+        type=int,
+        default=0,
+        help="For --hub-url: the claim recovery floor a restore wrote into the hub's database. "
+        "New claim generations then start at floor + 1 instead of 1.",
+    )
     p.add_argument("--golden", default=None, help="Golden file (default: the checked-in hub-contract-golden.json).")
     p.add_argument(
         "--write-golden", action="store_true", help="Record this run's refusals and tombstones as the golden."
@@ -175,6 +182,8 @@ def command(args: Any, helper: Any) -> int:
     admin_token = os.environ.get(args.admin_token_env, "").strip() if external else None
     if args.operator_recipient and not external:
         raise helper.HelperError("--operator-recipient applies to --hub-url; a launched hub gets a fresh operator")
+    if args.claim_floor and not external:
+        raise helper.HelperError("--claim-floor applies to --hub-url; a launched hub is fresh, so its floor is 0")
     brigade = helper.brigade_args(args)
     work = None if external and not clocked else workdir(args, helper, root, dry_run=False)
     try:
@@ -186,6 +195,7 @@ def command(args: Any, helper: Any) -> int:
             admin_token=admin_token,
             startup_timeout=startup_timeout,
             operator=args.operator_recipient,
+            claim_floor=args.claim_floor,
         )
         clocked_run = (
             lifecycle.run(clocked, brigade=brigade, state_dir=work / "lifecycle", startup_timeout=startup_timeout)

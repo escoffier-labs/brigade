@@ -212,6 +212,13 @@ Start that hub with its default flags, an empty database, and
 principal, so pick a new name for every run. Nodes get fresh random names, so
 a second run against the same hub still passes.
 
+A hub whose database came from `brigade fleet restore` allocates new claim
+generations above the claim recovery floor the restore wrote, at floor + 1
+rather than 1. Pass that floor with `--claim-floor <floor>` (the `claim_floor`
+in the restore's JSON report, or `hub_meta` key `recovery`) and the
+claim-fencing cases expect every generation relative to it. Without the option
+the drive expects a fresh hub.
+
 ### Read-only production profile (`--profile prod-readonly`)
 
 `--profile prod-readonly` runs an exact list of operations and nothing else:

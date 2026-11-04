@@ -620,16 +620,36 @@ def bench_summary(stdout: str) -> Any:
     return text[-2000:]
 
 
-def restore_drive_script(operator: str) -> str:
+def claim_floor(db: Path) -> int:
+    """The claim recovery floor a restore wrote into `db` (0 when none).
+
+    The same hub_meta row fleet_hub_claims.recovery_floor reads; this check is
+    stdlib only, so it reads the table directly.
+    """
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT value FROM hub_meta WHERE key = 'recovery'").fetchone()
+    finally:
+        conn.close()
+    if row is None:
+        return 0
+    value = json.loads(row[0])["claim_floor"]
+    if type(value) is not int or value < 0:
+        raise ValueError(f"corrupt claim recovery floor in {db}: {value!r}")
+    return value
+
+
+def restore_drive_script(operator: str, floor: int) -> str:
     """Serve the restored file and run the contract drive against it. The drive
     enrolls an operator and creates questions, which the hub refuses unless it
-    has the same fresh operator recipient in its environment."""
+    has the same fresh operator recipient in its environment. A restore raised
+    the claim recovery floor, so the drive expects new claims at floor + 1."""
     return (
         f"BRIGADE_FLEET_OPERATOR_RECIPIENT={operator} "
         "brigade fleet serve --host 127.0.0.1 --port 3774 --db /data/fleet-hub.db --token-file /data/token & "
         "sleep 5; BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=$(cat /data/token) "
         f"python {DRIVE}/control-brigade.py hub-contract --hub-url http://127.0.0.1:3774 "
-        f"--operator-recipient {operator}"
+        f"--operator-recipient {operator} --claim-floor {int(floor)}"
     )
 
 
@@ -909,7 +929,14 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
             (data / "token").write_text("fake-restore-drive-token\n", encoding="utf-8")
             # The restored file belongs to this account and is mode 0600, so the
             # throwaway hub runs as this account rather than the image's UID.
-            script = restore_drive_script(f"agent:restore-drive-{secrets.token_hex(4)}")
+            floor = claim_floor(data / "fleet-hub.db")
+            if not result.ok(
+                floor == reports[1]["claim_floor"],
+                "restored copy holds the floor the restore reported",
+                (floor, reports[1]["claim_floor"]),
+            ):
+                return
+            script = restore_drive_script(f"agent:restore-drive-{secrets.token_hex(4)}", floor)
             done = run(
                 [
                     "docker",
