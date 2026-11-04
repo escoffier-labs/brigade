@@ -2,6 +2,7 @@
 
 import http.client
 import ipaddress
+import os
 import threading
 
 import pytest
@@ -220,6 +221,11 @@ def test_upstream_checkpoint_idle_and_busy_retry(tmp_path, monkeypatch, caplog):
         while wal.stat().st_size and time.monotonic() < deadline:
             time.sleep(0.05)
         assert wal.stat().st_size == 0
+        if os.name == "nt":
+            # Windows locks byte ranges of the -shm file, so the observer below cannot
+            # read the WAL index. The idle path is the same code on every platform and is
+            # covered by the POSIX runs; the busy retry above ran here too.
+            return
         # Below the size thresholds, the idle timer must still checkpoint.
         monkeypatch.setattr(fleet_hub_upstream, "TRUNCATE_WAL_BYTES", 256 * 1024 * 1024)
         writer.execute("INSERT INTO checkpoint_busy VALUES (1)")
@@ -240,4 +246,24 @@ def test_upstream_checkpoint_idle_and_busy_retry(tmp_path, monkeypatch, caplog):
     finally:
         reader.close()
         writer.close()
+        server.server_close()
+
+
+@pytest.mark.parametrize(
+    "upstream,owner,expected", [(True, "rust", False), (True, "python", True), (False, "rust", False)]
+)
+def test_checkpoint_owner(tmp_path, monkeypatch, upstream, owner, expected):
+    if upstream:
+        monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
+    else:
+        monkeypatch.delenv("BRIGADE_HUB_UPSTREAM_KEY", raising=False)
+    monkeypatch.delenv("BRIGADE_HUB_MANAGED_LOOPBACK", raising=False)
+    monkeypatch.setenv("BRIGADE_HUB_CHECKPOINT_OWNER", owner)
+    server = fleet_hub.make_server(str(ipaddress.IPv4Address(2130706433)), 0, tmp_path / "hub.db", "fake-admin")
+    try:
+        maintenance = server._checkpoint_maintenance
+        assert (maintenance is not None) == expected
+        if maintenance:
+            assert maintenance.thread.is_alive()
+    finally:
         server.server_close()

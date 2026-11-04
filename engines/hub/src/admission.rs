@@ -1,10 +1,11 @@
 //! Header-only classification and isolated admission budgets.
 use crate::{Counts, Slot};
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
+use brigade_hub::read::ReaderPool;
+use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
-use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn hex(bytes: &[u8]) -> String {
     const DIGITS: &[u8] = b"0123456789abcdef";
@@ -18,25 +19,19 @@ fn hex(bytes: &[u8]) -> String {
 
 #[derive(Clone)]
 pub struct Lookup {
-    connection: Arc<Mutex<Connection>>,
+    pool: Arc<ReaderPool>,
     admin: [u8; 32],
+    #[cfg(test)]
+    slow: Option<Arc<std::sync::atomic::AtomicUsize>>,
 }
 impl Lookup {
-    pub fn open(path: &str, admin: &str) -> Result<Self, String> {
-        let connection =
-            Connection::open_with_flags(crate::audit::path(path), OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .map_err(|e| e.to_string())?;
-        crate::audit::instrument(&connection)?;
-        connection
-            .busy_timeout(Duration::from_secs(2))
-            .map_err(|e| e.to_string())?;
-        connection
-            .execute_batch("PRAGMA query_only=ON; PRAGMA wal_autocheckpoint=0;")
-            .map_err(|e| e.to_string())?;
-        Ok(Self {
-            connection: Arc::new(Mutex::new(connection)),
+    pub fn new(pool: Arc<ReaderPool>, admin: &str) -> Self {
+        Self {
+            pool,
             admin: Sha256::digest(admin.as_bytes()).into(),
-        })
+            #[cfg(test)]
+            slow: None,
+        }
     }
     pub async fn credential(&self, authorization: Option<&str>) -> Result<Option<String>, ()> {
         let Some(token) = authorization
@@ -51,27 +46,26 @@ impl Lookup {
             return Ok(Some(key));
         }
         let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let connection = tokio::time::timeout_at(deadline, self.connection.clone().lock_owned())
-            .await
-            .map_err(|_| ())?;
         let lookup_key = key.clone();
-        let job = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        let slow = self.slow.clone();
+        let job = self.pool.submit(move |connection| {
+            #[cfg(test)]
+            if let Some(active) = slow {
+                active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(400));
+            }
             let mut statement = connection.prepare_cached(
                 "SELECT 1 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 1 FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
-            ).map_err(|_| ())?;
-            let found = statement
-                .query_row([lookup_key], |_| Ok(()))
-                .optional()
-                .map_err(|_| ())?
-                .is_some();
-            drop(statement); // Reset immediately. Never keep a read snapshot between requests.
-            debug_assert!(connection.is_autocommit());
-            Ok::<_, ()>(found)
+            )?;
+            let found = statement.query_row([lookup_key], |_| Ok(())).optional()?.is_some();
+            drop(statement);
+            Ok(found)
         });
         let found = tokio::time::timeout_at(deadline, job)
             .await
             .map_err(|_| ())?
-            .map_err(|_| ())??;
+            .map_err(|_| ())?;
         Ok(found.then_some(key))
     }
 }
@@ -310,15 +304,54 @@ mod tests {
         assert_eq!(budgets.bodies[0].available_permits(), 61 * 1024 * 1024);
     }
     #[tokio::test]
+    async fn two_slow_credentials_use_different_readers() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let path = std::env::temp_dir().join(format!("hub-concurrent-{}.db", std::process::id()));
+        let c = rusqlite::Connection::open(&path).unwrap();
+        c.execute_batch("CREATE TABLE nodes(token_sha256 TEXT,revoked_at TEXT); CREATE TABLE fleet_message_principals(token_hash TEXT,revoked_at TEXT);").unwrap();
+        let mut lookup = Lookup::new(
+            Arc::new(ReaderPool::open_unchecked(&path, 2, 4, Duration::from_secs(2)).unwrap()),
+            "fake-admin",
+        );
+        let entered = Arc::new(AtomicUsize::new(0));
+        lookup.slow = Some(entered.clone());
+        let queries = async {
+            tokio::join!(
+                lookup.credential(Some("Bearer fake-a")),
+                lookup.credential(Some("Bearer fake-b"))
+            )
+        };
+        let observe = async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            assert_eq!(
+                entered.load(Ordering::SeqCst),
+                2,
+                "both lookups must start before either slow query finishes"
+            );
+        };
+        let ((a, b), ()) = tokio::join!(queries, observe);
+        assert_eq!(a.unwrap(), None);
+        assert_eq!(b.unwrap(), None);
+        drop(lookup);
+        drop(c);
+        std::fs::remove_file(path).unwrap();
+    }
+    #[tokio::test]
     async fn lookup_revocation_timeout_recovery_and_no_snapshot() {
-        let connection = Connection::open_in_memory().unwrap();
+        let directory = std::env::temp_dir().join(format!("hub-lookup-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("hub.db");
+        let connection = rusqlite::Connection::open(&path).unwrap();
         connection.execute_batch("CREATE TABLE nodes(token_sha256 TEXT,revoked_at TEXT); CREATE TABLE fleet_message_principals(token_hash TEXT,revoked_at TEXT);").unwrap();
         let digest = hex(&Sha256::digest(b"fake-node"));
         connection
             .execute("INSERT INTO nodes VALUES (?1,NULL)", [&digest])
             .unwrap();
         let lookup = Lookup {
-            connection: Arc::new(Mutex::new(connection)),
+            pool: Arc::new(
+                ReaderPool::open_unchecked(&path, 1, 4, Duration::from_secs(2)).unwrap(),
+            ),
+            slow: None,
             admin: Sha256::digest(b"fake-admin").into(),
         };
         assert!(
@@ -328,8 +361,19 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        let guard = lookup.connection.clone().lock_owned().await;
-        assert!(guard.is_autocommit());
+        let p = lookup.pool.clone();
+        let (started, starting) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let guard = tokio::spawn(async move {
+            p.submit(move |c| {
+                assert!(!c.is_autocommit());
+                let _ = started.send(());
+                let _ = released.recv();
+                Ok(())
+            })
+            .await
+        });
+        starting.await.unwrap();
         assert!(lookup.credential(Some("Bearer fake-node")).await.is_err());
         let mut app = crate::App::new(
             format!("http://{}:1", std::net::Ipv4Addr::LOCALHOST),
@@ -354,7 +398,8 @@ mod tests {
         let bytes = axum::body::to_bytes(reply.into_body(), 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(value["reason"], "credential-lookup");
-        drop(guard);
+        release.send(()).unwrap();
+        let _ = guard.await;
         assert!(
             lookup
                 .credential(Some("Bearer fake-node"))
@@ -362,10 +407,7 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        lookup
-            .connection
-            .lock()
-            .await
+        connection
             .execute("UPDATE nodes SET revoked_at='revoked'", [])
             .unwrap();
         assert!(
@@ -382,6 +424,12 @@ mod tests {
                 .unwrap()
                 .is_some()
         );
-        assert!(lookup.connection.lock().await.is_autocommit());
+        // A write through a separate connection succeeds after every request.
+        connection
+            .execute("INSERT INTO nodes VALUES ('other',NULL)", [])
+            .unwrap();
+        drop(lookup);
+        drop(connection);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

@@ -53,7 +53,7 @@ _LOG = logging.getLogger(__name__)
 
 
 class CheckpointMaintenance:
-    """Interim Python owner of checkpoints until S4b's Rust maintenance lands."""
+    """Checkpoint owner for keyed upstreams without managed Rust maintenance."""
 
     def __init__(self, db_path: Path) -> None:
         self.path = db_path.expanduser().resolve()

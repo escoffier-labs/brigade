@@ -85,7 +85,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
             super().__init__(server_address, RequestHandlerClass, bind_and_activate)
-            if self.upstream_mode:
+            if self.upstream_mode and os.environ.get("BRIGADE_HUB_CHECKPOINT_OWNER") != "rust":
                 self._checkpoint_maintenance = fleet_hub_upstream.CheckpointMaintenance(db_path)
                 self._checkpoint_maintenance.thread.start()
             # A deferred bind has no port yet. That caller announces it after binding.

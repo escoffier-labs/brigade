@@ -5,6 +5,7 @@ import ipaddress
 import os
 from pathlib import Path
 import resource
+import sqlite3
 import signal
 import socket
 import subprocess
@@ -26,10 +27,12 @@ def free_port():
 
 
 @contextlib.contextmanager
-def front(upstream=None, extra=(), env_overrides=None):
+def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False):
     with tempfile.TemporaryDirectory() as work:
         port = free_port()
-        command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
+        command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", "hub.db" if relative_db else f"{work}/hub.db"]
+        if default_db:
+            command = command[:-2]
         command.extend(extra)
         if upstream:
             command += ["--upstream", f"http://{HOST}:{upstream}"]
@@ -40,7 +43,7 @@ def front(upstream=None, extra=(), env_overrides=None):
             else:
                 env[name] = value
         with tempfile.TemporaryFile() as log:
-            child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=work if relative_db else None)
             try:
                 for _ in range(300):
                     if child.poll() is not None:
@@ -113,6 +116,60 @@ def raw(port, data):
 
 
 class Transport(unittest.TestCase):
+    def test_python_default_without_home_and_single_checkpoint_owner(self):
+        # Give Python's Unix password-database fallback a disposable home. Never
+        # open the operator database while testing HOME-unset startup.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sitecustomize.py").write_text(
+                "import os, pwd\n"
+                "from types import SimpleNamespace\n"
+                f"pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={directory!r})\n"
+                "if os.environ.get('BRIGADE_HUB_CHECKPOINT_OWNER') == 'rust':\n"
+                " import brigade.fleet_hub_upstream as u\n"
+                " def forbidden(*args, **kwargs): raise RuntimeError('duplicate Python checkpointer')\n"
+                " u.CheckpointMaintenance = forbidden\n"
+            )
+            pythonpath = os.pathsep.join([directory, str(Path(__file__).resolve().parents[3] / "src"), os.environ.get("PYTHONPATH", "")])
+            with front(default_db=True, env_overrides={"HOME": None, "PYTHONPATH": pythonpath}) as (_, port):
+                database = root / ".brigade/fleet-hub.db"
+                self.assertTrue(database.exists())
+                with sqlite3.connect(database) as writer:
+                    writer.execute("PRAGMA wal_autocheckpoint=0")
+                    writer.execute("INSERT INTO nodes(node_id,token_sha256,created_at) VALUES ('checkpoint-probe','fake-digest','2026-01-01')")
+                    sizes = []
+                    for _ in range(8):
+                        writer.execute("UPDATE nodes SET label=hex(randomblob(524288)) WHERE node_id='checkpoint-probe'")
+                        writer.commit()
+                        time.sleep(1.5)
+                        sizes.append(Path(str(database) + "-wal").stat().st_size)
+                    self.assertLess(max(sizes), 4 * 1024 * 1024, sizes)
+                self.assertEqual(request(port, "/ready")[0], 200)
+
+    def test_relative_database_admits_events_and_sessions(self):
+        with socket.socket() as listener:
+            listener.bind((HOST, 0))
+            listener.listen()
+            forwarded = []
+
+            def upstream():
+                for route in (b"/events", b"/sessions", b"/events", b"/sessions"):
+                    with accept_request(listener, b"POST " + route + b" ") as conn:
+                        forwarded.append(route)
+                        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}")
+
+            worker = threading.Thread(target=upstream, daemon=True)
+            worker.start()
+            with front(listener.getsockname()[1], relative_db=True) as (_, port):
+                for route in ("/events", "/sessions"):
+                    self.assertEqual(request(port, route, "POST")[0], 200)
+                # Exercise the periodic sampler as well as startup admission.
+                time.sleep(1.2)
+                for route in ("/events", "/sessions"):
+                    self.assertEqual(request(port, route, "POST")[0], 200)
+            worker.join(3)
+            self.assertEqual(forwarded, [b"/events", b"/sessions"] * 2)
+
     def test_down_and_readiness_recovery(self):
         port = free_port()
         with front(port) as (_, public):

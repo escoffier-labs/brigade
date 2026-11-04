@@ -135,12 +135,14 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "libc",
  "rusqlite",
  "serde_json",
  "sha2",
  "subtle",
  "tokio",
  "url",
+ "windows-sys",
 ]
 
 [[package]]

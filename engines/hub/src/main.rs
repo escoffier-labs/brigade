@@ -1,6 +1,5 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
-mod audit;
 mod response;
 
 use axum::{
@@ -212,6 +211,7 @@ struct App {
     lookup: Option<admission::Lookup>,
     trust_identity: bool,
     trust_proto: bool,
+    storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
     buffers: Arc<Semaphore>,
     buffer_fallbacks: Arc<std::sync::atomic::AtomicU64>,
     upstream_key: axum::http::HeaderValue,
@@ -227,6 +227,7 @@ impl App {
             lookup: None,
             trust_identity,
             trust_proto,
+            storage: None,
             buffers: Arc::new(Semaphore::new(BODY_BUDGET)),
             buffer_fallbacks: Arc::default(),
             upstream_key: axum::http::HeaderValue::from_static(""),
@@ -345,6 +346,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         );
     }
     if req.method() == "GET" && req.uri().path() == "/ready" {
+        if app.storage.as_ref().is_some_and(|s| !s.schema.ready()) {
+            return busy("schema-changed");
+        }
         let ready = app
             .ready
             .lock()
@@ -375,6 +379,18 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         .unwrap_or(0);
     if length > BODY_LIMIT as u64 {
         return body_too_large();
+    }
+    if let Some(storage) = &app.storage {
+        if req.method() != "GET" && !storage.schema.ready() {
+            return busy("schema-changed");
+        }
+        // S6's event/session writes are non-durable admission classes. Other
+        // families adopt the gate with their writer commands as they go native.
+        if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
+            if let Err(reason) = storage.disk.admit(false) {
+                return busy(reason);
+            }
+        }
     }
     let browser = admission::browser(req.uri().path());
     let credential = match &app.lookup {
@@ -642,6 +658,7 @@ async fn upstream(
             .args(config.python_args(0))
             .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
             .env("BRIGADE_HUB_UPSTREAM_KEY", key)
+            .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -686,8 +703,21 @@ fn parse_upstream_key(key: &str, managed: bool) -> Result<axum::http::HeaderValu
     axum::http::HeaderValue::from_str(key).map_err(|_| "invalid upstream key header".to_owned())
 }
 
-async fn run(config: Config) -> Result<(), String> {
+async fn run(mut config: Config) -> Result<(), String> {
     config.validate()?;
+    // Resolve defaults and user expansion through the matching Python runtime.
+    let output =
+        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+            .args(["-c", include_str!("../resolve_db.py")])
+            .args(config.db.iter())
+            .output()
+            .await
+            .map_err(|e| e.to_string())?;
+    if !output.status.success() {
+        return Err("Python database path resolution failed".into());
+    }
+    let database: String = serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+    config.db = Some(database.clone());
     let mut connector = HttpConnector::new();
     connector.set_connect_timeout(Some(Duration::from_secs(1)));
     let client = Client::builder(TokioExecutor::new())
@@ -733,15 +763,42 @@ async fn run(config: Config) -> Result<(), String> {
         "listening on {}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
+    let path = std::path::PathBuf::from(&database);
+    let storage = if config.upstream.is_none() {
+        Some(brigade_hub::maintenance::Maintenance::start(
+            &path,
+            &path.with_file_name("fleet-hub-memory.db"),
+            Arc::new(brigade_hub::maintenance::NoSweeps),
+        )?)
+    } else {
+        None
+    };
+    let readers = brigade_hub::read::ReaderPool::open(
+        &path,
+        brigade_hub::read::hub_threads(),
+        brigade_hub::read::HUB_QUEUE,
+    )?;
+    let memory_path = path.with_file_name("fleet-hub-memory.db");
+    let _memory_readers = if memory_path.exists() {
+        Some(brigade_hub::read::ReaderPool::open_unchecked(
+            &memory_path,
+            brigade_hub::read::MEMORY_THREADS,
+            brigade_hub::read::MEMORY_QUEUE,
+            brigade_hub::read::READ_LIMIT,
+        )?)
+    } else {
+        None
+    };
+    let _cpu = brigade_hub::read::CpuPool::default();
     let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
+    state.storage = storage.map(Arc::new);
     state.upstream_key = parsed_key;
     state.front_bind = address.ip().is_loopback();
-    let database = expand_user(config.db.as_deref().unwrap_or("~/.brigade/fleet-hub.db"));
     let admin = std::env::var("BRIGADE_FLEET_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -754,7 +811,7 @@ async fn run(config: Config) -> Result<(), String> {
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
-    state.lookup = Some(admission::Lookup::open(&database, &admin)?);
+    state.lookup = Some(admission::Lookup::new(Arc::new(readers), &admin));
     let probe = state.clone();
     tokio::spawn(async move {
         loop {

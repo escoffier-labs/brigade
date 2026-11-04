@@ -12,7 +12,17 @@ Managed mode launches Python on a numeric loopback ephemeral port. It creates
 a random per-start key, passes it only to the child, and requires it on every
 upstream request before routing. The managed switch must equal that key.
 Every upstream SQLite connection disables automatic WAL checkpoints and reads
-back the setting. Standalone Python keeps its existing checkpoint policy.
+back the setting. Managed Rust sets `BRIGADE_HUB_CHECKPOINT_OWNER=rust` on its Python child,
+which suppresses Python's checkpoint thread. Rust maintenance is the sole
+checkpoint owner in this mode. Without Rust maintenance, a keyed upstream
+keeps its Python checkpoint thread. Standalone Python keeps automatic
+checkpoints. External `--upstream` mode starts no Rust maintenance, so its
+operator must retain the upstream's checkpoint owner.
+
+Rust resolves the database path through the matching Python runtime before
+starting either storage or the managed child, using `Path.home()` for the
+default and `expanduser()` for an explicit path. Both processes receive the
+same absolute path, including when `HOME` is unset.
 
 Rust replaces incoming internal key and client-address headers with its key
 and the TCP peer address. Every Python request address consumer uses that
@@ -54,9 +64,9 @@ HTTPS front. Global connection limits still apply. A non-loopback bind keeps
 the per-source cap even for loopback peers.
 
 Before reading a body, Rust validates bearer digests against active node and
-message-principal rows on one dedicated query-only connection. Admin digest
+message-principal rows through the shared query-only reader pool. Admin digest
 comparison uses constant-time equality. Revocation takes effect on the next
-lookup. Lookup and connection wait together have a two-second deadline.
+lookup. Lookup and pool queue wait together have a two-second deadline.
 Lookup failure returns 503 `credential-lookup` with `Retry-After: 1`.
 
 Requests have separate credential, browser and anonymous budgets. Validated
