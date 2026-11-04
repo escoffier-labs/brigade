@@ -6,6 +6,16 @@ use std::{sync::Arc, time::Duration};
 use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore};
 
+fn hex(bytes: &[u8]) -> String {
+    const DIGITS: &[u8] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(char::from(DIGITS[(byte >> 4) as usize]));
+        output.push(char::from(DIGITS[(byte & 15) as usize]));
+    }
+    output
+}
+
 #[derive(Clone)]
 pub struct Lookup {
     connection: Arc<Mutex<Connection>>,
@@ -36,10 +46,7 @@ impl Lookup {
             return Ok(None);
         };
         let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
-        let key = digest
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let key = hex(&digest);
         if bool::from(digest.ct_eq(&self.admin)) {
             return Ok(Some(key));
         }
@@ -306,10 +313,7 @@ mod tests {
     async fn lookup_revocation_timeout_recovery_and_no_snapshot() {
         let connection = Connection::open_in_memory().unwrap();
         connection.execute_batch("CREATE TABLE nodes(token_sha256 TEXT,revoked_at TEXT); CREATE TABLE fleet_message_principals(token_hash TEXT,revoked_at TEXT);").unwrap();
-        let digest = Sha256::digest(b"fake-node")
-            .iter()
-            .map(|b| format!("{b:02x}"))
-            .collect::<String>();
+        let digest = hex(&Sha256::digest(b"fake-node"));
         connection
             .execute("INSERT INTO nodes VALUES (?1,NULL)", [&digest])
             .unwrap();
