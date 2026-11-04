@@ -84,7 +84,6 @@ COMMANDS: tuple[CommandEntry, ...] = (
     ),
     CommandEntry("center", "center", "Read local operator-center summaries.", extras=True),
     CommandEntry("run", "run", "Run a bounded cross-model orchestration task."),
-    CommandEntry("run-cloud", "run_cloud", "Deprecated alias for `brigade run cloud`."),
     CommandEntry("route", "route", "Show the deterministic route a task composes: signals, stages, waves, holds."),
     CommandEntry("roster", "roster", "Create and check agent rosters."),
     CommandEntry("runs", "runs", "Inspect Brigade run artifacts."),
@@ -99,10 +98,6 @@ COMMANDS: tuple[CommandEntry, ...] = (
     CommandEntry("projection", "projection", "Recover multi-file projection operations."),
     CommandEntry("handoff-template", "handoff_template", "Print the handoff TEMPLATE.md."),
     CommandEntry("ingest", "ingest", "Process writer memory-handoff inboxes into canonical memory."),
-    CommandEntry(
-        "openclaw-fragments", "openclaw_fragments", "Write OpenClaw config fragments for manual review.", extras=True
-    ),
-    CommandEntry("hermes-fragments", "hermes_fragments", "Write Hermes adapter fragments.", extras=True),
     CommandEntry("reconfigure", "reconfigure", "Adjust an existing install to a new Selection."),
     CommandEntry("completions", "completions", "Print a shell completion script (bash, zsh, or fish)."),
     CommandEntry("extras", "extras", "Enable or disable the extras command surface."),

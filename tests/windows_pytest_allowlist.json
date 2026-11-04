@@ -35,7 +35,6 @@
     "test_cursor_user_cmd.py",
     "test_doctor.py",
     "test_error_refusal_copy.py",
-    "test_evidence_ack_crypto.py",
     "test_evidence_cmd.py",
     "test_evidence_package_snapshot.py",
     "test_evidence_runtime.py",

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from brigade import cli
 from brigade.projection import kernel as projection
-from brigade.projection.fixture import mixed_workspace
+from tests.projection_fixture import mixed_workspace
 
 
 def test_projection_recover_cli_restores_and_prints_json(tmp_path: Path, capsys) -> None:

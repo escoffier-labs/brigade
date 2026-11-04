@@ -543,10 +543,13 @@ def test_work_review_closeout_stamps_completed_task_and_session(tmp_path, capsys
     assert payload["closeout"]["stamped_task_ids"] == [task["id"]]
     assert payload["closeout"]["stamped_session_path"] == str(session_dir)
 
-    assert work_cmd.task_show(target=tmp_path, task_id=task["id"]) == 0
-    out = capsys.readouterr().out
-    assert "review_closeouts: 1" in out
-    assert "run-done resolved=True findings=1 unresolved=0" in out
+    task = work_cmd._read_task_ledger(tmp_path)["tasks"][0]
+    closeouts = task["metadata"]["review_closeouts"]
+    assert len(closeouts) == 1
+    assert closeouts[0]["review_run_id"] == "run-done"
+    assert closeouts[0]["resolved"] is True
+    assert closeouts[0]["finding_count"] == 1
+    assert closeouts[0]["unresolved_count"] == 0
     session = json.loads((session_dir / "session.json").read_text())
     assert session["review_closeouts"][0]["review_run_id"] == "run-done"
 

@@ -1,6 +1,6 @@
 """Reusable projection conformance fixture.
 
-Production projectors import this module to share the mixed create/replace/remove
+Projection tests import this module to share the mixed create/replace/remove
 workspace and injected-failure boundaries. It does not import command modules.
 """
 

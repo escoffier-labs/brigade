@@ -1,6 +1,6 @@
 """`brigade harness fragments --harness {openclaw,hermes}` - write config fragments.
 
-`brigade openclaw-fragments` and `brigade hermes-fragments` remain aliases.
+Use `brigade harness fragments --harness <id>` to write adapter fragments.
 
 These never mutate a live config. They drop JSON fragments into the chosen
 output directory so the user can `jq -s '.[0] * .[1]'` them in by hand.

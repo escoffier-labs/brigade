@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli
+from tests.work_cmd_test_helpers import add_dependency_edge
 from brigade.work_cmd import bd_sync, ledger
 from brigade.work_cmd.import_bd import BdImportError
 
@@ -211,7 +212,7 @@ def test_manual_edges_survive_bd_removal(tmp_path, capsys):
     ids = by_title("1.3.2")
     tasks = mirror(tmp_path)
     crash, document = tasks[ids["Fix a crash found while parsing"]]["id"], tasks[ids["Document the parser"]]["id"]
-    assert cli.main(["work", "task", "edge", "add", "blocks", crash, document, "--target", str(tmp_path)]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=crash, target_id=document) == 0
     capsys.readouterr()
     assert sync(tmp_path, capsys, fixture("1.3.2"))[0] == 0
     edges = ledger._read_task_ledger(tmp_path)["edges"]
@@ -234,7 +235,7 @@ def test_cycles_fail_closed_without_writing(tmp_path, capsys, where):
             tasks[ids["Document the parser"]]["id"],
             tasks[ids["Fix a crash found while parsing"]]["id"],
         ]
-        assert cli.main(["work", "task", "edge", "add", *manual, "--target", str(tmp_path)]) == 0
+        assert add_dependency_edge(target=tmp_path, edge_type=manual[0], source=manual[1], target_id=manual[2]) == 0
         capsys.readouterr()
         prerequisite, dependent = ids["Fix a crash found while parsing"], ids["Implement the parser"]
     for row in items:

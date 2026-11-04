@@ -45,16 +45,6 @@ def _fake_surface_run(argv, timeout=8):
     return {"ok": False, "stdout": "", "error": "command not found"}
 
 
-def test_operator_plan_lists_safe_local_configs(tmp_path, capsys):
-    assert operator_cmd.plan(target=tmp_path, json_output=True) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    ids = {row["id"] for row in payload["steps"]}
-    assert {"daily", "handoff-sources", "work-scanners", "security", "tools"} <= ids
-    assert "Does not start services." in payload["boundaries"]
-    assert payload["profile"] == "local-operator"
-
-
 def test_operator_status_includes_bounded_grokbot_cloud_summary(tmp_path):
     grokbot_jobs.enqueue(
         tmp_path,
@@ -76,16 +66,6 @@ def test_operator_status_includes_bounded_grokbot_cloud_summary(tmp_path):
     payload = operator_cmd.status_payload(tmp_path, profile="local-operator")
     assert payload["grokbot_cloud"]["job_count"] == 1
     assert "PRIVATE OPERATOR INSTRUCTIONS" not in json.dumps(payload)
-
-
-def test_operator_internal_dogfood_plan_includes_dogfood(tmp_path, capsys):
-    assert operator_cmd.plan(target=tmp_path, profile="internal-dogfood", json_output=True) == 0
-
-    payload = json.loads(capsys.readouterr().out)
-    ids = {row["id"] for row in payload["steps"]}
-    assert "dogfood" in ids
-    assert payload["profile"] == "internal-dogfood"
-    assert any("security evidence" in boundary for boundary in payload["boundaries"])
 
 
 def test_operator_adoption_plan_summarizes_existing_workspace_without_raw_surface_details(
@@ -1259,7 +1239,7 @@ def test_operator_verify_harness_hermes_fails_broken_adapter_inbox(tmp_path, cap
     assert operator_cmd.verify_harness(target=tmp_path, harness="hermes", json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["ready"] is False
-    assert payload["next_command"] == "brigade hermes-fragments --out .brigade/hermes"
+    assert payload["next_command"] == "brigade harness fragments --harness hermes --out .brigade/hermes"
     assert any(
         row["name"] == "hermes_adapter_workspace_handoff_inbox"
         and row["status"] == "fail"
@@ -1292,44 +1272,8 @@ def test_operator_sync_tools_cli_dispatch(tmp_path, monkeypatch):
     assert seen == {"target": tmp_path, "dry_run": True, "force": True, "json_output": True}
 
 
-def test_operator_bootstrap_portable_cli_dispatch(tmp_path, monkeypatch):
-    seen = {}
-
-    def fake_bootstrap_portable(**kwargs):
-        seen.update(kwargs)
-        return 0
-
-    monkeypatch.setattr(operator_cmd, "bootstrap_portable", fake_bootstrap_portable)
-    assert (
-        cli.main(
-            [
-                "operator",
-                "bootstrap-portable",
-                "--target",
-                str(tmp_path),
-                "--tool-pack",
-                str(tmp_path / "tool-pack"),
-                "--skill-pack",
-                str(tmp_path / "skill-pack"),
-                "--dry-run",
-                "--force",
-                "--json",
-            ]
-        )
-        == 0
-    )
-    assert seen == {
-        "target": tmp_path,
-        "tool_pack": tmp_path / "tool-pack",
-        "skill_pack": tmp_path / "skill-pack",
-        "dry_run": True,
-        "force": True,
-        "json_output": True,
-    }
-
-
 def test_operator_bootstrap_portable_syncs_builtins(tmp_path, capsys):
-    assert cli.main(["operator", "bootstrap-portable", "--target", str(tmp_path), "--json"]) == 0
+    assert operator_cmd.bootstrap_portable(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "ok"
     assert [step["id"] for step in payload["steps"]] == ["operator-sync-tools", "tools-doctor", "skills-doctor"]
@@ -1493,7 +1437,7 @@ def test_operator_sync_tools_projects_tracked_sources(tmp_path, capsys):
     (tools_dir / "frontend.md").write_text("# Frontend\n\nBuild usable interfaces.\n")
     (tools_dir / "antislop.md").write_text("# Anti-Slop\n\nRemove vague unfinished work.\n")
 
-    assert cli.main(["operator", "init", "--target", str(tmp_path), "--json"]) == 0
+    assert operator_cmd.init(target=tmp_path, json_output=True) == 0
     capsys.readouterr()
     assert cli.main(["operator", "sync-tools", "--target", str(tmp_path), "--dry-run", "--json"]) == 0
     dry_run = json.loads(capsys.readouterr().out)
@@ -1588,19 +1532,7 @@ def test_internal_dogfood_fresh_repo_onboarding_loop(tmp_path, capsys, monkeypat
     assert cli.main(["roadmap", "commands", "--target", str(tmp_path), "--write", "--json"]) == 0
     capsys.readouterr()
     assert (
-        cli.main(
-            [
-                "operator",
-                "init",
-                "--profile",
-                "internal-dogfood",
-                "--target",
-                str(tmp_path),
-                "--waive-public-release",
-                "--json",
-            ]
-        )
-        == 0
+        operator_cmd.init(target=tmp_path, profile="internal-dogfood", waive_public_release=True, json_output=True) == 0
     )
     init_payload = json.loads(capsys.readouterr().out)
     assert init_payload["profile"] == "internal-dogfood"

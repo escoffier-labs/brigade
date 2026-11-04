@@ -462,7 +462,7 @@ def verify_harness_payload(target: Path, *, harness: str) -> dict[str, Any]:
         elif harness == "hermes" and hermes_adapter_issues and not (inbox_health and inbox_health.exists):
             next_command = "brigade init --target . --depth workspace --harnesses hermes"
         elif harness == "hermes" and hermes_adapter_issues:
-            next_command = "brigade hermes-fragments --out .brigade/hermes"
+            next_command = "brigade harness fragments --harness hermes --out .brigade/hermes"
         elif inbox_health is None or not inbox_path.exists():
             next_command = f"brigade handoff draft --inbox {harness} --target . --title <title> --summary <summary> --content <content>"
         elif not (inbox_health and inbox_health.watched):

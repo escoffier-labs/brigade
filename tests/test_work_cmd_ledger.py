@@ -12,6 +12,7 @@ from brigade import dogfood_cmd
 from brigade import work_cmd
 
 from tests.work_cmd_test_helpers import (
+    add_dependency_edge,
     _write_json,
     _init_git_repo,
     _plan_task_id,
@@ -41,15 +42,6 @@ def test_work_task_ledger_add_list_show_and_done(tmp_path, monkeypatch, capsys):
     assert "work tasks:" in out
     assert task_id in out
     assert "[pending] ready [task normal acceptance=0] Build task ledger" in out
-
-    assert work_cmd.task_show(target=tmp_path, task_id=task_id[:12]) == 0
-    out = capsys.readouterr().out
-    assert f"task: {task_id}" in out
-    assert "status: pending" in out
-    assert "type: task" in out
-    assert "priority: normal" in out
-    assert "acceptance: 0" in out
-    assert "text: Build task ledger" in out
 
     assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 0
     assert "status: done" in capsys.readouterr().out
@@ -1173,10 +1165,6 @@ def test_plan_decision_checkpoint_declare_resolve_and_gate(tmp_path, capsys):
     assert "unresolved plan decision checkpoint" in err
     assert "auth-approach" in err
 
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    err = capsys.readouterr().err
-    assert "unresolved plan decision checkpoint" in err
-
     assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
     err = capsys.readouterr().err
     assert "unresolved plan decision checkpoint" in err
@@ -1217,10 +1205,6 @@ def test_plan_decision_checkpoint_declare_resolve_and_gate(tmp_path, capsys):
     capsys.readouterr()
     receipt = json.loads(json_path.read_text())
     assert receipt["status"] == "accepted"
-
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
-    out = capsys.readouterr().out
-    assert "status: in_progress" in out
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -1333,9 +1317,6 @@ def test_plan_decision_absent_on_legacy_receipt_remains_valid(tmp_path, capsys):
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
     capsys.readouterr()
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
-    out = capsys.readouterr().out
-    assert "status: in_progress" in out
 
 
 def test_plan_decision_malformed_non_list_fails_closed_on_accept_claim_done(tmp_path, capsys):
@@ -1349,10 +1330,6 @@ def test_plan_decision_malformed_non_list_fails_closed_on_accept_claim_done(tmp_
     json_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
-    err = capsys.readouterr().err
-    assert "decisions must be a list" in err
-
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
     err = capsys.readouterr().err
     assert "decisions must be a list" in err
 
@@ -1389,9 +1366,6 @@ def test_plan_decision_malformed_field_types_fail_closed_on_accept_claim_done(tm
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
     err = capsys.readouterr().err
     assert "field 'options' must be a non-empty list of non-empty strings" in err
-
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
     assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
     assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
@@ -1434,9 +1408,6 @@ def _assert_plan_decision_options_gate_fails_closed(tmp_path, capsys, *, task_id
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
     err = capsys.readouterr().err
     assert "field 'options' must be a non-empty list of non-empty strings" in err
-
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
     assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
     assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
@@ -1481,9 +1452,6 @@ def test_plan_decision_missing_options_key_fail_closed_on_accept_claim_done(tmp_
     err = capsys.readouterr().err
     assert "field 'options' must be a non-empty list of non-empty strings" in err
 
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
-
     assert work_cmd.claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
     assert "field 'options' must be a non-empty list of non-empty strings" in capsys.readouterr().err
 
@@ -1507,9 +1475,6 @@ def test_plan_decision_absent_or_null_decisions_field_remains_valid_legacy(tmp_p
 
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 0
     capsys.readouterr()
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 0
-    out = capsys.readouterr().out
-    assert "status: in_progress" in out
 
 
 def test_plan_decision_malformed_entry_fails_closed_and_keeps_opaque_evidence_ref(tmp_path, capsys):
@@ -1535,8 +1500,6 @@ def test_plan_decision_malformed_entry_fails_closed_and_keeps_opaque_evidence_re
     assert work_cmd.task_plan(target=tmp_path, task_id=task_id[:12], write=True, accept=True) == 2
     err = capsys.readouterr().err
     assert "invalid or missing id" in err
-    assert work_cmd.task_claim(target=tmp_path, task_id=task_id[:12], actor="ops") == 2
-    assert "invalid or missing id" in capsys.readouterr().err
     assert work_cmd.task_done(target=tmp_path, task_id=task_id[:12]) == 2
     assert "invalid or missing id" in capsys.readouterr().err
 
@@ -1774,10 +1737,6 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
         seen.append(("add", kwargs))
         return 0
 
-    def fake_task_show(**kwargs):
-        seen.append(("show", kwargs))
-        return 0
-
     def fake_task_plan(**kwargs):
         seen.append(("plan", kwargs))
         return 0
@@ -1788,7 +1747,6 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
 
     monkeypatch.setattr(work_cmd, "tasks", fake_tasks)
     monkeypatch.setattr(work_cmd, "task_add", fake_task_add)
-    monkeypatch.setattr(work_cmd, "task_show", fake_task_show)
     monkeypatch.setattr(work_cmd, "task_plan", fake_task_plan)
     monkeypatch.setattr(work_cmd, "task_done", fake_task_done)
 
@@ -1816,7 +1774,6 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
         == 0
     )
     assert cli.main(["work", "task", "add", "--target", str(tmp_path), "--from-next"]) == 0
-    assert cli.main(["work", "task", "show", "abc123", "--target", str(tmp_path)]) == 0
     assert cli.main(["work", "task", "plan", "abc123", "--target", str(tmp_path), "--json"]) == 0
     assert cli.main(["work", "task", "done", "abc123", "--target", str(tmp_path)]) == 0
     assert seen == [
@@ -1863,7 +1820,6 @@ def test_work_tasks_cli(tmp_path, monkeypatch):
                 "json_output": False,
             },
         ),
-        ("show", {"target": tmp_path, "task_id": "abc123", "json_output": False}),
         (
             "plan",
             {
@@ -1963,7 +1919,7 @@ def test_import_promote_all_failed_item_does_not_persist_task_when_later_succeed
     downstream, created_down = work_cmd._add_task(tmp_path, "Downstream B")
     assert created_up and created_down
     assert (
-        work_cmd.task_edge_add(
+        add_dependency_edge(
             target=tmp_path,
             edge_type="blocks",
             source=upstream["id"],
