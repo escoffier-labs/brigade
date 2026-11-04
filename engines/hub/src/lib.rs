@@ -1,5 +1,6 @@
 //! Storage infrastructure. Route ownership remains with Python until S5.
 pub mod maintenance;
+pub mod memory;
 pub mod read;
 pub mod schema;
 pub mod writer;

@@ -10,27 +10,39 @@ use std::{
     ptr,
 };
 #[derive(Default)]
-struct Disk {
-    writer: bool,
-    skip_directory_sync: bool,
-    stable: BTreeMap<PathBuf, Vec<u8>>,
-    names: BTreeMap<PathBuf, bool>,
-    paths: Vec<PathBuf>,
-    count: usize,
-    cut: usize,
-    crashed: bool,
-    ordered: bool,
-    inside_sync: bool,
-    phase: usize,
-    active: Option<usize>,
-    commit_frame: bool,
-    commit_complete: bool,
-    volatile: BTreeMap<PathBuf, Vec<u8>>,
-    loss_mode: usize,
+pub(crate) struct Disk {
+    /// Memory power-cut runs (S13a): the NORMAL control, an SQLITE_FULL on
+    /// the next commit frame, and a delay added to syncs of matching files.
+    pub(crate) normal: bool,
+    pub(crate) full_on_commit: bool,
+    pub(crate) sync_delay: Option<(String, std::time::Duration, usize)>,
+    pub(crate) writer: bool,
+    pub(crate) skip_directory_sync: bool,
+    pub(crate) stable: BTreeMap<PathBuf, Vec<u8>>,
+    pub(crate) names: BTreeMap<PathBuf, bool>,
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) count: usize,
+    pub(crate) cut: usize,
+    pub(crate) crashed: bool,
+    pub(crate) ordered: bool,
+    pub(crate) inside_sync: bool,
+    pub(crate) phase: usize,
+    pub(crate) active: Option<usize>,
+    pub(crate) commit_frame: bool,
+    pub(crate) commit_complete: bool,
+    pub(crate) volatile: BTreeMap<PathBuf, Vec<u8>>,
+    pub(crate) loss_mode: usize,
 }
-thread_local! { static DISK: RefCell<Disk> = RefCell::default(); }
+thread_local! { pub(crate) static DISK: RefCell<Disk> = RefCell::default(); }
 // Registration is process-global, while fault state and writer switches are thread-local.
-static VFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static VFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) fn synchronous() -> (&'static str, i64) {
+    if DISK.with(|d| d.borrow().normal) {
+        ("NORMAL", 1)
+    } else {
+        ("FULL", 2)
+    }
+}
 pub(super) fn writer_vfs() -> Option<&'static str> {
     DISK.with(|d| d.borrow().writer.then_some("hub-powercut"))
 }
@@ -67,7 +79,7 @@ unsafe fn f<'a>(p: *mut sqlite3_file) -> &'a mut File {
 unsafe fn io(p: *mut sqlite3_file) -> &'static sqlite3_io_methods {
     &*(*f(p).real).pMethods
 }
-fn step(phase: usize) -> bool {
+pub(crate) fn step(phase: usize) -> bool {
     DISK.with(|d| {
         let mut d = d.borrow_mut();
         if d.crashed {
@@ -171,6 +183,19 @@ unsafe extern "C" fn write(p: *mut sqlite3_file, b: *const c_void, n: c_int, o: 
     if step(kind) {
         return SQLITE_IOERR_WRITE;
     }
+    if wal
+        && n > 24
+        && DISK.with(|d| {
+            let mut d = d.borrow_mut();
+            let full = d.commit_frame && d.full_on_commit;
+            if full {
+                d.full_on_commit = false;
+            }
+            full
+        })
+    {
+        return SQLITE_FULL;
+    }
     let rc = (io(p).xWrite.unwrap())(f(p).real, b, n, o);
     if wal && n > 24 && DISK.with(|d| d.borrow().commit_frame) {
         DISK.with(|d| d.borrow_mut().commit_complete = true);
@@ -194,6 +219,21 @@ unsafe extern "C" fn sync(p: *mut sqlite3_file, flags: c_int) -> c_int {
         return SQLITE_IOERR_FSYNC;
     }
     let path = f(p).path.clone();
+    let delay = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        match d.sync_delay.as_mut() {
+            Some((suffix, delay, remaining))
+                if *remaining > 0 && path.to_string_lossy().ends_with(suffix.as_str()) =>
+            {
+                *remaining -= 1;
+                Some(*delay)
+            }
+            _ => None,
+        }
+    });
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
     let rc = (io(p).xSync.unwrap())(f(p).real, flags);
     // A separate cut inside sync persists a sector prefix of its dirty image.
     let partial_cut = DISK.with(|d| d.borrow().inside_sync) && step(2);
@@ -298,9 +338,9 @@ static METHODS: sqlite3_io_methods = sqlite3_io_methods {
     xFetch: None,
     xUnfetch: None,
 };
-struct Registration(*mut sqlite3_vfs);
+pub(crate) struct Registration(*mut sqlite3_vfs);
 impl Registration {
-    unsafe fn new() -> Self {
+    pub(crate) unsafe fn new() -> Self {
         let parent = sqlite3_vfs_find(ptr::null());
         let mut v = Box::new(ptr::read(parent));
         v.zName = c"hub-powercut".as_ptr();
@@ -330,21 +370,27 @@ fn connect(path: &std::path::Path) -> rusqlite::Result<rusqlite::Connection> {
     )
 }
 fn seed(path: &std::path::Path, ordered: bool) {
+    seed_files(&[path], ordered);
+}
+/// Treat the current bytes of each file and its WAL as durable.
+pub(crate) fn seed_files(files: &[&std::path::Path], ordered: bool) {
     let mut disk = Disk {
         ordered,
         ..Disk::default()
     };
-    for suffix in ["", "-wal"] {
-        let p = PathBuf::from(format!("{}{suffix}", path.display()));
-        if let Ok(bytes) = std::fs::read(&p) {
-            disk.stable.insert(p.clone(), bytes);
-            disk.names.insert(p.clone(), true);
+    for path in files {
+        for suffix in ["", "-wal"] {
+            let p = PathBuf::from(format!("{}{suffix}", path.display()));
+            if let Ok(bytes) = std::fs::read(&p) {
+                disk.stable.insert(p.clone(), bytes);
+                disk.names.insert(p.clone(), true);
+            }
+            disk.paths.push(p);
         }
-        disk.paths.push(p);
     }
     DISK.with(|d| *d.borrow_mut() = disk);
 }
-fn restore() {
+pub(crate) fn restore() {
     DISK.with(|d| {
         let mut d = d.borrow_mut();
         d.cut = 0;
@@ -381,7 +427,8 @@ fn restore() {
 #[test]
 #[ignore = "storage fault matrix, run alone with --ignored --exact writer::powercut::power_cut_matrix"]
 fn power_cut_matrix() {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     let mut normal_losses = 0;
     let mut sync_losses = [0usize; 2];
@@ -669,7 +716,8 @@ fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
 }
 
 fn writer_creation_schedule(long: bool) {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     for skip in [false, true] {
         let (operations, ack, lost) = writer_creation_cut(0, skip);

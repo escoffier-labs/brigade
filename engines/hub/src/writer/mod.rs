@@ -2,7 +2,7 @@
 //! Commands are trusted, replayable database work: no external I/O or side effects.
 mod arbiter;
 mod stats;
-mod worker;
+pub(crate) mod worker;
 pub use arbiter::{Arbiter, Lane, Turn};
 use rusqlite::types::Value;
 use serde_json::Value as Json;
@@ -122,6 +122,12 @@ impl Writer {
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
         Self::start_connection(config, arbiter, connection)
     }
+    /// Tiny-schema fixtures for storage tests in this crate.
+    #[cfg(test)]
+    pub(crate) fn start_unchecked(config: Config, arbiter: Arc<Arbiter>) -> rusqlite::Result<Self> {
+        let connection = worker::open(&config.path)?;
+        Self::start_connection(config, arbiter, connection)
+    }
     fn start_connection(
         config: Config,
         arbiter: Arc<Arbiter>,
@@ -215,7 +221,7 @@ impl Writer {
 }
 
 #[cfg(test)]
-mod powercut;
+pub(crate) mod powercut;
 #[cfg(test)]
 mod tests;
 
