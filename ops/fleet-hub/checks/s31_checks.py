@@ -15,6 +15,7 @@ import concurrent.futures
 import http.client
 import json
 import os
+import secrets
 import socket
 import sqlite3
 import ssl
@@ -588,6 +589,19 @@ def bench_summary(stdout: str) -> Any:
     return text[-2000:]
 
 
+def restore_drive_script(operator: str) -> str:
+    """Serve the restored file and run the contract drive against it. The drive
+    enrolls an operator and creates questions, which the hub refuses unless it
+    has the same fresh operator recipient in its environment."""
+    return (
+        f"BRIGADE_FLEET_OPERATOR_RECIPIENT={operator} "
+        "brigade fleet serve --host 127.0.0.1 --port 3774 --db /data/fleet-hub.db --token-file /data/token & "
+        "sleep 5; BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=$(cat /data/token) "
+        f"python {DRIVE}/control-brigade.py hub-contract --hub-url http://127.0.0.1:3774 "
+        f"--operator-recipient {operator}"
+    )
+
+
 def check_load(args: argparse.Namespace, result: Result) -> None:
     """Concurrent GET /health through the real front: refused connections and latency at the fleet's concurrency."""
     url = front_url() + "/health"
@@ -798,11 +812,7 @@ def check_restore(args: argparse.Namespace, result: Result) -> None:
             (data / "token").write_text("fake-restore-drive-token\n", encoding="utf-8")
             # The restored file belongs to this account and is mode 0600, so the
             # throwaway hub runs as this account rather than the image's UID.
-            script = (
-                "brigade fleet serve --host 127.0.0.1 --port 3774 --db /data/fleet-hub.db --token-file /data/token & "
-                "sleep 5; BRIGADE_HUB_CONTRACT_ADMIN_TOKEN=$(cat /data/token) "
-                f"python {DRIVE}/control-brigade.py hub-contract --hub-url http://127.0.0.1:3774"
-            )
+            script = restore_drive_script(f"agent:restore-drive-{secrets.token_hex(4)}")
             done = run(
                 [
                     "docker",

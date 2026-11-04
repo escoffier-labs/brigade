@@ -557,3 +557,13 @@ def test_model_pull_stops_the_server_by_pid_and_keeps_the_pull_status(tmp_path):
         env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "BRIGADE_EMBED_MODEL": "m"}
         done = subprocess.run(["/bin/sh", "-c", command.replace("sleep 3", "sleep 0.2")], env=env, timeout=30)
         assert done.returncode == pull_status
+
+
+def test_restore_drive_gives_the_hub_and_the_drive_the_same_operator():
+    import shlex
+
+    script = checks.restore_drive_script("agent:restore-drive-ab12cd34")
+    serve, drive = script.split(" & ", 1)
+    assert shlex.split(serve)[0] == "BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:restore-drive-ab12cd34"
+    words = shlex.split(drive)
+    assert words[words.index("--operator-recipient") + 1] == "agent:restore-drive-ab12cd34"
