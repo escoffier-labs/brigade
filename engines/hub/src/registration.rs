@@ -281,8 +281,8 @@ impl ReadTx for ConnectionRead<'_> {
             .collect()
     }
 }
-fn authorize(
-    tx: &dyn ReadTx,
+fn authorize<T: ReadTx + ?Sized>(
+    tx: &T,
     key: &str,
     admin: &str,
     path: &str,

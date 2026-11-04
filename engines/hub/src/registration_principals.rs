@@ -52,7 +52,7 @@ fn patterns(raw: &Json) -> Result<Vec<String>> {
     out.dedup();
     Ok(out)
 }
-fn grants(tx: &dyn ReadTx, id: &str) -> rusqlite::Result<Vec<String>> {
+fn grants<T: ReadTx + ?Sized>(tx: &T, id: &str) -> rusqlite::Result<Vec<String>> {
     Ok(tx
         .query(
             "SELECT pattern FROM fleet_message_send_grants WHERE principal_id=?1 ORDER BY pattern",
@@ -107,7 +107,7 @@ pub fn audit(
     )?;
     Ok(())
 }
-fn get(tx: &dyn ReadTx, name: &str) -> Result<Option<String>> {
+fn get<T: ReadTx + ?Sized>(tx: &T, name: &str) -> Result<Option<String>> {
     let id = format!("agent:{name}");
     let rows=tx.query("SELECT principal_id,name,enrollment_id,revoked_at FROM fleet_message_principals WHERE principal_id=?1",&[text(&id)])?;
     let Some(r) = rows.first() else {
