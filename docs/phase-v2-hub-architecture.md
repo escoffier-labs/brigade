@@ -244,9 +244,9 @@ maintainer can decide.
 |---|---|---|---|
 | D1 | The Fleet Hub moves to Rust on axum, tokio and rusqlite. | Same handler logic in three servers: Rust 15k to 18k req/s, async Python about 5.3k, threaded Python about 2.3k (WAL, `synchronous=NORMAL`, keep-alive). Today's hub peaks near 460 writes/s because of its design: 32 handler threads, 8 per source, `request_queue_size=5`, and a new connection plus a schema read on every request. | Decided |
 | D2 | One writer thread with group commit, a reader pool, statements prepared once per connection, explicit admission caps and long-poll limits, WAL. Durability is D3. | Profiling put about 0.6 ms of the 0.96 ms per-request cost in opening a connection and reading the schema. A reused connection answers the same query in about 0.001 ms. | Decided, except the `synchronous=NORMAL` setting, which D3 replaces |
-| D3 | Every commit on `fleet-hub.db` and `fleet-hub-memory.db` runs at `synchronous=FULL`, as the Python hub does today. Group commit pays one WAL sync per batch. A family may move to `NORMAL` later only by a separate maintainer decision backed by S6 numbers, and never claims, fences, credentials, messages, questions, the audit log, findings or the memory log. | The Python hub sets `PRAGMA journal_mode=WAL` and never sets `synchronous`, so it runs at SQLite's WAL default, `FULL` (2). The first draft's `NORMAL` default would have lowered durability without saying so: after a power cut SQLite can lose acknowledged commits and hand out the same message id or memory `seq` again. Cost with group commit: [Durability](#durability). | Proposed, changes D2 (Q2) |
+| D3 | Every commit on `fleet-hub.db` and `fleet-hub-memory.db` runs at `synchronous=FULL`, as the Python hub does today. Group commit pays one WAL sync per batch. A family may move to `NORMAL` later only by a separate maintainer decision backed by S6 numbers, and never claims, fences, credentials, messages, questions, the audit log, findings or the memory log. | The Python hub sets `PRAGMA journal_mode=WAL` and never sets `synchronous`, so it runs at SQLite's WAL default, `FULL` (2). The first draft's `NORMAL` default would have lowered durability without saying so: after a power cut SQLite can lose acknowledged commits and hand out the same message id or memory `seq` again. Cost with group commit: [Durability](#durability). | Decided (2026-11-04, Q2), changes D2 |
 | D4 | Storage sits behind one interface so Postgres can be added later. SQLite is the default and the only backend in v2. | Keeps v2 small while leaving room for multi-node installs. | Decided |
-| D5 | The Rust hub fronts all traffic from its first deploy. Each route family is `native`, `shadow` (Python answers, Rust compares) or `proxy` (forwarded to the Python hub on loopback). | 54 JSON routes and 37 HTML routes, backed by more than 20,000 lines of Python hub code. Porting the hot set first and proxying the rest lets the cutover start long before a full port. | Proposed (Q1) |
+| D5 | The Rust hub fronts all traffic from its first deploy. Each route family is `native`, `shadow` (Python answers, Rust compares) or `proxy` (forwarded to the Python hub on loopback). | 54 JSON routes and 37 HTML routes, backed by more than 20,000 lines of Python hub code. Porting the hot set first and proxying the rest lets the cutover start long before a full port. | Decided (2026-11-04, Q1) |
 | D6 | During the rollback window the Python hub owns the hub database schema. Rust checks `user_version` and the structure it needs, triggers and constraints included, and never runs DDL on that file. Rust's own migrations later start at the version Python reached, plus one. | Rollback to Python needs a database Python accepts. Python refuses any `user_version` above its own. | Proposed |
 | D7 | Memory v2 lives in its own SQLite file, owned by the Rust hub. | The Python hub never opens it, so rollback stays clean, and memory gets its own writer and size profile. Authority across the two files is D23. | Proposed |
 | D8 | Memory v2 is an event log on the hub. Content hashes address bytes, blobs and vectors. The index is flat postings plus dense matrices per embedder version. Retrieval is BM25 plus dense, fused with reciprocal rank fusion (k=60), with an optional LLM rerank for top-1 answers. Any principal with a grant writes events. Curation is a policy. Derived rows carry fingerprints and lineage. | Judged real prompts: BM25 hit@5 0.66 to 0.74, hybrid with a 0.6B embedder 0.83 to 0.94, an LLM rerank of the top 20 lifted first-result correctness from about 0.64 to about 0.91. | Decided. Card identity amended by D22 |
@@ -266,7 +266,7 @@ maintainer can decide.
 | D22 | A memory card is identified by `(scope, card_id)`. Every change to a card's head (text, retirement, revival, trust) creates a new `revision`, and compare-and-set uses `base_revision`. The content hash is for deduplication only. | Hash-only compare-and-set cannot see a trust change on identical bytes, a retire and revive, or a return to earlier bytes, and a card id alone collides across repositories. | Proposed |
 | D23 | Each memory commit runs while the memory writer holds the hub database write lock, after re-reading the caller's credential and the policy revision under that lock. The memory writer takes the memory lock first and the hub lock second, holds the hub lock only for prepared work and one memory commit, and shares capped, alternating turns with the hub writer. The memory writer never writes to the hub file. | Credentials and policy live in `fleet-hub.db`. No SQLite transaction spans two files atomically, so without a lock a revocation could commit between the check and the memory commit. | Proposed |
 | D24 | Only `decide`, the hub's policy apply and `import` raise a card's trust, and each needs a clean scan of that content. A `put` from any caller, admin included, stores `agent-unreviewed` or `flagged`. If the scanner is unavailable, trust raises and pushes fail closed. | Every node token can write the `fleet` scope. Without this rule a scan-clean write from any node would be pushed to every agent. | Proposed |
-| D25 | Hub Tier 0 auto-apply stays off until the hub verifies evidence itself (S19e). Until then every hub proposal waits for review. | Local evidence ids cannot be resolved on the hub, and three submitted strings are not proof. | Proposed (Q6) |
+| D25 | Hub Tier 0 auto-apply stays off until the hub verifies evidence itself (S19e). Until then every hub proposal waits for review. | Local evidence ids cannot be resolved on the hub, and three submitted strings are not proof. | Decided (2026-11-04, Q6) |
 | D26 | The Rust front answers upstream failures with 502 or 504, never 503. `/health` keeps its v1 liveness meaning. A new `GET /ready` reports readiness. Proxied requests that may write are never retried. | The v1 claim client treats a 503 as an answer and maps any other HTTP error to `hub-unavailable` (`fleet_client.py`, the `claim` path). A dead upstream must look like an unreachable hub to that client, so it retries instead of reporting a refusal. | Proposed |
 | D27 | Hub work dependency edges and the ready view (#2210) are built on the Rust hub after the Worklore family port. The memory log compaction invariants from #2210 are recorded now. | #2210 asks for one build, in the Rust hub, with a Python version only if the Rust schedule slips. | Proposed (Q7) |
 | D28 | The production Fleet Hub stays on the LXC hub host. The embedder runs on the GPU workstation, and the production hub calls it over the tailnet under the remote-endpoint contract: the endpoint binds only the workstation's tailnet address, a tailnet ACL admits only the hub host, and the hub holds the endpoint's token, with a per-request deadline and fallback to BM25. A second hub, the dogfood hub, runs on the GPU workstation from the Docker Compose recipe as the everyday install path and is not production: a holder container owns the network namespace that the hub and the private network's HTTPS front join, no hub port is published, and the embedder container alone gets the GPU. Production moves to the workstation only through a separate gated step (S32), if the dogfood hub's deployment runs meet their latency targets or after the hub volume gets a device of its own. On a single-user machine the owner's agents run as the owner, and a separate agent account with no Docker rights and no `sudo` is optional hardening for multi-user or shared hosts ([Hosting](#hosting)). | `fdatasync` on the LXC hub host's data volume at load 1.4: median 1.01 ms, p99 1.71 and 2.60 ms, maximum 23.8 and 26.6 ms. On the GPU workstation at load 7 to 8: median 1.03 and 1.12 ms, p99 2.38 and 28.52 ms, maximum 4.25 and 38.6 ms, and the earlier overnight probe under load 38 to 183 had p99 871 to 928 ms and a 2.8 s maximum (two 6 s runs of 4 KiB write plus `fdatasync` per host, 2026-11-03). The medians match, and the tail decides how long a `FULL` commit holds every write behind it. The LXC hub host has no GPU the hub can use, S16a (#2217) found no CPU embedder that fits the allotment, and only the 8B hybrid passed both private halves of R1, so the GPU stays on the workstation and only embedding crosses hosts. D23's lock stays in one process on one host. | Decided (2026-11-03) |
@@ -3259,9 +3259,9 @@ one fits and what it needs from this revision.
 | Work | State | Fits as | What changes |
 |---|---|---|---|
 | Contract hot-set coverage | merged (#2218) | S1 | Done: 184 drive cases on the Python hub (`cases_total` in `registry/skills/verify-brigade/features/hub-contract.md`), pinning only the per-principal waiter cap. Its sealed cases use random bytes of valid lengths instead of envelopes generated by Python, which works because the hub checks format only (#2005). S1b's tombstone goldens still come from Python's own purge. Expiry, `client_id` window and error-text cases are S1b's |
-| Contract lifecycle and refusal text | open (#2249) | S1b | 301 drive cases pass on the Python hub: 244 on the core hub, a 60-case refusal sweep included, and 57 lifecycle cases on a second hub whose clock the drive steps through `hub_clock.py` from S2. The text of all 161 refusals and the two sealed tombstones are compared with `registry/skills/verify-brigade/hub-contract-golden.json`, captured from the Python hub with `--write-golden`. The lifecycle cases need a hub that reads `{clock_file}` (`--clock-hub-cmd`), so the Hub CI job's Rust front runs the core cases and the refusal text only. Quota, flag-gated and race refusals are not swept |
+| Contract lifecycle and refusal text | merged (#2249) on 2026-11-03 as `18f6098fd` | S1b | 301 drive cases pass on the Python hub: 244 on the core hub, a 60-case refusal sweep included, and 57 lifecycle cases on a second hub whose clock the drive steps through `hub_clock.py` from S2. The text of all 161 refusals and the two sealed tombstones are compared with `registry/skills/verify-brigade/hub-contract-golden.json`, captured from the Python hub with `--write-golden`. The lifecycle cases need a hub that reads `{clock_file}` (`--clock-hub-cmd`), so the Hub CI job's Rust front runs the core cases and the refusal text only. Quota, flag-gated and race refusals are not swept |
 | `brigade-hub` proxy crate | merged (#2215) | S3 | Shipped without the proxy contract. The postmerge items are in [Upstream proxy contract](#upstream-proxy-contract) |
-| S3b proxy hardening | open (#2226) at `8bed16452`, changes requested, auto-merge enabled | S3b | CodeRabbit's open Major on its admission keying is being fixed on the PR, and S3c completes that rule whatever it merges with. Closes the managed-loopback cap, the 24-slot proxied cap, 502 and 504, `/ready`, child-death exit, descriptor limits and request-target refusal. Leaves buffered JSON, upstream mode, front admission and the claim-client runs to S3c, restart with backoff and the drain length to S10. Its README forbids a live deployment before upstream mode lands and names S10 for it, which S3c corrects |
+| S3b proxy hardening | merged (#2226) on 2026-11-03 as `06f6a4560`, at head `8caebd92d` | S3b | The merge left its admission keying unchanged, and S3c completes that rule. Closes the managed-loopback cap, the 24-slot proxied cap, 502 and 504, `/ready`, child-death exit, descriptor limits and request-target refusal. Leaves buffered JSON, upstream mode, front admission and the claim-client runs to S3c, restart with backoff and the drain length to S10. Its README forbids a live deployment before upstream mode lands and names S10 for it, which S3c corrects |
 | Embedder benchmark | merged (#2217) | S16a | Done. It set `remote` as the provisional default, since no CPU embedder fits the allotment, and the hosting decision keeps that default for production. S16b confirms `remote` over the tailnet and `local` on the dogfood hub's GPU, after S17's R1 runs, the S6a harness and S31. Its R1 rows limit setup's model list to the 8B model until another passes R1 (D30) |
 | Hub hosting | decided 2026-11-03 (D28, Q8 closed) | S31, S32 | Production stays on the LXC hub host. S31 stands up the dogfood hub on the GPU workstation from the Compose recipe with today's Python hub. S32, the production move, is gated and outside the release |
 | Connectivity work: Grok Bot memory profile (#2216, merged), memory hits in inbox and digest responses (#2221, merged), the prompt-load scan on #2221's push path and the principal inbox `request_denied` fix (neither landed) | partly merged | first step of S23 and S26 | The terms in [Interim connectivity](#interim-connectivity). #2216 shipped `handoff_write` with the profile. #2221 merged with its `memory_hits` field, which S23 now adopts, and without the prompt-load scan, which a follow-up PR adds |
@@ -3434,7 +3434,7 @@ S27: S23 S24 S25 S26
 
 ## Release gate for 0.31.0
 
-Proposed, and it depends on Q1, Q2 and Q6:
+The questions this gate depended on, Q1, Q2 and Q6, are decided (2026-11-04):
 
 - Hub: S1, S1b, S2, S3, S3b, S3c, S4a, S4b, S5, S6a, S6, S7, S8, S9, S10, S29,
   S30 and S31, with cutover phase 3 complete for at least the heartbeat and
@@ -3504,30 +3504,32 @@ Proposed, and it depends on Q1, Q2 and Q6:
 
 ## Open questions
 
-These need the maintainer. Each open question has a recommendation. Q8,
+Q3, Q5 and Q7 need the maintainer, and each has a recommendation. Q8,
 opened in revision 3, was closed by the maintainer's hosting decision on
-2026-11-03 and stays here as a record.
+2026-11-03. Q1, Q2 and Q6 were closed on 2026-11-04. The closed questions stay
+here as a record.
 Q4 from the first draft
 (unreviewed cards are never pushed to other agents) is now a design rule
 (D24), since both reviews agreed with it, so it is not asked again.
 
-- **Q1, release scope.** May 0.31.0 ship with the Python hub serving the
-   cold JSON families and the HTML deck as a loopback upstream behind the
-   Rust hub? Recommended: yes, with the proxy contract (D26, S3b) in place and
-   release notes that say which routes Python serves. Requiring every JSON
-   route to be native puts S12 on the release path, including the policy and
-   routing modules (about 4,700 lines of Python).
-- **Q2, durability (changes D2).** Keep `synchronous=FULL` on every commit,
-   as the Python hub runs today, instead of the `NORMAL` setting D2 recorded?
-   Recommended: yes. The first draft offered `FULL` as an extra for claims on
-   top of a `NORMAL` default, but the shipped hub never sets `synchronous` and
-   so already runs `FULL` everywhere. `NORMAL` would lower durability for
-   messages, questions, the audit log and events, and after a power cut could
-   hand out a message id a recipient's cursor already passed. Group commit
-   pays one sync per batch. The measurement so far comes from a loaded
-   machine, so S6 confirms the cost on quiet hardware at the hub allotment
-   before release. If `FULL` misses the target there, a later decision can
-   name low-value families for `NORMAL`.
+- **Q1, release scope.** Closed 2026-11-04. The maintainer decided: 0.31.0
+   may ship with the Python hub serving the cold JSON families and the HTML
+   deck as a loopback upstream behind the Rust hub, with the proxy contract
+   (D26, S3b) in place and release notes that say which routes Python serves
+   (D5). Requiring every JSON route to be native would put S12 on the release
+   path, including the policy and routing modules (about 4,700 lines of
+   Python).
+- **Q2, durability (changes D2).** Closed 2026-11-04. The maintainer decided:
+   keep `synchronous=FULL` on every commit, as the Python hub runs today,
+   instead of the `NORMAL` setting D2 recorded (D3). The first draft offered
+   `FULL` as an extra for claims on top of a `NORMAL` default, but the shipped
+   hub never sets `synchronous` and so already runs `FULL` everywhere.
+   `NORMAL` would lower durability for messages, questions, the audit log and
+   events, and after a power cut could hand out a message id a recipient's
+   cursor already passed. Group commit pays one sync per batch. The
+   measurement so far comes from a loaded machine, so S6 confirms the cost on
+   quiet hardware at the hub allotment before release. If `FULL` misses the
+   target there, a later decision can name low-value families for `NORMAL`.
 - **Q3, publishing default.** Once a workspace has a hub, should its local
    cards publish only after an explicit per-workspace `sync` opt-in?
    Recommended: yes, with the first enable printing the card count and scope
@@ -3539,11 +3541,11 @@ Q4 from the first draft
    before the first Rust migration exists? Recommended: yes. Until the window
    closes, `fleet serve --engine rust` refuses to run Rust schema migrations
    on the hub file.
-- **Q6, hub reflect scope (D25).** Ship 0.31.0 with hub reflect limited to
-   proposals and review, and keep Tier 0 auto-apply on the hub off until
-   evidence attestation (S19e) lands after the release? Recommended: yes.
-   Local evidence ids cannot be checked on the hub, and a promoted card
-   reaches every agent.
+- **Q6, hub reflect scope (D25).** Closed 2026-11-04. The maintainer decided:
+   0.31.0 ships with hub reflect limited to proposals and review, and Tier 0
+   auto-apply on the hub stays off until evidence attestation (S19e) lands
+   after the release. Local evidence ids cannot be checked on the hub, and a
+   promoted card reaches every agent.
 - **Q7, #2210 timing (D27).** Build hub work dependency edges and the ready
    view in Rust right after the Worklore family port (S12g), as the first cold
    family after 0.31.0, and land a Python version only if that port has not
