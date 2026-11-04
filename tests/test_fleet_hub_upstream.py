@@ -79,4 +79,79 @@ def test_internal_address_is_available_for_audit(monkeypatch):
     handler = SimpleNamespace(headers=headers, client_address=peer)
     assert authorize(handler)
     assert handler.upstream_client_address == address
+    assert handler.client_address == (address, peer[1])
+
+
+def test_address_consumers_use_keyed_address(tmp_path, monkeypatch):
+    from brigade import fleet_hub_messages
+
+    host = str(ipaddress.IPv4Address(2130706433))
+    address = str(ipaddress.IPv4Address(3221225985))
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
+    server = fleet_hub.make_server(
+        host, 0, tmp_path / "hub.db", "fake-admin", allow_admin_writes=True, trust_tailscale_identity=True
+    )
+    observed = {}
+    original = server.RequestHandlerClass
+
+    class Handler(original):
+        def _route(self, method, *, refuse_token_query):
+            observed["logging"] = self.address_string()
+            observed["loopback"] = self._tailscale_identity_authorized()
+            observed["secure_transport"] = self._secure_transport()
+            observed["source_key"] = self.server._active_requests[self.request]
+            return super()._route(method, refuse_token_query=refuse_token_query)
+
+    server.RequestHandlerClass = Handler
+
+    def messages(*args, **kwargs):
+        observed["source_ip"] = kwargs["source_ip"]
+        observed["waiter_source_cap"] = fleet_hub_messages._source_cap_applies(kwargs["source_ip"])
+        return 200, {}
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", messages)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        conn = http.client.HTTPConnection(host, server.server_port, timeout=2)
+        conn.request(
+            "POST",
+            "/messages",
+            b"{}",
+            {
+                "Authorization": "Bearer fake-admin",
+                "Content-Type": "application/json",
+                "X-Brigade-Upstream-Key": "fake-key",
+                "X-Brigade-Client-Address": address,
+                "Tailscale-User-Login": "viewer@example.invalid",
+                "X-Forwarded-Proto": "https",
+            },
+        )
+        assert conn.getresponse().status == 200
+        conn.close()
+        assert observed == {
+            "logging": address,
+            "loopback": False,
+            "secure_transport": False,
+            "source_key": address,
+            "source_ip": address,
+            "waiter_source_cap": True,
+        }
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_standalone_ignores_internal_address_header(monkeypatch):
+    from email.message import Message
+    from types import SimpleNamespace
+    from brigade.fleet_hub_upstream import authorize
+
+    monkeypatch.delenv("BRIGADE_HUB_UPSTREAM_KEY", raising=False)
+    peer = (str(ipaddress.IPv4Address(2130706433)), 1234)
+    headers = Message()
+    headers["X-Brigade-Client-Address"] = str(ipaddress.IPv4Address(3221225985))
+    handler = SimpleNamespace(headers=headers, client_address=peer)
+    assert authorize(handler)
     assert handler.client_address == peer

@@ -15,8 +15,9 @@ Every upstream SQLite connection disables automatic WAL checkpoints and reads
 back the setting. Standalone Python keeps its existing checkpoint policy.
 
 Rust replaces incoming internal key and client-address headers with its key
-and the TCP peer address. Python keeps that address for audit records while
-browser trust checks continue using the actual socket peer.
+and the TCP peer address. Every Python request address consumer uses that
+validated address, including browser trust checks and request logging.
+Persisted per-request address auditing is deferred to a later schema slice.
 
 Live deployment remains outside this slice. S3c owns upstream mode and client
 address forwarding. S10 owns packaging and deployment recipes.

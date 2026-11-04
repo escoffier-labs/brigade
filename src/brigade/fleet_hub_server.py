@@ -58,6 +58,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         from . import fleet_hub_upstream
 
         upstream_key = fleet_hub_upstream.key()
+        self.upstream_mode = bool(upstream_key)
         if managed and not upstream_key:
             raise ValueError("managed upstream requires a per-start key")
         if managed and os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") != upstream_key:
@@ -112,8 +113,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             conn.close()
 
     def process_request(self, request: socket | tuple[bytes, socket], client_address: Any) -> None:
-        source = client_address[0]
-        front = self._loopback_bind and is_loopback_address(source)
+        source = "upstream-unclassified" if self.upstream_mode else client_address[0]
+        front = self.upstream_mode or self._loopback_bind and is_loopback_address(source)
         with self._admission_lock:
             source_count = self._source_counts.get(source, 0)
             admitted = (
@@ -134,6 +135,22 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # The accept loop owns socket cleanup when thread creation fails.
             self._release(request)
             raise
+
+    def rekey_upstream_request(self, request: socket, source: str) -> None:
+        """Replace the pre-header key only after the transport key is checked."""
+        if not self.upstream_mode:
+            return
+        with self._admission_lock:
+            previous = self._active_requests.get(request)
+            if previous is None or previous == source:
+                return
+            remaining = self._source_counts[previous] - 1
+            if remaining:
+                self._source_counts[previous] = remaining
+            else:
+                del self._source_counts[previous]
+            self._active_requests[request] = source
+            self._source_counts[source] = self._source_counts.get(source, 0) + 1
 
     def process_request_thread(self, request: socket | tuple[bytes, socket], client_address: Any) -> None:
         try:

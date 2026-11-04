@@ -36,4 +36,8 @@ def authorize(handler: object) -> bool:
         handler.send_error(400, "upstream client address required")  # type: ignore[attr-defined]
         return False
     handler.upstream_client_address = address  # type: ignore[attr-defined]
+    handler.client_address = (address, handler.client_address[1])  # type: ignore[attr-defined]
+    server = getattr(handler, "server", None)
+    if server is not None:
+        server.rekey_upstream_request(handler.request, address)  # type: ignore[attr-defined]
     return True
