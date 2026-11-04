@@ -717,7 +717,7 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
         if ($checksums.ContainsKey($Matches[2])) { throw "duplicate checksums.txt asset: $($Matches[2])" }
         $checksums[$Matches[2]] = $Matches[1]
     }
-    $legacyIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+    $legacyIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     $platforms = @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
     if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw "release manifest must contain exactly five components" }
     foreach ($property in $manifest.components.PSObject.Properties) {
@@ -743,17 +743,17 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
             $expected[$name] = $asset.sha256
         }
     }
-    $canonical = @{}
-    foreach ($componentId in @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")) {
+    $aliases = @{}
+    foreach ($componentId in @("graphtrail", "graphtrail-mcp", "miseledger")) {
         foreach ($platform in $platforms) {
             $name = "$componentId-$platform"
             if ($platform -eq "windows-amd64") { $name += ".exe" }
-            $canonical[$name] = $true
+            $aliases[$name] = $true
         }
     }
     if ($checksums.Count -eq 41) {
-        foreach ($name in $canonical.Keys) {
-            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete canonical matrix" }
+        foreach ($name in $aliases.Keys) {
+            if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete legacy alias matrix" }
             $expected[$name] = $checksums[$name]
         }
     }
@@ -838,7 +838,7 @@ function Invoke-VerifiedCanonicalSmoke {
     $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
     $revision = $null
-    foreach ($id in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($id in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $current = $manifest.components.$id.component_revision
         if ($current -isnot [string] -or $current -cnotmatch '\A[0-9a-f]{40}\z' -or ($revision -and $revision -cne $current)) {
             throw "primary manifest must contain one valid source commit for all components"
@@ -870,7 +870,7 @@ function Assert-ManagedComponentDigests {
         $Report,
         [string]$ManagedBin
     )
-    foreach ($componentId in @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")) {
+    foreach ($componentId in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
         $path = Get-ManagedExecutablePath -Report $Report -ComponentId $componentId -ManagedBin $ManagedBin
         $expected = $Manifest.components.$componentId.assets."windows-amd64".sha256
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $expected) {
@@ -992,7 +992,8 @@ function Get-ManagedExecutablePath {
         [string]$ComponentId,
         [string]$ManagedBin
     )
-    $item = $Report.components | Where-Object { $_.component_id -eq $ComponentId } | Select-Object -First 1
+    $familyAliases = @{ "brigade-code-graph" = "graphtrail"; "brigade-code-graph-mcp" = "graphtrail-mcp"; "brigade-evidence" = "miseledger" }
+    $item = $Report.components | Where-Object { $_.component_id -eq $ComponentId -or $_.component_id -eq $familyAliases[$ComponentId] } | Select-Object -First 1
     if (-not $item) {
         throw "missing component $ComponentId in report"
     }
@@ -1142,21 +1143,31 @@ try {
     if ($InstallMode -eq "pypi") {
         Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
     }
-    $requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+    Write-Step "verified compatibility copies"
+    $compatibilityNames = @{ "graphtrail" = "brigade-code-graph"; "graphtrail-mcp" = "brigade-code-graph-mcp"; "miseledger" = "brigade-evidence" }
+    foreach ($legacy in $compatibilityNames.Keys) {
+        $canonical = Get-ManagedExecutablePath -Report $report -ComponentId $compatibilityNames[$legacy] -ManagedBin $managedBin
+        $shim = Join-Path $managedBin ($legacy + ".exe")
+        if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw "missing compatibility copy: $legacy" }
+        if ((Get-FileHash -LiteralPath $shim -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash) {
+            throw "compatibility copy digest mismatch: $legacy"
+        }
+    }
+    $requiredIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |
         Where-Object { $unpublishedIds -notcontains $_ }
     if ($InstallMode -eq "source") {
         # Setup installed the released engines and the report above proved they
         # match the manifest. Replace them with binaries built from this commit
         # so the smoke steps below exercise the engines that ship with this
         # checkout instead of the previous release's.
-        $pinIds = @("graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |
+        $pinIds = @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |
             Where-Object { $unpublishedIds -notcontains $_ }
         Write-Step "pin same-commit engines"
         Install-SameCommitEngines -EngineBinDir $EngineBinDir -ManagedBin $managedBin -ComponentIds $pinIds
     }
-    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail" -ManagedBin $managedBin
-    $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "graphtrail-mcp" -ManagedBin $managedBin
-    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "miseledger" -ManagedBin $managedBin
+    $graphtrailExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-code-graph" -ManagedBin $managedBin
+    $graphtrailMcpExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-code-graph-mcp" -ManagedBin $managedBin
+    $miseledgerExe = Get-ManagedExecutablePath -Report $report -ComponentId "brigade-evidence" -ManagedBin $managedBin
     # The managed bin holds only the legacy evidence name until setup installs
     # canonical executables. A source install also runs the same-commit
     # canonical build against the same archive, so both names stay covered.
@@ -1209,7 +1220,7 @@ try {
             throw "$mcpName absolute-path smoke returned no JSON-RPC response: $mcpText"
         }
         # Each entry point reports its own server name.
-        $expectedName = if ($mcpName -eq "graphtrail-mcp") { "graphtrail" } else { "brigade-code-graph" }
+        $expectedName = "brigade-code-graph"
         # Read the initialize reply by id rather than assuming it is the first line.
         $serverName = $null
         foreach ($line in ($mcpText -split "`r?`n")) {
@@ -1438,8 +1449,8 @@ finally:
         if ($LASTEXITCODE -ne 0) { throw "manual export verify run failed" }
 
         $exportPath = Join-Path $acceptRoot "receipts.jsonl"
-        Write-Step "receipts export miseledger"
-        & brigade receipts export miseledger --target $workRepo --out $exportPath --new-only
+        Write-Step "receipts export evidence"
+        & brigade receipts export evidence --target $workRepo --out $exportPath --new-only
         if ($LASTEXITCODE -ne 0) { throw "receipts export failed" }
         if (-not (Test-Path $exportPath)) {
             throw "export file missing: $exportPath"

@@ -40,7 +40,7 @@ def test_receipts_keygen_writes_private_key_and_refuses_without_force(tmp_path, 
 
 def test_work_verify_receipt_without_key_keeps_unsigned_digest_shape(tmp_path, capsys, monkeypatch):
     monkeypatch.setenv("BRIGADE_RECEIPT_SIGNING_KEY_FILE", str(tmp_path / "missing-key"))
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     set_home(monkeypatch, str(tmp_path))
 
     assert (
@@ -55,7 +55,7 @@ def test_work_verify_receipt_without_key_keeps_unsigned_digest_shape(tmp_path, c
 def test_work_verify_receipt_signs_receipt_sha256_when_key_exists(tmp_path, capsys, monkeypatch):
     key_path = tmp_path / ".brigade" / "receipt-signing-key"
     _write_key(key_path, "01" * 32)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     set_home(monkeypatch, str(tmp_path))
 
     assert (

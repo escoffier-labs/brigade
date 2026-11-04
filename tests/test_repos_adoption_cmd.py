@@ -124,7 +124,7 @@ def test_cursor_adoption_reports_invalid_engine_overrides_without_writes(tmp_pat
     _fleet_config(workspace, [("cursor", cursor_repo), ("claude", claude_repo)])
     before = {path: path.read_bytes() for path in home.rglob("*") if path.is_file()}
     capsys.readouterr()
-    monkeypatch.setenv("MISELEDGER_BIN", "" if mode == "empty" else str(tmp_path / "missing-engine"))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", "" if mode == "empty" else str(tmp_path / "missing-engine"))
     if mode == "conflict":
         monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(tmp_path / "other-engine"))
 

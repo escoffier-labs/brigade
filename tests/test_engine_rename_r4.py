@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -597,8 +599,6 @@ def test_doctor_legacy_config_key_message_matches_what_load_config_reads(tmp_pat
 
 
 def test_evidence_doctor_timeout_hint_names_the_resolved_executable(monkeypatch):
-    from pathlib import Path
-
     from brigade import managed
     from brigade.station import DoctorContext
 
@@ -612,3 +612,35 @@ def test_evidence_doctor_timeout_hint_names_the_resolved_executable(monkeypatch)
 @pytest.fixture(autouse=True)
 def _isolated_home(tmp_path, monkeypatch):
     set_home(monkeypatch, str(tmp_path))
+
+
+def test_cursor_owned_skill_reinstall_with_windows_default_encoding(tmp_path, monkeypatch, capsys):
+    original_read = Path.read_text
+
+    def windows_read(path, encoding=None, errors=None):
+        return original_read(path, encoding=encoding or "cp1252", errors=errors)
+
+    monkeypatch.setattr(Path, "read_text", windows_read)
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: tmp_path)
+    assert _cursor_install() == 0
+    capsys.readouterr()
+    assert _cursor_install() == 0
+    assert json.loads(capsys.readouterr().out)["conflicts"] == []
+
+
+@pytest.mark.parametrize("platform,expected_rc", [("win32", 0), ("linux", 1)])
+def test_cursor_hook_executable_mode_is_platform_specific(tmp_path, monkeypatch, capsys, platform, expected_rc):
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: tmp_path)
+    assert _cursor_install() == 0
+    capsys.readouterr()
+    hook = tmp_path / ".cursor" / "hooks" / "brigade-session-start"
+    hook.chmod(0o644)
+    monkeypatch.setattr(cursor_user_cmd, "sys", SimpleNamespace(platform=platform), raising=False)
+    assert cursor_user_cmd.doctor(json_output=True) == expected_rc
+    payload = json.loads(capsys.readouterr().out)
+    check = next(item for item in payload["checks"] if item["id"] == "session-hook")
+    assert check["status"] == ("OK" if platform == "win32" else "FAIL")
+    assert cursor_user_cmd.install(write=False, json_output=True) == 0
+    plan = json.loads(capsys.readouterr().out)
+    hook_item = next(item for item in plan["items"] if item["surface"] == "hook")
+    assert hook_item["action"] == ("none" if platform == "win32" else "update")

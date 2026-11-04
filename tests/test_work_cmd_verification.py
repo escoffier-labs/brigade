@@ -942,7 +942,7 @@ def test_verify_reused_receipt_stamps_harness_session_from_outer_env_prefix(tmp_
 
     _init_verify_target_with_head(tmp_target)
     graphtrail_bin = str(tmp_target / "missing-graphtrail")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", graphtrail_bin)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", graphtrail_bin)
 
     fingerprint_a = _session_fingerprint("session-a-outer-prefix")
     fingerprint_b = _session_fingerprint("session-b-outer-prefix")
@@ -952,7 +952,7 @@ def test_verify_reused_receipt_stamps_harness_session_from_outer_env_prefix(tmp_
         f"{shlex.quote(sys.executable)} -m brigade work verify run "
         f"--target {shlex.quote(target)} --command {shlex.quote(verify_command)}"
     )
-    subprocess_env = {**os.environ, "GRAPHTRAIL_BIN": graphtrail_bin}
+    subprocess_env = {**os.environ, "BRIGADE_CODE_GRAPH_BIN": graphtrail_bin}
 
     case_a = subprocess.run(
         ["/bin/sh", "-c", f"BRIGADE_CLAUDE_SESSION={fingerprint_a} {brigade_cli}"],
@@ -992,7 +992,7 @@ def test_verify_reused_receipt_records_env_assignments_inside_command(tmp_target
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     command = f'FOO=bar BAZ=qux {sys.executable} -c "print(1)"'
 
     assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
@@ -1011,7 +1011,7 @@ def test_verify_reuses_identical_tree(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     rc1 = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
     assert rc1 == 0
@@ -1030,7 +1030,7 @@ def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
     verification.verify_run(target=tmp_target, commands=["true"], timeout=60, reuse=False)
@@ -1042,7 +1042,7 @@ def test_verify_dirty_tree_not_reused(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
     (tmp_target / "newfile.txt").write_text("x\n")
@@ -1055,7 +1055,7 @@ def test_verify_failed_receipt_not_reused(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
@@ -1068,7 +1068,7 @@ def test_verify_warns_before_retrying_uncaptured_failed_command(tmp_target, monk
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -1083,7 +1083,7 @@ def test_verify_blocks_before_retrying_uncaptured_failed_command(tmp_target, mon
 
     _init_verify_target_with_head(tmp_target)
     _write_brigade_config(tmp_target, capture_before_retry="block")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -1100,7 +1100,7 @@ def test_verify_off_allows_silent_retry_of_uncaptured_failed_command(tmp_target,
 
     _init_verify_target_with_head(tmp_target)
     _write_brigade_config(tmp_target, capture_before_retry="off")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     rc = verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
@@ -1114,7 +1114,7 @@ def test_verify_captured_failed_command_retries_silently(tmp_target, monkeypatch
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -1130,7 +1130,7 @@ def test_verify_first_run_and_passed_retry_stay_silent(tmp_target, monkeypatch, 
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     rc = verification.verify_run(target=tmp_target, commands=["true"], timeout=60)
     assert rc == 0
@@ -1147,7 +1147,7 @@ def test_verify_pass_after_failure_makes_next_retry_silent(tmp_target, monkeypat
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     (tmp_target / "check.py").write_text(
         "from pathlib import Path\n"
         "marker = Path('passed-once')\n"
@@ -1169,7 +1169,7 @@ def test_verify_capture_before_retry_matches_exact_command_identity(tmp_target, 
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["VAR=1 false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -1188,7 +1188,7 @@ def test_verify_command_identity_normalizes_whitespace(tmp_target, monkeypatch, 
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["VAR=1  false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -1651,7 +1651,7 @@ def test_work_verify_run_argv_json_rejects_malformed_json(tmp_path, capsys):
 
 def test_work_verify_receipt_digests_recompute_from_payload_and_logs(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     monkeypatch.setenv("PATH", str(tmp_path))
     set_home(monkeypatch, str(tmp_path))
 
@@ -1699,7 +1699,7 @@ def test_work_verify_receipt_compacts_prior_nested_evidence(tmp_path, capsys, mo
             },
         },
     )
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     set_home(monkeypatch, str(tmp_path))
 
     assert (
@@ -1725,7 +1725,7 @@ def test_work_verify_receipt_compacts_prior_nested_evidence(tmp_path, capsys, mo
 def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, monkeypatch):
     _init_git_repo_with_head(tmp_path)
     (tmp_path / "dirty.txt").write_text("dirty\n")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     set_home(monkeypatch, str(tmp_path))
 
     assert (
@@ -1751,7 +1751,7 @@ def test_work_verify_receipt_captures_git_state_before_digest(tmp_path, capsys, 
 
 
 def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, monkeypatch):
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     set_home(monkeypatch, str(tmp_path))
 
     assert (
@@ -1772,7 +1772,7 @@ def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, 
 def _write_brigade_config(
     tmp_path,
     *,
-    graphtrail_delta_timeout_seconds: float | None = None,
+    code_graph_delta_timeout_seconds: float | None = None,
     capture_before_retry: str | None = None,
 ) -> None:
     payload = {
@@ -1782,8 +1782,8 @@ def _write_brigade_config(
         "owner": "this-repo",
         "includes": [],
     }
-    if graphtrail_delta_timeout_seconds is not None:
-        payload["graphtrail_delta_timeout_seconds"] = graphtrail_delta_timeout_seconds
+    if code_graph_delta_timeout_seconds is not None:
+        payload["code_graph_delta_timeout_seconds"] = code_graph_delta_timeout_seconds
     if capture_before_retry is not None:
         payload["capture_before_retry"] = capture_before_retry
     brigade = tmp_path / ".brigade"
@@ -1964,7 +1964,7 @@ raise SystemExit(9)
 
 def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_path / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graphtrail"))
     monkeypatch.setenv("PATH", str(tmp_path))
     set_home(monkeypatch, str(tmp_path))
 
@@ -1982,7 +1982,7 @@ def test_work_verify_graphtrail_delta_missing_binary_fails_open(tmp_path, capsys
 def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2026,7 +2026,7 @@ def test_work_verify_compact_delta_emits_exportable_code_references(tmp_path, ca
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(_write_fake_graphtrail(tmp_path)))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(_write_fake_graphtrail(tmp_path)))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2195,7 +2195,7 @@ def test_code_reference_compaction_trusts_only_exact_declared_candidate_metadata
 def test_work_verify_graphtrail_delta_sync_failure_fails_open(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, mode="sync-fail")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2209,7 +2209,7 @@ def test_work_verify_graphtrail_delta_sync_failure_fails_open(tmp_path, capsys, 
 def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, mode="malformed-diff")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2222,9 +2222,9 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=25)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
     graphtrail = _write_fake_graphtrail(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
     real_capture_before = code_graph_delta.capture_before
     real_capture_after = code_graph_delta.capture_after_and_diff
@@ -2248,9 +2248,9 @@ def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(t
 
 def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=25)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
     graphtrail = _write_fake_graphtrail(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
     real_capture_before = code_graph_delta.capture_before
     real_capture_after = code_graph_delta.capture_after_and_diff
@@ -2282,9 +2282,9 @@ def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, cap
 
 def test_work_verify_graphtrail_delta_slow_sync_succeeds_with_configured_timeout(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=1.0)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=1.0)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2299,7 +2299,7 @@ def test_work_verify_graphtrail_delta_slow_sync_succeeds_with_configured_timeout
 def test_work_verify_graphtrail_delta_timeout_evidence_and_verify_exit_unchanged(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert (
         work_cmd.verify_run(
@@ -2339,7 +2339,7 @@ def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_t
         sync_delay_seconds=0.2,
         create_db_before_delay=True,
     )
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert (
         work_cmd.verify_run(
@@ -2367,7 +2367,7 @@ def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_t
 
 def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_orphan_run(tmp_path, capsys):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=0)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=0)
     assert _count_verify_run_dirs(tmp_path) == 0
 
     rc = work_cmd.verify_run(
@@ -2379,7 +2379,7 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
 
     assert rc == 2
     assert "error:" in err
-    assert "graphtrail_delta_timeout_seconds must be a positive number" in err
+    assert "code_graph_delta_timeout_seconds must be a positive number" in err
     assert "Traceback" not in err
     assert _count_verify_run_dirs(tmp_path) == 0
 
@@ -2387,7 +2387,7 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
 def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=2)
 
     # Isolate the post-sync deadline from the unrelated SQLite backup deadline.
@@ -2448,7 +2448,7 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
     _init_git_repo(tmp_path)
     _seed_graphtrail_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     def timeout_backup(*args, **kwargs):
         raise TimeoutError("timeout after 0.05s")
@@ -2479,7 +2479,7 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     _init_git_repo(tmp_path)
     _seed_graphtrail_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     real_run = code_graph_delta._run_graphtrail
     sync_calls = {"count": 0}
 
@@ -2536,7 +2536,7 @@ def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout
         tmp_path,
         diff_delay_seconds=_GRAPHTRAIL_SLOW_STAGE_DELAY_SECONDS,
     )
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     _derace_graphtrail_sync_timing(monkeypatch, graphtrail)
 
     assert (
@@ -2566,7 +2566,7 @@ def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout
 def test_work_verify_graphtrail_delta_timeout_differs_from_sync_command_failure(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, mode="sync-fail")
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
     assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
@@ -2718,7 +2718,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
                 str(tmp_path),
                 "--command",
                 "python3 -m pytest -q",
-                "--graphtrail-timeout",
+                "--code-graph-timeout",
                 "45",
                 "--json",
             ]
@@ -2922,7 +2922,7 @@ EMPTY_PATCH_SHA256 = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b78
 def _run_verify_with_graphtrail_disabled(target, monkeypatch, *, commands=None, reuse=True):
     from brigade.work_cmd import verification
 
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(target / "missing-graphtrail"))
     return verification.verify_run(
         target=target,
         commands=commands or ["true"],
@@ -3518,7 +3518,7 @@ def test_capture_before_retry_uses_receipt_stamped_artifact(tmp_target, monkeypa
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     skill_dir = tmp_target / ".claude" / "skills" / "taste"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# taste\n")
@@ -3543,7 +3543,7 @@ def test_capture_before_retry_prefers_receipt_stamp_over_current_capture(tmp_tar
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     skill_dir = tmp_target / ".claude" / "skills" / "taste"
     skill_dir.mkdir(parents=True)
     (skill_dir / "SKILL.md").write_text("# taste\n")
@@ -3567,7 +3567,7 @@ def test_capture_before_retry_uses_current_capture_when_receipt_unstamped(tmp_ta
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -3581,7 +3581,7 @@ def test_capture_before_retry_falls_back_to_brigade_work(tmp_target, monkeypatch
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     verification.verify_run(target=tmp_target, commands=["false"], timeout=60)
     failed = verification._verify_receipts(tmp_target)[0]
@@ -3595,7 +3595,7 @@ def test_distinct_skill_captures_accumulate_separate_rank_signals(tmp_target, mo
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     for skill in ("taste", "refire"):
         skill_dir = tmp_target / ".claude" / "skills" / skill
         skill_dir.mkdir(parents=True)
@@ -3652,7 +3652,7 @@ def test_command_capture_run_warns_that_receipt_is_not_scoreable(tmp_target, mon
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     assert verification.verify_run(target=tmp_target, commands=["true"], timeout=60, capture="brigade-work") == 0
     captured = capsys.readouterr()
@@ -3668,7 +3668,7 @@ def test_argv_json_capture_run_warns_and_still_writes_a_receipt(tmp_target, monk
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
 
     rc = verification.verify_run(
         target=tmp_target,
@@ -3691,7 +3691,7 @@ def test_manifest_capture_run_reports_an_eligible_attributed_receipt(tmp_target,
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     manifest_id = _register_tracked_verify_manifest(tmp_target)
     assert work_cmd.start(target=tmp_target, title="demo") == 0
     (tmp_target / "skills" / "demo" / "SKILL.md").write_text("# demo skill\nchanged\n")
@@ -3717,7 +3717,7 @@ def test_manifest_capture_run_prints_scoreable_yes_on_stdout(tmp_target, monkeyp
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     manifest_id = _register_tracked_verify_manifest(tmp_target)
     assert work_cmd.start(target=tmp_target, title="demo") == 0
     (tmp_target / "skills" / "demo" / "SKILL.md").write_text("# demo skill\nchanged\n")
@@ -3741,7 +3741,7 @@ def test_outcome_health_names_registered_manifest_ids_for_remediation(tmp_target
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
     manifest_id = _register_tracked_verify_manifest(tmp_target)
     assert verification.verify_run(target=tmp_target, commands=["true"], timeout=60, capture="brigade-work") == 0
     capsys.readouterr()

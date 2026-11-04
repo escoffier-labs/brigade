@@ -744,3 +744,56 @@ bearer_token_env_var = "fake-invalid-value!"
     errors = _payload(capsys)["errors"]
     assert "broken:" in errors[0]
     assert "fake-invalid-value" not in errors[0]
+
+
+def test_codex_sync_of_resolved_engine_command_settles_current(tmp_path, capsys, monkeypatch):
+    # The planner fingerprints the resolved engine path; the ownership record must store the same fingerprint.
+    engine = tmp_path / "bin" / "brigade-code-graph-mcp"
+    engine.parent.mkdir()
+    engine.write_text("#!/bin/sh\n")
+    engine.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_MCP_BIN", str(engine))
+    _init(tmp_path)
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command="brigade-code-graph-mcp", json_output=True) == 0
+    assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+    for _ in range(2):
+        capsys.readouterr()
+        assert mcp_cmd.sync(target=tmp_path, harness="codex", write=True, json_output=True) == 0
+        payload = _payload(capsys)
+        assert payload["files_written"] == []
+        assert all(item["status"] == "current" for item in payload["items"])
+
+
+def test_runtime_verification_probes_the_projected_engine_command(tmp_path, monkeypatch):
+    # verify must launch the same resolved engine path sync writes, not the bare catalog name.
+    engine = tmp_path / "bin" / "brigade-code-graph-mcp"
+    engine.parent.mkdir()
+    engine.write_text("#!/bin/sh\n")
+    engine.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_MCP_BIN", str(engine))
+    _init(tmp_path)
+    from brigade import component_manifest
+
+    legacy = next(k for k, v in component_manifest.COMPONENT_FAMILIES.items() if v == "brigade-code-graph-mcp")
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command=legacy, json_output=True) == 0
+    servers, errors, _ = mcp_cmd.load_canonical(tmp_path)
+    assert errors == []
+    selected = mcp_cmd._servers_for_verification(servers, ["claude"])
+    assert selected["code-graph"].command == str(engine)
+
+
+def test_unresolved_legacy_engine_command_is_kept_for_the_server_path(tmp_path, capsys):
+    # With no managed engine and no override, Brigade cannot resolve the engine, so the
+    # projected command must stay the catalog's own name, which the server may find on
+    # its own PATH, rather than a bare canonical name that may not exist there.
+    from brigade import component_manifest
+
+    legacy = next(k for k, v in component_manifest.COMPONENT_FAMILIES.items() if v == "brigade-code-graph-mcp")
+    _init(tmp_path)
+    assert mcp_cmd.add(target=tmp_path, name="code-graph", command=legacy, json_output=True) == 0
+    servers, errors, _ = mcp_cmd.load_canonical(tmp_path)
+    assert errors == []
+    assert mcp_cmd._servers_for_verification(servers, ["claude"])["code-graph"].command == legacy
+    assert mcp_cmd.sync(target=tmp_path, harness="claude", write=True, json_output=True) == 0
+    written = json.loads((tmp_path / mcp_adapters.ADAPTERS["claude"].path).read_text())
+    assert written["mcpServers"]["code-graph"]["command"] == legacy

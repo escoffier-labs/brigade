@@ -258,6 +258,30 @@ jobs:
       - name: Test locked default features
         run: cargo test --locked
 
+  engine-rename-installer:
+    needs: changes
+    if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: engines/code-graph
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - run: python -m pip install -e '.[dev]'
+      - name: Verify native installer transitions
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/verify-engine-rename-installer
+
   evidence-ledger-test:
     needs: changes
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' && needs.changes.outputs.evidence_ledger == 'true' }}
@@ -703,6 +727,7 @@ jobs:
       - cosign-integration
       - fleet-hub-container
       - component-manifest-provenance
+      - engine-rename-installer
       - content-guard
       - repo-metadata
       - changelog-fragments
@@ -727,7 +752,7 @@ jobs:
           # documentation-only runs may skip only the enumerated runtime jobs.
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
-              "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
+              "cosign-integration", "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer",
               "content-guard", "repo-metadata", "changelog-fragments", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
               "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
@@ -746,7 +771,7 @@ jobs:
           docs_only = changes.get("result") == "success" and docs_flag == "true"
           docs_skips = {
               "lint", "test", "test-shards", "coverage", "cosign-integration",
-              "fleet-hub-container", "component-manifest-provenance", "install-from-source",
+              "fleet-hub-container", "component-manifest-provenance", "engine-rename-installer", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance", "mesh-compatibility",
               "mesh-cross-version", "mesh-without-extra",
           }

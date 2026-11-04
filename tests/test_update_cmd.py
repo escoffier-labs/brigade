@@ -740,7 +740,7 @@ def test_release_manifest_still_rejects_missing_agent_notify_without_beta_handof
 
 def test_release_manifest_compatibility_mode_rejects_missing_published_component():
     manifest = json.loads(_pre_agent_notify_manifest())
-    del manifest["components"]["miseledger"]
+    del manifest["components"]["brigade-evidence"]
     raw = (json.dumps(manifest, sort_keys=True) + "\n").encode()
     release = update_cmd.ResolvedRelease(
         42,
@@ -753,7 +753,7 @@ def test_release_manifest_compatibility_mode_rejects_missing_published_component
         raw,
     )
 
-    with pytest.raises(ValueError, match="missing required components: miseledger"):
+    with pytest.raises(ValueError, match="missing required components: brigade-evidence"):
         update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
 
 

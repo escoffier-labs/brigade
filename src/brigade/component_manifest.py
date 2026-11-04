@@ -23,18 +23,18 @@ SUPPORTED_PLATFORMS: tuple[str, ...] = (
 )
 KNOWN_COMPONENT_IDS: tuple[str, ...] = (
     "agent-notify",
-    "graphtrail",
-    "graphtrail-mcp",
-    "miseledger",
+    "brigade-code-graph",
+    "brigade-code-graph-mcp",
+    "brigade-evidence",
     "sessionfind",
 )
-# Reader aliases only. Keep KNOWN_COMPONENT_IDS stable until release writers cut over.
+# Legacy wire keys remain readable through v0.32.
 COMPONENT_FAMILIES = {
     "graphtrail": "brigade-code-graph",
     "graphtrail-mcp": "brigade-code-graph-mcp",
     "miseledger": "brigade-evidence",
 }
-ACCEPTED_COMPONENT_IDS = (*KNOWN_COMPONENT_IDS, *COMPONENT_FAMILIES.values())
+ACCEPTED_COMPONENT_IDS = (*KNOWN_COMPONENT_IDS, *COMPONENT_FAMILIES)
 
 
 def family_id(name: str) -> str:

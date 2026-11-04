@@ -19,8 +19,8 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
 REPOSITORY = "escoffier-labs/brigade"
-COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
-CANONICAL_ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 USER_AGENT = "brigade-component-manifest-provenance/1.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -223,9 +223,9 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
             errors.append(f"GitHub release lists duplicate asset {name!r}")
         release_assets[name] = asset
     alias_names = {
-        _expected_asset_name(component, platform) for component in CANONICAL_ALIASES for platform in SUPPORTED_PLATFORMS
+        _expected_asset_name(component, platform) for component in LEGACY_ALIASES for platform in SUPPORTED_PLATFORMS
     }
-    expected_aliases = alias_names if set(release_assets) & alias_names else set()
+    expected_aliases = alias_names
     for name in sorted(expected_aliases):
         asset = release_assets.get(name)
         if asset is None:

@@ -8,10 +8,10 @@ FROM rust:1-slim AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
-RUN cargo build --release --bin graphtrail-mcp
+RUN cargo build --release --bin brigade-code-graph-mcp
 
 # Stage 2: minimal runtime image. The MCP server speaks JSON-RPC over stdio,
 # so there is no port to EXPOSE.
 FROM debian:bookworm-slim
-COPY --from=builder /app/target/release/graphtrail-mcp /usr/local/bin/graphtrail-mcp
-ENTRYPOINT ["graphtrail-mcp"]
+COPY --from=builder /app/target/release/brigade-code-graph-mcp /usr/local/bin/brigade-code-graph-mcp
+ENTRYPOINT ["brigade-code-graph-mcp"]

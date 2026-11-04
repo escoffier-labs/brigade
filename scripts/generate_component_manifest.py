@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Any
 
 
-COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
-CANONICAL_ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
+COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
@@ -44,16 +44,15 @@ def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> set[str]:
         raise ValueError(f"assets directory does not exist: {assets_dir}")
     found = {path.name for path in assets_dir.iterdir() if path.is_file()}
     expected = expected_asset_names()
-    aliases = {asset_name(component, platform) for component in CANONICAL_ALIASES for platform in SUPPORTED_PLATFORMS}
-    if found & aliases:
-        expected |= aliases
+    aliases = {asset_name(component, platform) for component in LEGACY_ALIASES for platform in SUPPORTED_PLATFORMS}
+    expected |= aliases
     missing = sorted(expected - found)
     extra = sorted(found - expected)
     if missing:
         raise ValueError("missing native assets: " + ", ".join(missing))
     if extra:
         raise ValueError("unexpected native assets: " + ", ".join(extra))
-    for name in sorted(found & aliases):
+    for name in sorted(found):
         if (assets_dir / name).stat().st_size <= 0:
             raise ValueError(f"canonical native asset {name!r} must have positive byte size")
     return found
@@ -93,11 +92,13 @@ def generate_manifest(
         "components": components,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    output.write_bytes((json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     manifest_digest = sha256(output)
     checksum_entries = {**native_digests, output.name: manifest_digest}
     checksums_output.parent.mkdir(parents=True, exist_ok=True)
-    checksums_output.write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_entries.items())))
+    checksums_output.write_bytes(
+        "".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_entries.items())).encode("utf-8")
+    )
     return manifest
 
 

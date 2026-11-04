@@ -696,10 +696,13 @@ Upgrade from v0.30 data:
 
 Downgrade from v0.31 to v0.30:
 
-- The v0.30 client treats the canonically keyed `installed.json` as missing.
-  It does not crash. Running v0.30 `brigade setup` reinstalls the legacy
-  executables. This test pins that behavior so a later change to the state
-  file cannot break it.
+- The published v0.30 reader returns `None` for a canonically keyed
+  `installed.json`. Its setup command exits 1 with `invalid installed state`.
+  For a home upgraded from v0.30, run v0.31 `brigade setup --rollback`
+  before downgrading. This restores the legacy-keyed state, so v0.30 setup
+  works. For a fresh v0.31 home with no earlier state, move `installed.json`
+  aside before running v0.30 setup. It then reinstalls the legacy executables.
+  Integration tests pin the failure and both recovery paths.
 - Data that v0.31 used in legacy locations stays readable by v0.30.
 - Data that a fresh v0.31 install created in canonical locations is not
   visible to v0.30. This is documented in the release notes. When the user
