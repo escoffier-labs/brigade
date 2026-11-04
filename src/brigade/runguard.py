@@ -319,15 +319,41 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     return enriched
 
 
+def _lock_fingerprint(path: Path) -> tuple[int, int, object] | None:
+    """Identity of the lock directory now at ``path``, or ``None`` when absent.
+
+    The owner token is part of it because a released lock's inode number is
+    usually handed straight to the next lock directory.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    owner = _read_lock_owner(path)
+    return info.st_dev, info.st_ino, owner.get("owner_token") if owner is not None else None
+
+
 def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None:
-    if not _lock_is_stale(path):
+    # `_lock_is_stale` reads pid and owner.json in separate steps and treats a
+    # lock with no readable owner as stale. If the holder releases between those
+    # reads and a new holder publishes at the same path, the "stale" verdict
+    # describes a lock that is gone while the rename below would take the live
+    # replacement out of sight (its holder then fails `stat` on its own lock, and
+    # a third acquirer can publish beside it). Bind the verdict to the lock that
+    # was judged and rename only that one.
+    judged = _lock_fingerprint(path)
+    if judged is None or not _lock_is_stale(path):
+        return None
+    if _lock_fingerprint(path) != judged:
         return None
     claimed = _recovery_claim_path(path)
     try:
         path.rename(claimed)
     except FileNotFoundError:
         return None
-    if not _lock_is_stale(claimed):
+    if _lock_fingerprint(claimed) != judged or not _lock_is_stale(claimed):
         if not path.exists():
             claimed.rename(path)
         return None

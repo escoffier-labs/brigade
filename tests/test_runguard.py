@@ -298,6 +298,85 @@ def test_run_lock_retries_when_concurrent_stale_claim_removes_visible_lock(tmp_p
     assert calls == 1
 
 
+def test_stale_verdict_never_takes_a_live_lock_published_during_the_check(tmp_path, monkeypatch):
+    """The holder releases and a new holder publishes while `_lock_is_stale` reads.
+
+    A lock with no readable owner counts as stale, so the verdict can describe a
+    lock that is already gone. Renaming `path` then takes the live replacement
+    out of sight: its holder cannot stat its own lock and a third acquirer can
+    publish beside it (a lost-update risk for the task ledger).
+    """
+    lock_path = tmp_path / "tasks.json.lock"
+    lock_path.mkdir()
+    (lock_path / "pid").write_text("99999999\n")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid == os.getpid())
+    original_is_stale = runguard._lock_is_stale
+    live = []
+
+    def replaced_during_check(path):
+        verdict = original_is_stale(path)
+        if not live:
+            shutil.rmtree(path)
+            live.append(runguard._publish_lock(path, run_dir=None))
+        return verdict
+
+    renamed = []
+    original_rename = Path.rename
+
+    def spy_rename(self, target):
+        renamed.append(self)
+        return original_rename(self, target)
+
+    monkeypatch.setattr(runguard, "_lock_is_stale", replaced_during_check)
+    monkeypatch.setattr(Path, "rename", spy_rename)
+
+    assert runguard._claim_stale_lock(lock_path) is None
+
+    assert lock_path not in renamed
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == live[0].owner_token
+
+
+def test_concurrent_acquirers_never_overlap_or_lose_their_lock(tmp_path):
+    lock_path = tmp_path / "tasks.json.lock"
+    holders = 0
+    overlaps = 0
+    errors: list[str] = []
+    guard = threading.Lock()
+
+    def worker():
+        nonlocal holders, overlaps
+        for _ in range(25):
+            try:
+                while True:
+                    try:
+                        ownership = runguard._acquire_lock(lock_path)
+                        break
+                    except runguard.RunLockError:
+                        stdlib_time.sleep(0.0005)
+                with guard:
+                    holders += 1
+                    overlaps += holders > 1
+                stdlib_time.sleep(0.0002)
+                with guard:
+                    holders -= 1
+                runguard._release_lock(lock_path, ownership)
+            except Exception as exc:  # noqa: BLE001 - any failure is the finding
+                errors.append(f"{type(exc).__name__}: {exc}")
+                return
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    give_up = stdlib_time.monotonic() + 120
+    for thread in threads:
+        thread.join(timeout=max(0.0, give_up - stdlib_time.monotonic()))
+
+    assert not any(thread.is_alive() for thread in threads), "an acquirer is stuck behind a lost lock"
+    assert errors == []
+    assert overlaps == 0
+    assert not lock_path.exists()
+
+
 def test_run_lock_waits_until_live_lock_clears(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
