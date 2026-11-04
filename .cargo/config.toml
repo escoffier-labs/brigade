@@ -1,0 +1,7 @@
+# pcre2-sys links a system libpcre2 whenever pkg-config finds one, so two hosts
+# can run different PCRE2 releases. Force the vendored copy (PCRE2 10.46 in
+# pcre2-sys 0.2.10) so the guard regex engine is identical everywhere. Cargo
+# reads this file for any working directory under the repository root. Only
+# the pcre2-sys build script reads the variable.
+[env]
+PCRE2_SYS_STATIC = { value = "1", force = true }
