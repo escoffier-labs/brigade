@@ -97,17 +97,33 @@ def test_floor_allocates_above_it_for_new_and_existing_targets(tmp_path):
         conn.close()
 
 
-def test_floor_keeps_an_acquire_retry_idempotent_across_the_jump(tmp_path):
+def test_floor_retry_accepts_only_the_exact_predecessor(tmp_path):
     conn = _hub(tmp_path / "hub.db")
     try:
+        assert _claim(conn, "acquire", "seen")[1]["claim"]["generation"] == 1
+        assert _claim(conn, "release", "seen", scope="holder", generation=1)[0] == 200
         conn.execute("BEGIN IMMEDIATE")
-        fleet_hub_claims.write_recovery_floor(conn, 0, advance=50, restored_at="t", copy_sha256="x")
+        floor = fleet_hub_claims.write_recovery_floor(conn, 0, advance=50, restored_at="t", copy_sha256="x")
         conn.commit()
-        first = _claim(conn, "acquire", "t1", generation=0)
-        assert first[1]["claim"]["generation"] == 51
-        retry = _claim(conn, "acquire", "t1", generation=0)
-        assert retry[0] == 200 and retry[1]["claim"]["generation"] == 51
-        assert _claim(conn, "acquire", "t1", holder="other", node=NODE_B, generation=0)[0] == 409
+        # A fence that existed at restore sits at the floor, so the first grant
+        # after it has predecessor floor and its retry stays idempotent.
+        first = _claim(conn, "acquire", "seen", generation=floor)
+        assert first[1]["claim"]["generation"] == floor + 1
+        retry = _claim(conn, "acquire", "seen", generation=floor)
+        assert retry[0] == 200 and retry[1]["claim"]["generation"] == floor + 1
+        # A replayed acquire from before the restore carries an old generation
+        # and must not pass as that retry or replace the live claim.
+        lock = retry[1]["claim"]["lock_token"] if "lock_token" in retry[1]["claim"] else None
+        replay = _claim(conn, "acquire", "seen", generation=2)
+        assert replay[0] == 409 and replay[1]["reason"] == "stale-generation"
+        if lock is not None:
+            assert _claim(conn, "inspect", "seen")[1]["claim"]["lock_token"] == lock
+        assert _claim(conn, "acquire", "seen", holder="other", node=NODE_B, generation=floor)[0] == 409
+        # A target with no fence row before the restore has predecessor 0 only
+        # in name; its post-restore retry with generation 0 is refused safely.
+        fresh = _claim(conn, "acquire", "t1", generation=0)
+        assert fresh[0] == 200 and fresh[1]["claim"]["generation"] == floor + 1
+        assert _claim(conn, "acquire", "t1", generation=0)[0] == 409
     finally:
         conn.close()
 
@@ -734,3 +750,17 @@ def test_sigterm_ends_fleet_serve_with_a_clean_exit(tmp_path):
             proc.kill()
     assert proc.returncode == 0, out
     assert "brigade fleet hub stopped cleanly" in out
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
+def test_online_copy_creates_its_destination_private_under_a_permissive_umask(tmp_path):
+    # The restore staging file sits next to the hub database, which may be in a
+    # directory others can traverse. It must never be readable mid-copy.
+    db = _populated(tmp_path)
+    destination = tmp_path / "staging.db"
+    previous = os.umask(0o022)
+    try:
+        backup._online_copy(db, destination)
+    finally:
+        os.umask(previous)
+    assert stat.S_IMODE(destination.stat().st_mode) == 0o600

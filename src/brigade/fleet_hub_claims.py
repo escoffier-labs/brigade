@@ -426,9 +426,11 @@ def _stale(
         and row is not None
         and row[1] == request["node_id"]
         and row[11] == holder
-        and expected is not None
-        and expected < current
-        and next_generation(conn, expected) == current
+        # The exact predecessor only. Restore raises every existing fence to the
+        # recovery floor, so the first grant after it still has predecessor
+        # current - 1. Mapping every generation at or below the floor onto that
+        # grant would let a replayed acquire from the lost window pass as a retry.
+        and expected == current - 1
         and expected >= retired
     )
     reason = None

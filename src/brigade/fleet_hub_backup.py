@@ -163,6 +163,10 @@ def _integrity(path: Path) -> str:
 
 def _online_copy(source: Path, destination: Path) -> int:
     """Copy ``source`` through the online backup API into a rollback-journal file."""
+    # Create the destination 0600 before any page lands in it. sqlite would
+    # create it with the umask (0644 under 022), readable for the whole copy.
+    fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    os.close(fd)
     src = sqlite3.connect(_sqlite_uri(source, "rw"), uri=True, timeout=30)
     try:
         dst = sqlite3.connect(destination)
