@@ -107,9 +107,15 @@ def _recovery_gate_busy_error(path: Path) -> RunLockError:
     from .runguard import RunLockError
 
     gate = _recovery_gate_path(path)
+    causes = f"a stopped process holds {gate} (resume or end it), or the filesystem is slow"
+    if sys.platform == "win32":
+        # msvcrt reports every failed non-blocking lock as EACCES, so a gate that can never be locked
+        # looks busy here. POSIX raises a named gate error for that case instead.
+        causes += (
+            f", or {gate} can never be locked because file locking does not work here, for example on a "
+            "share without byte-range locks (move the workspace to a local disk)"
+        )
     return RunLockError(
         f"stale lock recovery in progress: {path}. Another process holds the recovery gate {gate}; retry. "
-        f"If this persists, either a stopped process holds {gate} (resume or end it), or {gate} can never "
-        "be locked because file locking does not work here, for example on a share without byte-range "
-        "locks (move the workspace to a local disk)"
+        f"If this persists, {causes}"
     )

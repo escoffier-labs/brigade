@@ -616,7 +616,9 @@ def test_busy_recovery_gate_reports_recovery_in_progress_not_a_live_owner(tmp_pa
 
     message = str(recovering.value)
     assert f"recovery gate {runguard._recovery_gate_path(lock_path)}" in message
-    assert "share without byte-range locks" in message
+    assert "filesystem is slow" in message
+    # POSIX names an unlockable gate with its own error, so only Windows lists that cause here.
+    assert ("share without byte-range locks" in message) == (sys.platform == "win32")
     assert json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))["owner_token"] == dead_token
     assert runguard._stale_claims(lock_path) == []
 
@@ -641,6 +643,24 @@ def test_recovery_does_not_blame_another_runs_live_lock_after_the_wait(tmp_path,
 
     assert "run owner process is still active" not in str(raised.value)
     assert runguard._owner_matches_run(runguard._read_lock_owner(lock_path), other_run.resolve())
+
+
+def test_an_unreadable_owner_after_the_wait_still_counts_as_active(tmp_path, monkeypatch):
+    """A published lock always has its owner file, so one failed re-read must not drop a live run."""
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    real_read = runguard._read_lock_owner
+    reads = []
+
+    def read_once(path):
+        reads.append(path)
+        return real_read(path) if len(reads) == 1 else None
+
+    monkeypatch.setattr(runguard, "_read_lock_owner", read_once)
+    monkeypatch.setattr(runguard, "_claim_stale_lock_patiently", lambda *args, **kwargs: None)
+
+    with pytest.raises(runguard.RunLockError, match="run owner process is still active"):
+        runguard.recover_stale_run(repo, run_dir)
+    assert len(reads) == 2
 
 
 def test_recovery_waits_out_a_briefly_busy_gate(tmp_path, monkeypatch):

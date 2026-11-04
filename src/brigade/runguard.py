@@ -24,8 +24,10 @@ from uuid import uuid4
 
 from . import dirfd, localio, proc, receipt_schema, run_dirfd
 from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
-from .runguard_gate import _recovery_gate_path as _recovery_gate_path  # re-exported for tests
-from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor  # re-exported for tests
+
+# Re-exported for tests to call. Patch these on runguard_gate: the gate looks them up there.
+from .runguard_gate import _recovery_gate_path as _recovery_gate_path
+from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
@@ -1045,7 +1047,11 @@ def recover_stale_run(
             stale = _claim_stale_lock_patiently(path)
             if stale is None:
                 # A gate holder may have recovered this run's lock and published its own during the wait.
-                if _lock_path_is_directory(path) is not None and _owner_matches_run(_read_lock_owner(path), run_dir):
+                # A published lock always has its owner file, so an unreadable owner still counts as active.
+                current = _read_lock_owner(path)
+                if _lock_path_is_directory(path) is not None and (
+                    current is None or _owner_matches_run(current, run_dir)
+                ):
                     raise RunLockError(f"run owner process is still active: {path}")
             else:
                 claimed, claimed_owner = stale
