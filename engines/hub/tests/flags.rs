@@ -70,3 +70,34 @@ fn config_rejected_by_python_before_listening() {
         }
     }
 }
+
+#[test]
+fn invalid_upstream_key_is_refused_before_listening() {
+    use std::net::TcpListener;
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream = format!("http://{}", listener.local_addr().unwrap());
+    // Occupy the requested port: a missing startup validation fails at bind
+    // instead of leaving a panicking readiness task inside a live test server.
+    let port = listener.local_addr().unwrap().port().to_string();
+    for key in ["fake\nkey", "fake\rkey", "fake\u{7f}key"] {
+        let out = hub(
+            &[
+                "--host",
+                &Ipv4Addr::LOCALHOST.to_string(),
+                "--port",
+                &port,
+                "--upstream",
+                &upstream,
+            ],
+            &[
+                ("BRIGADE_HUB_UPSTREAM_KEY", key),
+                ("BRIGADE_FLEET_TOKEN", "fake-test-token"),
+            ],
+        );
+        assert_eq!(out.status.code(), Some(2));
+        let error = String::from_utf8_lossy(&out.stderr);
+        assert!(error.contains("invalid upstream key header"), "{error}");
+        assert!(!error.contains("listening on"), "{error}");
+        assert!(!error.contains(key), "must not print the key");
+    }
+}

@@ -214,7 +214,7 @@ struct App {
     trust_proto: bool,
     buffers: Arc<Semaphore>,
     buffer_fallbacks: Arc<std::sync::atomic::AtomicU64>,
-    upstream_key: String,
+    upstream_key: axum::http::HeaderValue,
     front_bind: bool,
     ready: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
@@ -229,7 +229,7 @@ impl App {
             trust_proto,
             buffers: Arc::new(Semaphore::new(BODY_BUDGET)),
             buffer_fallbacks: Arc::default(),
-            upstream_key: String::new(),
+            upstream_key: axum::http::HeaderValue::from_static(""),
             front_bind: false,
             ready: Arc::default(),
         }
@@ -289,7 +289,7 @@ fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
                     .and_then(|v| v.as_u64())
                     .filter(|v| *v > 0)
                 {
-                    return Duration::from_millis(wait.min(20_000) + 5_000);
+                    return Duration::from_millis(wait.min(20_000) + 10_000);
                 }
             }
         }
@@ -484,7 +484,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             peer.to_string().parse().unwrap(),
         );
         req.headers_mut()
-            .insert("x-brigade-upstream-key", app.upstream_key.parse().unwrap());
+            .insert("x-brigade-upstream-key", app.upstream_key.clone());
     }
     let origin = match app.upstream.parse::<axum::http::Uri>() {
         Ok(uri) => uri,
@@ -679,6 +679,13 @@ async fn upstream(
     }
     Err("Python upstream startup timed out".into())
 }
+fn parse_upstream_key(key: &str, managed: bool) -> Result<axum::http::HeaderValue, String> {
+    if managed && key.is_empty() {
+        return Err("managed upstream key must not be empty".into());
+    }
+    axum::http::HeaderValue::from_str(key).map_err(|_| "invalid upstream key header".to_owned())
+}
+
 async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
     let mut connector = HttpConnector::new();
@@ -705,6 +712,7 @@ async fn run(config: Config) -> Result<(), String> {
             .trim()
             .to_owned()
     };
+    let parsed_key = parse_upstream_key(&key, config.upstream.is_none())?;
     let (upstream, mut child) = upstream(&config, &client, &key).await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
@@ -731,7 +739,7 @@ async fn run(config: Config) -> Result<(), String> {
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
-    state.upstream_key = key;
+    state.upstream_key = parsed_key;
     state.front_bind = address.ip().is_loopback();
     let database = expand_user(config.db.as_deref().unwrap_or("~/.brigade/fleet-hub.db"));
     let admin = std::env::var("BRIGADE_FLEET_TOKEN")
@@ -876,14 +884,25 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
     #[test]
+    fn upstream_keys_are_validated_once() {
+        assert!(parse_upstream_key("", true).is_err());
+        assert!(parse_upstream_key("", false).is_ok());
+        for key in ["fake\nkey", "fake\rkey", "fake\u{7f}key"] {
+            assert!(parse_upstream_key(key, true).is_err());
+            assert!(parse_upstream_key(key, false).is_err());
+        }
+        assert_eq!(parse_upstream_key("fake-key", true).unwrap(), "fake-key");
+    }
+
+    #[test]
     fn long_poll_uses_body_and_caps_wait() {
         assert_eq!(
             long_poll_deadline("/messages", br#"{"action":"list","wait_ms":12000}"#),
-            Duration::from_secs(17)
+            Duration::from_secs(22)
         );
         assert_eq!(
             long_poll_deadline("/messages", br#"{"action":"list","wait_ms":999999}"#),
-            Duration::from_secs(25)
+            Duration::from_secs(30)
         );
         assert_eq!(
             long_poll_deadline("/messages", br#"{"action":"send","wait_ms":1}"#),
