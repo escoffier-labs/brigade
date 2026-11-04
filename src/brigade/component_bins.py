@@ -156,11 +156,16 @@ def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
 
 
 def canonical_command(command: str | None) -> str | None:
-    """Project bare engine commands canonically while preserving custom paths."""
+    """Project bare engine commands to a resolved engine path, preserving anything unresolved.
+
+    When Brigade cannot resolve the engine, the original command is kept: the
+    server may find it through its own PATH, and a bare canonical name could
+    point at nothing there.
+    """
     if command not in component_manifest.ACCEPTED_COMPONENT_IDS:
         return command
     assert command is not None
     canonical = component_manifest.family_id(command)
     if canonical not in component_manifest.COMPONENT_FAMILIES.values():
         return command
-    return resolve(canonical) or canonical
+    return resolve(canonical) or command
