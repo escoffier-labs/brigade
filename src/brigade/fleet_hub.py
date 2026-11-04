@@ -102,6 +102,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from .fleet_hub_upstream import configure_connection
+
 from . import (
     fleet_command_deck,
     fleet_hub_events,
@@ -846,6 +848,7 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     db_path = Path(db_path).expanduser().resolve()
     conn = sqlite3.connect(f"{db_path.as_uri()}?mode=rw", timeout=10, uri=True)
     try:
+        configure_connection(conn)
         conn.execute("PRAGMA busy_timeout=5000")
         _refuse_newer_schema(conn, db_path)
     except BaseException:
@@ -933,6 +936,7 @@ def init_db(
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
+        configure_connection(conn)
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
             _init_schema(conn, resolved, storage_policy=storage_policy, prune_messages=prune_messages)
