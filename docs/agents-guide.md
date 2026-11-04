@@ -22,12 +22,12 @@ with the same subcommands. Profiles select components. See the
 
 Public names for the built-in engines:
 
-| Public surface | Commands | Historical name |
+| Public surface | Commands | Binary |
 |---|---|---|
-| Code map | `brigade code …` | GraphTrail |
-| Evidence log | `brigade evidence …` | MiseLedger |
+| Code map | `brigade code …` | brigade-code-graph |
+| Evidence log | `brigade evidence …` | brigade-evidence |
 
-Standalone GraphTrail or MiseLedger product installs are replaced by `brigade setup`. Some binary and path names still use the historical labels.
+Standalone brigade-code-graph or brigade-evidence product installs are replaced by `brigade setup`. Canonical binaries are used for new installs. Legacy entry points are deprecated and removed in v0.33.0.
 
 ## Start here
 
@@ -105,7 +105,7 @@ brigade harness install cursor --scope user --write
 brigade harness doctor cursor --scope user
 ```
 
-This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade Stack plus the code-map and evidence engines (often still labeled `graphtrail` / `miseledger` in native Cursor config). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
+This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade Stack plus the code-map and evidence engines (with canonical labels `brigade-code-graph` / `brigade-evidence` for new entries). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
 
 Uninstall is ownership-aware:
 

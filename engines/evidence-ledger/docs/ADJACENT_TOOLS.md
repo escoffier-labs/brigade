@@ -1,6 +1,6 @@
 # Adjacent Tools
 
-MiseLedger should learn from adjacent tools without copying their product shape.
+brigade-evidence should learn from adjacent tools without copying their product shape.
 
 ## Agent Sessions
 
@@ -10,45 +10,45 @@ Agent Sessions is adjacent, not a blocker and not a target to clone.
 
 Agent Sessions is a macOS-first session browser and cockpit for many AI coding tools. Its public README describes a native Mac app for Codex, Claude, OpenCode, Cursor, GitHub Copilot CLI, Pi, Gemini CLI, Hermes, and OpenClaw histories. It focuses on browsing local session folders, transcript inspection, image browsing, saved-session recovery, resume commands, live Agent Cockpit behavior, rate or usage visibility, and macOS terminal integrations.
 
-MiseLedger is different:
+brigade-evidence is different:
 
-- MiseLedger is a portable CLI, server, and MCP-friendly normalized memory layer.
-- MiseLedger spans crawler archives and agent sessions.
-- MiseLedger's first product surface is the `miseledger` CLI and durable SQLite archive.
-- MiseLedger's adapter boundary is `miseledger.adapter.v1` JSONL.
-- MiseLedger normalizes source, collection, actor, item, event, artifact, and relation concepts across heterogeneous sources.
-- MiseLedger is intended to become Brigade's evidence source and sink, where imported data is untrusted evidence rather than instructions.
+- brigade-evidence is a portable CLI, server, and MCP-friendly normalized memory layer.
+- brigade-evidence spans crawler archives and agent sessions.
+- brigade-evidence's first product surface is the `brigade-evidence` CLI and durable SQLite archive.
+- brigade-evidence's adapter boundary is `miseledger.adapter.v1` JSONL.
+- brigade-evidence normalizes source, collection, actor, item, event, artifact, and relation concepts across heterogeneous sources.
+- brigade-evidence is intended to become Brigade's evidence source and sink, where imported data is untrusted evidence rather than instructions.
 
 Each source system is best at its native domain:
 
-- Built-in `miseledger crawl sessions`: Codex, Claude, Pi, OpenClaw, OpenCode, Hermes, Cursor, and Grok local history
-- `miseledger crawl docs/files/html/json/jsonl/gitlog`: wrappers around the external `sourceharvest` binary for local files, Markdown, HTML, JSON, JSONL, and git history
+- Built-in `brigade-evidence crawl sessions`: Codex, Claude, Pi, OpenClaw, OpenCode, Hermes, Cursor, and Grok local history
+- `brigade-evidence crawl docs/files/html/json/jsonl/gitlog`: wrappers around the external `sourceharvest` binary for local files, Markdown, HTML, JSON, JSONL, and git history
 - `discrawl`: Discord messages
 - `gitcrawl`: GitHub issues and pull requests
 - `notcrawl`: Notion pages
 - `slacrawl`, `graincrawl`, and `mailcrawl`: domain-specific archives that emit adapter JSONL
-- `telecrawl`: Telegram archive queried through its public JSON message command, then converted by MiseLedger
+- `telecrawl`: Telegram archive queried through its public JSON message command, then converted by brigade-evidence
 
 ## Boundary
 
-Agent session scanning is in scope for MiseLedger through conservative native JSON/JSONL generators and `miseledger crawl sessions`.
+Agent session scanning is in scope for brigade-evidence through conservative native JSON/JSONL generators and `brigade-evidence crawl sessions`.
 
 The intended split is:
 
-- MiseLedger owns built-in local harness parsing, local artifact crawl wrappers, adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
-- External crawler binaries own their source-specific sync and query behavior, then hand MiseLedger adapter JSONL.
+- brigade-evidence owns built-in local harness parsing, local artifact crawl wrappers, adapter ingest, normalized SQLite storage, FTS, relations, scan manifests, search, show, and evidence bundles.
+- External crawler binaries own their source-specific sync and query behavior, then hand brigade-evidence adapter JSONL.
 
-The earlier StationTrail and SourceHarvest repos are archived. Native session parsers live in MiseLedger, but local artifact crawl wrappers still execute `sourceharvest`. Existing adapter JSONL from those tools can still be imported.
+The earlier StationTrail and SourceHarvest repos are archived. Native session parsers live in brigade-evidence, but local artifact crawl wrappers still execute `sourceharvest`. Existing adapter JSONL from those tools can still be imported.
 
 Common paths:
 
 ```bash
-miseledger crawl sessions --json
-miseledger crawl docs ./notes --json
-miseledger crawl gitlog . --json
-miseledger crawl github --repo escoffier-labs/miseledger --json
-miseledger crawl telegram --chat "MiseLedger" --json
-miseledger import adapter discrawl.adapter.jsonl --json
+brigade-evidence crawl sessions --json
+brigade-evidence crawl docs ./notes --json
+brigade-evidence crawl gitlog . --json
+brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
+brigade-evidence crawl telegram --chat "brigade-evidence" --json
+brigade-evidence import adapter discrawl.adapter.jsonl --json
 ```
 
 The minimum proof remains:
@@ -61,7 +61,7 @@ The minimum proof remains:
 
 ## Non-goals
 
-Do not turn MiseLedger into a worse Agent Sessions clone.
+Do not turn brigade-evidence into a worse Agent Sessions clone.
 
 Do not build for this MVP:
 

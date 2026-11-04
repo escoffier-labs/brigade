@@ -26,7 +26,7 @@ Recommended fields:
 Example:
 
 ```json
-{"schema":"miseledger.adapter.v1","source":{"kind":"discrawl","name":"Discrawl","version":"0.6.0"},"collection":{"external_id":"discord:guild:demo/channel:ai-crawl","kind":"discord_channel","name":"#ai-crawl"},"item":{"external_id":"discord:message:1","kind":"message","created_at":"2026-06-03T12:39:06-04:00","text":"adapter contract example","summary":null,"tags":["miseledger"]},"actor":{"external_id":"discord:user:demo","type":"human","name":"Demo User"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:<hash>","path":"raw/discrawl/ai-crawl.jsonl","ordinal":1}}
+{"schema":"miseledger.adapter.v1","source":{"kind":"discrawl","name":"Discrawl","version":"0.6.0"},"collection":{"external_id":"discord:guild:demo/channel:ai-crawl","kind":"discord_channel","name":"#ai-crawl"},"item":{"external_id":"discord:message:1","kind":"message","created_at":"2026-06-03T12:39:06-04:00","text":"adapter contract example","summary":null,"tags":["brigade-evidence"]},"actor":{"external_id":"discord:user:demo","type":"human","name":"Demo User"},"artifacts":[],"links":[],"relations":[],"raw":{"format":"json","hash":"sha256:<hash>","path":"raw/discrawl/ai-crawl.jsonl","ordinal":1}}
 ```
 
 Identity boundary:
@@ -42,30 +42,30 @@ If a source lacks stable IDs, adapters should create deterministic external IDs 
 the evidence ledger includes conservative native generators for local agent-session JSON and JSONL:
 
 ```bash
-miseledger adapter codex <path-or-dir> --out <file|->
-miseledger adapter openclaw <path-or-dir> --out <file|->
-miseledger adapter claude <path-or-dir> --out <file|->
-miseledger adapter pi <path-or-dir> --out <file|->
-miseledger adapter hermes <path-or-dir> --out <file|->
-miseledger adapter opencode <path-or-dir> --out <file|->
-miseledger adapter cursor <path-or-dir> --out <file|->
-miseledger adapter grok <path-or-dir> --out <file|->
+brigade-evidence adapter codex <path-or-dir> --out <file|->
+brigade-evidence adapter openclaw <path-or-dir> --out <file|->
+brigade-evidence adapter claude <path-or-dir> --out <file|->
+brigade-evidence adapter pi <path-or-dir> --out <file|->
+brigade-evidence adapter hermes <path-or-dir> --out <file|->
+brigade-evidence adapter opencode <path-or-dir> --out <file|->
+brigade-evidence adapter cursor <path-or-dir> --out <file|->
+brigade-evidence adapter grok <path-or-dir> --out <file|->
 ```
 
 They emit the same `miseledger.adapter.v1` JSONL contract as external tools. Native import commands generate adapter records and reuse the adapter import path internally:
 
 ```bash
-miseledger import codex <path-or-dir> --json
-miseledger import openclaw <path-or-dir> --json
-miseledger import claude <path-or-dir> --json
-miseledger import pi <path-or-dir> --json
-miseledger import hermes <path-or-dir> --json
-miseledger import opencode <path-or-dir> --json
-miseledger import cursor <path-or-dir> --json
-miseledger import grok <path-or-dir> --json
-miseledger import discovered --json
-miseledger watch once --json
-miseledger watch once --if-changed --json
+brigade-evidence import codex <path-or-dir> --json
+brigade-evidence import openclaw <path-or-dir> --json
+brigade-evidence import claude <path-or-dir> --json
+brigade-evidence import pi <path-or-dir> --json
+brigade-evidence import hermes <path-or-dir> --json
+brigade-evidence import opencode <path-or-dir> --json
+brigade-evidence import cursor <path-or-dir> --json
+brigade-evidence import grok <path-or-dir> --json
+brigade-evidence import discovered --json
+brigade-evidence watch once --json
+brigade-evidence watch once --if-changed --json
 ```
 
 Scanner rules:
@@ -107,12 +107,12 @@ resolve within the source item's own `source_id`, matching pre-Slice-1a behavior
 When `target` is present it takes precedence for resolution.
 
 Unresolved external ids stay stored with `target_item_id` null and remain
-queryable for later backfill via `miseledger relations backfill`.
+queryable for later backfill via `brigade-evidence relations backfill`.
 
 ## Native Memory Card Source
 
 ```bash
-miseledger crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]
+brigade-evidence crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]
 ```
 
 The native `brigade-memory` source walks `memory/cards/**/*.md`, parses the flat
@@ -212,47 +212,47 @@ Size bounds:
 the evidence ledger's user-facing crawlers generate the same `miseledger.adapter.v1` records internally and stream them through normal ingest:
 
 ```bash
-miseledger crawl sessions --json
-miseledger crawl memory <workspace> --json
-miseledger crawl cursor --json
-miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
-miseledger crawl claude-export ~/Downloads/claude-export.zip --json
+brigade-evidence crawl sessions --json
+brigade-evidence crawl memory <workspace> --json
+brigade-evidence crawl cursor --json
+brigade-evidence crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+brigade-evidence crawl claude-export ~/Downloads/claude-export.zip --json
 ```
 
 Local artifact and git-history commands below delegate to the external `sourceharvest` binary, which must be on `PATH`:
 
 ```bash
-miseledger crawl docs ./notes --json
-miseledger crawl files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
-miseledger crawl html ./site-export --source docs --collection docs:html --json
-miseledger crawl gitlog . --source gitlog --collection repo:miseledger --json
-miseledger crawl json export.json --source export --collection export:records --records-path records --json
-miseledger crawl jsonl export.jsonl --source notes --collection notes:local --json
+brigade-evidence crawl docs ./notes --json
+brigade-evidence crawl files ./notes --source notes --collection notes:files --glob "*.md,*.txt" --json
+brigade-evidence crawl html ./site-export --source docs --collection docs:html --json
+brigade-evidence crawl gitlog . --source gitlog --collection repo:brigade-evidence --json
+brigade-evidence crawl json export.json --source export --collection export:records --records-path records --json
+brigade-evidence crawl jsonl export.jsonl --source notes --collection notes:local --json
 ```
 
 External crawler binaries can emit adapter JSONL directly or run through the evidence ledger domain wrappers:
 
 ```bash
-miseledger crawl discord --limit 100 --json
-miseledger crawl github --repo escoffier-labs/miseledger --json
-miseledger crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
-miseledger crawl slack --workspace T123 --json
-miseledger crawl granola --json
-miseledger crawl notion --json
-miseledger crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:miseledger" --json
-miseledger crawl telegram --chat "the evidence ledger" --json
-miseledger import adapter discrawl.adapter.jsonl --json
+brigade-evidence crawl discord --limit 100 --json
+brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
+brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --numbers 34,35 --limit 2 --json
+brigade-evidence crawl slack --workspace T123 --json
+brigade-evidence crawl granola --json
+brigade-evidence crawl notion --json
+brigade-evidence crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:brigade-evidence" --json
+brigade-evidence crawl telegram --chat "the evidence ledger" --json
+brigade-evidence import adapter discrawl.adapter.jsonl --json
 ```
 
 The Discord, Slack, Granola, and Notion wrappers consume adapter JSONL from `export adapter`. Gmail uses `mailcrawl gmail export`. GitHub is a current-Gitcrawl compatibility route: the evidence ledger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: the evidence ledger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
 
-The archived `stationtrail` and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
+The archived `stationtrail` and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `brigade-evidence import adapter`.
 
 Scan manifests can be compared without reading transcript content into output:
 
 ```bash
-miseledger scans diff <path> --json
-miseledger scans changed --json
+brigade-evidence scans diff <path> --json
+brigade-evidence scans changed --json
 ```
 
 Crawler and native-import scan manifests contain path, size, mtime, content hash for regular files or summary hash for directories, generated adapter hash, record count, and warning count. They do not contain harvested text.

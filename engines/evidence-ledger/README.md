@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="docs/assets/miseledger-social-preview.jpg" alt="MiseLedger banner" width="900">
+  <img src="docs/assets/miseledger-social-preview.jpg" alt="brigade-evidence banner" width="900">
 </p>
 
-<h1 align="center">MiseLedger</h1>
+<h1 align="center">brigade-evidence</h1>
 
 <p align="center">
   <img src="docs/assets/marks/miseledger-circle.svg" alt="" width="40" height="40">
 </p>
 
 <p align="center">
-  <strong>Your agent history is scattered. MiseLedger makes it searchable evidence.</strong>
+  <strong>Your agent history is scattered. brigade-evidence makes it searchable evidence.</strong>
 </p>
 
 <p align="center">
@@ -43,20 +43,20 @@ MISELEDGER_VERSION=v0.6.0
 curl -fsSLO https://raw.githubusercontent.com/escoffier-labs/miseledger/v0.6.0/install.sh
 cat install.sh  # review before running
 MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
-miseledger init
-miseledger crawl sessions
-miseledger search "cookie rotation"
-miseledger evidence "cookie rotation" --json
+brigade-evidence init
+brigade-evidence crawl sessions
+brigade-evidence search "cookie rotation"
+brigade-evidence evidence "cookie rotation" --json
 ```
 
-Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/miseledger`.
+Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/brigade-evidence`.
 
 Or from source:
 
 ```bash
 git clone https://github.com/escoffier-labs/brigade.git
 cd brigade/engines/evidence-ledger
-go build -o bin/miseledger ./cmd/miseledger
+go build -o bin/brigade-evidence ./cmd/brigade-evidence
 ```
 
 ## What it does
@@ -72,34 +72,34 @@ go build -o bin/miseledger ./cmd/miseledger
   <img src="docs/assets/evidence-graph.svg" alt="Evidence graph: sources crawl into adapter.v1, land in SQLite ledger with FTS5, then search and evidence export to Brigade" width="880">
 </p>
 
-<p align="center"><em>Memory is for decisions. MiseLedger is for proof of what actually happened. Local only.</em></p>
+<p align="center"><em>Memory is for decisions. brigade-evidence is for proof of what actually happened. Local only.</em></p>
 
 
 ## Build
 
 ```bash
-go build -o bin/miseledger ./cmd/miseledger
+go build -o bin/brigade-evidence ./cmd/brigade-evidence
 go build -o bin/sessionfind ./cmd/sessionfind
 ```
 
 You can also run commands with:
 
 ```bash
-go run ./cmd/miseledger --help
+go run ./cmd/brigade-evidence --help
 ```
 
 First archive:
 
 ```bash
-miseledger init
-miseledger crawl sessions --json
-miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
-miseledger crawl claude-export ~/Downloads/claude-export.zip --json
-miseledger crawl docs ./notes --json
-miseledger crawl repo . --json
-miseledger sessions search "release audit" --source codex --json
-miseledger search "auth timeout" --json
-miseledger evidence "auth timeout" --markdown
+brigade-evidence init
+brigade-evidence crawl sessions --json
+brigade-evidence crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+brigade-evidence crawl claude-export ~/Downloads/claude-export.zip --json
+brigade-evidence crawl docs ./notes --json
+brigade-evidence crawl repo . --json
+brigade-evidence sessions search "release audit" --source codex --json
+brigade-evidence search "auth timeout" --json
+brigade-evidence evidence "auth timeout" --markdown
 ```
 
 Independent-development fallback: mutable `HEAD` installer. This is not the default Brigade installation path:
@@ -114,7 +114,7 @@ For a first archive and agent integration path, see [docs/QUICKSTART.md](docs/QU
 
 <p align="center"><em>The generated evidence plate above is rebuilt from <code>docs/assets/workflows/evidence.json</code>.</em></p>
 
-MiseLedger follows one ingest path:
+brigade-evidence follows one ingest path:
 
 1. Receive `miseledger.adapter.v1` JSONL from a file, stdin, a built-in crawler, a native compatibility adapter, or an external crawler binary.
 2. Parse and validate each adapter record.
@@ -126,22 +126,22 @@ MiseLedger follows one ingest path:
 ## Stack Map
 
 <p align="center">
-  <img src="docs/assets/stack-map.svg" alt="MiseLedger stack map: agent sessions, local artifacts, and external crawlers pass through native adapters and adapter.v1 validation into a normalized SQLite ledger with FTS5, then reach CLI, evidence bundle, HTTP/MCP, and archive-operation readers" width="880">
+  <img src="docs/assets/stack-map.svg" alt="brigade-evidence stack map: agent sessions, local artifacts, and external crawlers pass through native adapters and adapter.v1 validation into a normalized SQLite ledger with FTS5, then reach CLI, evidence bundle, HTTP/MCP, and archive-operation readers" width="880">
 </p>
 
 <p align="center"><em>Generated from <code>docs/assets/workflows/stack-map.json</code> with <code>plating workflow</code>.</em></p>
 
-MiseLedger owns local agent-session crawling, local artifact crawl wrappers, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
+brigade-evidence owns local agent-session crawling, local artifact crawl wrappers, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
 External crawler tools keep their native sync and query behavior. Five wrappers consume source-owned adapter JSONL. The GitHub wrapper converts Gitcrawl thread rows, and the Telegram wrapper converts Telecrawl's public JSON message output into the same adapter contract.
 
 ## Runtime Paths
 
-MiseLedger uses XDG paths when present:
+brigade-evidence uses XDG paths when present:
 
-- config: `~/.config/miseledger/config.toml`
-- data: `~/.local/share/miseledger/miseledger.db`
-- cache: `~/.cache/miseledger/`
+- config: `~/.config/brigade/evidence/config.toml`
+- data: `~/.local/share/brigade/evidence/evidence.db`
+- cache: `~/.cache/brigade/evidence/`
 
 Directories and files created by the CLI use private permissions.
 
@@ -150,7 +150,7 @@ Directories and files created by the CLI use private permissions.
 `import stationtrail` refuses to run a legacy scanner unless its executable
 SHA-256 digest is explicitly approved. The allowlist is a file,
 `stationtrail-approved-digests`, in the data directory shown above (for
-example `~/.local/share/miseledger/stationtrail-approved-digests`). One
+example `~/.local/share/brigade/evidence/stationtrail-approved-digests`). One
 64-hex digest per line; an optional `sha256:` prefix and uppercase hex are
 normalized on load.
 
@@ -200,35 +200,35 @@ exec refuse to stage the scanner at all.
 ## Smoke Test
 
 ```bash
-miseledger init
-miseledger import adapter testdata/adapters/discrawl.fixture.jsonl
-miseledger import adapter testdata/adapters/agent-session.fixture.jsonl --source codex
-miseledger adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
-miseledger adapter hermes testdata/harnesses/session_hermes-demo.fixture.json --out -
-miseledger adapter opencode testdata/harnesses/opencode-export.fixture.json --out -
-miseledger import codex testdata/harnesses/codex-session.fixture.jsonl --json
-miseledger import openclaw testdata/harnesses/openclaw-session.fixture.jsonl --json
-miseledger import claude testdata/harnesses/claude-project.fixture.jsonl --json
-miseledger import hermes testdata/harnesses/session_hermes-demo.fixture.json --json
-miseledger import opencode testdata/harnesses/opencode-export.fixture.json --json
-miseledger status --json
-miseledger scans list --json
-miseledger sources discover --json
-miseledger search "adapter contract" --json
-miseledger evidence "adapter contract" --json
-miseledger evidence show <bundle-id> --json
-miseledger explain "adapter contract" --json
-miseledger show <returned-item-id> --json
-miseledger export markdown --out /tmp/miseledger-md
-miseledger relations backfill --json
-miseledger stats --json
-miseledger compact --json
-miseledger migrate codex-arguments --dry-run --json
-miseledger prune imports --before 2026-01-01 --dry-run --json
-miseledger sql "select count(*) as items from items" --json
-miseledger doctor --json
-miseledger doctor --mcp --json
-miseledger doctor --archive --json
+brigade-evidence init
+brigade-evidence import adapter testdata/adapters/discrawl.fixture.jsonl
+brigade-evidence import adapter testdata/adapters/agent-session.fixture.jsonl --source codex
+brigade-evidence adapter codex testdata/harnesses/codex-session.fixture.jsonl --out -
+brigade-evidence adapter hermes testdata/harnesses/session_hermes-demo.fixture.json --out -
+brigade-evidence adapter opencode testdata/harnesses/opencode-export.fixture.json --out -
+brigade-evidence import codex testdata/harnesses/codex-session.fixture.jsonl --json
+brigade-evidence import openclaw testdata/harnesses/openclaw-session.fixture.jsonl --json
+brigade-evidence import claude testdata/harnesses/claude-project.fixture.jsonl --json
+brigade-evidence import hermes testdata/harnesses/session_hermes-demo.fixture.json --json
+brigade-evidence import opencode testdata/harnesses/opencode-export.fixture.json --json
+brigade-evidence status --json
+brigade-evidence scans list --json
+brigade-evidence sources discover --json
+brigade-evidence search "adapter contract" --json
+brigade-evidence evidence "adapter contract" --json
+brigade-evidence evidence show <bundle-id> --json
+brigade-evidence explain "adapter contract" --json
+brigade-evidence show <returned-item-id> --json
+brigade-evidence export markdown --out /tmp/brigade-evidence-md
+brigade-evidence relations backfill --json
+brigade-evidence stats --json
+brigade-evidence compact --json
+brigade-evidence migrate codex-arguments --dry-run --json
+brigade-evidence prune imports --before 2026-01-01 --dry-run --json
+brigade-evidence sql "select count(*) as items from items" --json
+brigade-evidence doctor --json
+brigade-evidence doctor --mcp --json
+brigade-evidence doctor --archive --json
 ```
 
 Re-running the same imports is idempotent and does not increase item counts.
@@ -240,74 +240,74 @@ New imports start with quarantined provenance and pending injection status. Sear
 Native adapter generators convert local session JSON and JSONL into `miseledger.adapter.v1` records:
 
 ```bash
-miseledger adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
-miseledger adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
-miseledger adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
-miseledger adapter pi ~/.pi/agent/sessions --out pi.adapter.jsonl --limit 100
-miseledger adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
-miseledger adapter opencode ~/.local/share/opencode --out opencode.adapter.jsonl --limit 100
-miseledger adapter cursor ~/.config/Cursor/User --out cursor.adapter.jsonl
-miseledger adapter grok ~/.grok/sessions --out grok.adapter.jsonl
+brigade-evidence adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
+brigade-evidence adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
+brigade-evidence adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
+brigade-evidence adapter pi ~/.pi/agent/sessions --out pi.adapter.jsonl --limit 100
+brigade-evidence adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
+brigade-evidence adapter opencode ~/.local/share/opencode --out opencode.adapter.jsonl --limit 100
+brigade-evidence adapter cursor ~/.config/Cursor/User --out cursor.adapter.jsonl
+brigade-evidence adapter grok ~/.grok/sessions --out grok.adapter.jsonl
 ```
 
 Native import commands stream generated adapter records into the same adapter ingest path:
 
 ```bash
-miseledger import codex ~/.codex/sessions --json
-miseledger import openclaw ~/.openclaw/agents --json
-miseledger import claude ~/.claude/projects --json
-miseledger import pi ~/.pi/agent/sessions --json
-miseledger import hermes ~/.hermes/sessions --json
-miseledger import opencode ~/.local/share/opencode --json
-miseledger import cursor ~/.config/Cursor/User --json
-miseledger import grok ~/.grok/sessions --json
-miseledger import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
-miseledger import discovered --json
-miseledger watch once --json
-miseledger watch once --if-changed --json
+brigade-evidence import codex ~/.codex/sessions --json
+brigade-evidence import openclaw ~/.openclaw/agents --json
+brigade-evidence import claude ~/.claude/projects --json
+brigade-evidence import pi ~/.pi/agent/sessions --json
+brigade-evidence import hermes ~/.hermes/sessions --json
+brigade-evidence import opencode ~/.local/share/opencode --json
+brigade-evidence import cursor ~/.config/Cursor/User --json
+brigade-evidence import grok ~/.grok/sessions --json
+brigade-evidence import codex testdata/harnesses/malformed-unknown.fixture.jsonl --dry-run --json
+brigade-evidence import discovered --json
+brigade-evidence watch once --json
+brigade-evidence watch once --if-changed --json
 ```
 
 For the normal user-facing archive-crawler lane, prefer:
 
 ```bash
-miseledger crawl sessions --json
+brigade-evidence crawl sessions --json
 ```
 
 That imports discovered local session roots through the same idempotent archive path.
 
 ## Provider Exports
 
-MiseLedger can also import official AI chat exports directly from a `.zip`, a directory containing `conversations.json`, or the JSON file itself:
+brigade-evidence can also import official AI chat exports directly from a `.zip`, a directory containing `conversations.json`, or the JSON file itself:
 
 ```bash
-miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
-miseledger crawl claude-export ~/Downloads/claude-export.zip --json
-miseledger import chatgpt-export conversations.json --json
-miseledger import claude-export conversations.json --json
+brigade-evidence crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
+brigade-evidence crawl claude-export ~/Downloads/claude-export.zip --json
+brigade-evidence import chatgpt-export conversations.json --json
+brigade-evidence import claude-export conversations.json --json
 ```
 
 These imports normalize provider conversations into local `conversation` collections with `message` items tagged as `ai-chat`.
 
 ## Cursor
 
-MiseLedger imports current Cursor conversation search data from its user-data root (`$XDG_CONFIG_HOME/Cursor/User` or `~/.config/Cursor/User` on Linux, `~/Library/Application Support/Cursor/User` on macOS, and `%APPDATA%/Cursor/User` on Windows):
+brigade-evidence imports current Cursor conversation search data from its user-data root (`$XDG_CONFIG_HOME/Cursor/User` or `~/.config/Cursor/User` on Linux, `~/Library/Application Support/Cursor/User` on macOS, and `%APPDATA%/Cursor/User` on Windows):
 
 ```bash
-miseledger crawl cursor --json            # defaults to the standard Cursor root
-miseledger crawl cursor ~/.config/Cursor/User --json
-miseledger import cursor ~/.config/Cursor/User --json
+brigade-evidence crawl cursor --json            # defaults to the standard Cursor root
+brigade-evidence crawl cursor ~/.config/Cursor/User --json
+brigade-evidence import cursor ~/.config/Cursor/User --json
 ```
 
 The current reader opens `globalStorage/conversation-search.db` in read-only mode and indexes conversation titles and FTS bodies as agent sessions. When a WAL exists, its metadata is used for change tracking while raw references stay on the main database. The older Cursor Agent `prompt_history.json`, chat `meta.json`, and store-only session layout remains supported for explicit legacy roots. Binary legacy `store.db` message bodies are not decoded.
 
 ## Grok Sessions
 
-Grok sessions are discovered under `~/.grok/sessions`. MiseLedger reads each session's `summary.json` and `chat_history.jsonl` without importing unrelated files:
+Grok sessions are discovered under `~/.grok/sessions`. brigade-evidence reads each session's `summary.json` and `chat_history.jsonl` without importing unrelated files:
 
 ```bash
-miseledger crawl sessions --json
-miseledger import grok ~/.grok/sessions --json
-miseledger sessions search "crawler review" --source grok --json
+brigade-evidence crawl sessions --json
+brigade-evidence import grok ~/.grok/sessions --json
+brigade-evidence sessions search "crawler review" --source grok --json
 ```
 
 ## Session Locator
@@ -315,10 +315,10 @@ miseledger sessions search "crawler review" --source grok --json
 For harness-style "find the session I was working in" workflows, use the session-level commands:
 
 ```bash
-miseledger sessions list --source codex --json
-miseledger sessions list --project miseledger --model gpt-5 --json
-miseledger sessions search "release audit" --project miseledger --model gpt-5 --json
-miseledger sessions search "auth timeout" --source claude --model claude-sonnet --json
+brigade-evidence sessions list --source codex --json
+brigade-evidence sessions list --project brigade-evidence --model gpt-5 --json
+brigade-evidence sessions search "release audit" --project brigade-evidence --model gpt-5 --json
+brigade-evidence sessions search "auth timeout" --source claude --model claude-sonnet --json
 sessionfind list --source codex --json
 sessionfind "release audit" --source codex --json
 ```
@@ -329,57 +329,57 @@ The scanners accept a file or directory, walk relevant source files recursively,
 
 ## Built-In Crawlers
 
-`miseledger crawl sessions` imports discovered local agent-session roots through the same adapter ingest path:
+`brigade-evidence crawl sessions` imports discovered local agent-session roots through the same adapter ingest path:
 
 ```bash
-miseledger sources discover --json
-miseledger crawl sessions --dry-run --json
-miseledger crawl sessions --json
-miseledger crawl cursor --json
+brigade-evidence sources discover --json
+brigade-evidence crawl sessions --dry-run --json
+brigade-evidence crawl sessions --json
+brigade-evidence crawl cursor --json
 ```
 
 Native compatibility imports remain available when you want to point at one source explicitly:
 
 ```bash
-miseledger import codex ~/.codex/sessions --json
-miseledger import claude ~/.claude/projects --json
-miseledger import pi ~/.pi/agent/sessions --json
-miseledger import openclaw ~/.openclaw/agents --json
-miseledger import opencode ~/.local/share/opencode --json
-miseledger import hermes ~/.hermes/sessions --json
-miseledger import grok ~/.grok/sessions --json
+brigade-evidence import codex ~/.codex/sessions --json
+brigade-evidence import claude ~/.claude/projects --json
+brigade-evidence import pi ~/.pi/agent/sessions --json
+brigade-evidence import openclaw ~/.openclaw/agents --json
+brigade-evidence import opencode ~/.local/share/opencode --json
+brigade-evidence import hermes ~/.hermes/sessions --json
+brigade-evidence import grok ~/.grok/sessions --json
 ```
 
 Local artifact crawl wrappers add defaults for common archive sources. Every route except `crawl adapter` requires `sourceharvest` on `PATH`; `crawl adapter` imports adapter JSONL directly:
 
 ```bash
-miseledger crawl docs ./notes --json
-miseledger crawl files ./logs --glob "*.md,*.txt,*.log" --json
-miseledger crawl gitlog . --json
-miseledger crawl json export.json --records-path records --json
-miseledger crawl jsonl export.jsonl --source notes --collection notes:local --json
-miseledger crawl adapter export.adapter.jsonl --source export --json
+brigade-evidence crawl docs ./notes --json
+brigade-evidence crawl files ./logs --glob "*.md,*.txt,*.log" --json
+brigade-evidence crawl gitlog . --json
+brigade-evidence crawl json export.json --records-path records --json
+brigade-evidence crawl jsonl export.jsonl --source notes --collection notes:local --json
+brigade-evidence crawl adapter export.adapter.jsonl --source export --json
 ```
 
 External crawler binaries can be called through domain wrappers when installed on `PATH`, or through adapter JSONL files they produced earlier:
 
 ```bash
-miseledger crawl discord --limit 100 --json
-miseledger crawl github --repo escoffier-labs/miseledger --json
-miseledger crawl github --repo escoffier-labs/miseledger --numbers 34,35 --limit 2 --json
-miseledger crawl slack --workspace T123 --json
-miseledger crawl granola --json
-miseledger crawl notion --json
-miseledger crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:miseledger" --json
-miseledger crawl telegram --chat "MiseLedger" --json
-miseledger import adapter discrawl.adapter.jsonl --json
+brigade-evidence crawl discord --limit 100 --json
+brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --json
+brigade-evidence crawl github --repo escoffier-labs/brigade-evidence --numbers 34,35 --limit 2 --json
+brigade-evidence crawl slack --workspace T123 --json
+brigade-evidence crawl granola --json
+brigade-evidence crawl notion --json
+brigade-evidence crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:brigade-evidence" --json
+brigade-evidence crawl telegram --chat "brigade-evidence" --json
+brigade-evidence import adapter discrawl.adapter.jsonl --json
 ```
 
-Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
+Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `brigade-evidence import adapter`.
 
-Discord, Slack, Granola, and Notion call each crawler's `export adapter` command. Gmail calls `mailcrawl gmail export`. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`. MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
+Discord, Slack, Granola, and Notion call each crawler's `export adapter` command. Gmail calls `mailcrawl gmail export`. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`. brigade-evidence converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
 
-Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first. `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
+Gmail remains explicit about account selection. Gog may have configured accounts, but brigade-evidence requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first. `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
 
 Scheduled crawls use the same commands as manual crawls. Put the jobs in a local config file:
 
@@ -400,24 +400,24 @@ args = ["sessions", "--json"]
 Then run once, or run a foreground daemon that a systemd user service, cron wrapper, or Brigade job can supervise:
 
 ```bash
-miseledger schedule run ~/.config/miseledger/schedule.toml --json
-miseledger schedule daemon ~/.config/miseledger/schedule.toml --interval 15m --json
+brigade-evidence schedule run ~/.config/brigade/evidence/schedule.toml --json
+brigade-evidence schedule daemon ~/.config/brigade/evidence/schedule.toml --interval 15m --json
 ```
 
-Schedule jobs are in-process MiseLedger commands, not shell strings. Supported scheduled commands are `crawl`, `import`, `watch`, `adapter`, `relations`, and `compact`.
+Schedule jobs are in-process brigade-evidence commands, not shell strings. Supported scheduled commands are `crawl`, `import`, `watch`, `adapter`, `relations`, and `compact`.
 
-For adapter files that already carry a source kind, leave `--source` off. If you must override it, use the wrapper's canonical kind: `discord`, `github`, `slack`, `granola`, `notion`, `gmail`, or `telegram`. MiseLedger warns when the override disagrees with embedded record kinds because that creates a separate dedupe namespace.
+For adapter files that already carry a source kind, leave `--source` off. If you must override it, use the wrapper's canonical kind: `discord`, `github`, `slack`, `granola`, `notion`, `gmail`, or `telegram`. brigade-evidence warns when the override disagrees with embedded record kinds because that creates a separate dedupe namespace.
 
 ## Scan Manifests
 
-Native imports record which local source files MiseLedger has seen without exposing transcript text:
+Native imports record which local source files brigade-evidence has seen without exposing transcript text:
 
 ```bash
-miseledger scans list --json
-miseledger scans list --source codex --json
-miseledger scans show <id-or-path> --json
-miseledger scans diff <path> --json
-miseledger scans changed --source codex --json
+brigade-evidence scans list --json
+brigade-evidence scans list --source codex --json
+brigade-evidence scans show <id-or-path> --json
+brigade-evidence scans diff <path> --json
+brigade-evidence scans changed --source codex --json
 ```
 
 Manifest rows include source kind, path, size, mtime, content hash, generated adapter hash, first/last seen timestamps, last imported timestamp, generated record count, and warning count.
@@ -427,16 +427,16 @@ Manifest rows include source kind, path, size, mtime, content hash, generated ad
 Archive maintenance commands are local-only:
 
 ```bash
-miseledger stats --json
-miseledger relations backfill --json
-miseledger compact --json
-miseledger fork snapshot.db --json
-miseledger diff snapshot.db --json
-miseledger migrate codex-arguments --dry-run --json
-miseledger prune --policy default --dry-run --json
-miseledger prune imports --before 2026-01-01 --dry-run --json
-miseledger prune scans --missing --dry-run --json
-miseledger doctor --archive --json
+brigade-evidence stats --json
+brigade-evidence relations backfill --json
+brigade-evidence compact --json
+brigade-evidence fork snapshot.db --json
+brigade-evidence diff snapshot.db --json
+brigade-evidence migrate codex-arguments --dry-run --json
+brigade-evidence prune --policy default --dry-run --json
+brigade-evidence prune imports --before 2026-01-01 --dry-run --json
+brigade-evidence prune scans --missing --dry-run --json
+brigade-evidence doctor --archive --json
 ```
 
 `stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune --policy default --dry-run` reports old operational-noise items eligible for retention pruning. Destructive policy pruning requires `--apply --export <path>` and writes compressed adapter JSONL before deleting item rows. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. See [docs/RETENTION_POLICY.md](docs/RETENTION_POLICY.md) for policy file shape and deletion semantics.
@@ -450,17 +450,17 @@ miseledger doctor --archive --json
 Discovery reports candidate roots and supported file counts only:
 
 ```bash
-miseledger sources discover --json
+brigade-evidence sources discover --json
 ```
 
 It checks Codex sessions, OpenClaw agents, Claude projects, Pi sessions, OpenCode exports, Hermes session files, Cursor history, and Grok sessions without printing private transcript content.
 
 ## Browser UI
 
-`miseledger serve` also hosts a single-page browser UI at the server root, a search box for sessions and conversations when terminal Ctrl+F is not an option:
+`brigade-evidence serve` also hosts a single-page browser UI at the server root, a search box for sessions and conversations when terminal Ctrl+F is not an option:
 
 ```bash
-miseledger serve --addr 127.0.0.1:8765
+brigade-evidence serve --addr 127.0.0.1:8765
 # open http://127.0.0.1:8765/
 ```
 
@@ -471,12 +471,12 @@ It offers live full-text search in two modes (Sessions, which groups hits by ses
 The local HTTP API binds to loopback only by default:
 
 ```bash
-miseledger serve --addr 127.0.0.1:8765
+brigade-evidence serve --addr 127.0.0.1:8765
 curl "http://127.0.0.1:8765/search?q=auth+timeout"
 curl "http://127.0.0.1:8765/sessions?q=auth+timeout&source=cursor"
 curl --get "http://127.0.0.1:8765/sessions" \
   --data-urlencode "q=release audit" \
-  --data-urlencode "project=miseledger" \
+  --data-urlencode "project=brigade-evidence" \
   --data-urlencode "model=gpt-5"
 curl "http://127.0.0.1:8765/items/<item-id>"
 curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":10}'
@@ -485,8 +485,8 @@ curl -X POST http://127.0.0.1:8765/evidence -d '{"query":"auth timeout","limit":
 The stdio MCP server exposes `search_evidence`, `show_item`, `create_evidence_bundle`, `show_evidence_bundle`, and `list_sources`:
 
 ```bash
-miseledger mcp
-miseledger doctor --mcp --json
+brigade-evidence mcp
+brigade-evidence doctor --mcp --json
 ```
 
 Fixture smoke scripts exercise these surfaces without private transcript content:
@@ -502,22 +502,22 @@ scripts/smoke_mcp.sh
 Brigade-facing evidence bundles are structured and explicitly untrusted:
 
 ```bash
-miseledger evidence "auth timeout" --source discrawl --limit 20 --json
-miseledger evidence "Claude native import" --project miseledger --json
-miseledger evidence "adapter contract" --include-related --json
-miseledger evidence "adapter contract" --include-artifact-text --json
-miseledger evidence "adapter contract" --markdown
-miseledger evidence show <bundle-id> --json
-miseledger evidence list --json
-miseledger explain "adapter contract" --source codex --json
+brigade-evidence evidence "auth timeout" --source discrawl --limit 20 --json
+brigade-evidence evidence "Claude native import" --project brigade-evidence --json
+brigade-evidence evidence "adapter contract" --include-related --json
+brigade-evidence evidence "adapter contract" --include-artifact-text --json
+brigade-evidence evidence "adapter contract" --markdown
+brigade-evidence evidence show <bundle-id> --json
+brigade-evidence evidence list --json
+brigade-evidence explain "adapter contract" --source codex --json
 ```
 
-Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, generated timestamp, eligible result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Query text and filters are omitted from outbound bundles. Ineligible results contain only an opaque `id`, `eligibility_status`, and `reason_code`. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
+Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, generated timestamp, eligible result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Query text and filters are omitted from outbound bundles. Ineligible results contain only an opaque `id`, `eligibility_status`, and `reason_code`. Evidence results dedupe repeated content hashes. Generated bundles are cached under brigade-evidence's private cache directory and can be shown later with `brigade-evidence evidence show`.
 
-Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive and descriptor-relative (`openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` against the validated data-directory handle held across the miss-or-create sequence), so concurrent initializers converge on one key and a data directory swapped in between cannot receive or interpose key material. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
+Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/brigade/evidence/evidence-bundle-mac.key`. The key file is validated on every load , regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes , and first creation is exclusive and descriptor-relative (`openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` against the validated data-directory handle held across the miss-or-create sequence), so concurrent initializers converge on one key and a data directory swapped in between cannot receive or interpose key material. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
 The root `station.json` advertises bounded Brigade retrieval as
-`miseledger evidence <task> --markdown --limit 5`. That surface is stateful
+`brigade-evidence evidence <task> --markdown --limit 5`. That surface is stateful
 because it opens the archive and caches the generated bundle. Its
 `evidence --help` probe returns before either action. Bulk `export markdown`
 remains a separate archive export command.
@@ -526,25 +526,25 @@ remains a separate archive export command.
 
 ## Relations
 
-MiseLedger resolves shallow relations during import when the target item already exists in the same source:
+brigade-evidence resolves shallow relations during import when the target item already exists in the same source:
 
 - Codex function/tool call results link back to calls by `call_id`.
 - Claude `tool_result` records link back to `tool_use` records by `tool_use_id`.
 - OpenClaw session/run events preserve `belongs_to_session` and `belongs_to_run` relations when session or run identifiers are present.
 
-If a target is not present yet, MiseLedger preserves `target_external_id` for later inspection.
+If a target is not present yet, brigade-evidence preserves `target_external_id` for later inspection.
 
 ## Why not something else?
 
-- **A cloud memory service (mem0, Letta, and friends)** is built for apps you ship, usually behind an API or a server, and your history lives on someone else's machine. MiseLedger is for the local agent CLIs and exports you already have. The archive is a plain SQLite file on your disk, queryable with `sqlite3` and the read-only `sql` command even without MiseLedger.
-- **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, Grok, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. MiseLedger normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, Grok, chat exports, notes, and git history at once.
-- **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. MiseLedger parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
-- **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. MiseLedger stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
-- **The archived StationTrail and SourceHarvest repos** were earlier source-exporter experiments. Their adapter JSONL output still imports cleanly, but the day-to-day crawler paths now live under `miseledger crawl` and native `miseledger import` commands.
+- **A cloud memory service (mem0, Letta, and friends)** is built for apps you ship, usually behind an API or a server, and your history lives on someone else's machine. brigade-evidence is for the local agent CLIs and exports you already have. The archive is a plain SQLite file on your disk, queryable with `sqlite3` and the read-only `sql` command even without brigade-evidence.
+- **A single tool's built-in history** (Codex, Claude, OpenCode, Cursor, Grok, ChatGPT export) is a silo. It does not cross harnesses, and there is no shared search. brigade-evidence normalizes every source into one `adapter.v1` contract and one FTS5 index, so one query spans Codex, Claude, OpenClaw, OpenCode, Cursor, Grok, chat exports, notes, and git history at once.
+- **`grep` over raw session folders** works until the formats diverge, the JSONL nests, and binary stores like Cursor's `store.db` are unreadable. brigade-evidence parses each harness, dedupes by stable external IDs, preserves raw refs for audit, and warns rather than crashing on malformed records.
+- **A vector database or RAG stack** adds embeddings, a server, and a model dependency for what is mostly an exact-recall problem. brigade-evidence stays lexical and deterministic: FTS5 search, shallow relations, and reproducible evidence bundles, with no embeddings, no model calls, and no network.
+- **The archived StationTrail and SourceHarvest repos** were earlier source-exporter experiments. Their adapter JSONL output still imports cleanly, but the day-to-day crawler paths now live under `brigade-evidence crawl` and native `brigade-evidence import` commands.
 
-## What MiseLedger is not
+## What brigade-evidence is not
 
-MiseLedger is not a hosted service, a memory daemon, or an agent framework.
+brigade-evidence is not a hosted service, a memory daemon, or an agent framework.
 
 It does not:
 
@@ -557,4 +557,4 @@ It does not:
 
 ## Privacy
 
-MiseLedger does not make network calls for init, adapter generation, import, search, evidence, show, export, status, SQL inspection, MCP, HTTP serving, or doctor. Imported text is stored locally and treated as untrusted evidence, not executable instructions.
+brigade-evidence does not make network calls for init, adapter generation, import, search, evidence, show, export, status, SQL inspection, MCP, HTTP serving, or doctor. Imported text is stored locally and treated as untrusted evidence, not executable instructions.

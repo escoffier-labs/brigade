@@ -96,7 +96,7 @@ brigade operator sync-mcp --write      # validate -> sync -> summary, one receip
 ```
 
 Cursor stays project-scoped unless both `--harness cursor` and `--user-scope`
-are present. A user-scoped Cursor projection drops a GraphTrail `--db` argument
+are present. A user-scoped Cursor projection drops a brigade-code-graph `--db` argument
 when that database resolves inside the source repository, so the global client
 does not pin every workspace to one repository.
 

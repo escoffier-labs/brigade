@@ -1,8 +1,8 @@
 ---
 name: forward-plan
-description: Use when turning Brigade's native ready set, outcome rank, and ROADMAP.md into a dependency-filed plan artifact under .brigade/work/plans/ - propose GraphTrail-derived edges (blocks from def/use, conflicts-with from write overlap) marked derived and requiring confirmation. Degrade cleanly when GraphTrail is unavailable. Never a subcommand.
+description: Use when turning Brigade's native ready set, outcome rank, and ROADMAP.md into a dependency-filed plan artifact under .brigade/work/plans/ - propose brigade-code-graph-derived edges (blocks from def/use, conflicts-with from write overlap) marked derived and requiring confirmation. Degrade cleanly when brigade-code-graph is unavailable. Never a subcommand.
 allowed-tools: Read, Grep, Write, Bash(brigade work ready:*), Bash(brigade outcome rank:*), Bash(brigade work task:*), Bash(brigade work plans:*), Bash(brigade code:*)
-compatibility: Brigade-wired workspaces with a work ledger. GraphTrail optional (degrades to no proposed edges).
+compatibility: Brigade-wired workspaces with a work ledger. brigade-code-graph optional (degrades to no proposed edges).
 ---
 
 # forward-plan
@@ -17,7 +17,7 @@ the planning sequence stays inspectable.
 - You need a forward plan that joins what is ready now with roadmap direction.
 - An operator schedules a headless harness against this skill for planning.
 - The workspace has (or can create) `.brigade/work/` and may or may not have
-  GraphTrail installed.
+  brigade-code-graph installed.
 
 ## Allowlist
 
@@ -26,13 +26,13 @@ Work only through this allowlist:
 - `brigade work ready --json` (add `--explain` when blocked items matter)
 - `brigade outcome rank --json` (optional `--by-capability` / `--recency`)
 - Read of repo-root `ROADMAP.md` under the parse contract below
-- `brigade code …` for GraphTrail footprint / impact / doctor checks
+- `brigade code …` for brigade-code-graph footprint / impact / doctor checks
 - `brigade work task edge …` / `brigade work task add --graph …` only after an
   operator confirms derived edges (never auto-apply. See Safety gates)
 - `brigade work plans` to list existing plan artifacts
 - Write only under `.brigade/work/plans/` (the plan JSON + plan.md pair)
 - Read/Grep of on-disk task ledgers, existing plans, and code paths named by
-  GraphTrail output
+  brigade-code-graph output
 
 Bash is scoped to those `brigade …` commands only. Do not expand into arbitrary
 shell, remote APIs, or writes outside `.brigade/work/plans/`. Stay inside the
@@ -118,13 +118,13 @@ contract. Required fields:
   apply)
 
 The `.plan.md` mirrors the JSON: summary, nodes, proposed edges (calling out
-derived + unconfirmed), GraphTrail status, and next safe command.
+derived + unconfirmed), brigade-code-graph status, and next safe command.
 
-## Derived dependency edges (GraphTrail impact intersection)
+## Derived dependency edges (brigade-code-graph impact intersection)
 
-When GraphTrail is available (`brigade code doctor` / impact / neighbors work):
+When brigade-code-graph is available (`brigade code doctor` / impact / neighbors work):
 
-1. Build a footprint per candidate node (files + symbol ids) from GraphTrail
+1. Build a footprint per candidate node (files + symbol ids) from brigade-code-graph
    context/impact, stamped with the graph snapshot you queried.
 2. Pairwise impact intersection over open / proposed nodes:
    - **def/use ordering** → directed `blocks` (definer/source blocks
@@ -138,7 +138,7 @@ When GraphTrail is available (`brigade code doctor` / impact / neighbors work):
    an operator confirms them.
 5. Only derived edges may be auto-retracted by a later reconcile recipe (see
    scheduled-care / outcome reconcile docs). Authored (human-confirmed) edges
-   are never auto-deleted by this skill. If GraphTrail later contradicts them,
+   are never auto-deleted by this skill. If brigade-code-graph later contradicts them,
    flag the contradiction in the plan, do not silently remove them.
 
 `conflicts-with` is proposal-only in the plan artifact today (the native ledger
@@ -147,13 +147,13 @@ file native `blocks` edges that the operator accepts. Keep confirmed
 `conflicts-with` in the plan as parallel-safety advisories unless a native type
 exists.
 
-### GraphTrail unavailable (degrade cleanly)
+### brigade-code-graph unavailable (degrade cleanly)
 
-If GraphTrail is missing, the DB is absent, or `brigade code …` fails:
+If brigade-code-graph is missing, the DB is absent, or `brigade code …` fails:
 
 - Propose **no** derived edges (`proposed_edges: []`).
-- Set `graphtrail.available` to `false` and state plainly in both JSON and
-  plan.md: "GraphTrail unavailable. No derived dependency edges proposed."
+- Set `brigade-code-graph.available` to `false` and state plainly in both JSON and
+  plan.md: "brigade-code-graph unavailable. No derived dependency edges proposed."
 - Still write the plan from the ready set, outcome rank, and ROADMAP parse.
 - Do not invent edges from prose guesswork.
 
@@ -163,7 +163,7 @@ If GraphTrail is missing, the DB is absent, or `brigade code …` fails:
 2. Run `brigade outcome rank --json`.
 3. Read `ROADMAP.md` under the parse contract. Collect Now / Next / Later
    bullets.
-4. Probe GraphTrail (`brigade code doctor` or a cheap `brigade code stats`).
+4. Probe brigade-code-graph (`brigade code doctor` or a cheap `brigade code stats`).
    If unavailable, skip to step 6 with empty proposed edges and say so.
 5. Otherwise compute footprints and propose derived edges from impact
    intersection. Mark each derived + unconfirmed.
@@ -187,7 +187,7 @@ If GraphTrail is missing, the DB is absent, or `brigade code …` fails:
 - Malformed ready / rank JSON or unreadable ROADMAP: skip the bad input, say
   so, continue with what remains. Never rewrite ledger or roadmap files to
   "fix" parse errors.
-- GraphTrail errors mid-probe: degrade as above (no derived edges, say so).
+- brigade-code-graph errors mid-probe: degrade as above (no derived edges, say so).
 
 ## Out of scope
 

@@ -1,15 +1,15 @@
 <p align="center">
-  <img src="docs/assets/graphtrail-social-preview.jpg?v=20260716" alt="GraphTrail banner" width="900">
+  <img src="docs/assets/graphtrail-social-preview.jpg?v=20260716" alt="brigade-code-graph banner" width="900">
 </p>
 
-<h1 align="center">GraphTrail</h1>
+<h1 align="center">brigade-code-graph</h1>
 
 <p align="center">
   <img src="docs/assets/marks/graphtrail-circle.svg" alt="" width="40" height="40">
 </p>
 
 <p align="center">
-  <strong>Your agents grep. GraphTrail shows who calls whom.</strong>
+  <strong>Your agents grep. brigade-code-graph shows who calls whom.</strong>
 </p>
 
 <p align="center">
@@ -31,7 +31,7 @@
 
 ## Install
 
-Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest.
+Install brigade-code-graph and `brigade-code-graph-mcp` through Brigade's verified managed manifest.
 `brigade setup` is the distribution replacement for every standalone install path
 per [`docs/phase-4a-compatibility-and-archive.md`](../../docs/phase-4a-compatibility-and-archive.md):
 
@@ -57,29 +57,29 @@ The supported Cargo configurations are the minimal `--no-default-features` build
 ## Quickstart
 
 ```bash
-graphtrail init .
-graphtrail sync .                    # incremental after the first pass
-DB=.graphtrail/graphtrail.db
+brigade-code-graph init .
+brigade-code-graph sync .                    # incremental after the first pass
+DB=.brigade/code-graph/code-graph.db
 
-graphtrail --db "$DB" callers serve
-graphtrail --db "$DB" callees serve
-graphtrail --db "$DB" impact serve --depth 2
-graphtrail --db "$DB" outline src/app.py --json
-graphtrail --db "$DB" callers helper --all-matches
-graphtrail --db "$DB" context "handoff lint" --json
-graphtrail --db "$DB" doctor . --json
+brigade-code-graph --db "$DB" callers serve
+brigade-code-graph --db "$DB" callees serve
+brigade-code-graph --db "$DB" impact serve --depth 2
+brigade-code-graph --db "$DB" outline src/app.py --json
+brigade-code-graph --db "$DB" callers helper --all-matches
+brigade-code-graph --db "$DB" context "handoff lint" --json
+brigade-code-graph --db "$DB" doctor . --json
 ```
 
 <p align="center">
-  <img src="docs/assets/graphtrail-context.svg" alt="GraphTrail workflow: source files pass through init or incremental sync into SQLite, then CLI and MCP queries return graph answers and context packs" width="900">
+  <img src="docs/assets/graphtrail-context.svg" alt="brigade-code-graph workflow: source files pass through init or incremental sync into SQLite, then CLI and MCP queries return graph answers and context packs" width="900">
 </p>
 
 <p align="center"><em><code>init</code> builds the first graph. <code>sync</code> updates changed files. Every query reads the same SQLite index.</em></p>
 
-Real output against GraphTrail's own source:
+Real output against brigade-code-graph's own source:
 
 ```text
-$ graphtrail --db .graphtrail/graphtrail.db callers serve
+$ brigade-code-graph --db .brigade/code-graph/code-graph.db callers serve
 main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 ```
 
@@ -87,7 +87,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 
 | | Job | What you get |
 |---|---|---|
-| **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.graphtrail/graphtrail.db` |
+| **Index** | Parse the repo with tree-sitter | Symbols, imports, and call edges in `.brigade/code-graph/code-graph.db` |
 | **Ask** | Query structure, not text | `search`, `outline`, `callers`, `callees`, `impact`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `diff`, `explain` |
 | **Brief** | Pack neighborhood for agents | `context` over CLI or MCP. Brigade can attach it to runs |
 
@@ -97,7 +97,7 @@ main --calls@19 hops=1--> serve  (src/bin/graphtrail-mcp.rs -> src/mcp.rs)
 
 <p align="center"><em>Incoming edges identify callers. Outgoing edges identify callees. <code>context</code> packages that neighborhood before an edit.</em></p>
 
-Python, TypeScript/JavaScript, Astro, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `graphtrail-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
+Python, TypeScript/JavaScript, Astro, Rust, and Go. One SQLite file per repo. CLI for humans and scripts. `brigade-code-graph-mcp` serves agents, opens query connections with `SQLITE_OPEN_READ_ONLY`, and supports multiple repositories through `repo` and `db` arguments. No hooks, no daemon, no network in the default build.
 
 When the sync root is inside a git repository, `sync` follows `.gitignore` and `.git/info/exclude`, while still indexing hidden paths such as `.github` if they are not ignored. Sync also skips any directory below the root that has its own `.git` file or directory (linked worktrees, nested clones, submodules), since those are separate checkouts. `doctor` counts them as `ignored.nested_repo`. Doctor JSON includes `resolver: {stored, current, stale}`: stored and current resolver versions are strings (stored can be null), and stale is a boolean. Missing or mismatched resolver versions or sync provenance yield `STALE`. Sync rebuilds derived edges without reparsing unchanged files. `doctor` exits 0 for `FRESH`, 1 for `STALE`, or 2 for `NEEDS-MIGRATION` or a missing database.
 
@@ -105,9 +105,9 @@ A file that cannot be indexed does not fail the sync. Sync skips it, drops any r
 
 ## MCP server
 
-`graphtrail-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.
+`brigade-code-graph-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.
 
-The default database comes from `--db <path>`, `--db=<path>`, the `GRAPHTRAIL_DB` env var, or `.graphtrail/graphtrail.db` in the working directory. Every tool also accepts an optional `repo` (uses `<repo>/.graphtrail/graphtrail.db`) or `db` (explicit path) argument, so a single running server can answer for any indexed repository. The database is opened lazily per call, so the server starts even before the default db exists.
+The default database comes from `--db <path>`, `--db=<path>`, the `BRIGADE_CODE_GRAPH_DB` env var, or `.brigade/code-graph/code-graph.db` in the working directory. Every tool also accepts an optional `repo` (uses `<repo>/.brigade/code-graph/code-graph.db`) or `db` (explicit path) argument, so a single running server can answer for any indexed repository. The database is opened lazily per call, so the server starts even before the default db exists.
 
 Register it with an MCP client. For Claude Code, add to `.mcp.json` (project scope) or `~/.claude.json` (user scope):
 
@@ -115,8 +115,8 @@ Register it with an MCP client. For Claude Code, add to `.mcp.json` (project sco
 {
   "mcpServers": {
     "graphtrail": {
-      "command": "/abs/path/to/graphtrail-mcp",
-      "args": ["--db", "/abs/path/to/repo/.graphtrail/graphtrail.db"]
+      "command": "/abs/path/to/brigade-code-graph-mcp",
+      "args": ["--db", "/abs/path/to/repo/.brigade/code-graph/code-graph.db"]
     }
   }
 }
@@ -141,7 +141,7 @@ The server exposes fifteen tools. This list is verified against the live `tools/
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
 | `affected` | `files` (`depth` optional, default 3, clamped to 1..5) | Tests statically attributed to the changed files via incoming call edges, plus impacted source files. A lower bound on what to run, not coverage. |
 | `explain` | `source`, `target` | How call edges from `source` to `target` resolved: resolution path, confidence, matched import, and targets. Exact name match, like the seed of `callers`, `callees`, and `impact`. |
-| `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.graphtrail/graphtrail.db` under root directories. |
+| `repos` | none (`roots` optional) | Default database metadata plus optional one-level scans for `.brigade/code-graph/code-graph.db` under root directories. |
 | `diff` | `before`, `after` | Structural diff of two indexed graph DBs: added, removed, and changed symbols plus added and removed call edges. |
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
@@ -181,26 +181,26 @@ Builds compiled with `--features codesearch` also expose the Code Search integra
 
 With the same feature, `context` also accepts `blend_code_search: true` plus optional `embed_weight` and `graph_weight`, mirroring the CLI `--blend-code-search` flag. The default build remains network-free, and a `codesearch` build makes no Code Search request unless `semantic_search` is called or `context` is called with `blend_code_search: true`.
 
-A live self-index reports counts for the checked-out revision. Run this after `graphtrail sync .` instead of relying on counts copied from an older release:
+A live self-index reports counts for the checked-out revision. Run this after `brigade-code-graph sync .` instead of relying on counts copied from an older release:
 
 ```bash
-graphtrail --db .graphtrail/graphtrail.db stats --json
+brigade-code-graph --db .brigade/code-graph/code-graph.db stats --json
 ```
 
 The response includes `files`, `symbols`, `edges`, `imports`, `language_files`, `schema_version`, `synced_at`, and `tool_version`.
 
 ## Cross-tool benchmark corpus
 
-The versioned [cross-tool corpus](benchmarks/cross-tool/README.md) measures context and impact behavior on a synthetic Python, TypeScript, Rust, and Go repository. Its standard-library runner applies identical task text and response budgets to GraphTrail and explicitly supplied comparator adapters, then records correctness, setup steps, tool calls, response size, elapsed time, and peak memory. It is an evidence harness only and does not change default ranking or MCP behavior.
+The versioned [cross-tool corpus](benchmarks/cross-tool/README.md) measures context and impact behavior on a synthetic Python, TypeScript, Rust, and Go repository. Its standard-library runner applies identical task text and response budgets to brigade-code-graph and explicitly supplied comparator adapters, then records correctness, setup steps, tool calls, response size, elapsed time, and peak memory. It is an evidence harness only and does not change default ranking or MCP behavior.
 
 ## Optional integrations
 
-GraphTrail's Brigade adapter is built in: `graphtrail context "<task>" --markdown` renders a context pack as a Brigade-friendly markdown document you can drop into a handoff's evidence section.
+brigade-code-graph's Brigade adapter is built in: `brigade-code-graph context "<task>" --markdown` renders a context pack as a Brigade-friendly markdown document you can drop into a handoff's evidence section.
 
 Two more adapters are gated behind optional cargo features, so the default binary stays free of network and cross-tool dependencies:
 
 ```bash
-# Build one context brief from graph context, Code Search semantic hits, and MiseLedger evidence.
+# Build one context brief from graph context, Code Search semantic hits, and brigade-evidence evidence.
 cargo run --features codesearch,miseledger -- \
   --db <db> context "rate limiting" --markdown --blend-code-search --evidence
 
@@ -209,14 +209,14 @@ cargo run --features codesearch,miseledger -- \
 cargo run --features codesearch -- --db <db> blend "rate limiting" --json
 
 # Expose Code Search over MCP too.
-cargo build --features codesearch --bin graphtrail-mcp
+cargo build --features codesearch --bin brigade-code-graph-mcp
 
-# Surface MiseLedger evidence items (read-only FTS) mentioning a symbol or term.
+# Surface brigade-evidence evidence items (read-only FTS) mentioning a symbol or term.
 # Honors MISELEDGER_DB (defaults to ~/.local/share/miseledger/miseledger.db).
 cargo run --features miseledger -- links "dispatch" --json
 ```
 
-### MiseLedger adapter deprecation
+### brigade-evidence adapter deprecation
 
 The direct `miseledger` Cargo feature, `graphtrail context --evidence`, and `graphtrail links` are deprecated but remain functional. Use Brigade for structured composition instead:
 
@@ -232,41 +232,41 @@ brigade evidence doctor --target .
 
 An exact code reference is matched before lexical fallback. GraphTrail will keep the direct adapter functional through at least two minor GraphTrail releases or 90 days after the first GraphTrail release containing this deprecation, whichever is longer. Removal cannot occur before that compatibility policy is satisfied. The direct adapter keeps its existing default database resolution and read-only FTS behavior during the compatibility window.
 
-When `codesearch` is enabled, GraphTrail also reads the shared Code Search index
+When `codesearch` is enabled, brigade-code-graph also reads the shared Code Search index
 manifest from `CODE_INDEX_MANIFEST`, `XDG_DATA_HOME/code-index/manifest.json`, or
 `~/.local/share/code-index/manifest.json`. `CODE_SEARCH_URL` still wins when it is
 set; otherwise the client falls back to the manifest's `semantic_api_url`, then to
 `http://localhost:5204`. If the manifest has an entry whose canonical `repo_root`
-matches the GraphTrail repo, requests include that entry's `code_search_project`.
-Returned Code Search paths must start with `code_search_file_prefix`; GraphTrail
+matches the brigade-code-graph repo, requests include that entry's `code_search_project`.
+Returned Code Search paths must start with `code_search_file_prefix`; brigade-code-graph
 strips that prefix so blended hits match its repo-relative graph paths and drops
 nonmatching hits.
 
 ## How the pieces fit
 
-GraphTrail is one station in a small set of focused tools:
+brigade-code-graph is one station in a small set of focused tools:
 
 - **Code Search** keeps semantic chunks, summaries, and embeddings.
-- **GraphTrail** owns symbols, imports, call edges, and graph context.
-- **MiseLedger** owns session and evidence archives and JSON receipts.
+- **brigade-code-graph** owns symbols, imports, call edges, and graph context.
+- **brigade-evidence** owns session and evidence archives and JSON receipts.
 - **Brigade** owns operator workflow, handoffs, context packs, and guardrails.
 
 Internally the code is split into focused modules: `model` (shared types), `extractors` (per-language tree-sitter providers plus traversal), `store` (`db`, `schema`, `sync`), `query` (`search`, `graph`, `context`, `stats`), and a thin `cli`.
 
 ## Why not just grep or an embedding index?
 
-- **grep / ripgrep** find text, not structure. They will show you every line where a name appears, but they do not know that one function calls another, so they cannot answer "who calls this" or "what breaks if I change it." GraphTrail walks real tree-sitter call edges and answers those directly.
-- **An embedding / semantic index** (the kind Code Search keeps) is great for "find code that looks relevant to this idea," but it ranks by similarity, not by reachability. It will not tell you the blast radius of an edit. GraphTrail is the structural layer; the two compose, which is exactly what the optional `blend` feature does.
-- **A language server (LSP)** gives precise per-language navigation inside an editor, but it is a stateful daemon tied to one project and one process, not a queryable database an agent can hit over MCP across many repos at once. GraphTrail persists a small graph to disk, opens queries read-only, runs no daemon, and is multi-repo from a single server.
-- **A full code-intelligence platform** (graph databases, ctags servers, hosted indexers) does far more and costs far more to run. GraphTrail is a sidecar on purpose: one SQLite file per repo, no network, no background process.
+- **grep / ripgrep** find text, not structure. They will show you every line where a name appears, but they do not know that one function calls another, so they cannot answer "who calls this" or "what breaks if I change it." brigade-code-graph walks real tree-sitter call edges and answers those directly.
+- **An embedding / semantic index** (the kind Code Search keeps) is great for "find code that looks relevant to this idea," but it ranks by similarity, not by reachability. It will not tell you the blast radius of an edit. brigade-code-graph is the structural layer; the two compose, which is exactly what the optional `blend` feature does.
+- **A language server (LSP)** gives precise per-language navigation inside an editor, but it is a stateful daemon tied to one project and one process, not a queryable database an agent can hit over MCP across many repos at once. brigade-code-graph persists a small graph to disk, opens queries read-only, runs no daemon, and is multi-repo from a single server.
+- **A full code-intelligence platform** (graph databases, ctags servers, hosted indexers) does far more and costs far more to run. brigade-code-graph is a sidecar on purpose: one SQLite file per repo, no network, no background process.
 
-## What GraphTrail is not
+## What brigade-code-graph is not
 
-GraphTrail is a sidecar, not a platform. It does not:
+brigade-code-graph is a sidecar, not a platform. It does not:
 
 - run a daemon, install hooks, or watch your filesystem (the opt-in `watch` command is a foreground process you start and stop yourself)
 - make network calls in the default build
-- own memory, receipts, publishing, or scheduling (those stay in Brigade and MiseLedger)
+- own memory, receipts, publishing, or scheduling (those stay in Brigade and brigade-evidence)
 - keep semantic chunks, summaries, or embeddings (Code Search owns those)
 - mutate your code. Graph-index writes come from CLI `init`, `sync`, foreground `watch`, or a supported MCP query that explicitly sets `refresh: true`
 
@@ -274,4 +274,8 @@ It indexes source into a graph and answers structural questions. That is the who
 
 ## Contributing
 
-Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local dev setup and what lands easily, [SECURITY.md](SECURITY.md) for reporting vulnerabilities privately, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). GraphTrail is MIT licensed; see [LICENSE](LICENSE).
+Issues and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for local dev setup and what lands easily, [SECURITY.md](SECURITY.md) for reporting vulnerabilities privately, and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md). brigade-code-graph is MIT licensed; see [LICENSE](LICENSE).
+
+### Legacy install wording
+
+Earlier instructions said: "Install GraphTrail and `graphtrail-mcp` through Brigade's verified managed manifest". Those names now refer to deprecated compatibility entry points. New installs use the canonical binaries above. Legacy entry points are removed in v0.33.0.

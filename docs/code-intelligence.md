@@ -1,6 +1,6 @@
 # Code intelligence
 
-Brigade's built-in code map (`brigade code`, historically GraphTrail) indexes a repository for structural queries and attaches a graph delta to verification receipts when the engine is present. Install it with `brigade setup`. No separate GraphTrail product install is required.
+Brigade's built-in code map (`brigade code`) indexes a repository for structural queries and attaches a graph delta to verification receipts when the engine is present. Install it with `brigade setup`. No separate brigade-code-graph product install is required.
 
 ## Sync
 
@@ -43,7 +43,7 @@ The export caps the module map at 15 modules and 24 edges. `--overlay` reads the
 
 ## MCP access
 
-`brigade setup` installs `graphtrail-mcp`. Register it in the harness configuration directly or through `brigade mcp sync` so agents can query callers, impact, and context. Historical MCP entry labels may still say `graphtrail`.
+`brigade setup` installs `brigade-code-graph-mcp`. Register it in the harness configuration directly or through `brigade mcp sync` so agents can query callers, impact, and context. Existing owned MCP labels remain readable during the compatibility window.
 
 ## Limitations
 
@@ -51,6 +51,6 @@ The export caps the module map at 15 modules and 24 edges. `--overlay` reads the
 - Queries depend on a successful sync. Stale checkouts need another sync pass.
 - Graph ranking inside `work verify plan` is advisory. The worker still chooses the command.
 - Static analysis has language and dynamic-dispatch blind spots. Treat impact results as evidence for choosing checks, not proof that no other code is affected.
-- Binary and path names under the engines tree may still use the GraphTrail label. The operator surface is `brigade code`.
+- New indexes use `.brigade/code-graph/code-graph.db`. Existing legacy indexes remain readable through v0.32.
 
-Related: [wiring guide](wiring-graphtrail-miseledger.md), [work closeout](work-closeout.md), [receipt schemas](receipt-schemas.md), [operator center](operator-center.md).
+Related: [wiring guide](wiring-code-graph-evidence.md), [work closeout](work-closeout.md), [receipt schemas](receipt-schemas.md), [operator center](operator-center.md).
