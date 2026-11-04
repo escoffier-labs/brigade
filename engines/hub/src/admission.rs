@@ -45,9 +45,19 @@ impl Lookup {
             return "admin";
         }
         let key = hex(&digest);
-        self.pool.submit(move |c| {
+        // The kind only labels request logs, so a slow reader falls back to
+        // "anonymous" after the same 2-second deadline credential() uses.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        let job = self.pool.submit(move |c| {
             c.query_row("SELECT 'node' FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 'principal' FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1",[key],|r|r.get::<_,String>(0)).optional()
-        }).await.ok().flatten().map(|kind|if kind=="node" {"node"} else {"principal"}).unwrap_or("anonymous")
+        });
+        tokio::time::timeout_at(deadline, job)
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .flatten()
+            .map(|kind| if kind == "node" { "node" } else { "principal" })
+            .unwrap_or("anonymous")
     }
     pub async fn credential(&self, authorization: Option<&str>) -> Result<Option<String>, ()> {
         let Some(token) = authorization

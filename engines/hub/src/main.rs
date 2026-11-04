@@ -293,6 +293,15 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
 fn req_path(parts: &axum::http::request::Parts) -> &str {
     parts.uri.path()
 }
+/// The family a request is counted under once its body shows the action.
+#[derive(Clone, Default)]
+struct FamilySlot(Arc<std::sync::OnceLock<&'static str>>);
+fn message_action(bytes: &[u8]) -> String {
+    serde_json::from_slice::<serde_json::Value>(bytes)
+        .ok()
+        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_owned))
+        .unwrap_or_default()
+}
 fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
     if path == "/messages" && bytes.len() <= BODY_LIMIT {
         if let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(bytes) {
@@ -333,8 +342,22 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     let started = std::time::Instant::now();
     let f = family(req.method().as_str(), req.uri().path(), "");
-    let kind = if admin_authorized(&app, &req) {
+    // Create the log first so a request cancelled during the lookup is still counted.
+    let mut log = RequestLog {
+        telemetry: app.telemetry.clone(),
+        id: app.telemetry.id(),
+        family: f,
+        status: 500,
+        credential_kind: "anonymous",
+        request_bytes: Arc::default(),
+        response_bytes: 0,
+        start: started,
+    };
+    log.credential_kind = if admin_authorized(&app, &req) {
         "admin"
+    } else if f == "health" {
+        // Liveness and readiness never wait on the reader pool for a log label.
+        "unchecked"
     } else if let Some(lookup) = &app.lookup {
         lookup
             .kind(
@@ -346,18 +369,11 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     } else {
         "anonymous"
     };
-    let mut log = RequestLog {
-        telemetry: app.telemetry.clone(),
-        id: app.telemetry.id(),
-        family: f,
-        status: 500,
-        credential_kind: kind,
-        request_bytes: Arc::default(),
-        response_bytes: 0,
-        start: started,
-    };
     let request_bytes = log.request_bytes.clone();
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    // handle_inner fills this in for POST /messages once the body is buffered.
+    let action_family = FamilySlot::default();
+    parts.extensions.insert(action_family.clone());
     let body = body.into_data_stream().map(move |item| {
         if let Ok(bytes) = &item {
             request_bytes.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
@@ -407,6 +423,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             let bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
                 Ok(bytes) => bytes,
                 Err(_) => {
+                    log.status = StatusCode::BAD_GATEWAY.as_u16();
                     return upstream_error(StatusCode::BAD_GATEWAY, "upstream-body-error", false);
                 }
             };
@@ -444,6 +461,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     } else {
         handle_inner(State(app.clone()), req).await
     };
+    if let Some(family) = action_family.0.get() {
+        log.family = family;
+    }
     log.status = response.status().as_u16();
     let (parts, body) = response.into_parts();
     // Hold the logger until completion or disconnect and count actual streamed bytes.
@@ -662,6 +682,15 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
     };
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
+    if let Some(slot) = parts.extensions.get::<FamilySlot>() {
+        if parts.method == axum::http::Method::POST && req_path(&parts) == "/messages" {
+            let _ = slot.0.set(brigade_hub::modes::family(
+                "POST",
+                "/messages",
+                &message_action(&body),
+            ));
+        }
+    }
     let bodyless = body.is_empty();
     let outgoing = if headers_only {
         Body::from_stream(futures_util::stream::pending::<
@@ -1157,6 +1186,14 @@ mod tests {
         assert_eq!(parse_upstream_key("fake-key", true).unwrap(), "fake-key");
     }
 
+    #[test]
+    fn message_action_sets_the_request_family() {
+        use brigade_hub::modes::family;
+        let of = |body: &[u8]| family("POST", "/messages", &message_action(body));
+        assert_eq!(of(br#"{"action":"events_list"}"#), "cold");
+        assert_eq!(of(br#"{"action":"send"}"#), "messages");
+        assert_eq!(of(b"not json"), "messages");
+    }
     #[test]
     fn long_poll_uses_body_and_caps_wait() {
         assert_eq!(
