@@ -155,3 +155,89 @@ def test_standalone_ignores_internal_address_header(monkeypatch):
     handler = SimpleNamespace(headers=headers, client_address=peer)
     assert authorize(handler)
     assert handler.client_address == peer
+
+
+def test_upstream_writes_reuse_checkpointed_wal(tmp_path, monkeypatch):
+    import time
+
+    from brigade import fleet_hub_upstream
+
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
+    # Exercise the same policy with a smaller WAL to keep the regression fast.
+    monkeypatch.setattr(fleet_hub_upstream, "PASSIVE_WAL_BYTES", 256 * 1024, raising=False)
+    path = tmp_path / "hub.db"
+    server = fleet_hub.make_server(str(ipaddress.IPv4Address(2130706433)), 0, path, "fake-admin")
+    conn = fleet_hub.open_db(path)
+    try:
+        conn.execute("CREATE TABLE checkpoint_probe (value BLOB)")
+        conn.execute("INSERT INTO checkpoint_probe VALUES (zeroblob(16384))")
+        conn.commit()
+        for _batch in range(30):
+            for _ in range(30):
+                conn.execute("UPDATE checkpoint_probe SET value = randomblob(16384)")
+                conn.commit()
+            time.sleep(0.12)
+        assert path.with_suffix(".db-wal").stat().st_size < 2 * 1024 * 1024
+    finally:
+        conn.close()
+        server.server_close()
+
+
+def test_upstream_checkpoint_thread_stops_on_close(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
+    server = fleet_hub.make_server(str(ipaddress.IPv4Address(2130706433)), 0, tmp_path / "hub.db", "fake-admin")
+    try:
+        maintenance = server._checkpoint_maintenance
+        assert maintenance.thread.is_alive()
+    finally:
+        server.server_close()
+    assert not maintenance.thread.is_alive()
+    server.server_close()
+
+
+def test_upstream_checkpoint_idle_and_busy_retry(tmp_path, monkeypatch, caplog):
+    import time
+
+    from brigade import fleet_hub_upstream
+
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
+    monkeypatch.setattr(fleet_hub_upstream, "TRUNCATE_WAL_BYTES", 1)
+    path = tmp_path / "hub.db"
+    server = fleet_hub.make_server(str(ipaddress.IPv4Address(2130706433)), 0, path, "fake-admin")
+    reader = fleet_hub.open_db(path)
+    writer = fleet_hub.open_db(path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT * FROM nodes").fetchall()
+        writer.execute("CREATE TABLE checkpoint_busy (value)")
+        writer.commit()
+        deadline = time.monotonic() + 5
+        while "checkpoint busy" not in caplog.text and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert "checkpoint busy" in caplog.text
+        reader.rollback()
+        wal = path.with_suffix(".db-wal")
+        while wal.stat().st_size and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert wal.stat().st_size == 0
+        # Below the size thresholds, the idle timer must still checkpoint.
+        monkeypatch.setattr(fleet_hub_upstream, "TRUNCATE_WAL_BYTES", 256 * 1024 * 1024)
+        writer.execute("INSERT INTO checkpoint_busy VALUES (1)")
+        writer.commit()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            # A separate observer can inspect checkpoint progress in the WAL index
+            # without issuing a checkpoint itself.
+            import struct
+
+            shm = path.with_suffix(".db-shm").read_bytes()
+            frames = struct.unpack_from("=I", shm, 16)[0]
+            backfilled = struct.unpack_from("=I", shm, 96)[0]
+            if frames and backfilled == frames:
+                break
+            time.sleep(0.05)
+        assert frames and backfilled == frames
+    finally:
+        reader.close()
+        writer.close()
+        server.server_close()

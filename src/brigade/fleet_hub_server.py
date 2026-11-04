@@ -75,6 +75,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self._closing = False
         # Only lifecycle cleanup uses this connection across threads. Requests
         # continue to open their own connections and see fresh auth state.
+        self._checkpoint_maintenance: fleet_hub_upstream.CheckpointMaintenance | None = None
         self._db_keepalive: sqlite3.Connection | None = sqlite3.connect(
             f"{db_path.expanduser().resolve().as_uri()}?mode=rw", uri=True, check_same_thread=False
         )
@@ -84,10 +85,15 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
             super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+            if self.upstream_mode:
+                self._checkpoint_maintenance = fleet_hub_upstream.CheckpointMaintenance(db_path)
+                self._checkpoint_maintenance.thread.start()
             # A deferred bind has no port yet. That caller announces it after binding.
             if managed and bind_and_activate:
                 print(f"BRIGADE_UPSTREAM_PORT={self.server_port}", flush=True, file=sys.stdout)
         except BaseException:
+            if self._checkpoint_maintenance is not None:
+                self._checkpoint_maintenance.close()
             self._close_db_if_idle()
             raise
 
@@ -102,6 +108,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            if self._checkpoint_maintenance is not None:
+                self._checkpoint_maintenance.close()
             self._close_db_if_idle()
 
     def _close_db_if_idle(self) -> None:

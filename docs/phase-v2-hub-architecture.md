@@ -1216,6 +1216,8 @@ still come from Python's own purge. The `/mesh/identity` and
   writer. It runs a passive checkpoint when the hub has been idle for 1 s or
   the WAL passes 64 MiB, and a truncating checkpoint above 256 MiB with a busy
   handler bounded at 250 ms. A busy result is retried later and reported.
+  S3c supplies an interim Python maintenance thread on its own connection,
+  stopped on server close, until S4b's Rust maintenance thread takes ownership.
 - Every Rust connection sets `wal_autocheckpoint=0`. Python's connections keep
   SQLite's default of 1,000 pages unless the upstream runs in upstream mode,
   which turns it off on every connection it opens, the events dispatch thread
