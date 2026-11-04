@@ -184,3 +184,25 @@ def test_key_permission_bits_are_posix_only(tmp_path, monkeypatch, platform):
             assert f._key(conn) == expected
     finally:
         conn.close()
+
+
+def test_key_file_is_opened_in_binary_mode(tmp_path, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    binary = 0x8000  # Windows O_BINARY; absent on POSIX, so it is injected here.
+    opened = []
+
+    def recording_open(path, flags, *args):
+        opened.append(flags)
+        return os.open(path, flags & ~binary, *args)
+
+    monkeypatch.setattr(f, "os", SimpleNamespace(**{**vars(os), "O_BINARY": binary, "open": recording_open}))
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        f._key(conn)
+    finally:
+        conn.close()
+    # Both the create and the read must avoid text-mode newline translation.
+    assert len(opened) == 2
+    assert all(flags & binary for flags in opened)

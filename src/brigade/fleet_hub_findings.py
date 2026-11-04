@@ -93,7 +93,8 @@ def _key(conn: sqlite3.Connection) -> bytes:
     path = Path(db + ".findings-key")
     if not path.exists() and conn.execute("SELECT 1 FROM fleet_findings LIMIT 1").fetchone():
         raise FindingError("findings key missing", "finding_unavailable", 503)
-    flags = getattr(os, "O_NOFOLLOW", 0)
+    # O_BINARY keeps Windows from translating newline bytes in the raw key.
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
     except FileExistsError:
