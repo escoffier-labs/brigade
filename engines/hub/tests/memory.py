@@ -166,6 +166,13 @@ class Memory(unittest.TestCase):
             json.loads(payload), {"error": "incomplete request body", "code": "memory_request_invalid"}
         )
 
+    def test_drive_profile_passes_twice_against_one_hub(self):
+        # --hub-url runs reuse a hub: the second run must not meet the first run's cards.
+        hub = self.run_hub("twice", "--route-mode memory=native")
+        for attempt in (1, 2):
+            result = hm.run_memory(hub)
+            self.assertEqual(result["mismatches"], [], attempt)
+
     def test_token_query_keeps_the_shared_refusal(self):
         # Python refuses a `token` query on every GET and POST before routing
         # (fleet_hub_http._route); the hub front answers it before memory runs.

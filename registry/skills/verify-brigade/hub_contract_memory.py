@@ -127,25 +127,33 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
             body["base_epoch"] = epoch
         return mem(case, body, token=token, **expect)
 
+    # Card ids and repository scopes carry the run's suffix, so a second run
+    # against the same --hub-url creates fresh cards instead of meeting the
+    # first run's revisions.
+    def card(name: str) -> str:
+        return f"{name}-{suffix}"
+
+    repo_one = f"repo:contract/one-{suffix}"
+    repo_two = f"repo:contract/two-{suffix}"
     unreviewed = event("agent-unreviewed")
     # Same id in two scopes is two cards.
-    fleet = put("memory-put-create", "fleet", "build", None, "fleet build", status=201, shape=unreviewed)
-    put("memory-put-second-scope", "repo:contract/one", "build", None, "repo build", status=201, shape=unreviewed)
+    fleet = put("memory-put-create", "fleet", card("build"), None, "fleet build", status=201, shape=unreviewed)
+    put("memory-put-second-scope", repo_one, card("build"), None, "repo build", status=201, shape=unreviewed)
     mem(
         "memory-card-ambiguous",
-        {"action": "card", "card_id": "build"},
+        {"action": "card", "card_id": card("build")},
         token=node_token,
         status=409,
-        shape={**err("memory_card_ambiguous"), "scopes": hc.Eq(["fleet", "repo:contract/one"])},
+        shape={**err("memory_card_ambiguous"), "scopes": hc.Eq(["fleet", repo_one])},
     )
     mem(
         "memory-card-scoped",
-        {"action": "card", "card_id": "build", "scope": "repo:contract/one"},
+        {"action": "card", "card_id": card("build"), "scope": repo_one},
         token=node_token,
         shape={
             "card": {
-                "scope": hc.Eq("repo:contract/one"),
-                "card_id": hc.Eq("build"),
+                "scope": hc.Eq(repo_one),
+                "card_id": hc.Eq(card("build")),
                 "revision": int,
                 "content_hash": HEX64,
                 "text": hc.Eq("repo build\n"),
@@ -157,19 +165,19 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     )
     mem(
         "memory-card-not-found",
-        {"action": "card", "card_id": "absent", "scope": "fleet"},
+        {"action": "card", "card_id": card("absent"), "scope": "fleet"},
         token=node_token,
         status=404,
         shape=err("memory_card_not_found"),
     )
     # Bytes A, B, A: the third revision has the first hash, and an edit of the first is stale.
-    a1 = _revision(put("memory-bytes-a", "fleet", "flip", None, "A", status=201, shape=unreviewed))
-    b = _revision(put("memory-bytes-b", "fleet", "flip", a1, "B", status=201, shape=unreviewed))
-    a2 = _revision(put("memory-bytes-a-again", "fleet", "flip", b, "A", status=201, shape=unreviewed))
+    a1 = _revision(put("memory-bytes-a", "fleet", card("flip"), None, "A", status=201, shape=unreviewed))
+    b = _revision(put("memory-bytes-b", "fleet", card("flip"), a1, "B", status=201, shape=unreviewed))
+    a2 = _revision(put("memory-bytes-a-again", "fleet", card("flip"), b, "A", status=201, shape=unreviewed))
     put(
         "memory-bytes-stale",
         "fleet",
-        "flip",
+        card("flip"),
         a1,
         "C",
         status=409,
@@ -181,7 +189,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         {
             "action": "retire",
             "scope": "fleet",
-            "card_id": "flip",
+            "card_id": card("flip"),
             "base_revision": a2,
             "base_epoch": epoch,
             "reason": "contract",
@@ -191,24 +199,24 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape=event("agent-unreviewed", "retired"),
     )
     r = _revision(retired)
-    revived = _revision(put("memory-revive", "fleet", "flip", r, "A", status=201, shape=unreviewed))
+    revived = _revision(put("memory-revive", "fleet", card("flip"), r, "A", status=201, shape=unreviewed))
     put(
         "memory-stale-after-revival",
         "fleet",
-        "flip",
+        card("flip"),
         r,
         "late",
         status=409,
         shape={**err("memory_base_mismatch"), "current_revision": hc.Eq(revived)},
     )
-    put("memory-create-over-existing", "fleet", "flip", None, "x", status=409, shape=err("memory_base_mismatch"))
+    put("memory-create-over-existing", "fleet", card("flip"), None, "x", status=409, shape=err("memory_base_mismatch"))
     # A base revision read under another log_epoch, and one without its epoch.
     mem(
         "memory-epoch-changed",
         {
             "action": "put",
             "scope": "fleet",
-            "card_id": "build",
+            "card_id": card("build"),
             "base_revision": _revision(fleet),
             "base_epoch": event_id(0),
             "text": "x",
@@ -223,7 +231,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         {
             "action": "put",
             "scope": "fleet",
-            "card_id": "build",
+            "card_id": card("build"),
             "base_revision": _revision(fleet),
             "text": "x",
             "client_event_id": event_id(),
@@ -233,11 +241,13 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape=err("memory_request_invalid"),
     )
     # Trust: an admin put is unreviewed, import needs the grant, then a clean scan.
-    put("memory-admin-put-unreviewed", "fleet", "admin-card", None, "x", token=admin, status=201, shape=unreviewed)
+    put(
+        "memory-admin-put-unreviewed", "fleet", card("admin-card"), None, "x", token=admin, status=201, shape=unreviewed
+    )
     imported = {
         "action": "import",
         "scope": "fleet",
-        "card_id": "imported",
+        "card_id": card("imported"),
         "base_revision": None,
         "text": "x",
     }
@@ -257,8 +267,8 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     # Grants and scopes.
     put(
         "memory-principal-no-grant",
-        "repo:contract/one",
-        "agent-card",
+        repo_one,
+        card("agent-card"),
         None,
         "x",
         token=agent_token,
@@ -268,7 +278,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     grant = {
         "action": "grant",
         "principal": f"agent:{agent_name}",
-        "scope": "repo:contract/one",
+        "scope": repo_one,
         "rights": ["write", "read"],
     }
     mem(
@@ -277,7 +287,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape={
             "grant": {
                 "principal": hc.Eq(f"agent:{agent_name}"),
-                "scope": hc.Eq("repo:contract/one"),
+                "scope": hc.Eq(repo_one),
                 "rights": hc.Eq(["read", "write"]),
             }
         },
@@ -289,11 +299,11 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         status=403,
         shape=err("memory_grant_missing"),
     )
-    put("memory-principal-granted", "repo:contract/one", "agent-card", None, "x", token=agent_token, status=201)
+    put("memory-principal-granted", repo_one, card("agent-card"), None, "x", token=agent_token, status=201)
     put(
         "memory-principal-other-scope",
-        "repo:contract/two",
-        "build",
+        repo_two,
+        card("build"),
         None,
         "x",
         token=agent_token,
@@ -314,7 +324,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     body = {
         "action": "put",
         "scope": "fleet",
-        "card_id": "idempotent",
+        "card_id": card("idempotent"),
         "base_revision": None,
         "text": "first",
         "client_event_id": event_id(),
@@ -366,7 +376,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     scopes = {e.get("scope") for e in agent_page.get("events", []) if isinstance(e, dict)}
     d.invariant(
         "memory-log-principal",
-        scopes == {"repo:contract/one"},
+        scopes == {repo_one},
         "only scopes the principal can read",
         sorted(str(s) for s in scopes),
     )
@@ -389,7 +399,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         {
             "action": "capture",
             "session_ref": "contract-session-ref-0001",
-            "pushed": ["fleet/build"],
+            "pushed": [f"fleet/{card('build')}"],
             "opened": [],
             "client_event_id": event_id(),
         },
@@ -402,7 +412,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     put(
         "memory-card-too-large",
         "fleet",
-        "large",
+        card("large"),
         None,
         "x" * (600 * 1024),
         status=413,
