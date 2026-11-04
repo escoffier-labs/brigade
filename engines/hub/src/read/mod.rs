@@ -55,7 +55,7 @@ impl ReaderPool {
         // Open all connections before spawning so partial startup never leaks threads.
         let mut connections = Vec::new();
         for _ in 0..threads {
-            let c = Connection::open_with_flags(
+            let c = schema::audit::open(
                 path,
                 OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
             )

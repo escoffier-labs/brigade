@@ -1,4 +1,5 @@
-//! Python owns DDL during rollback. This module only inspects structure.
+pub mod audit;
+// Python owns DDL during rollback. This module only inspects structure.
 use rusqlite::{Connection, OptionalExtension, types::ValueRef};
 use serde_json::{Value, json};
 use std::sync::atomic::{AtomicBool, Ordering};

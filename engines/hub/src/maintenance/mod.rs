@@ -78,7 +78,7 @@ pub fn checkpoint(c: &Connection, truncate: bool) -> rusqlite::Result<(i64, i64,
 }
 fn open(path: &Path) -> Result<Connection, String> {
     // Never create the memory file before its schema owner (S13a) does.
-    let c = Connection::open_with_flags(
+    let c = crate::schema::audit::open(
         path,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
@@ -160,7 +160,7 @@ impl Maintenance {
         memory: &Path,
         writer: Arc<dyn WriterCommands>,
     ) -> Result<Self, String> {
-        let watch = Connection::open_with_flags(
+        let watch = crate::schema::audit::open(
             hub,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )
@@ -227,6 +227,12 @@ impl Maintenance {
                         Ok(file) => files.push(file),
                         Err(_) => m.lock().unwrap().failures += 1,
                     }
+                }
+                // The read-only audit pauses Python sweepers too. Keep native
+                // connections live and instrumented, while excluding autonomous
+                // checkpoints and retention from its request-only write window.
+                if crate::schema::audit::enabled() {
+                    continue;
                 }
                 let mut max_wal = 0;
                 if space_sample.elapsed() >= Duration::from_secs(1) {
