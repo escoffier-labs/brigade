@@ -7,6 +7,7 @@ import os
 import shutil
 import sqlite3
 import stat
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -407,6 +408,27 @@ def test_one_reachable_ledger_is_enough_and_its_records_count(tmp_path):
     second = backup.restore(copy, tmp_path / "b.db", ledgers=[store, missing_host], now=T0)
     assert second["ledgers_unreachable"] == [str(missing_host)]
     assert second["claim_floor"] > first["claim_floor"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_two_names_for_one_ledger_lock_and_record_it_once(tmp_path):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    store = tmp_path / "backups" / backup.LEDGER_NAME
+    store.touch()
+    alias = tmp_path / "alias.jsonl"
+    alias.symlink_to(store)
+    # Before the fix the second flock on the same file blocked forever.
+    done = {}
+    worker = threading.Thread(
+        target=lambda: done.update(backup.restore(copy, tmp_path / "a.db", ledgers=[store, alias], now=T0)),
+        daemon=True,
+    )
+    worker.start()
+    worker.join(30)
+    assert not worker.is_alive(), "restore blocked on its own ledger lock"
+    assert len(done["ledgers_written"]) == 1
+    assert len(store.read_text(encoding="utf-8").splitlines()) == 1
 
 
 def test_restore_refuses_without_a_ledger_unless_the_operator_states_no_prior_restore(tmp_path):
