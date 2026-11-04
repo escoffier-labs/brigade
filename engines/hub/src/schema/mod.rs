@@ -111,7 +111,8 @@ pub fn snapshot(c: &Connection) -> rusqlite::Result<Value> {
                 }
                 tables.insert(name.into(), json!({"columns":columns, "indexes":indexes,
                     "foreign_keys":rows(c, &format!("PRAGMA foreign_key_list({})", quoted(name)))?,
-                    "checks":checks(sql), "autoincrement":sql.to_uppercase().contains("AUTOINCREMENT")}));
+                    "checks":checks(sql), "autoincrement":sql.to_uppercase().contains("AUTOINCREMENT"),
+                    "sql":normalize(sql), "column_order":rows(c, &format!("PRAGMA table_xinfo({})", quoted(name)))?.into_iter().map(|r| r[1].clone()).collect::<Vec<_>>()}));
             }
             _ => {}
         }
@@ -127,7 +128,15 @@ pub fn check(c: &Connection) -> Result<(), String> {
         None
     };
     let actual = snapshot(c).map_err(|e| e.to_string())?;
+    accepts(&actual)
+}
+fn accepts(actual: &Value) -> Result<(), String> {
     let mut required: Value = serde_json::from_str(REQUIRED).map_err(|e| e.to_string())?;
+    let variants = required
+        .as_object_mut()
+        .unwrap()
+        .remove("variants")
+        .unwrap();
     // Optional tables carry their full required indexes and constraints. Only
     // absence is permitted; a present object must equal the reviewed structure.
     let optional = required
@@ -145,7 +154,17 @@ pub fn check(c: &Connection) -> Result<(), String> {
             }
         }
     }
-    if actual == required {
+    for (name, accepted) in variants.as_object().unwrap() {
+        if let Some(table) = actual["tables"].get(name) {
+            if accepted.as_array().unwrap().contains(table) {
+                required["tables"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), table.clone());
+            }
+        }
+    }
+    if *actual == required {
         Ok(())
     } else {
         Err("schema-changed: Python schema differs from required.json".into())
@@ -186,5 +205,42 @@ impl DataVersion {
         let changed = self.0 != next;
         self.0 = next;
         Ok(changed)
+    }
+}
+
+#[cfg(test)]
+mod variant_tests {
+    use super::*;
+    #[test]
+    fn every_variant_is_exact_and_hybrids_are_refused() {
+        let required: Value = serde_json::from_str(REQUIRED).unwrap();
+        let mut actual = required.clone();
+        actual.as_object_mut().unwrap().remove("variants");
+        actual.as_object_mut().unwrap().remove("optional");
+        for (name, variants) in required["variants"].as_object().unwrap() {
+            let original = actual["tables"].get(name).cloned();
+            for variant in variants.as_array().unwrap() {
+                actual["tables"]
+                    .as_object_mut()
+                    .unwrap()
+                    .insert(name.clone(), variant.clone());
+                accepts(&actual).unwrap();
+                for other in variants.as_array().unwrap() {
+                    if variant["columns"] != other["columns"] {
+                        let mut hybrid = variant.clone();
+                        hybrid["columns"] = other["columns"].clone();
+                        assert!(!variants.as_array().unwrap().contains(&hybrid));
+                        actual["tables"][name] = hybrid;
+                        assert!(accepts(&actual).is_err(), "accepted hybrid {name}");
+                        actual["tables"][name] = variant.clone();
+                    }
+                }
+            }
+            if let Some(value) = original {
+                actual["tables"][name] = value;
+            } else {
+                actual["tables"].as_object_mut().unwrap().remove(name);
+            }
+        }
     }
 }

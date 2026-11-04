@@ -12,6 +12,14 @@ fn python_lockstep_and_both_sqlite_builds() {
         .status()
         .unwrap();
     assert!(status.success());
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        let name = path.file_name().unwrap().to_string_lossy();
+        if name.ends_with(".db") && !name.ends_with(".raw.db") {
+            schema::check(&Connection::open(&path).unwrap())
+                .unwrap_or_else(|e| panic!("{name}: {e}"));
+        }
+    }
     let lazy = Connection::open(dir.join("lazy.db")).unwrap();
     let required: serde_json::Value = serde_json::from_str(schema::REQUIRED).unwrap();
     let fresh = Connection::open(dir.join("fresh.db")).unwrap();

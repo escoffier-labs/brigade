@@ -51,3 +51,20 @@ def test_new_lazy_table_requires_optional_contract(tmp_path: Path, monkeypatch: 
     monkeypatch.setattr(fleet_mcp_inventory, "ensure_schema", new_lazy_table)
     with pytest.raises(AssertionError, match="schema drift: lazy.db"):
         runpy.run_path(str(LOCKSTEP))["fixtures"](tmp_path)
+
+
+def test_generation_covers_legacy_builders_and_rejects_hybrids(tmp_path: Path) -> None:
+    lockstep = runpy.run_path(str(LOCKSTEP))
+    required = lockstep["generate"](tmp_path)
+    assert {"test_fleet_hub_sealed", "test_fleet_messages", "test_fleet_cloud", "test_fleet_model_roster"} <= {
+        name for name, _ in lockstep["upgrade_inputs"]()
+    }
+    import copy
+
+    actual = {key: copy.deepcopy(required[key]) for key in ("user_version", "tables", "triggers")}
+    variants = required["variants"]["fleet_messages"]
+    legacy = next(v for v in variants if any(c[0] == "client_id" and c[2] == 0 for c in v["columns"]))
+    hybrid = copy.deepcopy(legacy)
+    hybrid["columns"] = required["tables"]["fleet_messages"]["columns"]
+    actual["tables"]["fleet_messages"] = hybrid
+    assert not lockstep["compatible"](actual, required)
