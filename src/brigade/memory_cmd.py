@@ -9,13 +9,14 @@ import os
 import re
 import shutil
 import sys
+import tomllib
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from pathlib import Path
 from collections.abc import Callable
 from typing import Any
 
-from . import engine_paths, memory_bm25, toml_compat as tomllib
+from . import engine_paths, memory_bm25
 from .budgets import MEMORY_CARD_BUDGET_BYTES
 from .install import apply_gitignore
 from .selection import Selection

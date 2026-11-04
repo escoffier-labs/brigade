@@ -38,7 +38,7 @@ function resolveRuntime(runtime) {
   const platform = runtime.platforms[key];
   process.report.excludeNetwork=true;
   if (!platform || (process.platform==='linux' && !process.report.getReport().header.glibcVersionRuntime)) {
-    throw new Error(`Unsupported platform ${key}. Use Python 3.10+ and pipx install brigade-cli instead.`);
+    throw new Error(`Unsupported platform ${key}. Use Python 3.11+ and pipx install brigade-cli instead.`);
   }
   let manifestPath;
   try { manifestPath=require.resolve(`${platform.package}/manifest.json`); }

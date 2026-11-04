@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import argparse
 import json
 import re
@@ -432,13 +434,11 @@ def _parse_roadmap_headline_version(text: str) -> tuple[int, int] | None:
 
 
 def _parse_pyproject_major_minor(target: Path) -> tuple[int, int] | None:
-    from . import toml_compat
-
     text = _read_text(target / "pyproject.toml")
     if not text:
         return None
     try:
-        data = toml_compat.loads(text)
+        data = tomllib.loads(text)
     except Exception:
         return None
     project = data.get("project")

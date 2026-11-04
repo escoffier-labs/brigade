@@ -3863,13 +3863,8 @@ def test_doctor_codex_config_read_boundary(tmp_path: Path, codex_user_config: Pa
 
 
 @pytest.mark.parametrize("change", ["in-place", "replace", "overflow"])
-@pytest.mark.parametrize("runtime", ["native", "python310"])
 @_requires_nonblocking_config
-def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_config: Path, monkeypatch, change, runtime):
-    import sys
-
-    if runtime == "python310":
-        monkeypatch.setattr(sys, "version_info", (3, 10))
+def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_config: Path, monkeypatch, change):
     codex_user_config.write_text("project_doc_max_bytes = 0\n", encoding="utf-8")
     real_open, real_read = os.open, os.read
     held = []
@@ -3903,13 +3898,8 @@ def test_doctor_codex_changed_config_is_not_used(tmp_path: Path, codex_user_conf
     assert status == doctor_mod.MANUAL
     assert "not evaluated" in detail
     assert "cap source default-assumption" not in detail
-    if sys.version_info < (3, 11):
-        assert "config_parser_unavailable" in detail
-        assert not held
-        assert not bytes_read
-    else:
-        assert bytes_read
-        assert sum(bytes_read) <= 1048577
+    assert bytes_read
+    assert sum(bytes_read) <= 1048577
 
 
 @pytest.mark.parametrize(("body", "expected"), [("project_doc_max_bytes = 0\n", "WARN"), ("broken = [", "MANUAL")])
@@ -3974,10 +3964,9 @@ def test_doctor_codex_huge_cap_is_bounded(tmp_path: Path, codex_user_config: Pat
     assert doctor_agent.extract_commands(detail) == []
 
 
-@pytest.mark.parametrize("version", [(3, 10), (3, 11)], ids=["python310", "supported"])
 @pytest.mark.parametrize("loaded", [False, True], ids=["before-import", "already-loaded"])
 def test_doctor_codex_untrusted_parser_is_not_executed_or_used(
-    tmp_path: Path, codex_user_config: Path, monkeypatch, version, loaded
+    tmp_path: Path, codex_user_config: Path, monkeypatch, loaded
 ):
     import importlib.util
     import sys
@@ -4003,7 +3992,6 @@ def test_doctor_codex_untrusted_parser_is_not_executed_or_used(
     else:
         monkeypatch.delitem(sys.modules, "tomllib", raising=False)
         monkeypatch.syspath_prepend(str(shadow))
-    monkeypatch.setattr(sys, "version_info", version)
     status, _name, detail = _codex_chain_check(_codex_repo(tmp_path))
     assert status == doctor_mod.MANUAL
     assert "config_parser_unavailable" in detail

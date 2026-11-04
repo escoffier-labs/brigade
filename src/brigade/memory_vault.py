@@ -15,13 +15,13 @@ import os
 import re
 import stat
 import sys
+import tomllib
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import toml_compat as tomllib
 from . import dirfd as dirfd_mod
 from .card_identity import mint_card_id, valid_card_id
 from .guard import redact_text

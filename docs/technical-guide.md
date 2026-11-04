@@ -18,7 +18,7 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 
 <p align="center">
   <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigade/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
-  <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
+  <img src="https://img.shields.io/badge/python-3.11%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.11+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
   <img src="https://img.shields.io/badge/harnesses-19-orange?style=for-the-badge" alt="19 harnesses">
 </p>
@@ -284,7 +284,7 @@ npm install --global @escoffier-labs/brigade@0.30.0   # Node.js 22+ and npm
 
 The npm package runs the published `brigade-cli` wheel on a managed Python that it downloads on first launch. Upgrade it with npm, because `brigade update` refuses npm-managed installs. Runtime, cache, and platform details: [`npm/feasibility/README.md`](../npm/feasibility/README.md).
 
-With Python 3.10 or newer:
+With Python 3.11 or newer:
 
 ```bash
 pipx install brigade-cli

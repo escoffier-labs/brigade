@@ -11,7 +11,6 @@ import importlib.util
 import os
 from pathlib import Path
 import stat
-import sys
 import sysconfig
 from types import ModuleType
 
@@ -33,8 +32,6 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int, int]:
 
 def _stdlib_tomllib() -> ModuleType | None:
     """Reject unsupported or shadowed parsers before executing their code."""
-    if sys.version_info < (3, 11):
-        return None
     try:
         spec = importlib.util.find_spec("tomllib")
         expected = Path(sysconfig.get_path("stdlib")) / "tomllib" / "__init__.py"

@@ -58,12 +58,12 @@ expression instead, as the `test-shards` Python axis does.
 Before activation, verify the server-side `brigade-trusted` runner group accepts
 only `.github/workflows/ci.yml@refs/heads/main` in this repository. Keep that exact
 workflow/ref restriction. Do not add pull-request refs or merge-queue refs.
-Prepare one ephemeral Ubuntu runner with system Python 3.10 or newer and Git
+Prepare one ephemeral Ubuntu runner with system Python 3.11 or newer and Git
 available. During provisioning, verify the interpreter before taking the clean
 snapshot or enabling the canary:
 
 ```sh
-python3 -c 'import sys; print(sys.version); sys.exit(0 if sys.version_info >= (3, 10) else "Python 3.10+ required")'
+python3 -c 'import sys; print(sys.version); sys.exit(0 if sys.version_info >= (3, 11) else "Python 3.11+ required")'
 ```
 
 Source execution bypasses the package installer, so the job cannot rely on

@@ -654,9 +654,9 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
 
 
 # Pull requests run only the 3.12 shards. Merge groups and pushes to main run
-# every supported Python, so the queue still tests 3.10 and 3.11 before landing.
+# every supported Python, so the queue still tests 3.11 before landing.
 SHARD_PYTHON_AXIS = (
-    'python: ${{ fromJSON(github.event_name == \'pull_request\' && \'["3.12"]\' || \'["3.10", "3.11", "3.12"]\') }}'
+    "python: ${{ fromJSON(github.event_name == 'pull_request' && '[\"3.12\"]' || '[\"3.11\", \"3.12\"]') }}"
 )
 
 
@@ -672,12 +672,12 @@ def test_ci_workflow_limits_pull_request_shards_to_python312_only():
     assert match is not None, axis.group(1)
     pull_request, other_events = (json.loads(group) for group in match.groups())
     assert pull_request == ["3.12"]
-    assert other_events == ["3.10", "3.11", "3.12"]
+    assert other_events == ["3.11", "3.12"]
     # The shard name expands per leg, and the required test (X) names keep
     # the full matrix, so no check reports an unexpanded matrix expression.
     assert "matrix." not in re.search(r"^    if: (.+)$", shards, re.MULTILINE)[1]
     protected = _workflow_job_section(text, "test")
-    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    assert 'python: ["3.11", "3.12"]' in protected
     notice = _workflow_step_section(text, "test", "Note Python shards deferred to the merge queue")
     assert "if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}" in notice
     assert "::notice::" in notice
@@ -713,7 +713,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "python -m coverage report --fail-under=78" in coverage
     assert "name: test (${{ matrix.python }})" in protected
     assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
-    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    assert 'python: ["3.11", "3.12"]' in protected
     assert "if: ${{ !cancelled() && needs.changes.result == 'success'" in protected
     assert "CHANGES_RESULT: ${{ needs.changes.result }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
@@ -1767,7 +1767,7 @@ def test_ci_migration_preserves_complete_matrices():
     for job, axis in (
         ("test-shards", SHARD_PYTHON_AXIS),
         ("test-shards", "shard: [0, 1, 2, 3]"),
-        ("test", 'python: ["3.10", "3.11", "3.12"]'),
+        ("test", 'python: ["3.11", "3.12"]'),
         ("cosign-integration", 'cosign: ["v2.6.5", "v3.1.3"]'),
         ("fleet-hub-container", "platform: [linux/amd64, linux/arm64]"),
         ("quickstart-smoke", "os: [ubuntu-latest, macos-latest, windows-latest]"),

@@ -36,6 +36,8 @@ repaired, when that fence state is missing, corrupt, or from a newer schema.
 
 from __future__ import annotations
 
+import tomllib
+
 import argparse
 import csv
 import json
@@ -53,7 +55,7 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 
 from . import fleet_hub, fleet_hub_claims
-from . import toml_compat as tomllib
+
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 
 DEFAULT_HUB_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
