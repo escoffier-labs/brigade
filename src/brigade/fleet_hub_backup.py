@@ -146,8 +146,14 @@ def _tree_bytes(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file() and not item.is_symlink())
 
 
+def _sqlite_uri(path: Path, mode: str) -> str:
+    """A SQLite URI for ``path``. ``as_uri`` percent-encodes ``#``, ``?`` and ``%``,
+    which a raw ``file:`` string would read as a fragment or a query."""
+    return f"{path.absolute().as_uri()}?mode={mode}"
+
+
 def _integrity(path: Path) -> str:
-    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn = sqlite3.connect(_sqlite_uri(path, "ro"), uri=True)
     try:
         rows = conn.execute("PRAGMA integrity_check").fetchall()
     finally:
@@ -157,7 +163,7 @@ def _integrity(path: Path) -> str:
 
 def _online_copy(source: Path, destination: Path) -> int:
     """Copy ``source`` through the online backup API into a rollback-journal file."""
-    src = sqlite3.connect(f"file:{source}?mode=rw", uri=True, timeout=30)
+    src = sqlite3.connect(_sqlite_uri(source, "rw"), uri=True, timeout=30)
     try:
         dst = sqlite3.connect(destination)
         try:
