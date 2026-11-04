@@ -146,12 +146,18 @@ pub fn now(clock: Option<&str>) -> String {
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<f64>().ok())
         .filter(|v| v.is_finite() && *v >= 0.0 && *v < 253402300799.0);
-    let secs = epoch
-        .map(|v| v.floor() as libc::time_t)
-        .unwrap_or(d.as_secs() as libc::time_t);
-    let micros = epoch
-        .map(|v| ((v - v.floor()) * 1_000_000.0).round() as u32)
-        .unwrap_or(d.subsec_micros());
+    // Round the whole epoch to microseconds first, so 1.9999996 carries into
+    // the next second as Python's datetime.fromtimestamp does.
+    let (secs, micros) = match epoch {
+        Some(v) => {
+            let total = (v * 1_000_000.0).round() as u64;
+            (
+                (total / 1_000_000) as libc::time_t,
+                (total % 1_000_000) as u32,
+            )
+        }
+        None => (d.as_secs() as libc::time_t, d.subsec_micros()),
+    };
     let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
     // gmtime_r writes the supplied structure and keeps no shared mutable state.
     let tm = unsafe {
@@ -522,6 +528,21 @@ fn parse_body(body: &[u8]) -> std::result::Result<Json, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn clock_epoch_carries_rounded_microseconds_into_seconds() {
+        let dir = std::env::temp_dir().join(format!("hub-clock-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clock = dir.join("clock");
+        let at = |value: &str| {
+            std::fs::write(&clock, value).unwrap();
+            now(Some(clock.to_str().unwrap()))
+        };
+        // Python: datetime.fromtimestamp(1.9999996, timezone.utc).isoformat()
+        assert_eq!(at("1.9999996"), "1970-01-01T00:00:02+00:00");
+        assert_eq!(at("1.25"), "1970-01-01T00:00:01.250000+00:00");
+        assert_eq!(at("1700000000"), "2023-11-14T22:13:20+00:00");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
     #[test]
     fn python_json_spacing_unicode_and_bounds() {
         assert_eq!(
