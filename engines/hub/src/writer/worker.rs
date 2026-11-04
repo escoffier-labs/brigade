@@ -70,7 +70,11 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
     let result = catch_unwind(AssertUnwindSafe(|| e.command.apply(&Tx(db))));
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     if db.is_autocommit() {
-        return Err(Failure::storage("storage-error"));
+        return Err(if Instant::now() >= deadline {
+            Failure::timeout(e.budget.durable)
+        } else {
+            Failure::storage("storage-error")
+        });
     }
     let result = match result {
         Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
@@ -162,7 +166,7 @@ pub(super) fn run(
             bytes += e.budget.bytes;
             let result = apply(&db, &e);
             if db.is_autocommit() {
-                answer(e, Err(Failure::storage("storage-error")));
+                answer(e, result);
                 if replayed || begin(&db, lock_deadline).is_err() {
                     broken = true;
                     break;

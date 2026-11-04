@@ -583,3 +583,21 @@ fn second_abort_fails_prior_commands_instead_of_replaying_again() {
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     assert_eq!(values(&path), 1);
 }
+
+#[tokio::test]
+async fn interrupted_write_abort_keeps_durable_timeout_status() {
+    struct ExpensiveWrite;
+    impl Command for ExpensiveWrite {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("WITH RECURSIVE x(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM x WHERE n<100000000) INSERT INTO rows(value) SELECT n FROM x",&[])?;
+            Ok(Json::Null)
+        }
+    }
+    let path = fixture();
+    let writer = Writer::start(Config::new(path.clone()), Arc::default()).unwrap();
+    let mut b = budget(true);
+    b.deadline = Instant::now() + Duration::from_millis(20);
+    let reply = writer.submit(ExpensiveWrite, b).await.unwrap();
+    assert_eq!(reply.await.unwrap(), Err(Failure::timeout(true)));
+    assert_eq!(values(&path), 0);
+}
