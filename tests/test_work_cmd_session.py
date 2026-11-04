@@ -865,7 +865,7 @@ def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path,
     graphtrail = tmp_path / "fake-graphtrail"
     graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' '### Entry points' '- brigade.work_cmd.session._brief_payload'\n")
     graphtrail.chmod(0o755)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     assert work_cmd.task_add(target=tmp_path, text="Attach GraphTrail to work brief") == 0
     capsys.readouterr()
 

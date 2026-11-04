@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 from . import component_manifest, localio, mcp_adapters, mcp_fidelity, mcp_runtime, projection, toml_compat as tomllib
+from .component_bins import canonical_command
 from .mcp_adapters import ADAPTERS, MCP_TARGETS, CanonicalServer
 from .render import emit as _emit
 
@@ -306,6 +307,7 @@ class NativeAuthConflict(ValueError):
 def _project_server(
     target: Path, harness: str, server: CanonicalServer, context: ProjectionContext | None = None
 ) -> dict[str, Any]:
+    server = replace(server, command=canonical_command(server.command))
     adapter = ADAPTERS[harness]
     if harness in ("codex", "codex-user"):
         if context is None:
@@ -633,6 +635,7 @@ def _plan_from_inputs(
     assessments: dict[str, dict[str, Any]] = {}
     sources = _rename_sources(prune_names, desired, live, owned)
 
+    desired = {name: replace(server, command=canonical_command(server.command)) for name, server in desired.items()}
     for name, server in sorted(desired.items()):
         if name_filter is not None and name != name_filter:
             continue

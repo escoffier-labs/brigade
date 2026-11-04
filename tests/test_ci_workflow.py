@@ -742,6 +742,7 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "lint",
         "test",
         "component-manifest-provenance",
+        "engine-rename-installer",
         "content-guard",
         "repo-metadata",
         "changelog-fragments",
@@ -1066,7 +1067,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "brigade work verify run (manual export)" in text
     assert "--capture brigade-work" in text
     assert "--no-reuse" in text
-    assert "brigade receipts export miseledger" in text
+    assert "brigade receipts export evidence" in text
     assert "import adapter" in text
     assert "brigade care install" in text
     assert "BrigadeCare-ingest-sweep" in text
@@ -1456,7 +1457,10 @@ def test_windows_native_acceptance_source_mode_skips_only_bundled_unpublished_co
     # The agent-notify absolute-path smoke is gated on the computed required set
     # so source mode skips an unpublished agent-notify instead of invoking a
     # missing managed binary.
-    assert '$requiredIds = @("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind") |' in main
+    assert (
+        '$requiredIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |'
+        in main
+    )
     assert "Where-Object { $unpublishedIds -notcontains $_ }" in main
     assert 'if ($requiredIds -contains "agent-notify") {' in main
     agent_block = main[main.index('if ($requiredIds -contains "agent-notify") {') :]
@@ -1530,10 +1534,16 @@ def test_windows_native_acceptance_pypi_mode_never_skips_agent_notify():
     assert "Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin" in main
     digest_fn = _extract_powershell_function(script, "Assert-ManagedComponentDigests")
     assert '"agent-notify"' in digest_fn
-    assert '"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"' in digest_fn
+    assert '"brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"' in digest_fn
 
     release_fn = _extract_powershell_function(script, "Assert-ReleaseManifestAndAssets")
-    for component_id in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+    for component_id in (
+        "agent-notify",
+        "brigade-code-graph",
+        "brigade-code-graph-mcp",
+        "brigade-evidence",
+        "sessionfind",
+    ):
         assert component_id in release_fn
     assert (
         'foreach ($platform in @("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64"))'
@@ -1729,6 +1739,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     jobs = text.split("jobs:\n", 1)[1]
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
         "trusted-runner-canary",
+        "engine-rename-installer",
         "ci-gate",
         "windows-affected-tests",
         "pr-tier-shadow",
@@ -2493,7 +2504,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
     for component in manifest["components"].values():
         component["component_revision"] = "a" * 40
     if case in {"revision", "mixed"}:
-        manifest["components"]["graphtrail"]["component_revision"] = "invalid" if case == "revision" else "b" * 40
+        manifest["components"]["brigade-code-graph"]["component_revision"] = (
+            "invalid" if case == "revision" else "b" * 40
+        )
     for name, body in bodies.items():
         (tmp_path / name).write_bytes(body)
     (tmp_path / "component-manifest-v1.json").write_text(json.dumps(manifest))

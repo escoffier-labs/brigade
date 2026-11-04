@@ -4342,7 +4342,7 @@ def test_import_context_from_miseledger_prints_untrusted_brief(tmp_path, monkeyp
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     assert (
         work_cmd.import_context_from_miseledger(
@@ -4371,7 +4371,7 @@ def test_import_context_from_miseledger_json_prints_raw_bundle(tmp_path, monkeyp
         "untrusted_context": True,
         "results": [{"id": "item-one", "snippet": "run id verify-json status completed"}],
     }
-    monkeypatch.setenv("MISELEDGER_BIN", str(_write_fake_miseledger(tmp_path, bundle)))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(_write_fake_miseledger(tmp_path, bundle)))
 
     assert (
         work_cmd.import_context_from_miseledger(
@@ -4406,7 +4406,7 @@ def test_import_context_from_miseledger_json_strips_forged_envelope_body(tmp_pat
             }
         ],
     }
-    monkeypatch.setenv("MISELEDGER_BIN", str(_write_fake_miseledger(tmp_path, bundle)))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(_write_fake_miseledger(tmp_path, bundle)))
 
     assert (
         work_cmd.import_context_from_miseledger(
@@ -4431,7 +4431,7 @@ def test_import_context_from_miseledger_json_strips_forged_envelope_body(tmp_pat
 def test_import_context_from_miseledger_appends_active_session_note(tmp_path, monkeypatch, capsys):
     tmp_path.mkdir(exist_ok=True)
     monkeypatch.setenv(
-        "MISELEDGER_BIN",
+        "BRIGADE_EVIDENCE_BIN",
         str(
             _write_fake_miseledger(
                 tmp_path,

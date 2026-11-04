@@ -16,11 +16,11 @@ five-platform matrix with matching digests and provenance.
 
 | Component id | Executable | Native release status |
 | --- | --- | --- |
-| `graphtrail` | `graphtrail` | built from the tagged Brigade commit |
-| `graphtrail-mcp` | `graphtrail-mcp` | built from the tagged Brigade commit |
-| `miseledger` | `miseledger` | built from the tagged Brigade commit |
+| `brigade-code-graph` | `brigade-code-graph` | built from the tagged Brigade commit |
+| `brigade-code-graph-mcp` | `brigade-code-graph-mcp` | built from the tagged Brigade commit |
+| `brigade-evidence` | `brigade-evidence` | built from the tagged Brigade commit |
 | `sessionfind` | `sessionfind` | built from the tagged Brigade commit |
-| `agent-notify` | `agent-notify` | bundled empty/unpublished on main; first stable manifest contract after `agent-notify` publication |
+| `agent-notify` | `agent-notify` | bundled empty/unpublished on main. first stable manifest contract after `agent-notify` publication |
 
 Every component records the immutable 40-character tagged Brigade commit in `component_revision`.
 Every `source.repository` is `escoffier-labs/brigade`, and every `source.release_tag` is the same
@@ -44,12 +44,12 @@ a filename and never falls back to Cargo builds.
 
 Go-style platform keys drive asset names:
 
-- Linux and macOS: `<executable>-<platform-key>` with no suffix (`miseledger-linux-amd64`)
-- Windows: same pattern with a `.exe` suffix (`miseledger-windows-amd64.exe`)
+- Linux and macOS: `<executable>-<platform-key>` with no suffix (`brigade-evidence-linux-amd64`)
+- Windows: same pattern with a `.exe` suffix (`brigade-evidence-windows-amd64.exe`)
 
 Each asset records `asset_name`, `byte_size`, lowercase 64-hex `sha256`, and an immutable
 `download_url` whose final path segment equals `asset_name` over HTTPS with no query or fragment.
-The JSON Schema constrains URL shape and Go-style asset names; Brigade runtime validation also
+The JSON Schema constrains URL shape and Go-style asset names. Brigade runtime validation also
 requires the download URL final segment to match `asset_name` exactly.
 
 ## Schema and runtime validation
@@ -58,22 +58,22 @@ requires the download URL final segment to match `asset_name` exactly.
 review. Unified release and update validation enforce the same platform matrix, asset naming rules,
 download URL invariants, and a 40-character lowercase `component_revision` for every component.
 The revision must equal the immutable target commit of the resolved Brigade release. Unknown
-component ids remain a soft diagnostic; malformed known components are a hard failure.
+component ids remain a soft diagnostic. malformed known components are a hard failure.
 
 `scripts/generate_component_manifest.py` derives the future first stable
-manifest in deterministic order from the tag, commit, exact 25 filenames, byte
+manifest in deterministic order from the tag, commit, 25 canonical filenames and 15 legacy filenames, byte
 sizes, and SHA-256 values. That 25-asset set is the contract the first stable
-manifest will publish after `agent-notify` publication; until then the bundled
+manifest will publish after `agent-notify` publication. until then the bundled
 compatibility manifest on `main` carries empty/unpublished `agent-notify`
 assets and no stable release is claimed. The script also writes
-`checksums.txt`, which contains exactly those 25 assets and
+`checksums.txt`, which contains all 40 native assets and
 `component-manifest-v1.json`.
 
 The release gate runs `scripts/verify_component_manifest_provenance.py` after creating the release.
 It requires exactly one `escoffier-labs/brigade` tag for all five components, the complete five-platform
-matrix, exactly 25 native assets plus the manifest and checksum file, matching release API digests,
+matrix, exactly 40 native assets plus the manifest and checksum file, matching release API digests,
 the complete checksum map, matching fetched `checksums.txt` bytes, and a release-page manifest
-byte-for-byte equal to the packaged manifest. This is the future first stable manifest contract;
+byte-for-byte equal to the packaged manifest. This is the future first stable manifest contract.
 it does not apply to the current bundled compatibility manifest, whose `agent-notify` assets remain
 empty/unpublished. It uses injected fetchers in unit tests. Attestation verification is deliberately performed by `gh
 attestation verify` in the release workflow rather than represented by an API boolean.
@@ -111,7 +111,8 @@ Layout:
   ([writer](../src/brigade/component_install.py), [schema](../src/brigade/component_state.py))
 - `<cache-root>/brigade/components/<sha256>/<asset_name>` - verified download cache
 
-Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive paths.
+Brigade reads existing legacy indexes and evidence archives in place. New indexes use
+`.brigade/code-graph/code-graph.db`. new archives use the `brigade/evidence` leaf.
 
 ## Forward compatibility
 
@@ -126,5 +127,17 @@ This policy owns one release and update contract. `brigade update --channel stab
 latest immutable Brigade release, installs that exact CLI version, and runs setup against its
 verified manifest. Beta resolves the exact non-yanked PyPI `0.31.0.devYYYYMMDD` wheel while
 retaining the verified stable release manifest. `brigade setup` resolves the running CLI's exact
-release manifest; offline automatic setup requires a verified exact-release cache. The bundled
+release manifest. offline automatic setup requires a verified exact-release cache. The bundled
 legacy manifest is available only with `--manifest-source standalone`.
+
+## Rename window
+
+From v0.31, manifest writers pin canonical keys, executables and assets only.
+Readers accept either spelling through v0.32 and reject both spellings in one
+family. Releases keep building and attesting all 40 assets through v0.32.
+Setup writes canonical state even when a compatible older manifest supplies
+legacy assets. It creates legacy hardlinks in managed bin, using verified
+copies on Windows or when linking fails. Setup and rollback remove only
+compatibility files that match the recorded digest. Published manifests and
+attestations stay unchanged. The release build copies the generated manifest
+into the package template before packaging, preserving byte equality.

@@ -143,7 +143,7 @@ def test_component_report_ignores_stale_release_cache_after_explicit_setup(tmp_p
     write_test_manifest(explicit_manifest, brigade_version=brigade.__version__)
     explicit_data = json.loads(explicit_manifest.read_text())
     explicit_data["manifest_revision"] = "explicit-revision"
-    explicit_data["components"]["graphtrail"]["component_revision"] = "b" * 40
+    explicit_data["components"]["brigade-code-graph"]["component_revision"] = "b" * 40
     explicit_manifest.write_text(json.dumps(explicit_data))
     assert (
         setup_native_components(
@@ -473,11 +473,11 @@ def test_corrupt_managed_executable_hash(tmp_path, monkeypatch):
     manifest_path = component_manifest.manifest_path()
     _write_healthy_install(env, manifest_path)
     paths = _managed_paths(env)
-    paths["graphtrail"].write_bytes(b"wrong-bytes")
+    paths["brigade-code-graph"].write_bytes(b"wrong-bytes")
     report = component_report.inspect_components(env=env, system="linux")
     by_id = {component.component_id: component for component in report.components}
-    assert by_id["graphtrail"].status == "corrupt"
-    assert by_id["miseledger"].status == "healthy"
+    assert by_id["brigade-code-graph"].status == "corrupt"
+    assert by_id["brigade-evidence"].status == "healthy"
 
 
 def test_corrupt_managed_executable_read_error(tmp_path, monkeypatch):
@@ -531,29 +531,31 @@ def test_unsupported_asset_for_platform(tmp_path, monkeypatch):
     original_resolve = component_manifest.resolve_asset
 
     def fake_resolve(manifest, component_id, platform):
-        if component_id == "graphtrail":
-            raise ValueError("unsupported-component-platform: component 'graphtrail' has no pinned native asset")
+        if component_id == "brigade-code-graph":
+            raise ValueError(
+                "unsupported-component-platform: component 'brigade-code-graph' has no pinned native asset"
+            )
         return original_resolve(manifest, component_id, platform)
 
     monkeypatch.setattr(component_manifest, "resolve_asset", fake_resolve)
     report = component_report.inspect_components(env=env, system="linux")
     by_id = {component.component_id: component for component in report.components}
-    assert by_id["graphtrail"].status == "unsupported"
-    assert by_id["miseledger"].status == "missing"
+    assert by_id["brigade-code-graph"].status == "unsupported"
+    assert by_id["brigade-evidence"].status == "missing"
 
 
 def test_path_binary_is_reported_without_satisfying_install(tmp_path, monkeypatch):
     env = _install_fixture_manifest(tmp_path, monkeypatch)
     path_bin = tmp_path / "bin"
     path_bin.mkdir()
-    payload, _, _ = fixture_payload("graphtrail")
-    shim = path_bin / "graphtrail"
+    payload, _, _ = fixture_payload("brigade-code-graph")
+    shim = path_bin / "brigade-code-graph"
     shim.write_bytes(payload)
     shim.chmod(0o755)
     env = dict(env)
     env["PATH"] = f"{path_bin}{os.pathsep}{env.get('PATH', '')}"
     report = component_report.inspect_components(env=env, system="linux")
-    graphtrail = next(item for item in report.components if item.component_id == "graphtrail")
+    graphtrail = next(item for item in report.components if item.component_id == "brigade-code-graph")
     assert graphtrail.status == "missing"
     assert graphtrail.path_binary == str(shim.resolve())
 
@@ -574,7 +576,7 @@ def test_precedence_corrupt_before_stale(tmp_path, monkeypatch):
     manifest_path = component_manifest.manifest_path()
     _write_healthy_install(env, manifest_path)
     paths = _managed_paths(env)
-    paths["graphtrail"].write_bytes(b"tampered")
+    paths["brigade-code-graph"].write_bytes(b"tampered")
     roots = resolve_roots(env=env, system="linux")
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
@@ -589,7 +591,7 @@ def test_precedence_corrupt_before_stale(tmp_path, monkeypatch):
     )
     component_state.write_installed_state(state_path, stale)
     report = component_report.inspect_components(env=env, system="linux")
-    graphtrail = next(item for item in report.components if item.component_id == "graphtrail")
+    graphtrail = next(item for item in report.components if item.component_id == "brigade-code-graph")
     assert graphtrail.status == "corrupt"
 
 
@@ -601,9 +603,9 @@ def test_stale_asset_name(tmp_path, monkeypatch):
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
     assert state is not None
-    graphtrail = state.components["graphtrail"]
+    graphtrail = state.components["brigade-code-graph"]
     stale_components = dict(state.components)
-    stale_components["graphtrail"] = component_state.InstalledComponentRecord(
+    stale_components["brigade-code-graph"] = component_state.InstalledComponentRecord(
         component_revision=graphtrail.component_revision,
         asset_name="graphtrail-linux-amd64-stale",
         byte_size=graphtrail.byte_size,
@@ -621,7 +623,7 @@ def test_stale_asset_name(tmp_path, monkeypatch):
     )
     component_state.write_installed_state(state_path, stale)
     report = component_report.inspect_components(env=env, system="linux")
-    graphtrail_report = next(item for item in report.components if item.component_id == "graphtrail")
+    graphtrail_report = next(item for item in report.components if item.component_id == "brigade-code-graph")
     assert graphtrail_report.status == "stale"
     assert graphtrail_report.installed_asset_name == "graphtrail-linux-amd64-stale"
     assert "installed asset name" in graphtrail_report.detail
@@ -635,9 +637,9 @@ def test_stale_recorded_executable(tmp_path, monkeypatch):
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
     assert state is not None
-    graphtrail = state.components["graphtrail"]
+    graphtrail = state.components["brigade-code-graph"]
     stale_components = dict(state.components)
-    stale_components["graphtrail"] = component_state.InstalledComponentRecord(
+    stale_components["brigade-code-graph"] = component_state.InstalledComponentRecord(
         component_revision=graphtrail.component_revision,
         asset_name=graphtrail.asset_name,
         byte_size=graphtrail.byte_size,
@@ -655,7 +657,7 @@ def test_stale_recorded_executable(tmp_path, monkeypatch):
     )
     component_state.write_installed_state(state_path, stale)
     report = component_report.inspect_components(env=env, system="linux")
-    graphtrail_report = next(item for item in report.components if item.component_id == "graphtrail")
+    graphtrail_report = next(item for item in report.components if item.component_id == "brigade-code-graph")
     assert graphtrail_report.status == "stale"
     assert graphtrail_report.recorded_executable == "graphtrail-stale"
     assert "recorded executable" in graphtrail_report.detail
@@ -775,7 +777,7 @@ def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, 
     roots = resolve_roots(env=env, system="linux")
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     raw = json.loads(state_path.read_text())
-    record = raw["components"].pop("miseledger")
+    record = raw["components"].pop("brigade-evidence")
     old = Path(record["executable"])
     new = old.with_name("brigade-evidence")
     old.rename(new)
@@ -784,7 +786,9 @@ def test_report_pairs_legacy_manifest_with_canonical_installed_family(tmp_path, 
     state_path.write_text(json.dumps(raw))
     report = component_report.inspect_components(env=env, system="linux")
     assert report.state_file_status == "valid"
-    rows = [row for row in component_report.render_json(report)["components"] if row["component_id"] == "miseledger"]
+    rows = [
+        row for row in component_report.render_json(report)["components"] if row["component_id"] == "brigade-evidence"
+    ]
     assert len(rows) == 1
     assert rows[0]["installed_component_id"] == "brigade-evidence"
     assert rows[0]["recorded_executable"] == str(new)

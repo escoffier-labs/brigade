@@ -902,7 +902,7 @@ def test_evidence_brief_renders_untrusted_header_result_lines_and_query(tmp_path
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(
         work,
@@ -948,7 +948,7 @@ def test_evidence_brief_mismatch_is_metadata_only_and_counts_omission(tmp_path, 
             "query": "integrity",
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(work, "check integrity mismatch handling")
 
@@ -962,7 +962,7 @@ def test_evidence_brief_mismatch_is_metadata_only_and_counts_omission(tmp_path, 
 
 
 def test_evidence_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
-    monkeypatch.delenv("MISELEDGER_BIN", raising=False)
+    monkeypatch.delenv("BRIGADE_EVIDENCE_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
@@ -974,7 +974,7 @@ def test_evidence_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
 
 def test_evidence_brief_malformed_json_is_not_attached(tmp_path, monkeypatch):
     miseledger = _write_fake_miseledger(tmp_path, "{not-json")
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
 
@@ -1004,7 +1004,7 @@ def test_evidence_brief_byte_cap_is_enforced(tmp_path, monkeypatch):
         tmp_path,
         {"results": results},
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch")
 
@@ -1031,7 +1031,7 @@ def test_evidence_brief_renders_trust_source_and_selection_rule(tmp_path, monkey
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "fix dispatch bug")
 
@@ -1055,7 +1055,7 @@ def test_evidence_brief_renders_single_arm_declaration(tmp_path, monkeypatch):
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "add feature")
 
@@ -1082,7 +1082,7 @@ def test_evidence_brief_renders_multi_arm_and_retrieval_fields(tmp_path, monkeyp
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "refactor session handling")
 
@@ -1108,7 +1108,7 @@ def test_evidence_brief_renders_unavailable_arm(tmp_path, monkeypatch):
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "check memory")
 
@@ -1131,7 +1131,7 @@ def test_evidence_brief_renders_omitted_count_for_truncated_pool(tmp_path, monke
             ],
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "run evidence selection")
 
@@ -1290,7 +1290,7 @@ def test_evidence_brief_omits_unknown_and_quarantined(tmp_path, monkeypatch):
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "trust omit unknown")
 
@@ -1316,7 +1316,7 @@ def test_evidence_brief_wraps_untrusted_and_caps_two_items(tmp_path, monkeypatch
             }
         )
     miseledger = _write_fake_miseledger(tmp_path, {"results": results})
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "untrusted item cap")
 
@@ -1348,7 +1348,7 @@ def test_evidence_brief_untrusted_byte_cap_at_boundaries(tmp_path, monkeypatch):
                 }
             ]
         }
-        monkeypatch.setenv("MISELEDGER_BIN", str(_write_fake_miseledger(tmp_path, payload)))
+        monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(_write_fake_miseledger(tmp_path, payload)))
         return evidence_brief.evidence_brief(tmp_path, "untrusted byte cap")
 
     under = _run(under_body, "under-cap")
@@ -1380,7 +1380,7 @@ def test_evidence_brief_pending_injection_is_metadata_only(tmp_path, monkeypatch
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "pending injection")
 
@@ -1413,7 +1413,7 @@ def test_evidence_brief_injection_status_variants_are_metadata_only(tmp_path, mo
             ]
         },
     )
-    monkeypatch.setenv("MISELEDGER_BIN", str(miseledger))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(miseledger))
 
     brief = evidence_brief.evidence_brief(tmp_path, "variant injection")
 

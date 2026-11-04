@@ -21,7 +21,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import brigade
-from brigade import component_manifest, component_paths, component_state, localio, templates
+from brigade import component_manifest, component_paths, component_shims, component_state, localio, templates
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
@@ -245,12 +245,12 @@ def build_setup_plan(
         )
         managed_path = component_paths.managed_executable_path(
             roots.data_root,
-            component.executable,
+            component_manifest.family_id(component.executable),
         )
         for action in _SETUP_ACTIONS:
             plan.append(
                 SetupPlanAction(
-                    component_id=component_id,
+                    component_id=component_manifest.family_id(component_id),
                     action=action,
                     cache_path=cache_path,
                     managed_path=managed_path,
@@ -933,9 +933,17 @@ def _setup_rollback(
     remove_paths = [
         Path(component_paths.managed_executable_path(roots.data_root, component_id)) for component_id in remove_ids
     ]
-    managed_snapshots = _snapshot_managed_executables([*managed_paths.values(), *remove_paths])
+    managed_snapshots = _snapshot_managed_executables(
+        [
+            *managed_paths.values(),
+            *remove_paths,
+            *component_shims.shim_paths(current_state, roots.data_root),
+            *component_shims.shim_paths(previous_state, roots.data_root),
+        ]
+    )
     state_snapshots = _snapshot_managed_executables([current_state_path, previous_state_path])
     try:
+        component_shims.remove_shims(current_state, roots.data_root, verify_cached_asset)
         for component_id in restore_ids:
             materialize_executable(
                 cache_path=cache_paths[component_id],
@@ -958,6 +966,7 @@ def _setup_rollback(
             current=current_state,
             remove_ids=remove_ids,
         )
+        component_shims.create_shims(previous_state, roots.data_root, verify_cached_asset, materialize_executable)
         component_state.write_installed_state(current_state_path, previous_state)
         component_state.write_installed_state(previous_state_path, current_state)
     except (ComponentInstallError, OSError, ValueError) as exc:
@@ -1151,7 +1160,7 @@ def setup_native_components(
             raise ComponentInstallError(f"invalid installed state: {current_state_path}")
 
         for entry in assets:
-            asset = manifest.components[entry.component_id].assets[platform]
+            asset = component_manifest.resolve_asset(manifest, entry.component_id, platform)
             fetch_asset_to_cache(
                 asset,
                 cache_path=Path(entry.cache_path),
@@ -1160,12 +1169,27 @@ def setup_native_components(
             )
 
         managed_paths = {entry.component_id: Path(entry.managed_path) for entry in assets}
-        snapshots = _snapshot_managed_executables(list(managed_paths.values()))
+        snapshots = _snapshot_managed_executables(
+            [
+                *managed_paths.values(),
+                *[
+                    Path(component_paths.managed_executable_path(roots.data_root, cid))
+                    for cid in (current_state.components if current_state else ())
+                ],
+                *component_shims.shim_paths(current_state, roots.data_root),
+                *[
+                    Path(component_paths.managed_executable_path(roots.data_root, legacy))
+                    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items()
+                    if canonical in managed_paths
+                ],
+            ]
+        )
         state_paths = [current_state_path, previous_state_path]
         if auto_release is not None:
             state_paths.append(Path(component_paths.update_state_path(roots.data_root)))
         state_snapshots = _snapshot_managed_executables(state_paths)
         try:
+            component_shims.remove_shims(current_state, roots.data_root, verify_cached_asset)
             for entry in assets:
                 managed_path = managed_paths[entry.component_id]
                 if not _managed_executable_is_ready(
@@ -1193,7 +1217,7 @@ def setup_native_components(
             run_post_install_smoke(
                 {component_id: str(path) for component_id, path in managed_paths.items()},
                 runner=runner,
-                expected_components=component_manifest.published_component_ids(manifest),
+                expected_components=tuple(managed_paths),
             )
             next_state = component_state.InstalledState(
                 schema_version=component_state.SCHEMA_VERSION,
@@ -1213,6 +1237,12 @@ def setup_native_components(
                     for entry in assets
                 },
             )
+            if current_state is not None:
+                obsolete = tuple(cid for cid in current_state.components if cid not in next_state.components)
+                _remove_transaction_managed_binaries(
+                    data_root=roots.data_root, current=current_state, remove_ids=obsolete
+                )
+            component_shims.create_shims(next_state, roots.data_root, verify_cached_asset, materialize_executable)
             if current_state is not None and component_state.should_rotate_previous(current_state, next_state):
                 component_state.write_installed_state(previous_state_path, current_state)
             component_state.write_installed_state(current_state_path, next_state)

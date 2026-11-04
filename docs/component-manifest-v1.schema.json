@@ -26,7 +26,7 @@
     },
     "components": {
       "type": "object",
-      "required": ["agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"],
+      "required": ["agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"],
       "properties": {
         "agent-notify": {
           "allOf": [
@@ -35,7 +35,7 @@
               "additionalProperties": false,
               "required": ["component_revision", "source", "executable", "assets"],
               "properties": {
-                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
+                "component_revision": {"$ref": "#/$defs/brigade-code-graph_component_revision"},
                 "executable": {"const": "agent-notify"},
                 "source": {},
                 "assets": {}
@@ -61,15 +61,15 @@
             }
           ]
         },
-        "graphtrail": {
+        "brigade-code-graph": {
           "allOf": [
             {
               "type": "object",
               "additionalProperties": false,
               "required": ["component_revision", "source", "executable", "assets"],
               "properties": {
-                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
-                "executable": {"const": "graphtrail"},
+                "component_revision": {"$ref": "#/$defs/brigade-code-graph_component_revision"},
+                "executable": {"const": "brigade-code-graph"},
                 "source": {},
                 "assets": {}
               }
@@ -94,15 +94,15 @@
             }
           ]
         },
-        "graphtrail-mcp": {
+        "brigade-code-graph-mcp": {
           "allOf": [
             {
               "type": "object",
               "additionalProperties": false,
               "required": ["component_revision", "source", "executable", "assets"],
               "properties": {
-                "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
-                "executable": {"const": "graphtrail-mcp"},
+                "component_revision": {"$ref": "#/$defs/brigade-code-graph_component_revision"},
+                "executable": {"const": "brigade-code-graph-mcp"},
                 "source": {},
                 "assets": {}
               }
@@ -127,12 +127,12 @@
             }
           ]
         },
-        "miseledger": {
+        "brigade-evidence": {
           "allOf": [
             {"$ref": "#/$defs/known_component"},
             {
               "properties": {
-                "executable": {"const": "miseledger"},
+                "executable": {"const": "brigade-evidence"},
                 "assets": {"$ref": "#/$defs/published_assets"},
                 "source": {"$ref": "#/$defs/published_source"}
               }
@@ -161,7 +161,7 @@
       "additionalProperties": false,
       "required": ["component_revision", "source", "executable", "assets"],
       "properties": {
-        "component_revision": {"$ref": "#/$defs/graphtrail_component_revision"},
+        "component_revision": {"$ref": "#/$defs/brigade-code-graph_component_revision"},
         "source": {
           "type": "object",
           "additionalProperties": false,
@@ -181,7 +181,7 @@
         }
       }
     },
-    "graphtrail_component_revision": {
+    "brigade-code-graph_component_revision": {
       "type": "string",
       "pattern": "^[0-9a-f]{40}$"
     },

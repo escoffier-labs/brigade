@@ -153,3 +153,14 @@ def resolve_argv(argv: tuple[str, ...] | list[str]) -> list[str]:
         if _override_values(component_manifest.family_names(head), os.environ):
             raise ValueError(f"invalid or conflicting explicit executable override for {head!r}")
     return list(argv)
+
+
+def canonical_command(command: str | None) -> str | None:
+    """Project bare engine commands canonically while preserving custom paths."""
+    if command not in component_manifest.ACCEPTED_COMPONENT_IDS:
+        return command
+    assert command is not None
+    canonical = component_manifest.family_id(command)
+    if canonical not in component_manifest.COMPONENT_FAMILIES.values():
+        return command
+    return resolve(canonical) or canonical

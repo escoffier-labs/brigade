@@ -129,9 +129,9 @@ def _mcp_servers(
             "args": ["memory", "serve-mcp", "--stdio", "--target", "."],
             "timeout": 60,
         },
-        keys["brigade-code-graph"]: {"command": _absolute("brigade-code-graph-mcp", "graphtrail-mcp")},
+        keys["brigade-code-graph"]: {"command": _absolute("brigade-code-graph-mcp", "brigade-code-graph-mcp")},
         keys["brigade-evidence"]: {
-            "command": _absolute("brigade-evidence", "miseledger"),
+            "command": _absolute("brigade-evidence", "brigade-evidence"),
             "args": ["mcp"],
             "timeout": 60,
         },
