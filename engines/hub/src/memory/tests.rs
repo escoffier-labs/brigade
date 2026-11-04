@@ -1305,3 +1305,29 @@ async fn an_unreadable_policy_refuses_a_policy_bound_command() {
         })
     );
 }
+
+#[test]
+fn disk_pressure_refuses_memory_writes_but_not_reads() {
+    let disk = crate::maintenance::DiskPressure::default();
+    let put = br#"{"action":"put","scope":"fleet","card_id":"x","text":"x"}"#;
+    assert_eq!(pressure_refusal(&disk, put), None);
+    // A WAL past 1 GiB turns pressure on.
+    disk.update(2 * 1024 * 1024 * 1024, None);
+    for read in ["card", "log", "status"] {
+        let body = format!(r#"{{"action":"{read}"}}"#);
+        assert_eq!(pressure_refusal(&disk, body.as_bytes()), None, "{read}");
+    }
+    for write in [
+        "put", "import", "retire", "handoff", "capture", "grant", "search", "nope",
+    ] {
+        let body = format!(r#"{{"action":"{write}"}}"#);
+        assert_eq!(
+            pressure_refusal(&disk, body.as_bytes()),
+            Some("disk-pressure"),
+            "{write}"
+        );
+    }
+    // A body that does not parse is not a read.
+    assert_eq!(pressure_refusal(&disk, b"{"), Some("disk-pressure"));
+    assert_eq!(pressure_refusal(&disk, b"[]"), Some("disk-pressure"));
+}

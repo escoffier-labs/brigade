@@ -646,10 +646,9 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
         // S6's event/session writes are non-durable admission classes. Other
         // families adopt the gate with their writer commands as they go native.
-        if req.method() == "POST"
-            && (matches!(req.uri().path(), "/events" | "/sessions")
-                || (req.uri().path() == "/memory" && app.memory.is_some()))
-        {
+        // Memory reads stay available under pressure; memory writes are
+        // refused after the body shows the action.
+        if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
             if let Err(reason) = storage.disk.admit(false) {
                 return busy(reason);
             }
@@ -765,6 +764,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         }
     };
     if let Some((route, credential)) = memory {
+        if let Some(reason) = app
+            .storage
+            .as_ref()
+            .and_then(|s| brigade_hub::memory::pressure_refusal(&s.disk, &body))
+        {
+            return busy(reason);
+        }
         return route.handle(&credential, &body).await;
     }
     if let Some(native) = native {

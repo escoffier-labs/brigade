@@ -92,6 +92,27 @@ impl ReadTx for Conn<'_> {
     }
 }
 
+/// True when the body names an action `Store::handle` answers from the
+/// query-only readers. Disk-pressure admission lets these through (S4b:
+/// reads continue). A body that does not parse is not a read.
+pub fn read_only(body: &[u8]) -> bool {
+    serde_json::from_slice::<Json>(body).is_ok_and(|v| {
+        matches!(
+            v.get("action").and_then(Json::as_str),
+            Some("card" | "log" | "status")
+        )
+    })
+}
+
+/// The disk-pressure refusal for one memory request, if any. Writes are
+/// non-durable admission (D21 and S4b); reads go on.
+pub fn pressure_refusal(
+    disk: &crate::maintenance::DiskPressure,
+    body: &[u8],
+) -> Option<&'static str> {
+    disk.admit(false).err().filter(|_| !read_only(body))
+}
+
 impl Store {
     /// Creates the memory file when it is absent, then migrates and checks it.
     pub fn open(options: Options, hub: Arc<ReaderPool>) -> Result<Self, String> {
