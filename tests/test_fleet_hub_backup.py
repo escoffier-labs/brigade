@@ -437,3 +437,57 @@ def test_cli_restore_reports_and_refuses(tmp_path, capsys):
     assert json.loads(capsys.readouterr().out)["claims_ended"] == 2
     assert cli.main(args) == 1
     assert "already exists" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_sigterm_ends_fleet_serve_with_a_clean_exit(tmp_path):
+    import signal
+    import socket
+    import subprocess
+    import sys
+    import time
+    import urllib.request
+
+    token = tmp_path / "token"
+    token.write_text("fake-admin-token-for-sigterm\n", encoding="utf-8")
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = probe.getsockname()[1]
+    env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+    proc = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "brigade",
+            "fleet",
+            "serve",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            str(port),
+            "--db",
+            str(tmp_path / "hub.db"),
+            "--token-file",
+            str(token),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        env=env,
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            try:
+                urllib.request.urlopen(f"http://127.0.0.1:{port}/health", timeout=1).read()
+                break
+            except OSError:
+                assert proc.poll() is None and time.monotonic() < deadline
+                time.sleep(0.1)
+        proc.send_signal(signal.SIGTERM)
+        out, _ = proc.communicate(timeout=30)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+    assert proc.returncode == 0, out
+    assert "brigade fleet hub stopped cleanly" in out
