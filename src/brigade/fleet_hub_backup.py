@@ -411,14 +411,25 @@ class _LockedLedgers:
         self.created: list[Path] = []
 
     def __enter__(self) -> _LockedLedgers:
+        # Two names for one file (a symlink, or a relative and an absolute
+        # path) would take the same lock twice and block on themselves, and
+        # would read and append each record twice. Keep the first name only.
+        seen: set[tuple[int, int]] = set()
         try:
             for path in self.paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                if not path.exists():
-                    self.created.append(path)
+                created = not path.exists()
                 flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
-                self.fds[path] = os.open(path, flags, 0o600)
-                _lock(self.fds[path])
+                fd = os.open(path, flags, 0o600)
+                info = os.fstat(fd)
+                if (info.st_dev, info.st_ino) in seen:
+                    os.close(fd)
+                    continue
+                seen.add((info.st_dev, info.st_ino))
+                if created:
+                    self.created.append(path)
+                self.fds[path] = fd
+                _lock(fd)
         except BaseException:
             self.__exit__(None, None, None)
             raise
