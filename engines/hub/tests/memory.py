@@ -57,7 +57,14 @@ class Memory(unittest.TestCase):
         broken = self.run_hub(
             "broken", "--route-mode memory=native", lambda s: (s / "fleet-hub-memory.db").mkdir()
         )
-        for hub in (forced, broken):
+        # A regular file that is not SQLite: the store and maintenance both fail
+        # to open it, and only /memory is unavailable.
+        corrupt = self.run_hub(
+            "corrupt",
+            "--route-mode memory=native",
+            lambda s: (s / "fleet-hub-memory.db").write_bytes(b"not a database, " * 256),
+        )
+        for hub in (forced, broken, corrupt):
             for token in (hub.admin_token, None):
                 response = hc.request(hub.url, "POST", "/memory", body={"action": "status"}, token=token)
                 self.assertEqual((response.status, response.json), (503, UNAVAILABLE), hub.argv)

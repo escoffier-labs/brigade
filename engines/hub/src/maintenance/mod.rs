@@ -237,10 +237,15 @@ impl Maintenance {
                 .map_err(|e| e.to_string())?,
         ));
         let mut files = vec![hub];
-        // Only a regular file: a memory path the store cannot use leaves memory
-        // unavailable (503) and must not stop the hub's own maintenance.
+        // A memory file the store cannot use leaves memory unavailable (503).
+        // It never stops the hub's own maintenance: a failed open is counted
+        // and retried on later ticks.
+        let mut memory_failed = false;
         if memory.is_file() {
-            files.push(FileState::new(memory.into())?);
+            match FileState::new(memory.into()) {
+                Ok(file) => files.push(file),
+                Err(_) => memory_failed = true,
+            }
         }
         let memory_path = memory.to_path_buf();
         let disk = Arc::new(DiskPressure::default());
@@ -257,7 +262,10 @@ impl Maintenance {
                 .unwrap_or(0),
             sample_space(files.iter().map(|f| f.path.as_path())),
         );
-        let metrics = Arc::new(Mutex::new(Metrics::default()));
+        let metrics = Arc::new(Mutex::new(Metrics {
+            failures: u64::from(memory_failed),
+            ..Metrics::default()
+        }));
         let (stop, receive) = mpsc::sync_channel(256);
         let (d, s, m) = (disk.clone(), schema.clone(), metrics.clone());
         let thread = std::thread::spawn(move || {
