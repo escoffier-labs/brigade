@@ -37,8 +37,12 @@ _LONG_OPERATION_TIMEOUT_ENVS = {
 _ENGINE_USAGE_LINE = re.compile(r"(?m)^(\s*)Usage: (?:brigade-code-graph|graphtrail)(?![\w-])")
 # From R5 on, a legacy entry point announces its own deprecation on stderr. The user
 # typed `brigade code`, not the engine's name, so the notice is not theirs to act on.
+# Match the engine's own notice (`<legacy> is deprecated; use brigade-code-graph; removed
+# in v0.33.0`) and the earlier wording. Environment-variable notices name an uppercase
+# variable after `use`, so they never match and still reach the user.
 _ENGINE_DEPRECATION_LINE = re.compile(
-    r"(?m)^warning: \S+ is deprecated and will be removed in v\S+; use brigade-code-graph\n"
+    r"(?m)^(?:warning: \S+ is deprecated and will be removed in v\S+; use brigade-code-graph"
+    r"|\S+ is deprecated; use brigade-code-graph(?:-mcp)?; removed in v\S+)\n"
 )
 
 

@@ -111,6 +111,9 @@ def initialize(binary, env, repo, *args):
         repo,
         input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}) + "\n",
     )
+    name = Path(binary).name
+    expected = f"{name} is deprecated; use {FAMILIES[name]}; removed in v0.33.0\n" if name in FAMILIES else ""
+    assert result.stderr == expected
     return json.loads(result.stdout.splitlines()[0])["result"]["serverInfo"]["name"]
 
 
@@ -144,7 +147,9 @@ def test_fresh_install_and_canonical_storage(acceptance):
             assert initialize(shim, env, repo) == legacy.removesuffix("-mcp")
         else:
             flag = "version" if canonical == "brigade-evidence" else "--version"
-            assert run([shim, flag], env, repo).stdout.startswith(legacy + " ")
+            result = run([shim, flag], env, repo)
+            assert result.stdout.startswith(legacy + " ")
+            assert result.stderr == f"{legacy} is deprecated; use {canonical}; removed in v0.33.0\n"
 
 
 def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):
@@ -232,6 +237,7 @@ def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):
         )
 
     review(evidence)
+    old_show = json.loads(run([evidence, "evidence", "show", bundle_id, "--json"], env, repo).stdout)
     paths = setup(acceptance)
     monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(paths["brigade-evidence"]))
     assert receipts_cmd.verify(target=repo, json_output=True) == 0
@@ -258,6 +264,11 @@ def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):
     run([paths["brigade-code-graph"], "stats", "--json"], env, repo)
     shown = json.loads(run([paths["brigade-evidence"], "evidence", "show", bundle_id, "--json"], env, repo).stdout)
     assert shown["id"] == bundle_id
+    # Show regenerates observation times, while all signed and identity fields stay stable.
+    volatile = {"generated_at", "regenerated_at"}
+    assert {k: v for k, v in shown.items() if k not in volatile} == {
+        k: v for k, v in old_show.items() if k not in volatile
+    }
     for path, body in protected.items():
         assert path.read_bytes() == body
     # The actual old reader treats canonical state as missing without crashing.

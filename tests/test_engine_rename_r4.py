@@ -1,7 +1,7 @@
 """Rename slice R4: Brigade-side compatibility for the retired engine names.
 
 docs/phase-engine-rename.md, "R4". Legacy names keep working through v0.32 and
-print nothing on stderr until R5; doctor reports them instead.
+gain stderr notices in R5. Doctor reports legacy use too.
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ def test_receipts_export_evidence_and_legacy_alias_dispatch_alike(tmp_path, monk
     monkeypatch.setattr("brigade.receipts_cmd.export_miseledger", lambda **kwargs: seen.append(kwargs) or 0)
     assert cli.main(["receipts", "export", name, "--target", str(tmp_path), "--new-only"]) == 0
     assert seen and seen[0]["new_only"] is True and seen[0]["target"] == tmp_path
-    assert capsys.readouterr().err == ""
+    assert ("deprecated" in capsys.readouterr().err) == (name == LEGACY_EVIDENCE)
 
 
 @pytest.mark.parametrize(

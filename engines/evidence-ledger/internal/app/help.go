@@ -43,9 +43,8 @@ func isServerName(name string) bool {
 }
 
 // Main is the process entry for both executables. It selects the identity
-// from argv[0] and runs the command. The legacy entry point writes nothing
-// extra on stderr: Brigade still runs it until R5 installs the canonical
-// executables, so the deprecation line lands in R5 (docs/phase-engine-rename.md).
+// from argv[0] and runs the command. A legacy entry point prints one stderr
+// deprecation notice.
 func Main(argv []string, out, errw io.Writer) int {
 	argv0 := ""
 	if len(argv) > 0 {
@@ -53,6 +52,9 @@ func Main(argv []string, out, errw io.Writer) int {
 		argv = argv[1:]
 	}
 	program = IdentityFor(argv0)
+	if program == LegacyProgram {
+		fmt.Fprintf(errw, "%s is deprecated; use %s; removed in v0.33.0\n", LegacyProgram, CanonicalProgram)
+	}
 	return Run(argv, out, errw)
 }
 

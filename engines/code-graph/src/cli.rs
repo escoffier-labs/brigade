@@ -26,9 +26,7 @@ use crate::store::{
 /// Each binary takes its identity from the basename of `argv[0]`, with `.exe` stripped. A legacy
 /// name selects the legacy identity; any other name, including a renamed copy, selects the
 /// canonical one. Identity sets the program name for clap (version banner, usage and help) and the
-/// MCP `serverInfo.name`. A legacy entry point writes nothing extra on stderr: Brigade still runs
-/// it until R5 installs the canonical executables, so the deprecation line lands in R5
-/// (docs/phase-engine-rename.md).
+/// MCP `serverInfo.name`. A legacy entry point prints one stderr deprecation notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Identity {
     /// Program name for the version banner, usage and help text.
@@ -56,6 +54,23 @@ const LEGACY_MCP_IDENTITY: Identity = Identity {
 };
 
 impl Identity {
+    /// Print the rename notice only for a legacy executable basename.
+    pub fn warn_if_legacy(self) {
+        let replacement = if self == LEGACY_CLI_IDENTITY {
+            Some(CLI_IDENTITY.program)
+        } else if self == LEGACY_MCP_IDENTITY {
+            Some(MCP_IDENTITY.program)
+        } else {
+            None
+        };
+        if let Some(replacement) = replacement {
+            eprintln!(
+                "{} is deprecated; use {}; removed in v0.33.0",
+                self.program, replacement
+            );
+        }
+    }
+
     /// Identity of the query CLI invoked as `argv0`.
     pub fn cli(argv0: Option<&std::ffi::OsStr>) -> Self {
         Self::select(argv0, LEGACY_CLI_IDENTITY, CLI_IDENTITY)
@@ -87,6 +102,7 @@ pub fn parse_invoked() -> Cli {
 
     let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     let identity = Identity::cli(args.first().map(std::ffi::OsString::as_os_str));
+    identity.warn_if_legacy();
     let command = Cli::command()
         .name(identity.program)
         .bin_name(identity.program)

@@ -750,8 +750,7 @@ fn context_help_lists_join_layer_flags() {
 fn canonical_and_legacy_cli_contracts() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
-    // Neither entry point writes extra stderr: the legacy deprecation line lands in R5
-    // (docs/phase-engine-rename.md, "Entry point identity").
+    // Only the legacy entry point prints the deprecation notice.
     for (binary, name) in [
         (legacy_engine(), "graphtrail"),
         (engine(), "brigade-code-graph"),
@@ -770,7 +769,11 @@ fn canonical_and_legacy_cli_contracts() {
         assert!(text.contains("--db <PATH>"), "{text}");
         assert!(text.contains("sync"), "{text}");
         assert!(text.contains(&format!("Usage: {name} ")), "{text}");
-        assert!(help.stderr.is_empty(), "{help:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&help.stderr).contains("deprecated"),
+            binary == legacy_engine(),
+            "{help:?}"
+        );
 
         let version = invoke(&["--version"]);
         assert_eq!(version.status.code(), Some(0));
@@ -778,7 +781,11 @@ fn canonical_and_legacy_cli_contracts() {
             String::from_utf8_lossy(&version.stdout),
             format!("{name} {}\n", env!("CARGO_PKG_VERSION"))
         );
-        assert!(version.stderr.is_empty(), "{version:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&version.stderr).contains("deprecated"),
+            binary == legacy_engine(),
+            "{version:?}"
+        );
 
         for args in [
             vec!["--unknown-option"],
@@ -789,7 +796,14 @@ fn canonical_and_legacy_cli_contracts() {
             assert_eq!(error.status.code(), Some(2), "{error:?}");
             assert!(error.stdout.is_empty(), "{error:?}");
             let stderr = String::from_utf8_lossy(&error.stderr);
-            assert!(stderr.starts_with("error:"), "{error:?}");
+            assert!(
+                stderr.starts_with(if binary == legacy_engine() {
+                    "graphtrail is deprecated;"
+                } else {
+                    "error:"
+                }),
+                "{error:?}"
+            );
             assert!(stderr.contains("error:"), "{error:?}");
         }
         let stats = invoke(&["--db", db.to_str().unwrap(), "stats", "--json"]);
@@ -824,7 +838,11 @@ fn argv0_selects_the_entry_point_identity() {
             String::from_utf8_lossy(&output.stdout),
             format!("{banner} {}\n", env!("CARGO_PKG_VERSION"))
         );
-        assert!(output.stderr.is_empty(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr).contains("deprecated"),
+            banner == "graphtrail",
+            "{output:?}"
+        );
     }
 }
 
@@ -970,16 +988,25 @@ fn database_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // The legacy variable works and prints nothing until R5 (docs/phase-engine-rename.md).
+    // A legacy variable works and prints one deprecation notice.
     let legacy = stats(&[("GRAPHTRAIL_DB", db)]);
     assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert!(legacy.stderr.is_empty(), "{legacy:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&legacy.stderr).lines().count(),
+        1,
+        "{legacy:?}"
+    );
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
     let value: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
     assert_eq!(value["symbols"], 2, "{value}");
 
     let same = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", db)]);
     assert_eq!(same.status.code(), Some(0), "{same:?}");
-    assert!(same.stderr.is_empty(), "{same:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&same.stderr).lines().count(),
+        1,
+        "{same:?}"
+    );
 
     let conflict = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", "other.db")]);
     assert_ne!(conflict.status.code(), Some(0), "{conflict:?}");
@@ -1023,10 +1050,15 @@ fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // The legacy variable works and prints nothing until R5 (docs/phase-engine-rename.md).
+    // A legacy variable works and prints one deprecation notice.
     let legacy = sync(&[("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "1")]);
     assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert!(legacy.stderr.is_empty(), "{legacy:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&legacy.stderr).lines().count(),
+        1,
+        "{legacy:?}"
+    );
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
 
     let conflict = sync(&[
         ("BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT", "1"),
