@@ -182,7 +182,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - {python: '3.10', mode: core}
+          - {python: '3.11', mode: core}
           - {python: '3.12', mode: core}
           - {python: '3.12', mode: transport}
     steps:

@@ -14,7 +14,7 @@ from uuid import uuid4
 
 
 BASES = {
-    "3.10": "python:3.10-slim@sha256:7b6bd969dda3ecfca0655524e338b57a8b8cd692a9362e3d55b5a3ef49b07256",
+    "3.11": "python:3.11-slim@sha256:db20d8506e2f15b6db39b40b6015ca46bae855dec6dd326d462cfe79ae972893",
     "3.12": "python:3.12-slim@sha256:44ff437bba879d4941b710a369a8f19266aea34b29002807f0c487fabc9eec9b",
 }
 HELPERS = Path(__file__).resolve().parent
