@@ -165,6 +165,16 @@ class Registration(unittest.TestCase):
                 )
                 self.assertEqual(added.status, 200, added.body)
                 token = added.json["token"]
+                # The native registration writer reports into /metrics.
+                metrics = request("GET", "/metrics", hub.admin_token)
+                self.assertEqual(metrics.status, 200)
+                batch = [
+                    line.split()[-1]
+                    for line in metrics.body.decode("utf-8").splitlines()
+                    if line.startswith("brigade_hub_writer_batch_size ")
+                ]
+                self.assertEqual(len(batch), 1, metrics.body)
+                self.assertNotEqual(batch[0], "NaN")
                 self.assertEqual(request("GET", "/nodes", token).status, 403)
                 revoked = request(
                     "POST",
