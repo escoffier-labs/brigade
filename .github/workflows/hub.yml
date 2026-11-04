@@ -34,6 +34,8 @@ jobs:
       - run: cargo clippy --locked --all-targets -- -D warnings
       - run: cargo test --locked
       - run: cargo build --locked --release
+      - name: Ops authentication and shadow housekeeping
+        run: python tests/ops.py
       - name: Proxy transport integration
         run: python tests/transport.py
       - name: Lazy schema through managed front and restart

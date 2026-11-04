@@ -42,6 +42,9 @@ const DRAIN: Duration = Duration::from_secs(25);
     args_override_self = true
 )]
 struct Config {
+    /// Repeatable route override. Unimplemented handlers are refused.
+    #[arg(long)]
+    route_mode: Vec<String>,
     #[arg(long)]
     host: String,
     #[arg(long, default_value_t = 3774, allow_hyphen_values = true)]
@@ -109,6 +112,7 @@ fn expand_user(path: &str) -> String {
 
 impl Config {
     fn validate(&self) -> Result<(), String> {
+        brigade_hub::modes::Modes::parse(&self.route_mode)?;
         u16::try_from(self.port).map_err(|_| "port must be 0-65535")?;
         if self.host.is_empty() {
             return Err(
@@ -205,6 +209,10 @@ impl Drop for Slot {
 type HttpClient = Client<HttpConnector, Body>;
 #[derive(Clone)]
 struct App {
+    modes: brigade_hub::modes::Modes,
+    telemetry: Arc<brigade_hub::telemetry::Telemetry>,
+    admin_digest: Option<[u8; 32]>,
+    shadow_db: Option<std::path::PathBuf>,
     upstream: String,
     client: HttpClient,
     budgets: admission::Budgets,
@@ -221,6 +229,10 @@ struct App {
 impl App {
     fn new(upstream: String, client: HttpClient, trust_identity: bool, trust_proto: bool) -> Self {
         App {
+            modes: Default::default(),
+            telemetry: Arc::default(),
+            admin_digest: None,
+            shadow_db: None,
             upstream,
             client,
             budgets: admission::Budgets::default(),
@@ -297,7 +309,161 @@ fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
     }
     Duration::from_secs(30)
 }
+fn admin_authorized(app: &App, req: &Request<Body>) -> bool {
+    use sha2::Digest;
+    use subtle::ConstantTimeEq;
+    let Some(token) = req
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .filter(|v| !v.is_empty())
+    else {
+        return false;
+    };
+    let digest: [u8; 32] = sha2::Sha256::digest(token.as_bytes()).into();
+    app.admin_digest
+        .is_some_and(|admin| bool::from(admin.ct_eq(&digest)))
+}
 async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
+    use brigade_hub::{
+        modes::{Mode, family},
+        shadow,
+        telemetry::RequestLog,
+    };
+    let started = std::time::Instant::now();
+    let f = family(req.method().as_str(), req.uri().path(), "");
+    let kind = if admin_authorized(&app, &req) {
+        "admin"
+    } else if let Some(lookup) = &app.lookup {
+        lookup
+            .kind(
+                req.headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok()),
+            )
+            .await
+    } else {
+        "anonymous"
+    };
+    let mut log = RequestLog {
+        telemetry: app.telemetry.clone(),
+        id: app.telemetry.id(),
+        family: f,
+        status: 500,
+        credential_kind: kind,
+        request_bytes: Arc::default(),
+        response_bytes: 0,
+        start: started,
+    };
+    let request_bytes = log.request_bytes.clone();
+    let (parts, body) = req.into_parts();
+    let body = body.into_data_stream().map(move |item| {
+        if let Ok(bytes) = &item {
+            request_bytes.fetch_add(bytes.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
+        item
+    });
+    let req = Request::from_parts(parts, Body::from_stream(body));
+    // Only /health has a native shadow handler in S9. /ready stays local.
+    let shadowed = req.method() == "GET"
+        && req.uri().path() == "/health"
+        && req.uri().query().is_none()
+        && !req.headers().contains_key("transfer-encoding")
+        && req.headers().get_all("content-length").iter().count() <= 1
+        && req.headers().get("content-length").is_none_or(|v| v == "0")
+        && app.modes.get("health") == Mode::Shadow;
+    let response = if shadowed {
+        // Each comparison owns one dedicated watch connection across all samples.
+        // Read-only + query_only means no Rust housekeeping can write here.
+        let watch = match app.shadow_db.clone() {
+            Some(path) => shadow::Watch::open(path).await,
+            None => None,
+        };
+        let retry_headers = req.headers().clone();
+        let peer = req.extensions().get::<SocketAddr>().copied();
+        let mut original = Some(req);
+        let mut observations = Vec::new();
+        let mut answer = None;
+        for _ in 0..3 {
+            let before = match &watch {
+                Some(w) => w.sample().await,
+                None => None,
+            };
+            let request = original.take().unwrap_or_else(|| {
+                let mut request = Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap();
+                *request.headers_mut() = retry_headers.clone();
+                if let Some(peer) = peer {
+                    request.extensions_mut().insert(peer);
+                }
+                request
+            });
+            let python = handle_inner(State(app.clone()), request).await;
+            let status = python.status();
+            let (parts, body) = python.into_parts();
+            let bytes = match axum::body::to_bytes(body, BODY_LIMIT).await {
+                Ok(bytes) => bytes,
+                Err(_) => {
+                    return upstream_error(StatusCode::BAD_GATEWAY, "upstream-body-error", false);
+                }
+            };
+            let native = shadow::health_shape();
+            let (comparison, path) = serde_json::from_slice(&bytes)
+                .map(|p| shadow::compare("health", &p, &native, log.start.elapsed().as_secs_f64()))
+                .unwrap_or((shadow::Class::Definite, String::new()));
+            let after = match &watch {
+                Some(w) => w.sample().await,
+                None => None,
+            };
+            let equal = status == 200 && comparison == shadow::Class::Match;
+            observations.push((equal, before.is_none() || before != after));
+            let class = shadow::classify(&observations);
+            answer = Some(Response::from_parts(parts, Body::from(bytes.clone())));
+            if class != shadow::Class::Inconclusive || observations.len() == 3 {
+                app.telemetry.shadow(class.label());
+                if class != shadow::Class::Match {
+                    eprintln!(
+                        "{}",
+                        shadow::record(
+                            "/health",
+                            "",
+                            (status.as_u16(), 200),
+                            class,
+                            &path,
+                            (&bytes, native.to_string().as_bytes())
+                        )
+                    );
+                }
+                break;
+            }
+        }
+        answer.unwrap()
+    } else {
+        handle_inner(State(app.clone()), req).await
+    };
+    log.status = response.status().as_u16();
+    let (parts, body) = response.into_parts();
+    // Hold the logger until completion or disconnect and count actual streamed bytes.
+    let stream = futures_util::stream::unfold(
+        (body.into_data_stream(), log),
+        |(mut stream, mut log)| async move {
+            match stream.next().await {
+                Some(item) => {
+                    if let Ok(bytes) = &item {
+                        log.response_bytes += bytes.len() as u64;
+                    }
+                    Some((item, (stream, log)))
+                }
+                None => None,
+            }
+        },
+    );
+    Response::from_parts(parts, Body::from_stream(stream))
+}
+async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if req
         .uri()
         .path_and_query()
@@ -328,22 +494,56 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             .body(Body::from("Dashboard request refused.\n"))
             .unwrap();
     }
-    if req.method() == "GET" && req.uri().path() == "/health" {
+    if req.method() == "GET"
+        && req.uri().path() == "/health"
+        && app.modes.get("health") == brigade_hub::modes::Mode::Native
+    {
         return Response::builder()
             .header("content-type", "application/json")
             .header("server", "brigade-fleet-hub/1")
             .header("cache-control", "no-store")
             .header("referrer-policy", "no-referrer")
-            .body(Body::from(
-                r#"{"ok": true, "service": "brigade-fleet-hub"}"#,
-            ))
+            .body(Body::from(brigade_hub::shadow::health_shape().to_string()))
             .unwrap();
     }
     if req.method() == "GET" && req.uri().path() == "/metrics" {
-        return json(
-            StatusCode::OK,
-            serde_json::json!({"proxy_buffer_fallback_total":app.buffer_fallbacks.load(std::sync::atomic::Ordering::Relaxed)}),
+        if !admin_authorized(&app, &req) {
+            return json(
+                StatusCode::UNAUTHORIZED,
+                serde_json::json!({"error":"unauthorized"}),
+            );
+        }
+        let mut text = app.telemetry.render();
+        text += &format!(
+            "brigade_hub_proxy_buffer_fallback_total {}\nbrigade_hub_upstream_up {}\n",
+            app.buffer_fallbacks
+                .load(std::sync::atomic::Ordering::Relaxed),
+            u8::from(
+                app.ready
+                    .lock()
+                    .unwrap()
+                    .is_some_and(|last| last.elapsed() < Duration::from_secs(5))
+            )
         );
+        if let Some(storage) = &app.storage {
+            let m = storage.metrics.lock().unwrap();
+            text += &format!(
+                "brigade_hub_checkpoint_busy_total {}\nbrigade_hub_checkpoint_failures_total {}\nbrigade_hub_checkpoint_wal_frames {}\nbrigade_hub_checkpointed_frames {}\nbrigade_hub_wal_bytes {}\nbrigade_hub_checkpoint_stall_frames {}\n",
+                m.busy,
+                m.failures,
+                m.log_frames,
+                m.checkpointed_frames,
+                m.wal_bytes,
+                (m.log_frames - m.checkpointed_frames).max(0)
+            );
+        } else {
+            text += "brigade_hub_checkpoint_stall_frames NaN\n";
+        }
+        return Response::builder()
+            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+            .header("cache-control", "no-store")
+            .body(Body::from(text))
+            .unwrap();
     }
     if req.method() == "GET" && req.uri().path() == "/ready" {
         if app.storage.as_ref().is_some_and(|s| !s.schema.ready()) {
@@ -796,6 +996,8 @@ async fn run(mut config: Config) -> Result<(), String> {
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
+    state.modes = brigade_hub::modes::Modes::parse(&config.route_mode)?;
+    state.shadow_db = Some(path.clone());
     state.storage = storage.map(Arc::new);
     state.upstream_key = parsed_key;
     state.front_bind = address.ip().is_loopback();
@@ -811,6 +1013,10 @@ async fn run(mut config: Config) -> Result<(), String> {
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
+    {
+        use sha2::Digest;
+        state.admin_digest = Some(sha2::Sha256::digest(admin.as_bytes()).into());
+    }
     state.lookup = Some(admission::Lookup::new(Arc::new(readers), &admin));
     let probe = state.clone();
     tokio::spawn(async move {
@@ -1171,3 +1377,6 @@ mod tests {
 
 #[cfg(test)]
 mod tests_s3c;
+
+#[cfg(test)]
+mod tests_s9;

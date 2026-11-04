@@ -33,6 +33,22 @@ impl Lookup {
             slow: None,
         }
     }
+    pub async fn kind(&self, authorization: Option<&str>) -> &'static str {
+        let Some(token) = authorization
+            .and_then(|v| v.strip_prefix("Bearer "))
+            .filter(|v| !v.is_empty())
+        else {
+            return "anonymous";
+        };
+        let digest: [u8; 32] = Sha256::digest(token.as_bytes()).into();
+        if bool::from(digest.ct_eq(&self.admin)) {
+            return "admin";
+        }
+        let key = hex(&digest);
+        self.pool.submit(move |c| {
+            c.query_row("SELECT 'node' FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 'principal' FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1",[key],|r|r.get::<_,String>(0)).optional()
+        }).await.ok().flatten().map(|kind|if kind=="node" {"node"} else {"principal"}).unwrap_or("anonymous")
+    }
     pub async fn credential(&self, authorization: Option<&str>) -> Result<Option<String>, ()> {
         let Some(token) = authorization
             .and_then(|v| v.strip_prefix("Bearer "))

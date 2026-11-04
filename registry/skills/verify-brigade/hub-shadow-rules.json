@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "default": "exact",
+  "families": {
+    "health": {
+      "clock_seconds": [],
+      "housekeeping": "none",
+      "shape": {
+        "ok": true,
+        "service": "brigade-fleet-hub"
+      }
+    }
+  },
+  "boundary": "both handlers exhausted their byte budget and common prefix is exact",
+  "projection": "handler proves purge eligibility and compares complete projected envelope"
+}

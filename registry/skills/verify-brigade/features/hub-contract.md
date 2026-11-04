@@ -328,3 +328,17 @@ digest change and all four controls writing. Each of the seven mutation kinds
   route or action means updating all three.
 - **Browser routes are out of scope.** The Command Deck and dashboard pages
   return HTML and no client calls them. The inventory lists them as `not yet`.
+
+## Ops (S9, additive v1 routes)
+
+`hub_contract_ops.py` drives `GET /metrics` on the Rust front. It issues real
+node and principal credentials and requires 401 for each, a missing token,
+an invalid token, query-token authentication and cookie authentication. An
+admin bearer receives metrics text with writer values explicitly unavailable.
+`engines/hub/tests/ops.py` runs these cases and audits the enabled shadow
+route on a managed Python hub for housekeeping commits.
+
+`hub-shadow-rules.json` is the shared comparator policy. Values are exact
+unless the route declares a clock pointer or generated-ID namespace. Health
+is the only enabled shadow family in S9. Other native handlers and their
+housekeeping audits land in S5 to S8 before shadow can be enabled.
