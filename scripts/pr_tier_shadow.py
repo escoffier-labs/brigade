@@ -365,7 +365,10 @@ def parse_full_log(text: str, index: int, sha: str) -> dict:
     }
 
 
-def parse_time(value: str) -> datetime:
+def parse_time(value: str | None) -> datetime:
+    # A job that has not finished reports a null completed_at.
+    if not isinstance(value, str):
+        raise ValueError("timestamp is missing")
     instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if instant.tzinfo is None:
         raise ValueError("timestamp has no timezone")
