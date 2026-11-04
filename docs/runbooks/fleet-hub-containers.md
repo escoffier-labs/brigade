@@ -41,6 +41,20 @@ rollback constraints. The baseline smoke results above do not verify those featu
 
 ## Docker Compose
 
+The Compose recipe now uses the holder layout: a holder container owns the
+network namespace, the hub and the private network's HTTPS front join it, the
+hub binds `127.0.0.1:3774` inside that namespace, and no service publishes a
+port. Its setup script picks the retrieval mode, writes the secrets and the
+`.env` file, and the GPU embedder runs only under the `gpu` profile. Set it up
+with [Dogfood hub from the Compose recipe](fleet-hub-dogfood.md), which
+replaces the token and start steps below. The image pinning, backup and
+rollback steps in this section still apply, with health checked inside the
+namespace (`HEALTH` below) instead of from the host:
+
+```bash
+HEALTH='docker compose exec -T hub python -c "import urllib.request; urllib.request.urlopen(\"http://127.0.0.1:3774/health\", timeout=2).read()"'
+```
+
 Docker Engine 28.0.0 or newer is required for the localhost-only port
 publication below. Older releases can expose localhost-published ports to
 hosts on the same layer-2 network. Check the server version before deployment:
@@ -85,7 +99,7 @@ services:
 EOF
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build \
   --wait --wait-timeout 120
-curl --fail http://127.0.0.1:3774/health
+sh -c "$HEALTH"
 ```
 
 The wait options require a Compose CLI that supports
@@ -107,7 +121,7 @@ while true; do
     echo "Fleet Hub did not recover within 120 seconds after restart" >&2
     exit 1
   fi
-  if curl --fail --connect-timeout 2 --max-time "$remaining" http://127.0.0.1:3774/health; then
+  if sh -c "$HEALTH"; then
     break
   fi
   remaining=$((deadline - SECONDS))
@@ -422,10 +436,10 @@ The image binds to `0.0.0.0` inside the container. A bare
 `docker run -p 3774:3774` publishes plain HTTP on every host interface. Use the
 explicit loopback publication in these recipes.
 
-Both recipes publish only on host loopback and mount the token as a protected
-file. Docker Compose requires Engine 28.0.0 or newer for localhost publication
-to remain inaccessible from same-L2 hosts. Plain HTTP is therefore local-only
-under that requirement. The smoke check proves HTTPS
+The Quadlet recipe publishes only on host loopback. The Compose recipe
+publishes no port at all: clients reach the hub through the HTTPS front in its
+namespace. Both mount the token as a protected file. Localhost publication
+needs Docker Engine 28.0.0 or newer to stay inaccessible from same-L2 hosts. The smoke check proves HTTPS
 enrollment and Secure cookies with a TLS proxy sharing the Hub's network
 namespace. The Hub binds to numeric loopback with `--trust-forwarded-proto`,
 and the proxy overwrites `X-Forwarded-Proto`. This makes its Hub-side peer
@@ -434,10 +448,10 @@ loopback publication does not make its peer loopback. Do not weaken the Hub
 check to make that topology work.
 
 Connection admission keys on the TCP peer address. With the image's `0.0.0.0`
-bind, the Compose loopback publication delivers every client from the Docker
-bridge gateway, one ordinary source. The whole recipe therefore shares one
-8-connection per-source cap, and the ninth concurrent request is closed
-without a response. A front that shares the Hub's network namespace, with the
+bind, a loopback port publication delivers every client from the Docker
+bridge gateway, one ordinary source, which shares one 8-connection per-source
+cap: the ninth concurrent request is closed without a response. The Compose
+recipe avoids that. A front that shares the Hub's network namespace, with the
 Hub bound to numeric loopback as the smoke check runs it, is exempt from that
 cap and bounded by the 32-handler global cap, of which long-poll message
 waiters hold at most 8.

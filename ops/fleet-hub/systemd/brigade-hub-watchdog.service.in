@@ -1,0 +1,11 @@
+[Unit]
+Description=Brigade dogfood hub watchdog (health and namespace checks)
+After=brigade-hub-compose.service
+
+[Service]
+Type=oneshot
+User=@COMPOSE_USER@
+RuntimeDirectory=brigade-hub-watchdog
+RuntimeDirectoryPreserve=yes
+Environment=BRIGADE_HUB_PROJECT_DIR=@PROJECT_DIR@
+ExecStart=@PROJECT_DIR@/bin/hub-watchdog.sh

@@ -68,13 +68,15 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
     assert '"--db", "/var/lib/brigade/fleet-hub.db"' in text
 
 
-def test_compose_recipe_keeps_host_port_private_and_token_out_of_environment():
-    text = (CONTAINER / "compose.yaml").read_text()
-    dockerignore = (ROOT / ".dockerignore").read_text().splitlines()
-    containerfile = (CONTAINER / "Containerfile").read_text().splitlines()
+def test_compose_recipe_publishes_no_port_and_keeps_the_token_out_of_environment():
+    text = (CONTAINER / "compose.yaml").read_text(encoding="utf-8")
+    dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+    containerfile = (CONTAINER / "Containerfile").read_text(encoding="utf-8").splitlines()
 
-    assert '"127.0.0.1:3774:3774"' in text
-    assert "target: admin_token" in text
+    # Holder layout (S31): the hub and the front join the holder's namespace.
+    assert "ports:" not in text
+    assert text.count('network_mode: "service:netns"') == 2
+    assert "file: ./secrets/admin-token.txt" in text and "      - admin_token\n" in text
     assert dockerignore == ["**", "!ops/", "!ops/fleet-hub/", "!ops/fleet-hub/Containerfile"]
     assert not any(line.startswith(("ADD ", "COPY ")) for line in containerfile)
     assert "BRIGADE_FLEET_TOKEN" not in text
@@ -97,7 +99,7 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub" in runbook
     assert runbook.count("--wait --wait-timeout 120") == 4
     assert "deadline=$((SECONDS + 120))" in runbook
-    assert 'curl --fail --connect-timeout 2 --max-time "$remaining"' in runbook
+    assert 'if sh -c "$HEALTH"; then' in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
     assert 'docker image save --output "$archive" "$previous_id"' in runbook
     assert 'docker image load --input "$archive"' in runbook

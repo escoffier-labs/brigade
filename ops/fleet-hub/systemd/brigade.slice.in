@@ -1,0 +1,9 @@
+# Parent of the hub and embedder slices. A child's MemoryMin only takes effect
+# up to its parent's, so the parent reserves the sum of both.
+[Unit]
+Description=Brigade reserved resources (dogfood hub and embedder)
+
+[Slice]
+AllowedCPUs=@HUB_CPUS@,@EMBED_CPUS@
+CPUWeight=10000
+MemoryMin=3G

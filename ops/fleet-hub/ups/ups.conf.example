@@ -1,0 +1,8 @@
+# /etc/nut/ups.conf. Find the vendor and product ids with `nut-scanner -U`
+# after installing the package, and replace the placeholders.
+[workstation]
+    driver = usbhid-ups
+    port = auto
+    vendorid = <UPS_VENDOR_ID>
+    productid = <UPS_PRODUCT_ID>
+    desc = "GPU workstation UPS"

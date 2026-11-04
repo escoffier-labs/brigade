@@ -1,0 +1,14 @@
+# Hub, holder, front and backup containers (compose cgroup_parent). Needs
+# Docker's systemd cgroup driver. Check the effective set with
+# checks/s31_checks.py cgroups: a set the parent cannot meet falls back to the
+# parent's set without an error.
+[Unit]
+Description=Brigade dogfood hub containers
+
+[Slice]
+AllowedCPUs=@HUB_CPUS@
+CPUWeight=10000
+MemoryMin=1G
+MemoryMax=3G
+IOWeight=1000
+IODeviceLatencyTargetSec=@DB_DEVICE@ @IO_LATENCY@
