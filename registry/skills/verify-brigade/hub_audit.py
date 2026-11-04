@@ -51,7 +51,9 @@ from pathlib import Path
 from typing import Any
 
 # Pragmas that change only the connection that ran them, never the file.
-LOCAL_PRAGMAS = frozenset({"busy_timeout", "query_only", "foreign_keys", "cache_size", "temp_store", "trusted_schema"})
+LOCAL_PRAGMAS = frozenset(
+    {"busy_timeout", "query_only", "foreign_keys", "cache_size", "temp_store", "trusted_schema", "wal_autocheckpoint"}
+)
 # Pragmas that can write to the database file or take its locks with no argument at all, so the
 # "has a value" test below would miss them: a checkpoint copies WAL pages back, `optimize` may run
 # ANALYZE, and `incremental_vacuum` frees pages.

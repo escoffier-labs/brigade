@@ -54,8 +54,16 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         db_path: Path,
     ) -> None:
         # Private managed-front escape hatch. Never lift admission on a public bind.
-        managed = os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") == "1"
-        if managed and not ipaddress.ip_address(server_address[0]).is_loopback:
+        managed = bool(os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK"))
+        from . import fleet_hub_upstream
+
+        upstream_key = fleet_hub_upstream.key()
+        self.upstream_mode = bool(upstream_key)
+        if managed and not upstream_key:
+            raise ValueError("managed upstream requires a per-start key")
+        if managed and os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") != upstream_key:
+            raise ValueError("managed upstream switch must match the per-start key")
+        if upstream_key and not ipaddress.ip_address(server_address[0]).is_loopback:
             raise ValueError("managed upstream requires a numeric loopback bind")
         # Set from the bound address in server_bind; nothing is exempt before it.
         self._loopback_bind = False
@@ -67,18 +75,25 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         self._closing = False
         # Only lifecycle cleanup uses this connection across threads. Requests
         # continue to open their own connections and see fresh auth state.
+        self._checkpoint_maintenance: fleet_hub_upstream.CheckpointMaintenance | None = None
         self._db_keepalive: sqlite3.Connection | None = sqlite3.connect(
             f"{db_path.expanduser().resolve().as_uri()}?mode=rw", uri=True, check_same_thread=False
         )
         try:
+            fleet_hub_upstream.configure_connection(self._db_keepalive)
             # Merely opening a handle does not join the WAL. Finish a real
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()
             super().__init__(server_address, RequestHandlerClass, bind_and_activate)
+            if self.upstream_mode and os.environ.get("BRIGADE_HUB_CHECKPOINT_OWNER") != "rust":
+                self._checkpoint_maintenance = fleet_hub_upstream.CheckpointMaintenance(db_path)
+                self._checkpoint_maintenance.thread.start()
             # A deferred bind has no port yet. That caller announces it after binding.
             if managed and bind_and_activate:
                 print(f"BRIGADE_UPSTREAM_PORT={self.server_port}", flush=True, file=sys.stdout)
         except BaseException:
+            if self._checkpoint_maintenance is not None:
+                self._checkpoint_maintenance.close()
             self._close_db_if_idle()
             raise
 
@@ -93,6 +108,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         try:
             super().server_close()
         finally:
+            if self._checkpoint_maintenance is not None:
+                self._checkpoint_maintenance.close()
             self._close_db_if_idle()
 
     def _close_db_if_idle(self) -> None:
@@ -104,8 +121,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             conn.close()
 
     def process_request(self, request: socket | tuple[bytes, socket], client_address: Any) -> None:
-        source = client_address[0]
-        front = self._loopback_bind and is_loopback_address(source)
+        source = "upstream-unclassified" if self.upstream_mode else client_address[0]
+        front = self.upstream_mode or self._loopback_bind and is_loopback_address(source)
         with self._admission_lock:
             source_count = self._source_counts.get(source, 0)
             admitted = (
@@ -126,6 +143,22 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             # The accept loop owns socket cleanup when thread creation fails.
             self._release(request)
             raise
+
+    def rekey_upstream_request(self, request: socket, source: str) -> None:
+        """Replace the pre-header key only after the transport key is checked."""
+        if not self.upstream_mode:
+            return
+        with self._admission_lock:
+            previous = self._active_requests.get(request)
+            if previous is None or previous == source:
+                return
+            remaining = self._source_counts[previous] - 1
+            if remaining:
+                self._source_counts[previous] = remaining
+            else:
+                del self._source_counts[previous]
+            self._active_requests[request] = source
+            self._source_counts[source] = self._source_counts.get(source, 0) + 1
 
     def process_request_thread(self, request: socket | tuple[bytes, socket], client_address: Any) -> None:
         try:

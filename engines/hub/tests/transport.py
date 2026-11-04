@@ -5,6 +5,7 @@ import ipaddress
 import os
 from pathlib import Path
 import resource
+import sqlite3
 import signal
 import socket
 import subprocess
@@ -26,14 +27,21 @@ def free_port():
 
 
 @contextlib.contextmanager
-def front(upstream=None, extra=(), relative_db=False):
+def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False):
     with tempfile.TemporaryDirectory() as work:
         port = free_port()
         command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", "hub.db" if relative_db else f"{work}/hub.db"]
+        if default_db:
+            command = command[:-2]
         command.extend(extra)
         if upstream:
             command += ["--upstream", f"http://{HOST}:{upstream}"]
         env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+        for name, value in (env_overrides or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         with tempfile.TemporaryFile() as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log, cwd=work if relative_db else None)
             try:
@@ -108,6 +116,36 @@ def raw(port, data):
 
 
 class Transport(unittest.TestCase):
+    def test_python_default_without_home_and_single_checkpoint_owner(self):
+        # Give Python's Unix password-database fallback a disposable home. Never
+        # open the operator database while testing HOME-unset startup.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "sitecustomize.py").write_text(
+                "import os, pwd\n"
+                "from types import SimpleNamespace\n"
+                f"pwd.getpwuid = lambda uid: SimpleNamespace(pw_dir={directory!r})\n"
+                "if os.environ.get('BRIGADE_HUB_CHECKPOINT_OWNER') == 'rust':\n"
+                " import brigade.fleet_hub_upstream as u\n"
+                " def forbidden(*args, **kwargs): raise RuntimeError('duplicate Python checkpointer')\n"
+                " u.CheckpointMaintenance = forbidden\n"
+            )
+            pythonpath = os.pathsep.join([directory, str(Path(__file__).resolve().parents[3] / "src"), os.environ.get("PYTHONPATH", "")])
+            with front(default_db=True, env_overrides={"HOME": None, "PYTHONPATH": pythonpath}) as (_, port):
+                database = root / ".brigade/fleet-hub.db"
+                self.assertTrue(database.exists())
+                with sqlite3.connect(database) as writer:
+                    writer.execute("PRAGMA wal_autocheckpoint=0")
+                    writer.execute("INSERT INTO nodes(node_id,token_sha256,created_at) VALUES ('checkpoint-probe','fake-digest','2026-01-01')")
+                    sizes = []
+                    for _ in range(8):
+                        writer.execute("UPDATE nodes SET label=hex(randomblob(524288)) WHERE node_id='checkpoint-probe'")
+                        writer.commit()
+                        time.sleep(1.5)
+                        sizes.append(Path(str(database) + "-wal").stat().st_size)
+                    self.assertLess(max(sizes), 4 * 1024 * 1024, sizes)
+                self.assertEqual(request(port, "/ready")[0], 200)
+
     def test_relative_database_admits_events_and_sessions(self):
         with socket.socket() as listener:
             listener.bind((HOST, 0))
@@ -149,8 +187,13 @@ class Transport(unittest.TestCase):
 
                 worker = threading.Thread(target=healthy)
                 worker.start()
+                for _ in range(150):
+                    if request(public, "/ready")[0] == 200:
+                        break
+                    time.sleep(0.02)
                 self.assertEqual(request(public, "/ready")[0], 200)
                 worker.join(3)
+            time.sleep(1.2)
             self.assertEqual(request(public, "/ready")[0], 503)
 
     def test_reset_after_commit_has_no_retry(self):
@@ -225,7 +268,7 @@ class Transport(unittest.TestCase):
                 response = request(port, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})
                 self.assertEqual(response[0], 503)
                 self.assertIn(("retry-after", "1"), response[1])
-                self.assertIn(b"proxy-inflight-full", response[2])
+                self.assertIn(b"credential-inflight-full", response[2])
                 listener.close()
 
     def test_slow_bodies_with_fake_credentials_leave_proxy_capacity(self):

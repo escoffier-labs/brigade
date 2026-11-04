@@ -241,7 +241,7 @@ def post(
             parsed,
             caller=caller_node,
             open_conn=lambda: hub.open_db(hub.db_path),
-            source_ip=request.client_address[0],
+            source_ip=getattr(request, "upstream_client_address", request.client_address[0]),
             storage_policy=hub.storage_policy,
             authenticated_generation=_hub.hash_node_token(request._bearer() or ""),
         )
