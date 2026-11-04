@@ -1121,7 +1121,7 @@ def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) ->
 
 def _is_reparse_point(path: Path) -> bool:
     """True when *path* is a Windows reparse point (junction or mount point)."""
-    if hasattr(os, "isjunction") and os.path.isjunction(path):
+    if hasattr(os, "isjunction") and getattr(os.path, "isjunction", lambda _path: False)(path):
         return True
     try:
         st = os.lstat(path)

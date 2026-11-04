@@ -12,7 +12,7 @@ The explicit package form also works: `npx --yes --package=@escoffier-labs/briga
 
 ## Preparation and local evaluation
 
-Preparation requires Python 3.10+, Node 24.22.0 and npm 11.19.1. It downloads the exact wheel URL and SHA-256 in `runtime.json`, with a 64 MiB download bound and hash verification before use. It validates metadata, WHEEL tags, MIT license, extra-only dependencies, archive paths and RECORD hashes.
+Preparation requires Python 3.11+, Node 24.22.0 and npm 11.19.1. It downloads the exact wheel URL and SHA-256 in `runtime.json`, with a 64 MiB download bound and hash verification before use. It validates metadata, WHEEL tags, MIT license, extra-only dependencies, archive paths and RECORD hashes.
 
 Every Brigade package member must match the `v0.30.0` tag at `02270bc7ffd92640cd8debf39711eca7c8678fc0`. The sole exception is `brigade/templates/components/manifest-v1.json`: it must equal the pinned release asset and its checksum, with the exact release version and component revisions. A reference build from the tag with `build-requirements.txt` enforces reverse package coverage. That build checks the inventory and does not replace the published wheel. Hosted CI also verifies the manifest's GitHub attestation.
 

@@ -1,10 +1,12 @@
 //! Bounded group-commit API for S5 domain commands. No routes use it yet.
 //! Commands are trusted, replayable database work: no external I/O or side effects.
 mod arbiter;
+mod stats;
 mod worker;
 pub use arbiter::{Arbiter, Lane, Turn};
 use rusqlite::types::Value;
 use serde_json::Value as Json;
+pub use stats::{WriterSnapshot, WriterStats};
 use std::{
     path::PathBuf,
     sync::Arc,
@@ -106,6 +108,7 @@ pub struct Writer {
     regular: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
     arbiter: Arc<Arbiter>,
+    stats: Arc<WriterStats>,
     max_bytes: usize,
 }
 impl Writer {
@@ -125,19 +128,27 @@ impl Writer {
         connection: rusqlite::Connection,
     ) -> rusqlite::Result<Self> {
         let (sender, receiver) = mpsc::channel(config.capacity);
+        let stats = Arc::new(WriterStats::with_queue(crate::telemetry::queue_probe(
+            &sender,
+        )));
         let writer = Self {
             sender,
             slots: Arc::new(Semaphore::new(config.capacity)),
             regular: Arc::new(Semaphore::new(config.capacity - config.durable_reserve)),
             bytes: Arc::new(Semaphore::new(config.queue_bytes)),
             arbiter: arbiter.clone(),
+            stats: stats.clone(),
             max_bytes: config.queue_bytes,
         };
         std::thread::Builder::new()
             .name("hub-writer".into())
-            .spawn(move || worker::run(connection, receiver, config, arbiter))
+            .spawn(move || worker::run(connection, receiver, config, arbiter, stats))
             .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))?;
         Ok(writer)
+    }
+    /// Live counters for `Telemetry::attach_writer`. Reading them takes no lock.
+    pub fn stats(&self) -> Arc<WriterStats> {
+        self.stats.clone()
     }
     /// Non-durable overload is immediate 503. Durable admission waits to its deadline.
     /// Byte accounting includes command-owned payload and expected reply allocations.

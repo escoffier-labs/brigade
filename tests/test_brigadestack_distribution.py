@@ -14,16 +14,16 @@ import pytest
 
 from tests._posix import requires_process_groups
 
-from brigade import toml_compat
+import tomllib
 
 BRIDGE = Path(__file__).resolve().parents[1] / "distribution/brigadestack"
 
 
 def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():
-    manifest = toml_compat.loads((BRIDGE / "pypi/pyproject.toml").read_text())
+    manifest = tomllib.loads((BRIDGE / "pypi/pyproject.toml").read_text())
     project = manifest["project"]
     assert (project["name"], project["version"]) == ("brigadestack", "0.30.0")
-    assert project["requires-python"] == ">=3.10"
+    assert project["requires-python"] == ">=3.11"
     assert project["dependencies"] == ["brigade-cli==0.30.0"]
     assert project["scripts"] == {"brigadestack": "brigade.cli:process_main"}
     # No discovery of a second brigade package or alternate implementation.

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import os
 import re
 import sqlite3
@@ -10,7 +12,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import toml_compat
+
 from . import worklore_campaigns as campaigns
 from . import worklore_ownership as ownership
 from . import worklore_store as store
@@ -123,8 +125,8 @@ def operator_nodes(
 def _worklore_section(config_path: str | Path | None = None) -> dict[str, Any]:
     path = Path(config_path) if config_path is not None else brigade_home() / FLEET_CONFIG_REL_PATH.name
     try:
-        payload = toml_compat.loads(path.read_text(encoding="utf-8"))
-    except (OSError, toml_compat.TOMLDecodeError):
+        payload = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
         return {}
     fleet = payload.get("fleet") if isinstance(payload, dict) else None
     section = fleet.get("worklore") if isinstance(fleet, dict) else None

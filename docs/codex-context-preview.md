@@ -219,12 +219,12 @@ changed, oversized, or malformed inputs report `MANUAL` with opaque reasons.
 Logical source labels are shown instead of resolved personal paths. Config
 bodies, unrelated values, credentials, and parser diagnostics are never printed.
 
-Present configuration requires stdlib `tomllib`. On Python 3.10 it reports
-`MANUAL` with `config_parser_unavailable`, without using the permissive
-compatibility parser. A platform without non-blocking open support reports
+Present configuration requires trusted stdlib `tomllib` on Python 3.11 or newer.
+An unavailable or shadowed parser reports `MANUAL` with
+`config_parser_unavailable`. A platform without non-blocking open support reports
 `config_nonblocking_unavailable` for present configuration. A missing file
 still permits a default assumption. The explicit supplied-cap preview route
-remains available on supported platforms, including Python 3.10:
+remains available on supported platforms, including Python 3.11:
 
 ```sh
 brigade context preview --target /approved/project --cwd /approved/project \

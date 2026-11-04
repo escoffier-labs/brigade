@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import hashlib
 import json
 import os
@@ -13,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import toml_compat as tomllib
+
 from . import worklore_client
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 from .worklore_brigade import BrigadeObservationError, IDENTITY_RE, normalize_task

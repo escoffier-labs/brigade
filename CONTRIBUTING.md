@@ -8,7 +8,7 @@ External contributions are welcome. This section is the short path. [Pull reques
 
 1. **Pick work.** Look for issues labeled `good first issue` or `help wanted`. If nothing fits, comment on an existing issue or open one before you spend time on a surprise scope.
 2. **Claim it.** Comment on the issue that you are working on it. The maintainer holds off internal lanes for **48 hours** so your branch is not steamrolled.
-3. **Install and verify locally.** Clone with Python 3.10+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change: content-guard for docs, the focused gate while developing code, and the full gate before a code PR.
+3. **Install and verify locally.** Clone with Python 3.11+, then follow [Local dev](#local-dev): use a virtual environment (required on PEP 668-managed Python and on Windows), install dev dependencies, and run the verification path that matches your change: content-guard for docs, the focused gate while developing code, and the full gate before a code PR.
 4. **Open a pull request.** Required CI checks run automatically on the branch. You do not need to dispatch all required checks yourself.
 5. **Review turnaround.** Target an initial review within a few business days once required checks are green. Merge waits on the applicable review and gate rules in [Pull requests](#pull-requests), plus any explicit maintainer hold.
 
@@ -54,7 +54,7 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations. GitHub still blocks merge when any remain.
 
-Merging into `main` is asynchronous. `gh pr merge <number>` adds a pull request whose required checks have passed to the merge queue, or enables auto-merge if checks are still running. No merge-method flag is needed because the queue squashes. The queue reruns `ci.yml` on a `merge_group` event against the combined change and merges only if the required checks pass, so two pull requests that pass separately but conflict in behavior are caught before `main` goes red. `ci-gate` is the only required check. Pull requests run the Python 3.12 test shards. The queue runs 3.10, 3.11, and 3.12, so a failure that only appears on 3.10 or 3.11 surfaces there. A pull request that fails in the queue is removed from it and stays open. Merge verification means waiting until `gh pr view <number> --json state,mergeCommit` reports `MERGED`, not the exit status of `gh pr merge`. The queue ruleset has no bypass actors. Do not use `gh pr merge --admin` to skip it.
+Merging into `main` is asynchronous. `gh pr merge <number>` adds a pull request whose required checks have passed to the merge queue, or enables auto-merge if checks are still running. No merge-method flag is needed because the queue squashes. The queue reruns `ci.yml` on a `merge_group` event against the combined change and merges only if the required checks pass, so two pull requests that pass separately but conflict in behavior are caught before `main` goes red. `ci-gate` is the only required check. Pull requests run the Python 3.12 test shards. The queue runs 3.11 and 3.12, so a failure that only appears on 3.11 surfaces there. A pull request that fails in the queue is removed from it and stays open. Merge verification means waiting until `gh pr view <number> --json state,mergeCommit` reports `MERGED`, not the exit status of `gh pr merge`. The queue ruleset has no bypass actors. Do not use `gh pr merge --admin` to skip it.
 
 For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session. Explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
 
@@ -106,7 +106,7 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 
 ## Local dev
 
-From a repo clone with Python 3.10+:
+From a repo clone with Python 3.11+:
 
 ```bash
 git clone https://github.com/escoffier-labs/brigade.git

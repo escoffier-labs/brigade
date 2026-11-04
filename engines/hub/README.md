@@ -120,13 +120,21 @@ S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
 `GET /metrics` requires the admin bearer token. Node, principal, cookie and
 query credentials do not grant access. It serves metrics text version 0.0.4.
 Writer queue depth, batch size, apply time, commit time, lock wait and aborted
-batches are `NaN` with a `Not yet wired` help line pending S4a. Reader and CPU
-queue depth also remain `NaN`. Checkpoint metrics use S4b's samples when this
+batches read the writer's atomics when the process starts a writer and passes
+`Writer::stats()` to `Telemetry::attach_writer`. They are gauges for the last batch
+the writer finished, except aborted batches, a counter. Lock wait runs from taking a
+command off the queue to holding the hub write lock, the arbiter turn included, and
+is recorded when the wait fails too. The front runs as a pure proxy and starts no
+writer, because the Python upstream commits every write, so these six stay `NaN`
+with a help line that says so. Reader queue depth sums the jobs waiting in the
+front's reader pools, and CPU queue depth reads the CPU pool. Both are 0 when idle,
+and `NaN` only where no pool is attached. Each is a single unlabeled sample with no
+`# TYPE` line, as S9 published it. Checkpoint metrics use S4b's samples when this
 front owns maintenance, including busy results, failures, WAL frames,
 checkpointed frames, WAL bytes and outstanding frames (`checkpoint_stall_frames`).
 The external-upstream mode has no local checkpoint sampler and reports an
 unavailable stall value. Long-poll, memory and webhook metrics arrive with their
-own handlers. No writer or bench code changes in S9.
+own handlers. S9 itself changed no writer or bench code.
 
 Shadow comparisons use the shared `hub-shadow-rules.json` drive policy. Stored
 values are exact. A dedicated read-only, query-only watch connection samples
