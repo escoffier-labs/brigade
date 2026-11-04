@@ -9,9 +9,9 @@ import (
 	"os/exec"
 	"strings"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/ingest"
-	"github.com/escoffier-labs/miseledger/internal/toolpath"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/ingest"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
 // nativeExporter describes a crawler binary that emits miseledger.adapter.v1

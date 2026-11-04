@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
 	_ "modernc.org/sqlite"
 )
 

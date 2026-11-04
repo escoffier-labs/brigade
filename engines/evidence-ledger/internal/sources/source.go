@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
 	"github.com/klauspost/compress/zstd"
 )
 

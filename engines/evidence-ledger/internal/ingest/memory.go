@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/sources/memory"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/memory"
 )
 
 // MemorySourceKind is the native source kind for canonical Markdown memory cards.

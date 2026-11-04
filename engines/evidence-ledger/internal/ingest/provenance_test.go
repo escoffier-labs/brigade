@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/archive"
-	"github.com/escoffier-labs/miseledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/archive"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
 )
 
 func testSecret(t *testing.T) []byte {

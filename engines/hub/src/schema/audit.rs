@@ -65,6 +65,14 @@ fn trace(event: TraceEvent<'_>) {
     }
 }
 pub fn open(path: &Path, flags: OpenFlags) -> Result<Connection, String> {
+    open_with_vfs(path, flags, None)
+}
+
+pub(crate) fn open_with_vfs(
+    path: &Path,
+    flags: OpenFlags,
+    vfs: Option<&str>,
+) -> Result<Connection, String> {
     let routed = match (
         std::env::var_os("HUB_AUDIT_DB"),
         std::env::var_os("HUB_AUDIT_DB_ROUTE"),
@@ -78,7 +86,11 @@ pub fn open(path: &Path, flags: OpenFlags) -> Result<Connection, String> {
         }
         _ => path.to_path_buf(),
     };
-    let c = Connection::open_with_flags(routed, flags).map_err(|e| e.to_string())?;
+    let c = match vfs {
+        Some(vfs) => Connection::open_with_flags_and_vfs(routed, flags, vfs),
+        None => Connection::open_with_flags(routed, flags),
+    }
+    .map_err(|e| e.to_string())?;
     if enabled() {
         c.authorizer(Some(|context: rusqlite::hooks::AuthContext<'_>| {
             let writing = match context.action {

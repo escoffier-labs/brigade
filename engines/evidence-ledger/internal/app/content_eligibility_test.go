@@ -9,8 +9,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/provenance"
-	"github.com/escoffier-labs/miseledger/internal/textnorm"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/provenance"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/textnorm"
 )
 
 // Attack needles are unique, obviously fake prompt-injection text. The

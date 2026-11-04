@@ -1,4 +1,4 @@
-module github.com/escoffier-labs/miseledger
+module github.com/escoffier-labs/brigade/engines/evidence-ledger
 
 go 1.26.0
 
