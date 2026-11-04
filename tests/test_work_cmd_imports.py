@@ -4521,7 +4521,7 @@ def test_cli_work_import_context_from_miseledger_dispatch(tmp_path, monkeypatch)
                 "work",
                 "import",
                 "context",
-                "--from-miseledger",
+                "--from-evidence",
                 "auth receipts",
                 "--target",
                 str(tmp_path),

@@ -1772,7 +1772,7 @@ def test_work_verify_receipt_omits_git_state_outside_git_repo(tmp_path, capsys, 
 def _write_brigade_config(
     tmp_path,
     *,
-    graphtrail_delta_timeout_seconds: float | None = None,
+    code_graph_delta_timeout_seconds: float | None = None,
     capture_before_retry: str | None = None,
 ) -> None:
     payload = {
@@ -1782,8 +1782,8 @@ def _write_brigade_config(
         "owner": "this-repo",
         "includes": [],
     }
-    if graphtrail_delta_timeout_seconds is not None:
-        payload["graphtrail_delta_timeout_seconds"] = graphtrail_delta_timeout_seconds
+    if code_graph_delta_timeout_seconds is not None:
+        payload["code_graph_delta_timeout_seconds"] = code_graph_delta_timeout_seconds
     if capture_before_retry is not None:
         payload["capture_before_retry"] = capture_before_retry
     brigade = tmp_path / ".brigade"
@@ -2222,7 +2222,7 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=25)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
@@ -2248,7 +2248,7 @@ def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(t
 
 def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=25)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     recorded: list[tuple[str, float | None]] = []
@@ -2282,7 +2282,7 @@ def test_work_verify_graphtrail_delta_cli_override_precedes_config(tmp_path, cap
 
 def test_work_verify_graphtrail_delta_slow_sync_succeeds_with_configured_timeout(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=1.0)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=1.0)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
 
@@ -2367,7 +2367,7 @@ def test_work_verify_graphtrail_delta_cold_initial_early_db_timeout_stays_sync_t
 
 def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_orphan_run(tmp_path, capsys):
     _init_git_repo(tmp_path)
-    _write_brigade_config(tmp_path, graphtrail_delta_timeout_seconds=0)
+    _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=0)
     assert _count_verify_run_dirs(tmp_path) == 0
 
     rc = work_cmd.verify_run(
@@ -2379,7 +2379,7 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
 
     assert rc == 2
     assert "error:" in err
-    assert "graphtrail_delta_timeout_seconds must be a positive number" in err
+    assert "code_graph_delta_timeout_seconds must be a positive number" in err
     assert "Traceback" not in err
     assert _count_verify_run_dirs(tmp_path) == 0
 
@@ -2718,7 +2718,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
                 str(tmp_path),
                 "--command",
                 "python3 -m pytest -q",
-                "--graphtrail-timeout",
+                "--code-graph-timeout",
                 "45",
                 "--json",
             ]
