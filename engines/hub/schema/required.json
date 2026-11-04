@@ -1,0 +1,2983 @@
+{
+  "tables": {
+    "action_broker_grants": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["node_id", "TEXT", 0, null, 1, 0],
+        ["revoked_at", "REAL", 0, null, 0, 0],
+        ["subjects", "TEXT", 1, null, 0, 0],
+        ["targets", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_broker_grants_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "action_events": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["action_id", "TEXT", 1, null, 1, 0],
+        ["created_at", "REAL", 1, null, 0, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["event_id", "TEXT", 1, null, 3, 0],
+        ["generation", "INTEGER", 1, null, 2, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_events_1": {
+          "columns": [
+            [0, "action_id", 0, "BINARY", 1],
+            [1, "generation", 0, "BINARY", 1],
+            [2, "event_id", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "action_operator_grants": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["grant_id", "TEXT", 0, null, 1, 0],
+        ["login", "TEXT", 1, null, 0, 0],
+        ["revoked_at", "REAL", 0, null, 0, 0],
+        ["scopes", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_operator_grants_1": {
+          "columns": [
+            [0, "grant_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_action_operator_grants_2": {
+          "columns": [
+            [0, "login", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "action_sessions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["credential_digest", "TEXT", 0, null, 1, 0],
+        ["csrf_digest", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["grant_id", "TEXT", 1, null, 0, 0],
+        ["login", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_sessions_1": {
+          "columns": [
+            [0, "credential_digest", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "action_target_identities": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["identity", "TEXT", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 0, 0],
+        ["target_id", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_target_identities_1": {
+          "columns": [
+            [0, "target_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "action_targets": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["document", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 0, 0],
+        ["target_id", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_action_targets_1": {
+          "columns": [
+            [0, "target_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "admin_stats_snapshots": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["payload_json", "TEXT", 1, null, 0, 0],
+        ["schema", "TEXT", 1, null, 0, 0],
+        ["snapshot_id", "TEXT", 0, null, 1, 0],
+        ["source_set", "TEXT", 1, null, 0, 0],
+        ["taken_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "admin_stats_taken_at": {
+          "columns": [
+            [0, "taken_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX admin_stats_taken_at ON admin_stats_snapshots(taken_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_admin_stats_snapshots_1": {
+          "columns": [
+            [0, "snapshot_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "admin_stats_weeks": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["partial", "INTEGER", 1, null, 0, 0],
+        ["payload_json", "TEXT", 1, null, 0, 0],
+        ["taken_at", "TEXT", 1, null, 0, 0],
+        ["week", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_admin_stats_weeks_1": {
+          "columns": [
+            [0, "week", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "agent_actions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["action_id", "TEXT", 0, null, 1, 0],
+        ["claim_until", "REAL", 0, null, 0, 0],
+        ["client_id", "TEXT", 1, null, 0, 0],
+        ["created_at", "REAL", 1, null, 0, 0],
+        ["delivery", "TEXT", 1, "'none'", 0, 0],
+        ["destination_ref", "TEXT", 0, null, 0, 0],
+        ["destination_thread", "TEXT", 0, null, 0, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["generation", "INTEGER", 1, null, 0, 0],
+        ["grant_id", "TEXT", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 0, 0],
+        ["request_digest", "TEXT", 1, null, 0, 0],
+        ["started_at", "REAL", 0, null, 0, 0],
+        ["status", "TEXT", 1, null, 0, 0],
+        ["target_id", "TEXT", 1, null, 0, 0],
+        ["verification", "TEXT", 1, "'pending'", 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "agent_actions_queue": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "status", 0, "BINARY", 1],
+            [2, "created_at", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX agent_actions_queue ON agent_actions(node_id, status, created_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_agent_actions_1": {
+          "columns": [
+            [0, "action_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_agent_actions_2": {
+          "columns": [
+            [0, "grant_id", 0, "BINARY", 1],
+            [1, "client_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "ci_check_runs": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["attempt", "INTEGER", 1, null, 4, 0],
+        ["kind", "TEXT", 1, null, 2, 0],
+        ["object_id", "INTEGER", 1, null, 3, 0],
+        ["payload", "TEXT", 1, null, 0, 0],
+        ["repo", "TEXT", 1, null, 1, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_ci_check_runs_1": {
+          "columns": [
+            [0, "repo", 0, "BINARY", 1],
+            [1, "kind", 0, "BINARY", 1],
+            [2, "object_id", 0, "BINARY", 1],
+            [3, "attempt", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "ci_invalidations": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["head", "TEXT", 1, null, 2, 0],
+        ["reason", "TEXT", 1, null, 0, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["repo", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_ci_invalidations_1": {
+          "columns": [
+            [0, "repo", 0, "BINARY", 1],
+            [1, "head", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "ci_relay_watermarks": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["cursor", "INTEGER", 1, null, 0, 0],
+        ["relay", "TEXT", 1, null, 2, 0],
+        ["repo", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_ci_relay_watermarks_1": {
+          "columns": [
+            [0, "repo", 0, "BINARY", 1],
+            [1, "relay", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "ci_repo_state": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["last_event_received", "TEXT", 0, null, 0, 0],
+        ["last_reconciled", "TEXT", 0, null, 0, 0],
+        ["observed_at", "TEXT", 0, null, 0, 0],
+        ["refresh_requested", "TEXT", 0, null, 0, 0],
+        ["repo", "TEXT", 0, null, 1, 0],
+        ["snapshot", "TEXT", 0, null, 0, 0],
+        ["visibility", "TEXT", 1, "'unknown'", 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_ci_repo_state_1": {
+          "columns": [
+            [0, "repo", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "ci_runs": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["attempt", "INTEGER", 1, null, 3, 0],
+        ["object_id", "INTEGER", 1, null, 2, 0],
+        ["payload", "TEXT", 1, null, 0, 0],
+        ["repo", "TEXT", 1, null, 1, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_ci_runs_1": {
+          "columns": [
+            [0, "repo", 0, "BINARY", 1],
+            [1, "object_id", 0, "BINARY", 1],
+            [2, "attempt", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "claim_fences": {
+      "autoincrement": false,
+      "checks": ["typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807"],
+      "columns": [
+        ["generation", "INTEGER", 1, null, 0, 0],
+        ["target", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_claim_fences_1": {
+          "columns": [
+            [0, "target", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "claim_retired_holders": {
+      "autoincrement": false,
+      "checks": ["typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807", "typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308"],
+      "columns": [
+        ["generation", "INTEGER", 1, null, 0, 0],
+        ["holder_token", "TEXT", 1, null, 3, 0],
+        ["owner_node", "TEXT", 1, null, 2, 0],
+        ["retired_at", "REAL", 1, null, 0, 0],
+        ["target", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "claim_retired_holders_age": {
+          "columns": [
+            [0, "retired_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX claim_retired_holders_age ON claim_retired_holders (retired_at)",
+          "unique": 0
+        },
+        "claim_retired_holders_node_age": {
+          "columns": [
+            [0, "owner_node", 0, "BINARY", 1],
+            [1, "retired_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX claim_retired_holders_node_age ON claim_retired_holders (owner_node, retired_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_claim_retired_holders_1": {
+          "columns": [
+            [0, "target", 0, "BINARY", 1],
+            [1, "owner_node", 0, "BINARY", 1],
+            [2, "holder_token", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "claims": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["acquired_at", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["harness", "TEXT", 0, null, 0, 0],
+        ["holder_token", "TEXT", 1, null, 0, 0],
+        ["job", "TEXT", 0, null, 0, 0],
+        ["lock_acquired_at", "TEXT", 0, null, 0, 0],
+        ["lock_run_dir", "TEXT", 0, null, 0, 0],
+        ["lock_token", "TEXT", 0, null, 0, 0],
+        ["owner_conductor", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["renewed_at", "TEXT", 1, null, 0, 0],
+        ["role", "TEXT", 0, null, 0, 0],
+        ["session", "TEXT", 0, null, 0, 0],
+        ["target", "TEXT", 1, null, 1, 0],
+        ["ttl_seconds", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "claims_owner_expiry": {
+          "columns": [
+            [0, "owner_node", 0, "BINARY", 1],
+            [1, "expires_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX claims_owner_expiry ON claims (owner_node, expires_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_claims_1": {
+          "columns": [
+            [0, "target", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "cloud_global_state": {
+      "autoincrement": false,
+      "checks": ["limit_count BETWEEN 0 AND 64", "singleton = 1"],
+      "columns": [
+        ["limit_count", "INTEGER", 1, null, 0, 0],
+        ["singleton", "INTEGER", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "cloud_leases": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["admitted_at", "TEXT", 1, null, 0, 0],
+        ["artifact_ref", "TEXT", 0, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["holder_token", "TEXT", 1, null, 0, 0],
+        ["label", "TEXT", 0, null, 0, 0],
+        ["lease_id", "TEXT", 1, null, 1, 0],
+        ["owner_conductor", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["prompt_hash", "TEXT", 0, null, 0, 0],
+        ["provider", "TEXT", 1, null, 0, 0],
+        ["provider_task_id", "TEXT", 0, null, 0, 0],
+        ["released_at", "TEXT", 0, null, 0, 0],
+        ["renewed_at", "TEXT", 1, null, 0, 0],
+        ["repo", "TEXT", 0, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["ttl_seconds", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "cloud_leases_active": {
+          "columns": [
+            [0, "provider", 0, "BINARY", 1],
+            [1, "expires_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX cloud_leases_active ON cloud_leases (provider, expires_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_cloud_leases_1": {
+          "columns": [
+            [0, "lease_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "cloud_provider_state": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["circuit_state", "TEXT", 1, null, 0, 0],
+        ["enabled", "INTEGER", 1, null, 0, 0],
+        ["expires_at", "TEXT", 0, null, 0, 0],
+        ["hosted", "INTEGER", 1, null, 0, 0],
+        ["limit_count", "INTEGER", 1, null, 0, 0],
+        ["provider", "TEXT", 1, null, 1, 0],
+        ["reason", "TEXT", 0, null, 0, 0],
+        ["reset_at", "TEXT", 0, null, 0, 0],
+        ["subscription_pool", "TEXT", 0, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_cloud_provider_state_1": {
+          "columns": [
+            [0, "provider", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "dashboard_enrollment_codes": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["code_digest", "TEXT", 0, null, 1, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["issued_at", "REAL", 1, null, 0, 0],
+        ["label", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_dashboard_enrollment_codes_1": {
+          "columns": [
+            [0, "code_digest", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "dashboard_sessions": {
+      "autoincrement": false,
+      "checks": ["scope = 'read-only'"],
+      "columns": [
+        ["created_at", "REAL", 1, null, 0, 0],
+        ["credential_digest", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["label", "TEXT", 0, null, 0, 0],
+        ["revoked_at", "REAL", 0, null, 0, 0],
+        ["scope", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_dashboard_sessions_1": {
+          "columns": [
+            [0, "session_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_dashboard_sessions_2": {
+          "columns": [
+            [0, "credential_digest", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "events": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["capability_fingerprint", "TEXT", 0, null, 0, 0],
+        ["context", "TEXT", 0, null, 0, 0],
+        ["digest", "TEXT", 1, null, 4, 0],
+        ["exit_status", "INTEGER", 0, null, 0, 0],
+        ["harness", "TEXT", 0, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["repo", "TEXT", 0, null, 0, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["run_id", "TEXT", 1, null, 2, 0],
+        ["seat", "TEXT", 0, null, 0, 0],
+        ["sequence", "INTEGER", 1, null, 3, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["ts", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "events_grokbot_run_seq": {
+          "columns": [
+            [0, "run_id", 0, "BINARY", 1],
+            [1, "sequence", 0, "BINARY", 1],
+            [2, "received_at", 0, "BINARY", 1],
+            [3, "digest", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX events_grokbot_run_seq ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'",
+          "unique": 0
+        },
+        "events_received_at": {
+          "columns": [
+            [0, "received_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX events_received_at ON events (received_at)",
+          "unique": 0
+        },
+        "events_run_seq": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "run_id", 0, "BINARY", 1],
+            [2, "sequence", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX events_run_seq ON events (node_id, run_id, sequence)",
+          "unique": 0
+        },
+        "sqlite_autoindex_events_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "run_id", 0, "BINARY", 1],
+            [2, "sequence", 0, "BINARY", 1],
+            [3, "digest", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_audit_log": {
+      "autoincrement": true,
+      "checks": [],
+      "columns": [
+        ["action", "TEXT", 1, null, 0, 0],
+        ["actor", "TEXT", 1, null, 0, 0],
+        ["at", "TEXT", 1, null, 0, 0],
+        ["detail", "TEXT", 1, null, 0, 0],
+        ["id", "INTEGER", 0, null, 1, 0],
+        ["subject", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "fleet_dispatch_intents": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["decision_id", "TEXT", 1, null, 1, 0],
+        ["origin_node", "TEXT", 1, null, 0, 0],
+        ["reservation_id", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["target_node", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_dispatch_intents_1": {
+          "columns": [
+            [0, "decision_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_event_attempts": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["attempted_at", "REAL", 1, null, 0, 0],
+        ["subscription_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_event_attempts_recent": {
+          "columns": [
+            [0, "subscription_id", 0, "BINARY", 1],
+            [1, "attempted_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_event_attempts_recent ON fleet_event_attempts (subscription_id, attempted_at)",
+          "unique": 0
+        }
+      }
+    },
+    "fleet_event_deliveries": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["attempted_at", "REAL", 0, null, 0, 0],
+        ["attempts", "INTEGER", 1, "0", 0, 0],
+        ["next_attempt", "REAL", 1, null, 0, 0],
+        ["seq", "INTEGER", 1, null, 1, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["subscription_id", "TEXT", 1, null, 2, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_event_deliveries_due": {
+          "columns": [
+            [0, "state", 0, "BINARY", 1],
+            [1, "next_attempt", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_event_deliveries_due ON fleet_event_deliveries (state, next_attempt)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_event_deliveries_1": {
+          "columns": [
+            [0, "seq", 0, "BINARY", 1],
+            [1, "subscription_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_event_subscriptions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["arguments", "TEXT", 1, null, 0, 0],
+        ["created_at", "REAL", 1, null, 0, 0],
+        ["cursor_seq", "INTEGER", 1, "0", 0, 0],
+        ["expires_at", "REAL", 0, null, 0, 0],
+        ["failures", "INTEGER", 1, "0", 0, 0],
+        ["filter_value", "TEXT", 0, null, 0, 0],
+        ["generation", "TEXT", 1, "''", 0, 0],
+        ["id", "TEXT", 1, null, 1, 0],
+        ["name", "TEXT", 1, null, 0, 0],
+        ["previous_secret", "TEXT", 0, null, 0, 0],
+        ["principal_id", "TEXT", 1, null, 0, 0],
+        ["rotate_until", "REAL", 0, null, 0, 0],
+        ["secret", "TEXT", 1, null, 0, 0],
+        ["url", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_event_subscriptions_name": {
+          "columns": [
+            [0, "name", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_event_subscriptions_name ON fleet_event_subscriptions (name)",
+          "unique": 0
+        },
+        "fleet_event_subscriptions_principal": {
+          "columns": [
+            [0, "principal_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_event_subscriptions_principal ON fleet_event_subscriptions (principal_id)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_event_subscriptions_1": {
+          "columns": [
+            [0, "id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_event_verifications": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["attempted_at", "REAL", 1, null, 0, 0],
+        ["principal_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_event_verifications_recent": {
+          "columns": [
+            [0, "attempted_at", 0, "BINARY", 1],
+            [1, "principal_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_event_verifications_recent ON fleet_event_verifications (attempted_at, principal_id)",
+          "unique": 0
+        }
+      }
+    },
+    "fleet_events": {
+      "autoincrement": true,
+      "checks": [],
+      "columns": [
+        ["created_at", "REAL", 1, null, 0, 0],
+        ["data", "TEXT", 1, null, 0, 0],
+        ["event_id", "TEXT", 1, null, 0, 0],
+        ["name", "TEXT", 1, null, 0, 0],
+        ["producer", "TEXT", 1, null, 0, 0],
+        ["seq", "INTEGER", 0, null, 1, 0],
+        ["subject", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_events_producer": {
+          "columns": [
+            [0, "name", 0, "BINARY", 1],
+            [1, "producer", 0, "BINARY", 1],
+            [2, "created_at", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_events_producer ON fleet_events (name, producer, created_at)",
+          "unique": 0
+        },
+        "fleet_events_subject": {
+          "columns": [
+            [0, "name", 0, "BINARY", 1],
+            [1, "subject", 0, "BINARY", 1],
+            [2, "created_at", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_events_subject ON fleet_events (name, subject, created_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_events_1": {
+          "columns": [
+            [0, "event_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_machine_telemetry": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["active_claims", "TEXT", 1, null, 0, 0],
+        ["credential_state", "TEXT", 1, null, 0, 0],
+        ["load", "REAL", 0, null, 0, 0],
+        ["machine", "TEXT", 0, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["observed_at", "TEXT", 1, null, 0, 0],
+        ["observed_id", "TEXT", 1, null, 0, 0],
+        ["running", "TEXT", 1, null, 0, 0],
+        ["status", "TEXT", 1, null, 0, 0],
+        ["ttl_seconds", "INTEGER", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["usable_seats", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_machine_telemetry_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_mesh_statements": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["kind", "TEXT", 0, null, 1, 0],
+        ["seq", "INTEGER", 1, null, 0, 0],
+        ["statement", "TEXT", 1, null, 0, 0],
+        ["uploaded_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_mesh_statements_1": {
+          "columns": [
+            [0, "kind", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_message_keys": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["compromised_from", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["kid", "TEXT", 0, null, 1, 0],
+        ["principal_id", "TEXT", 1, null, 0, 0],
+        ["record", "TEXT", 1, null, 0, 0],
+        ["retired_at", "TEXT", 0, null, 0, 0],
+        ["revoked_at", "TEXT", 0, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_message_keys_active": {
+          "columns": [
+            [0, "principal_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE UNIQUE INDEX fleet_message_keys_active ON fleet_message_keys(principal_id) WHERE state='active'",
+          "unique": 1
+        },
+        "fleet_message_keys_principal": {
+          "columns": [
+            [0, "principal_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_message_keys_principal ON fleet_message_keys(principal_id)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_message_keys_1": {
+          "columns": [
+            [0, "kid", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_message_principals": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["authorization_enrollment_epoch", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["enrollment_id", "TEXT", 0, null, 0, 0],
+        ["grant_epoch", "TEXT", 0, null, 0, 0],
+        ["label", "TEXT", 1, null, 0, 0],
+        ["name", "TEXT", 1, null, 0, 0],
+        ["person", "TEXT", 0, null, 0, 0],
+        ["principal_id", "TEXT", 0, null, 1, 0],
+        ["revoked_at", "TEXT", 0, null, 0, 0],
+        ["role", "TEXT", 1, "'agent'", 0, 0],
+        ["token_hash", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_message_principals_1": {
+          "columns": [
+            [0, "principal_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_message_principals_2": {
+          "columns": [
+            [0, "name", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_message_principals_3": {
+          "columns": [
+            [0, "token_hash", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_message_send_grants": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["pattern", "TEXT", 1, null, 2, 0],
+        ["principal_id", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_message_send_grants_1": {
+          "columns": [
+            [0, "principal_id", 0, "BINARY", 1],
+            [1, "pattern", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_message_sends": {
+      "autoincrement": true,
+      "checks": [],
+      "columns": [
+        ["client_id", "TEXT", 1, null, 0, 0],
+        ["id", "INTEGER", 0, null, 1, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["sender", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_message_sends_received": {
+          "columns": [
+            [0, "received_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_message_sends_received ON fleet_message_sends (received_at)",
+          "unique": 0
+        },
+        "fleet_message_sends_sender_received": {
+          "columns": [
+            [0, "sender", 0, "BINARY", 1],
+            [1, "received_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_message_sends_sender_received ON fleet_message_sends (sender, received_at)",
+          "unique": 0
+        }
+      }
+    },
+    "fleet_messages": {
+      "autoincrement": true,
+      "checks": [],
+      "columns": [
+        ["acked_at", "TEXT", 0, null, 0, 0],
+        ["acked_by", "TEXT", 0, null, 0, 0],
+        ["body", "TEXT", 1, null, 0, 0],
+        ["client_id", "TEXT", 1, null, 0, 0],
+        ["content_state", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["envelope", "TEXT", 0, null, 0, 0],
+        ["envelope_bytes", "INTEGER", 0, null, 0, 0],
+        ["id", "INTEGER", 0, null, 1, 0],
+        ["kind", "TEXT", 0, null, 0, 0],
+        ["payload_hash", "TEXT", 1, null, 0, 0],
+        ["priority", "TEXT", 1, null, 0, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["recipient", "TEXT", 1, null, 0, 0],
+        ["reference", "TEXT", 0, null, 0, 0],
+        ["reply_to", "INTEGER", 0, null, 0, 0],
+        ["sealed_reply_to", "INTEGER", 0, null, 0, 0],
+        ["sender", "TEXT", 1, null, 0, 0],
+        ["sender_label", "TEXT", 0, null, 0, 0],
+        ["subject", "TEXT", 1, null, 0, 0],
+        ["thread", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "fleet_messages", "reply_to", "id", "NO ACTION", "NO ACTION", "NONE"]
+      ],
+      "indexes": {
+        "fleet_messages_created_at": {
+          "columns": [
+            [0, "created_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_messages_created_at ON fleet_messages (created_at)",
+          "unique": 0
+        },
+        "fleet_messages_inbox": {
+          "columns": [
+            [0, "recipient", 0, "BINARY", 1],
+            [1, "id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_messages_inbox ON fleet_messages (recipient, id)",
+          "unique": 0
+        },
+        "fleet_messages_reply_to": {
+          "columns": [
+            [0, "reply_to", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_messages_reply_to ON fleet_messages (reply_to)",
+          "unique": 0
+        },
+        "fleet_messages_sealed_acked": {
+          "columns": [
+            [0, "acked_at", 0, "BINARY", 1],
+            [1, "id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'",
+          "unique": 0
+        },
+        "fleet_messages_sender": {
+          "columns": [
+            [0, "sender", 0, "BINARY", 1],
+            [1, "id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_messages_sender ON fleet_messages (sender, id)",
+          "unique": 0
+        },
+        "fleet_messages_sender_client": {
+          "columns": [
+            [0, "sender", 0, "BINARY", 1],
+            [1, "client_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE UNIQUE INDEX fleet_messages_sender_client ON fleet_messages (sender, client_id)",
+          "unique": 1
+        },
+        "fleet_messages_unacked_recipient": {
+          "columns": [
+            [0, "recipient", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX fleet_messages_unacked_recipient ON fleet_messages (recipient) WHERE acked_at IS NULL",
+          "unique": 0
+        }
+      }
+    },
+    "fleet_policy_acknowledged": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["acknowledged_at", "TEXT", 1, null, 0, 0],
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["context_hash", "TEXT", 0, null, 0, 0],
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["effective", "TEXT", 1, null, 0, 0],
+        ["external_session_id", "TEXT", 1, null, 0, 0],
+        ["loaded_at", "TEXT", 1, null, 0, 0],
+        ["origin", "TEXT", 1, null, 0, 0],
+        ["override_reason", "TEXT", 0, null, 0, 0],
+        ["overrides", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["receipt_key", "TEXT", 1, null, 1, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["revision", "INTEGER", 1, null, 0, 0],
+        ["selected", "TEXT", 0, null, 0, 0],
+        ["source", "TEXT", 1, null, 0, 0],
+        ["sources", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_policy_ack_ext_session": {
+          "columns": [
+            [0, "external_session_id", 0, "BINARY", 1],
+            [1, "consumer", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_policy_ack_ext_session ON fleet_policy_acknowledged (external_session_id, consumer)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_policy_acknowledged_1": {
+          "columns": [
+            [0, "receipt_key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_policy_acknowledged_history": {
+      "autoincrement": true,
+      "checks": [],
+      "columns": [
+        ["acknowledged_at", "TEXT", 1, null, 0, 0],
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["context_hash", "TEXT", 0, null, 0, 0],
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["effective", "TEXT", 1, null, 0, 0],
+        ["external_session_id", "TEXT", 1, null, 0, 0],
+        ["history_id", "INTEGER", 0, null, 1, 0],
+        ["loaded_at", "TEXT", 1, null, 0, 0],
+        ["origin", "TEXT", 1, null, 0, 0],
+        ["override_reason", "TEXT", 0, null, 0, 0],
+        ["overrides", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["receipt_key", "TEXT", 1, null, 0, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["revision", "INTEGER", 1, null, 0, 0],
+        ["selected", "TEXT", 0, null, 0, 0],
+        ["source", "TEXT", 1, null, 0, 0],
+        ["sources", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_policy_ack_history_key": {
+          "columns": [
+            [0, "receipt_key", 0, "BINARY", 1],
+            [1, "revision", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_policy_ack_history_key ON fleet_policy_acknowledged_history (receipt_key, revision)",
+          "unique": 0
+        }
+      }
+    },
+    "fleet_policy_delegations": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["adapter", "TEXT", 1, null, 0, 0],
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["decision_id", "TEXT", 1, null, 0, 0],
+        ["delegation_id", "TEXT", 1, null, 1, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["expires_at", "TEXT", 1, null, 0, 0],
+        ["origin_node", "TEXT", 1, null, 0, 0],
+        ["parent_metadata", "TEXT", 0, null, 0, 0],
+        ["parent_request_id", "TEXT", 1, null, 0, 0],
+        ["policy_digest", "TEXT", 1, null, 0, 0],
+        ["policy_version", "INTEGER", 1, null, 0, 0],
+        ["repo_identity", "TEXT", 1, null, 0, 0],
+        ["reservation_id", "TEXT", 1, null, 0, 0],
+        ["seat", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 0, 0],
+        ["source_revision", "TEXT", 1, null, 0, 0],
+        ["target_machine", "TEXT", 1, null, 0, 0],
+        ["target_node", "TEXT", 1, null, 0, 0],
+        ["workload", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "idx_delegation_decision": {
+          "columns": [
+            [0, "decision_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE UNIQUE INDEX idx_delegation_decision ON fleet_policy_delegations (decision_id)",
+          "unique": 1
+        },
+        "idx_delegation_parent_origin": {
+          "columns": [
+            [0, "origin_node", 0, "BINARY", 1],
+            [1, "parent_request_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE UNIQUE INDEX idx_delegation_parent_origin ON fleet_policy_delegations (origin_node, parent_request_id)",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_policy_delegations_1": {
+          "columns": [
+            [0, "delegation_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_policy_meta": {
+      "autoincrement": false,
+      "checks": ["singleton = 1"],
+      "columns": [
+        ["current_revision", "INTEGER", 1, null, 0, 0],
+        ["singleton", "INTEGER", 0, null, 1, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["updated_by", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "fleet_policy_pending": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["context_hash", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["effective", "TEXT", 1, null, 0, 0],
+        ["instructions", "TEXT", 0, null, 0, 0],
+        ["origin", "TEXT", 1, null, 0, 0],
+        ["override_reason", "TEXT", 0, null, 0, 0],
+        ["overrides", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["pending_key", "TEXT", 1, null, 1, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["revision", "INTEGER", 1, null, 0, 0],
+        ["selected", "TEXT", 0, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 0, 0],
+        ["source", "TEXT", 1, null, 0, 0],
+        ["sources", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_policy_pending_session": {
+          "columns": [
+            [0, "session_id", 0, "BINARY", 1],
+            [1, "consumer", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_policy_pending_session ON fleet_policy_pending (session_id, consumer)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_policy_pending_1": {
+          "columns": [
+            [0, "pending_key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_policy_revisions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["actor", "TEXT", 1, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["parent_revision", "INTEGER", 0, null, 0, 0],
+        ["reason", "TEXT", 1, null, 0, 0],
+        ["revision", "INTEGER", 0, null, 1, 0],
+        ["schema", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "fleet_policy_sessions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["digest", "TEXT", 0, null, 0, 0],
+        ["loaded_at", "TEXT", 1, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["refresh_detail", "TEXT", 0, null, 0, 0],
+        ["refresh_requested_at", "TEXT", 0, null, 0, 0],
+        ["refresh_state", "TEXT", 1, "'none'", 0, 0],
+        ["refresh_updated_at", "TEXT", 0, null, 0, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["revision", "INTEGER", 0, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 1, 0],
+        ["source", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_policy_sessions_revision": {
+          "columns": [
+            [0, "revision", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_policy_sessions_revision ON fleet_policy_sessions (revision)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_policy_sessions_1": {
+          "columns": [
+            [0, "session_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_questions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["answer", "TEXT", 0, null, 0, 0],
+        ["answer_id", "INTEGER", 0, null, 0, 0],
+        ["answered_at", "TEXT", 0, null, 0, 0],
+        ["answered_by", "TEXT", 0, null, 0, 0],
+        ["caller", "TEXT", 1, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["deadline", "TEXT", 1, null, 0, 0],
+        ["generation", "TEXT", 1, null, 0, 0],
+        ["late_answer_message_id", "INTEGER", 0, null, 0, 0],
+        ["late_answered_at", "TEXT", 0, null, 0, 0],
+        ["message_id", "INTEGER", 1, null, 0, 0],
+        ["operator", "TEXT", 1, null, 0, 0],
+        ["operator_reply_after_desktop_at", "TEXT", 0, null, 0, 0],
+        ["operator_reply_after_desktop_message_id", "INTEGER", 0, null, 0, 0],
+        ["payload_hash", "TEXT", 1, null, 0, 0],
+        ["question", "TEXT", 1, null, 0, 0],
+        ["question_id", "TEXT", 0, null, 1, 0],
+        ["request_id", "TEXT", 1, null, 0, 0],
+        ["source", "TEXT", 0, null, 0, 0],
+        ["status", "TEXT", 1, "'pending'", 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_questions_created_at": {
+          "columns": [
+            [0, "created_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_questions_created_at ON fleet_questions(created_at)",
+          "unique": 0
+        },
+        "fleet_questions_deadline": {
+          "columns": [
+            [0, "status", 0, "BINARY", 1],
+            [1, "deadline", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_questions_deadline ON fleet_questions(status,deadline)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_questions_1": {
+          "columns": [
+            [0, "question_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_questions_2": {
+          "columns": [
+            [0, "caller", 0, "BINARY", 1],
+            [1, "generation", 0, "BINARY", 1],
+            [2, "request_id", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_quota_meta": {
+      "autoincrement": false,
+      "checks": ["singleton = 1"],
+      "columns": [
+        ["singleton", "INTEGER", 0, null, 1, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["version", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "fleet_quota_observations": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["account_id", "TEXT", 1, null, 0, 0],
+        ["collected_at", "TEXT", 1, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["digest", "TEXT", 1, null, 0, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["expires_at", "TEXT", 0, null, 0, 0],
+        ["observation_id", "TEXT", 1, null, 1, 0],
+        ["overrides_observation_id", "TEXT", 0, null, 0, 0],
+        ["pool_id", "TEXT", 1, null, 0, 0],
+        ["provider", "TEXT", 1, null, 0, 0],
+        ["provider_time", "TEXT", 0, null, 0, 0],
+        ["raw", "TEXT", 1, null, 0, 0],
+        ["reason", "TEXT", 0, null, 0, 0],
+        ["source", "TEXT", 1, null, 0, 0],
+        ["source_ref", "TEXT", 0, null, 0, 0],
+        ["status", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_quota_observations_pool": {
+          "columns": [
+            [0, "pool_id", 0, "BINARY", 1],
+            [1, "account_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_quota_observations_pool ON fleet_quota_observations (pool_id, account_id)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_quota_observations_1": {
+          "columns": [
+            [0, "observation_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_read_snapshot_groups": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["kind", "TEXT", 1, null, 2, 0],
+        ["row_count", "INTEGER", 1, null, 0, 0],
+        ["snapshot_id", "TEXT", 1, null, 1, 0],
+        ["total", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_read_snapshot_groups_1": {
+          "columns": [
+            [0, "snapshot_id", 0, "BINARY", 1],
+            [1, "kind", 0, "BINARY", 1],
+            [2, "row_count", 0, "BINARY", 0],
+            [3, "total", 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_read_snapshot_rows": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["caller", "TEXT", 1, null, 0, 0],
+        ["kind", "TEXT", 1, null, 2, 0],
+        ["ordinal", "INTEGER", 1, null, 3, 0],
+        ["payload", "TEXT", 1, null, 0, 0],
+        ["recipient", "TEXT", 1, null, 0, 0],
+        ["snapshot_id", "TEXT", 1, null, 1, 0],
+        ["visible", "INTEGER", 1, null, 0, 0],
+        ["wire_bytes", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_read_snapshot_caller": {
+          "columns": [
+            [0, "caller", 0, "BINARY", 1],
+            [1, "snapshot_id", 0, "BINARY", 0],
+            [2, "kind", 0, "BINARY", 0],
+            [3, "ordinal", 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_read_snapshot_caller ON fleet_read_snapshot_rows(caller)",
+          "unique": 0
+        },
+        "fleet_read_snapshot_recipient": {
+          "columns": [
+            [0, "recipient", 0, "BINARY", 1],
+            [1, "snapshot_id", 0, "BINARY", 0],
+            [2, "kind", 0, "BINARY", 0],
+            [3, "ordinal", 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_read_snapshot_recipient ON fleet_read_snapshot_rows(recipient)",
+          "unique": 0
+        },
+        "fleet_read_snapshot_visible": {
+          "columns": [
+            [0, "snapshot_id", 0, "BINARY", 1],
+            [1, "kind", 0, "BINARY", 1],
+            [2, "visible", 0, "BINARY", 1],
+            [3, "ordinal", 0, "BINARY", 1]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_read_snapshot_visible ON fleet_read_snapshot_rows(snapshot_id,kind,visible,ordinal)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_read_snapshot_rows_1": {
+          "columns": [
+            [0, "snapshot_id", 0, "BINARY", 1],
+            [1, "kind", 0, "BINARY", 1],
+            [2, "ordinal", 0, "BINARY", 1],
+            [3, "caller", 0, "BINARY", 0],
+            [4, "recipient", 0, "BINARY", 0],
+            [5, "payload", 0, "BINARY", 0],
+            [6, "wire_bytes", 0, "BINARY", 0],
+            [7, "visible", 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_read_snapshots": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["caller", "TEXT", 1, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["last_access", "REAL", 1, null, 0, 0],
+        ["payload", "TEXT", 1, null, 0, 0],
+        ["payload_bytes", "INTEGER", 1, null, 0, 0],
+        ["query_hash", "TEXT", 1, null, 0, 0],
+        ["snapshot_id", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_read_snapshots_expiry": {
+          "columns": [
+            [0, "expires_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_read_snapshots_expiry ON fleet_read_snapshots(expires_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_read_snapshots_1": {
+          "columns": [
+            [0, "snapshot_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_reservations": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["accepted", "INTEGER", 1, "0", 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["decision_id", "TEXT", 1, null, 0, 0],
+        ["expires_at", "TEXT", 1, null, 0, 0],
+        ["machine", "TEXT", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 0, 0],
+        ["origin_node", "TEXT", 1, null, 0, 0],
+        ["reservation_id", "TEXT", 1, null, 1, 0],
+        ["seat", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "fleet_reservations_machine": {
+          "columns": [
+            [0, "machine", 0, "BINARY", 1],
+            [1, "state", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_reservations_machine ON fleet_reservations (machine, state)",
+          "unique": 0
+        },
+        "fleet_reservations_node": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "state", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX fleet_reservations_node ON fleet_reservations (node_id, state)",
+          "unique": 0
+        },
+        "sqlite_autoindex_fleet_reservations_1": {
+          "columns": [
+            [0, "reservation_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "fleet_route_decisions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["admission_generation", "INTEGER", 1, "0", 0, 0],
+        ["consumer", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["decision_id", "TEXT", 1, null, 1, 0],
+        ["document", "TEXT", 1, null, 0, 0],
+        ["origin", "TEXT", 0, null, 0, 0],
+        ["origin_node", "TEXT", 1, null, 0, 0],
+        ["override_reason", "TEXT", 0, null, 0, 0],
+        ["policy_digest", "TEXT", 1, null, 0, 0],
+        ["policy_version", "INTEGER", 1, null, 0, 0],
+        ["reason", "TEXT", 0, null, 0, 0],
+        ["repo_identity", "TEXT", 0, null, 0, 0],
+        ["request_digest", "TEXT", 1, null, 0, 0],
+        ["request_document", "TEXT", 0, null, 0, 0],
+        ["request_key", "TEXT", 1, null, 0, 0],
+        ["reservation_id", "TEXT", 0, null, 0, 0],
+        ["selected_machine", "TEXT", 0, null, 0, 0],
+        ["selected_seat", "TEXT", 0, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 0, 0],
+        ["work_id", "TEXT", 0, null, 0, 0],
+        ["workload", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_fleet_route_decisions_1": {
+          "columns": [
+            [0, "decision_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_fleet_route_decisions_2": {
+          "columns": [
+            [0, "request_key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "grokbot_actor_policy": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["actor_kind", "TEXT", 1, null, 0, 0],
+        ["enabled", "INTEGER", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["queue_id", "TEXT", 1, null, 0, 0],
+        ["queue_owner_node_id", "TEXT", 1, null, 0, 0],
+        ["role", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_grokbot_actor_policy_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "grokbot_jobs": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["artifact_digest", "TEXT", 0, null, 0, 0],
+        ["artifact_kind", "TEXT", 1, null, 0, 0],
+        ["artifact_ref", "TEXT", 0, null, 0, 0],
+        ["artifact_size", "INTEGER", 0, null, 0, 0],
+        ["cancel_requested_at", "TEXT", 0, null, 0, 0],
+        ["claimant_node", "TEXT", 0, null, 0, 0],
+        ["claimant_worker", "TEXT", 0, null, 0, 0],
+        ["claimed_at", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["idempotency_key_hash", "TEXT", 1, null, 0, 0],
+        ["item_revision", "INTEGER", 1, null, 0, 0],
+        ["job_id", "TEXT", 1, null, 1, 0],
+        ["label", "TEXT", 1, null, 0, 0],
+        ["lease_expires_at", "TEXT", 0, null, 0, 0],
+        ["lease_generation", "INTEGER", 0, null, 0, 0],
+        ["lease_token_digest", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 0, null, 0, 0],
+        ["private_snapshot_id", "TEXT", 0, null, 0, 0],
+        ["queue_id", "TEXT", 0, null, 0, 0],
+        ["queue_ttl_seconds", "INTEGER", 0, null, 0, 0],
+        ["queued_at", "TEXT", 1, null, 0, 0],
+        ["repository", "TEXT", 1, null, 0, 0],
+        ["role", "TEXT", 1, null, 0, 0],
+        ["sequence", "INTEGER", 1, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["task_digest", "TEXT", 1, null, 0, 0],
+        ["timeout_seconds", "INTEGER", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "grokbot_jobs_queue": {
+          "columns": [
+            [0, "queue_id", 0, "BINARY", 1],
+            [1, "role", 0, "BINARY", 1],
+            [2, "state", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX grokbot_jobs_queue ON grokbot_jobs (queue_id, role, state)",
+          "unique": 0
+        },
+        "grokbot_jobs_role": {
+          "columns": [
+            [0, "role", 0, "BINARY", 1],
+            [1, "state", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX grokbot_jobs_role ON grokbot_jobs (role, state)",
+          "unique": 0
+        },
+        "grokbot_jobs_state": {
+          "columns": [
+            [0, "state", 0, "BINARY", 1],
+            [1, "updated_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX grokbot_jobs_state ON grokbot_jobs (state, updated_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_grokbot_jobs_1": {
+          "columns": [
+            [0, "job_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_grokbot_jobs_2": {
+          "columns": [
+            [0, "idempotency_key_hash", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "grokbot_operations": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["action", "TEXT", 1, null, 0, 0],
+        ["actor_node_id", "TEXT", 0, null, 0, 0],
+        ["job_id", "TEXT", 1, null, 1, 0],
+        ["operation_id", "TEXT", 1, null, 2, 0],
+        ["queue_id", "TEXT", 0, null, 0, 0],
+        ["queue_owner_node_id", "TEXT", 0, null, 0, 0],
+        ["request_digest", "TEXT", 1, null, 0, 0],
+        ["result_json", "TEXT", 1, null, 0, 0],
+        ["result_revision", "INTEGER", 1, null, 0, 0],
+        ["result_state", "TEXT", 1, null, 0, 0],
+        ["timestamp", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_grokbot_operations_1": {
+          "columns": [
+            [0, "job_id", 0, "BINARY", 1],
+            [1, "operation_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "hub_meta": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["key", "TEXT", 0, null, 1, 0],
+        ["value", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_hub_meta_1": {
+          "columns": [
+            [0, "key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "interactive_sessions": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["branch", "TEXT", 0, null, 0, 0],
+        ["checkout_path", "TEXT", 1, null, 0, 0],
+        ["cloud_context_json", "TEXT", 0, null, 0, 0],
+        ["dirty_paths_json", "TEXT", 1, null, 0, 0],
+        ["dirty_truncated", "INTEGER", 1, null, 0, 0],
+        ["ended_at", "TEXT", 0, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["harness", "TEXT", 1, null, 2, 0],
+        ["heartbeat_at", "TEXT", 1, null, 0, 0],
+        ["identity_scope", "TEXT", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["provider_link_json", "TEXT", 0, null, 0, 0],
+        ["repo_identity", "TEXT", 1, null, 4, 0],
+        ["repo_label", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 1, null, 3, 0],
+        ["started_at", "TEXT", 1, null, 0, 0],
+        ["state", "TEXT", 1, null, 0, 0],
+        ["ttl_seconds", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_interactive_sessions_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "harness", 0, "BINARY", 1],
+            [2, "session_id", 0, "BINARY", 1],
+            [3, "repo_identity", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_admission_audit": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["consumer", "TEXT", 1, null, 0, 0],
+        ["consumer_binding", "TEXT", 0, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["decision", "TEXT", 1, null, 0, 0],
+        ["expires_at", "TEXT", 1, null, 0, 0],
+        ["model", "TEXT", 0, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["phase", "TEXT", 1, null, 3, 0],
+        ["provider", "TEXT", 0, null, 0, 0],
+        ["reasoning", "TEXT", 0, null, 0, 0],
+        ["request_digest", "TEXT", 1, null, 0, 0],
+        ["request_id", "TEXT", 1, null, 2, 0],
+        ["roster_digest", "TEXT", 1, null, 0, 0],
+        ["roster_revision", "INTEGER", 1, null, 0, 0],
+        ["seat", "TEXT", 0, null, 0, 0],
+        ["source", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_model_admission_audit_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "request_id", 0, "BINARY", 1],
+            [2, "phase", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_consumer_defaults": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["consumer", "TEXT", 1, null, 1, 0],
+        ["seat", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_model_consumer_defaults_1": {
+          "columns": [
+            [0, "consumer", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_launch_proofs": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["consumer", "TEXT", 1, null, 2, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["policy_session_id", "TEXT", 1, null, 3, 0],
+        ["proof_key", "TEXT", 1, null, 4, 0],
+        ["request_digest", "TEXT", 1, null, 0, 0],
+        ["request_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_model_launch_proofs_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "consumer", 0, "BINARY", 1],
+            [2, "policy_session_id", 0, "BINARY", 1],
+            [3, "proof_key", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_leases": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["account_id", "TEXT", 0, null, 0, 0],
+        ["acquired_at", "TEXT", 1, null, 0, 0],
+        ["consumer", "TEXT", 0, null, 0, 0],
+        ["context_hash", "TEXT", 0, null, 0, 0],
+        ["decision_id", "TEXT", 0, null, 0, 0],
+        ["expires_at", "REAL", 1, null, 0, 0],
+        ["holder_token", "TEXT", 1, null, 0, 0],
+        ["launch_model", "TEXT", 0, null, 0, 0],
+        ["lease_id", "TEXT", 1, null, 1, 0],
+        ["model", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["policy_digest", "TEXT", 0, null, 0, 0],
+        ["policy_version", "INTEGER", 0, null, 0, 0],
+        ["pool", "TEXT", 0, null, 0, 0],
+        ["provider", "TEXT", 0, null, 0, 0],
+        ["released_at", "TEXT", 0, null, 0, 0],
+        ["request_id", "TEXT", 0, null, 0, 0],
+        ["seat", "TEXT", 1, null, 0, 0],
+        ["session_id", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "model_leases_active": {
+          "columns": [
+            [0, "seat", 0, "BINARY", 1],
+            [1, "expires_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX model_leases_active ON model_leases (seat, expires_at)",
+          "unique": 0
+        },
+        "sqlite_autoindex_model_leases_1": {
+          "columns": [
+            [0, "lease_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_policy": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["brigade_cli", "TEXT", 1, "''", 0, 0],
+        ["brigade_model", "TEXT", 1, "''", 0, 0],
+        ["enabled", "INTEGER", 1, null, 0, 0],
+        ["limit_count", "INTEGER", 0, null, 0, 0],
+        ["model", "TEXT", 1, null, 0, 0],
+        ["notes", "TEXT", 0, null, 0, 0],
+        ["provider", "TEXT", 1, null, 0, 0],
+        ["reasoning", "TEXT", 1, "'none'", 0, 0],
+        ["seat", "TEXT", 1, null, 1, 0],
+        ["t3_instance_id", "TEXT", 1, "''", 0, 0],
+        ["t3_model", "TEXT", 1, "''", 0, 0],
+        ["t3_service_tier", "TEXT", 1, "''", 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_model_policy_1": {
+          "columns": [
+            [0, "seat", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "model_roster_meta": {
+      "autoincrement": false,
+      "checks": ["singleton = 1"],
+      "columns": [
+        ["revision", "INTEGER", 1, null, 0, 0],
+        ["singleton", "INTEGER", 0, null, 1, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["updated_by", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "nodes": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["label", "TEXT", 0, null, 0, 0],
+        ["node_id", "TEXT", 1, null, 1, 0],
+        ["revoked_at", "TEXT", 0, null, 0, 0],
+        ["token_sha256", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_nodes_1": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_nodes_2": {
+          "columns": [
+            [0, "token_sha256", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "retired_models": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["family", "TEXT", 1, null, 2, 0],
+        ["match_kind", "TEXT", 1, null, 0, 0],
+        ["permanent", "INTEGER", 1, null, 0, 0],
+        ["provider", "TEXT", 1, null, 1, 0],
+        ["reason_code", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_retired_models_1": {
+          "columns": [
+            [0, "provider", 0, "BINARY", 1],
+            [1, "family", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "run_preference": {
+      "autoincrement": false,
+      "checks": ["id = 1"],
+      "columns": [
+        ["id", "INTEGER", 0, null, 1, 0],
+        ["impl", "TEXT", 0, null, 0, 0],
+        ["notes", "TEXT", 0, null, 0, 0],
+        ["orchestrator", "TEXT", 0, null, 0, 0],
+        ["research", "TEXT", 0, null, 0, 0],
+        ["review", "TEXT", 0, null, 0, 0],
+        ["scout", "TEXT", 0, null, 0, 0],
+        ["security", "TEXT", 0, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["updated_by", "TEXT", 0, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {}
+    },
+    "work_campaign_members": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["campaign_key", "TEXT", 1, null, 1, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["override", "TEXT", 1, "''", 0, 0],
+        ["repo", "TEXT", 1, null, 2, 0],
+        ["spec_fingerprint", "TEXT", 1, null, 0, 0],
+        ["work_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "work_items", "work_id", "work_id", "NO ACTION", "RESTRICT", "NONE"],
+        [1, 0, "work_campaigns", "campaign_key", "campaign_key", "NO ACTION", "RESTRICT", "NONE"]
+      ],
+      "indexes": {
+        "sqlite_autoindex_work_campaign_members_1": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_work_campaign_members_2": {
+          "columns": [
+            [0, "campaign_key", 0, "BINARY", 1],
+            [1, "repo", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "work_campaigns": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["campaign_key", "TEXT", 0, null, 1, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["created_by", "TEXT", 1, null, 0, 0],
+        ["work_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "work_items", "work_id", "work_id", "NO ACTION", "RESTRICT", "NONE"]
+      ],
+      "indexes": {
+        "sqlite_autoindex_work_campaigns_1": {
+          "columns": [
+            [0, "campaign_key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_work_campaigns_2": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "work_campaigns_created": {
+          "columns": [
+            [0, "created_at", 0, "BINARY", 1],
+            [1, "campaign_key", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_campaigns_created ON work_campaigns (created_at, campaign_key)",
+          "unique": 0
+        }
+      }
+    },
+    "work_create_keys": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["actor_id", "TEXT", 1, null, 1, 0],
+        ["fingerprint", "TEXT", 1, null, 0, 0],
+        ["idempotency_key", "TEXT", 1, null, 2, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["work_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "work_items", "work_id", "work_id", "NO ACTION", "RESTRICT", "NONE"]
+      ],
+      "indexes": {
+        "sqlite_autoindex_work_create_keys_1": {
+          "columns": [
+            [0, "actor_id", 0, "BINARY", 1],
+            [1, "idempotency_key", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "work_events": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["actor_id", "TEXT", 0, null, 0, 0],
+        ["actor_type", "TEXT", 1, null, 0, 0],
+        ["detail_json", "TEXT", 1, null, 0, 0],
+        ["event_id", "TEXT", 1, null, 2, 0],
+        ["event_type", "TEXT", 1, null, 0, 0],
+        ["from_status", "TEXT", 0, null, 0, 0],
+        ["node_id", "TEXT", 0, null, 0, 0],
+        ["occurred_at", "TEXT", 1, null, 0, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["run_id", "TEXT", 0, null, 0, 0],
+        ["seq", "INTEGER", 1, "0", 0, 0],
+        ["to_status", "TEXT", 0, null, 0, 0],
+        ["work_id", "TEXT", 1, null, 1, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "work_items", "work_id", "work_id", "NO ACTION", "RESTRICT", "NONE"]
+      ],
+      "indexes": {
+        "sqlite_autoindex_work_events_1": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "event_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "work_events_adapter_event_work_seq": {
+          "columns": [
+            [0, "actor_type", 0, "BINARY", 1],
+            [1, "event_type", 0, "BINARY", 1],
+            [2, "work_id", 0, "BINARY", 1],
+            [3, "seq", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_adapter_event_work_seq ON work_events (actor_type, event_type, work_id, seq)",
+          "unique": 0
+        },
+        "work_events_adapter_retention": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "actor_type", 0, "BINARY", 1],
+            [2, "event_type", 0, "BINARY", 1],
+            [3, "seq", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_adapter_retention ON work_events (work_id, actor_type, event_type, seq)",
+          "unique": 0
+        },
+        "work_events_attempt_identity": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "event_type", 0, "BINARY", 1],
+            [2, "node_id", 0, "BINARY", 1],
+            [3, "run_id", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_attempt_identity ON work_events (work_id, event_type, node_id, run_id)",
+          "unique": 0
+        },
+        "work_events_attempt_work_seq": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "event_type", 0, "BINARY", 1],
+            [2, "seq", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_attempt_work_seq ON work_events (work_id, event_type, seq)",
+          "unique": 0
+        },
+        "work_events_event_work": {
+          "columns": [
+            [0, "event_id", 0, "BINARY", 1],
+            [1, "work_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_event_work ON work_events (event_id, work_id)",
+          "unique": 0
+        },
+        "work_events_execution_identity": {
+          "columns": [
+            [0, "node_id", 0, "BINARY", 1],
+            [1, "run_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX work_events_execution_identity ON work_events (node_id, run_id) WHERE event_type = 'execution-linked'",
+          "unique": 0
+        },
+        "work_events_recent": {
+          "columns": [
+            [0, "occurred_at", 1, "BINARY", 1],
+            [1, "seq", 1, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_recent ON work_events (occurred_at DESC, seq DESC)",
+          "unique": 0
+        },
+        "work_events_seq": {
+          "columns": [
+            [0, "seq", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_seq ON work_events (seq)",
+          "unique": 0
+        },
+        "work_events_work_id": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_work_id ON work_events (work_id)",
+          "unique": 0
+        },
+        "work_events_work_seq": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "seq", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_events_work_seq ON work_events (work_id, seq)",
+          "unique": 0
+        }
+      }
+    },
+    "work_import_keys": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["adapter_id", "TEXT", 1, null, 1, 0],
+        ["created", "INTEGER", 1, null, 0, 0],
+        ["fingerprint", "TEXT", 1, null, 0, 0],
+        ["idempotency_key", "TEXT", 1, null, 2, 0],
+        ["owner_node", "TEXT", 0, null, 0, 0],
+        ["received_at", "TEXT", 1, null, 0, 0],
+        ["refused", "INTEGER", 1, "0", 0, 0],
+        ["unchanged", "INTEGER", 1, "0", 0, 0],
+        ["updated", "INTEGER", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_work_import_keys_1": {
+          "columns": [
+            [0, "adapter_id", 0, "BINARY", 1],
+            [1, "idempotency_key", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "work_import_keys_adapter": {
+          "columns": [
+            [0, "adapter_id", 0, "BINARY", 1],
+            [1, "received_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_import_keys_adapter ON work_import_keys (adapter_id, received_at)",
+          "unique": 0
+        },
+        "work_import_keys_owner": {
+          "columns": [
+            [0, "owner_node", 0, "BINARY", 1],
+            [1, "received_at", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_import_keys_owner ON work_import_keys (owner_node, received_at)",
+          "unique": 0
+        }
+      }
+    },
+    "work_items": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["acceptance_json", "TEXT", 1, null, 0, 0],
+        ["archived_at", "TEXT", 0, null, 0, 0],
+        ["attempt_count", "INTEGER", 1, null, 0, 0],
+        ["blocker", "TEXT", 0, null, 0, 0],
+        ["burn_eligible", "INTEGER", 1, null, 0, 0],
+        ["burn_rank", "INTEGER", 1, null, 0, 0],
+        ["created_at", "TEXT", 1, null, 0, 0],
+        ["description", "TEXT", 0, null, 0, 0],
+        ["execution_mode", "TEXT", 1, null, 0, 0],
+        ["kind", "TEXT", 1, null, 0, 0],
+        ["priority", "TEXT", 1, null, 0, 0],
+        ["ready_at", "TEXT", 0, null, 0, 0],
+        ["review_after", "TEXT", 0, null, 0, 0],
+        ["scope", "TEXT", 0, null, 0, 0],
+        ["spend_by", "TEXT", 0, null, 0, 0],
+        ["status", "TEXT", 1, null, 0, 0],
+        ["title", "TEXT", 1, null, 0, 0],
+        ["token_appetite", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0],
+        ["version", "INTEGER", 1, null, 0, 0],
+        ["work_id", "TEXT", 0, null, 1, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_work_items_1": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "work_items_burn": {
+          "columns": [
+            [0, "burn_eligible", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_items_burn ON work_items (burn_eligible)",
+          "unique": 0
+        },
+        "work_items_burn_order": {
+          "columns": [
+            [0, "burn_rank", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 1],
+            [4, "work_id", 0, "BINARY", 1],
+            [5, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_items_burn_order ON work_items (burn_rank, (spend_by IS NULL OR spend_by = ''), (COALESCE(spend_by, '')), (COALESCE(ready_at, '')), work_id)",
+          "unique": 0
+        },
+        "work_items_created_order": {
+          "columns": [
+            [0, "created_at", 0, "BINARY", 1],
+            [1, "work_id", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_items_created_order ON work_items (created_at, work_id)",
+          "unique": 0
+        },
+        "work_items_ready_at": {
+          "columns": [
+            [0, "ready_at", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_items_ready_at ON work_items (ready_at)",
+          "unique": 0
+        },
+        "work_items_status": {
+          "columns": [
+            [0, "status", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_items_status ON work_items (status)",
+          "unique": 0
+        }
+      }
+    },
+    "work_links": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["adapter_id", "TEXT", 0, null, 0, 0],
+        ["display_ref", "TEXT", 0, null, 0, 0],
+        ["external_key", "TEXT", 1, null, 0, 0],
+        ["external_state", "TEXT", 0, null, 0, 0],
+        ["external_updated_at", "TEXT", 0, null, 0, 0],
+        ["link_id", "TEXT", 0, null, 1, 0],
+        ["link_type", "TEXT", 1, null, 0, 0],
+        ["owner_node", "TEXT", 0, null, 0, 0],
+        ["source_acceptance_json", "TEXT", 1, null, 0, 0],
+        ["source_policy", "TEXT", 1, null, 0, 0],
+        ["source_version", "TEXT", 0, null, 0, 0],
+        ["stale_at", "TEXT", 0, null, 0, 0],
+        ["synced_at", "TEXT", 1, null, 0, 0],
+        ["url", "TEXT", 0, null, 0, 0],
+        ["work_id", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [
+        [0, 0, "work_items", "work_id", "work_id", "NO ACTION", "RESTRICT", "NONE"]
+      ],
+      "indexes": {
+        "sqlite_autoindex_work_links_1": {
+          "columns": [
+            [0, "link_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "sqlite_autoindex_work_links_2": {
+          "columns": [
+            [0, "link_type", 0, "BINARY", 1],
+            [1, "external_key", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "u",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        },
+        "work_links_adapter": {
+          "columns": [
+            [0, "adapter_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_adapter ON work_links (adapter_id)",
+          "unique": 0
+        },
+        "work_links_external": {
+          "columns": [
+            [0, "link_type", 0, "BINARY", 1],
+            [1, "external_key", 0, "BINARY", 1],
+            [2, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_external ON work_links (link_type, external_key)",
+          "unique": 0
+        },
+        "work_links_owner": {
+          "columns": [
+            [0, "owner_node", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_owner ON work_links (owner_node)",
+          "unique": 0
+        },
+        "work_links_work_id": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_id ON work_links (work_id)",
+          "unique": 0
+        },
+        "work_links_work_order": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "synced_at", 0, "BINARY", 1],
+            [2, "link_id", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_order ON work_links (work_id, synced_at, link_id)",
+          "unique": 0
+        },
+        "work_links_work_policy_order": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "source_policy", 0, "BINARY", 1],
+            [2, "synced_at", 0, "BINARY", 1],
+            [3, "link_id", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_policy_order ON work_links (work_id, source_policy, synced_at, link_id)",
+          "unique": 0
+        },
+        "work_links_work_policy_type_order": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "source_policy", 0, "BINARY", 1],
+            [2, "link_type", 0, "BINARY", 1],
+            [3, "synced_at", 0, "BINARY", 1],
+            [4, "link_id", 0, "BINARY", 1],
+            [5, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_policy_type_order ON work_links (work_id, source_policy, link_type, synced_at, link_id)",
+          "unique": 0
+        },
+        "work_links_work_policy_type_stale": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "source_policy", 0, "BINARY", 1],
+            [2, "link_type", 0, "BINARY", 1],
+            [3, "stale_at", 0, "BINARY", 1],
+            [4, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_policy_type_stale ON work_links (work_id, source_policy, link_type, stale_at)",
+          "unique": 0
+        },
+        "work_links_work_type": {
+          "columns": [
+            [0, "work_id", 0, "BINARY", 1],
+            [1, "link_type", 0, "BINARY", 1],
+            [2, "synced_at", 0, "BINARY", 1],
+            [3, null, 0, "BINARY", 0]
+          ],
+          "origin": "c",
+          "partial": 0,
+          "sql": "CREATE INDEX work_links_work_type ON work_links (work_id, link_type, synced_at)",
+          "unique": 0
+        }
+      }
+    },
+    "work_schema_meta": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["key", "TEXT", 0, null, 1, 0],
+        ["value", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_work_schema_meta_1": {
+          "columns": [
+            [0, "key", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    },
+    "work_sync_cursors": {
+      "autoincrement": false,
+      "checks": [],
+      "columns": [
+        ["adapter_id", "TEXT", 0, null, 1, 0],
+        ["cursor", "TEXT", 0, null, 0, 0],
+        ["last_error_code", "TEXT", 0, null, 0, 0],
+        ["last_success_at", "TEXT", 0, null, 0, 0],
+        ["owner_node", "TEXT", 1, null, 0, 0],
+        ["source_type", "TEXT", 1, null, 0, 0],
+        ["updated_at", "TEXT", 1, null, 0, 0]
+      ],
+      "foreign_keys": [],
+      "indexes": {
+        "sqlite_autoindex_work_sync_cursors_1": {
+          "columns": [
+            [0, "adapter_id", 0, "BINARY", 1],
+            [1, null, 0, "BINARY", 0]
+          ],
+          "origin": "pk",
+          "partial": 0,
+          "sql": "",
+          "unique": 1
+        }
+      }
+    }
+  },
+  "triggers": {
+    "fleet_audit_log_no_delete": "CREATE TRIGGER fleet_audit_log_no_delete BEFORE DELETE ON fleet_audit_log BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END",
+    "fleet_audit_log_no_replace": "CREATE TRIGGER fleet_audit_log_no_replace BEFORE INSERT ON fleet_audit_log WHEN EXISTS (SELECT 1 FROM fleet_audit_log WHERE id=NEW.id) BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END",
+    "fleet_audit_log_no_update": "CREATE TRIGGER fleet_audit_log_no_update BEFORE UPDATE ON fleet_audit_log BEGIN SELECT RAISE(ABORT, 'audit log is append-only'); END",
+    "fleet_questions_reply": "CREATE TRIGGER fleet_questions_reply AFTER INSERT ON fleet_messages BEGIN UPDATE fleet_questions SET status='answered', answer=NEW.body, answer_id=NEW.id, source='operator_reply', answered_by=NEW.sender, answered_at=NEW.received_at WHERE status='pending' AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND NEW.received_at<=deadline AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); UPDATE fleet_questions SET status='timeout', late_answer_message_id=NEW.id, late_answered_at=NEW.received_at WHERE status IN ('pending','timeout') AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND NEW.received_at>deadline AND late_answer_message_id IS NULL AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); UPDATE fleet_questions SET operator_reply_after_desktop_message_id=NEW.id, operator_reply_after_desktop_at=NEW.received_at WHERE status='answered' AND source='caller_reported_desktop' AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient AND operator_reply_after_desktop_message_id IS NULL AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL) OR EXISTS (SELECT 1 FROM fleet_message_principals WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL)); END",
+    "fleet_read_snapshot_delete": "CREATE TRIGGER fleet_read_snapshot_delete AFTER DELETE ON fleet_read_snapshots BEGIN DELETE FROM fleet_read_snapshot_rows WHERE snapshot_id=OLD.snapshot_id; DELETE FROM fleet_read_snapshot_groups WHERE snapshot_id=OLD.snapshot_id; END",
+    "fleet_read_snapshot_total": "CREATE TRIGGER fleet_read_snapshot_total AFTER UPDATE OF visible ON fleet_read_snapshot_rows WHEN OLD.visible != NEW.visible BEGIN UPDATE fleet_read_snapshot_groups SET total=total+NEW.visible-OLD.visible WHERE snapshot_id=NEW.snapshot_id AND kind=NEW.kind; END",
+    "fleet_read_visibility_fleet_message_principals_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_delete AFTER DELETE ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.principal_id OR caller=OLD.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_principals_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_insert AFTER INSERT ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=NEW.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_principals_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_principals_update AFTER UPDATE OF revoked_at,role ON fleet_message_principals BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.principal_id OR recipient=NEW.principal_id OR caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_delete": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_delete AFTER DELETE ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=OLD.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_insert": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_insert AFTER INSERT ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_fleet_message_send_grants_update": "CREATE TRIGGER fleet_read_visibility_fleet_message_send_grants_update AFTER UPDATE OF pattern,principal_id ON fleet_message_send_grants BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (caller=OLD.principal_id OR caller=NEW.principal_id) AND 1; END",
+    "fleet_read_visibility_nodes_delete": "CREATE TRIGGER fleet_read_visibility_nodes_delete AFTER DELETE ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.node_id OR caller=OLD.node_id) AND 1; END",
+    "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
+    "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=( ( (caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END))) ) AND ( kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)) ) ) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
+  },
+  "user_version": 48
+}

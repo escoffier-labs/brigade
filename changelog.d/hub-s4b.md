@@ -1,0 +1,1 @@
+- Add bounded Rust hub reader and CPU pools, Python schema compatibility checks, and independent WAL maintenance with disk-pressure admission for event and session writes. Route answers still come from Python.

@@ -178,6 +178,7 @@ struct App {
     inflight: Arc<Semaphore>,
     bodies: Arc<Semaphore>,
     hashes: RandomState,
+    storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
 }
 impl App {
     fn new(upstream: String, client: HttpClient, trust_identity: bool, trust_proto: bool) -> Self {
@@ -190,6 +191,7 @@ impl App {
             inflight: Arc::new(Semaphore::new(24)),
             bodies: Arc::new(Semaphore::new(BODY_BUDGET)),
             hashes: RandomState::new(),
+            storage: None,
         }
     }
 }
@@ -278,6 +280,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             .unwrap();
     }
     if req.method() == "GET" && req.uri().path() == "/ready" {
+        if app.storage.as_ref().is_some_and(|s| !s.schema.ready()) {
+            return busy("schema-changed");
+        }
         let Ok(_probe_slot) = app.inflight.clone().try_acquire_owned() else {
             return json(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -298,6 +303,18 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             },
             serde_json::json!({"ready":ready}),
         );
+    }
+    if let Some(storage) = &app.storage {
+        if req.method() != "GET" && !storage.schema.ready() {
+            return busy("schema-changed");
+        }
+        // S6's event/session writes are non-durable admission classes. Other
+        // families adopt the gate with their writer commands as they go native.
+        if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
+            if let Err(reason) = storage.disk.admit(false) {
+                return busy(reason);
+            }
+        }
     }
     if req.headers().contains_key("transfer-encoding")
         || req.headers().get_all("content-length").iter().count() > 1
@@ -605,12 +622,43 @@ async fn run(config: Config) -> Result<(), String> {
         "listening on {}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    let app = Router::new().fallback(any(handle)).with_state(App::new(
+    let path = config.db.as_deref().unwrap_or("~/.brigade/fleet-hub.db");
+    let path = if let Some(suffix) = path.strip_prefix("~/") {
+        std::path::PathBuf::from(std::env::var_os("HOME").ok_or("missing home directory")?)
+            .join(suffix)
+    } else {
+        std::path::PathBuf::from(path)
+    };
+    let storage = brigade_hub::maintenance::Maintenance::start(
+        &path,
+        &path.with_file_name("fleet-hub-memory.db"),
+        Arc::new(brigade_hub::maintenance::NoSweeps),
+    )?;
+    let _readers = brigade_hub::read::ReaderPool::open(
+        &path,
+        brigade_hub::read::hub_threads(),
+        brigade_hub::read::HUB_QUEUE,
+    )?;
+    let memory_path = path.with_file_name("fleet-hub-memory.db");
+    let _memory_readers = if memory_path.exists() {
+        Some(brigade_hub::read::ReaderPool::open_unchecked(
+            &memory_path,
+            brigade_hub::read::MEMORY_THREADS,
+            brigade_hub::read::MEMORY_QUEUE,
+            brigade_hub::read::READ_LIMIT,
+        )?)
+    } else {
+        None
+    };
+    let _cpu = brigade_hub::read::CpuPool::default();
+    let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
-    ));
+    );
+    state.storage = Some(Arc::new(storage));
+    let app = Router::new().fallback(any(handle)).with_state(state);
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
