@@ -48,13 +48,21 @@ jobs:
         run: python tests/claims.py
       - name: Credential body share memory peak
         run: python tests/memory_peak.py
+      - name: Native registration wire parity and revocation
+        run: python tests/registration.py
       - name: Frozen wire contract through managed front
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'
+          --clock-hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --test-clock-file {clock_file}'
+      - name: Native registration storage parity
+        working-directory: .
+        run: >-
+          python registry/skills/verify-brigade/control-brigade.py storage-parity
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native --test-clock-file {clock_file}'
       - name: Read-only production profile audit through managed front
         working-directory: .
         run: >-
           python registry/skills/verify-brigade/control-brigade.py hub-contract --profile prod-readonly
-          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
+          --hub-cmd '${{ github.workspace }}/engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode registration=native'

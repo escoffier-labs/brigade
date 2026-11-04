@@ -1,5 +1,6 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
+mod registration;
 mod response;
 
 use axum::{
@@ -47,6 +48,9 @@ struct Config {
     route_mode: Vec<String>,
     #[arg(long)]
     host: String,
+    /// Acceptance-only clock, shared with the Python upstream.
+    #[arg(long, hide = true)]
+    test_clock_file: Option<String>,
     #[arg(long, default_value_t = 3774, allow_hyphen_values = true)]
     port: i64,
     #[arg(long)]
@@ -217,6 +221,7 @@ struct App {
     client: HttpClient,
     budgets: admission::Budgets,
     lookup: Option<admission::Lookup>,
+    registration: Option<registration::Registration>,
     trust_identity: bool,
     trust_proto: bool,
     storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
@@ -237,6 +242,7 @@ impl App {
             client,
             budgets: admission::Budgets::default(),
             lookup: None,
+            registration: None,
             trust_identity,
             trust_proto,
             storage: None,
@@ -292,6 +298,12 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
 }
 fn req_path(parts: &axum::http::request::Parts) -> &str {
     parts.uri.path()
+}
+/// Matches Python's `"token" in parse_qs(query, keep_blank_values=True)`:
+/// names are split on `&` and percent- and plus-decoded.
+fn query_names_token(query: Option<&str>) -> bool {
+    query
+        .is_some_and(|q| url::form_urlencoded::parse(q.as_bytes()).any(|(name, _)| name == "token"))
 }
 /// The family a request is counted under once its body shows the action.
 #[derive(Clone, Default)]
@@ -653,6 +665,18 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     };
     let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
     let (parts, body) = req.into_parts();
+    let native = app
+        .registration
+        .as_ref()
+        .filter(|_| registration::Registration::route(parts.method.as_str(), parts.uri.path()))
+        // Python refuses any `token` query parameter with 401 before routing. Leave
+        // those requests to the proxy so the refusal and its bytes stay Python's.
+        .filter(|_| !query_names_token(parts.uri.query()));
+    if let Some(native) = native {
+        if let Some(refusal) = native.auth(&parts).await {
+            return refusal;
+        }
+    }
     let _budget = if headers_only {
         vec![]
     } else {
@@ -681,6 +705,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             );
         }
     };
+    if let Some(native) = native {
+        // serde_json rejects NaN, Infinity, 1e400 and lone surrogate escapes that
+        // Python's json.loads accepts. Python answers those bodies itself.
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            return native.handle(&parts, &body).await;
+        }
+    }
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
     if let Some(slot) = parts.extensions.get::<FamilySlot>() {
         if parts.method == axum::http::Method::POST && req_path(&parts) == "/messages" {
@@ -882,9 +913,22 @@ async fn upstream(
         }
         return Ok((url.trim_end_matches('/').into(), None));
     }
+    let upstream_args = if let Some(clock) = &config.test_clock_file {
+        let mut args = vec![
+            "-c".to_owned(),
+            include_str!("../../../registry/skills/verify-brigade/hub_clock.py").to_owned(),
+            "--clock-file".into(),
+            clock.clone(),
+            "--".into(),
+        ];
+        args.extend(config.python_args(0).into_iter().skip(2));
+        args
+    } else {
+        config.python_args(0)
+    };
     let mut child =
         Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
-            .args(config.python_args(0))
+            .args(upstream_args)
             .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
             .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
@@ -1046,7 +1090,20 @@ async fn run(mut config: Config) -> Result<(), String> {
         use sha2::Digest;
         state.admin_digest = Some(sha2::Sha256::digest(admin.as_bytes()).into());
     }
-    state.lookup = Some(admission::Lookup::new(Arc::new(readers), &admin));
+    let readers = Arc::new(readers);
+    state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
+    if state.modes.get("registration") == brigade_hub::modes::Mode::Native {
+        state.registration = Some(registration::Registration {
+            readers,
+            writer: brigade_hub::writer::Writer::start(
+                brigade_hub::writer::Config::new(path.clone()),
+                Arc::default(),
+            )
+            .map_err(|_| "registration writer unavailable")?,
+            admin: registration::digest(&admin),
+            clock: config.test_clock_file.clone(),
+        });
+    }
     let probe = state.clone();
     tokio::spawn(async move {
         loop {
@@ -1186,6 +1243,14 @@ mod tests {
         assert_eq!(parse_upstream_key("fake-key", true).unwrap(), "fake-key");
     }
 
+    #[test]
+    fn token_query_names_match_python_parse_qs() {
+        assert!(query_names_token(Some("token=x")));
+        assert!(query_names_token(Some("a=1&token")));
+        assert!(query_names_token(Some("%74oken=x")));
+        assert!(!query_names_token(Some("tokens=x&a=token")));
+        assert!(!query_names_token(None));
+    }
     #[test]
     fn message_action_sets_the_request_family() {
         use brigade_hub::modes::family;

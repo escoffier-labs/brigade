@@ -112,8 +112,8 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
 Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
 value wins. `health` defaults to native and supports proxy and shadow on
 `GET /health`. `/ready` always stays local. `metrics` requires native mode.
-`registration`, `heartbeat`, `claims`, `messages`, `cold` and `browser` currently
-accept proxy only. Selecting an unavailable native or shadow handler refuses
+`registration` accepts native or proxy. `heartbeat`, `claims`, `messages`, `cold`
+and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
 startup. Native handlers and housekeeping audits for those families land in
 S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
 
@@ -140,3 +140,10 @@ JSON pointer and SHA-256 body digests, with no bodies.
 Request JSON logs count streamed bytes through completion or disconnect and
 include a generated request ID, family, status, elapsed seconds and credential
 kind. Labels and logs omit request queries, identities and bearer material.
+
+S5 registration handlers run with `--route-mode registration=native` (proxy by
+default). This serves `GET /nodes`, `POST /nodes` and `POST /message-principals`
+natively. Registration flips last in cutover phase 3. The Python hub remains the schema owner throughout rollback.
+
+Acceptance drives can use `--test-clock-file PATH` to share a deterministic
+clock with the managed Python upstream. This flag is for throwaway fixtures.
