@@ -68,5 +68,16 @@ brigade work verify run --target . --argv-json '["env","PYTHONPATH=src","cargo",
 brigade work verify run --target . --argv-json '["cargo","test","--locked","--manifest-path","engines/hub/Cargo.toml","--lib","writer::tests::kill_nine_twenty_runs","--","--ignored","--exact","--nocapture"]' --timeout 180 --capture brigade-work
 ```
 
+The cgroup overload test is also ignored by default. Its launcher compiles
+outside the measured scope, then runs the test, the Rust front and the Python
+upstream in one transient systemd user scope with 512 MiB and no swap. It
+requires Linux cgroup v2 and a systemd user manager. It sends three times the
+queue capacity, checks excess 503 answers and records `memory.current` and
+`memory.peak` for the whole group. Run it with:
+
+```sh
+brigade work verify run --target . --argv-json '["python3","engines/hub/tests/cgroup.py"]' --timeout 180 --capture brigade-work
+```
+
 The VFS models Rust storage only. Python uses its own SQLite library. These
 checks do not replace the design's manual VM reset that covers both writers.
