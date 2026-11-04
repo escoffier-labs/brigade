@@ -587,6 +587,20 @@ def test_watchdog_never_restarts_a_fenced_hub(tmp_path):
     assert not (tmp_path / "docker.calls").exists()
 
 
+def test_restore_updates_the_hub_on_loopback_before_clients_reconnect():
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-dogfood.md").read_text(encoding="utf-8")
+    restore = runbook[runbook.index("1. Fence the hub:") : runbook.index("Rehearse the restore monthly")]
+    fenced_start = restore.index("docker compose up -d --no-build --no-deps hub")
+    loopback_update = restore.index("BRIGADE_FLEET_HUB_URL=http://127.0.0.1:3774")
+    revocations = restore.index("Re-apply every credential revocation")
+    unfence = restore.index("rm hub.fenced && docker compose up -d --no-build")
+    # The hub runs alone, without its front, while the fence holds and the
+    # revocations go in; only then does the fence come off.
+    assert fenced_start < loopback_update < unfence
+    assert fenced_start < revocations < unfence
+    assert "`front` stays stopped" in restore[fenced_start:unfence]
+
+
 def test_clean_exit_check_reads_a_stopped_container(monkeypatch):
     calls = []
 

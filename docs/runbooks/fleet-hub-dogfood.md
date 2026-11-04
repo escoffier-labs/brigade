@@ -299,12 +299,31 @@ moving forward.
       install -o 10001 -g 10001 -m 0600 /restore/fleet-hub.db /var/lib/brigade/fleet-hub.db'
    ```
 
-4. Before clients reconnect, each mesh signer publishes its newest membership,
-   manifest and revocation statements again from its own copy. If the hub
-   identity record changed after the copy, publish that too. Re-apply every
-   credential revocation, roster change and policy edit made since the copy,
-   from your own record, because the hub's audit rows for that time are gone.
-5. Start: `rm hub.fenced && docker compose up -d --no-build`. Nodes enrolled after the copy get
+4. Start the hub alone, still fenced, and bring it up to date before any
+   client can reach it:
+
+   ```bash
+   docker compose up -d --no-build netns
+   docker compose up -d --no-build --no-deps hub
+   ```
+
+   `hub.fenced` stays in place and `front` stays stopped, so the hub listens
+   only on loopback inside its namespace and no client can connect. Run every
+   update from inside that namespace, against loopback:
+
+   ```bash
+   docker compose exec hub sh -c \
+     'BRIGADE_FLEET_HUB_URL=http://127.0.0.1:3774 BRIGADE_FLEET_TOKEN="$(cat /run/secrets/admin_token)" brigade fleet <command>'
+   ```
+
+   Re-apply every credential revocation, roster change and policy edit made
+   since the copy, from your own record, because the hub's audit rows for
+   that time are gone. Each mesh signer's newest membership, manifest and
+   revocation statements must be published again from the signer's own copy.
+   Signers cannot reach a fenced hub, so bring their signed statements to the
+   hub host and submit them through the same loopback path. If the hub
+   identity record changed after the copy, publish that too.
+5. Open the hub to clients: `rm hub.fenced && docker compose up -d --no-build`. Nodes enrolled after the copy get
    401 and enroll again. Messages acknowledged after the copy are gone, and a
    message can arrive twice.
 
