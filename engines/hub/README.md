@@ -112,8 +112,8 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
 Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
 value wins. `health` defaults to native and supports proxy and shadow on
 `GET /health`. `/ready` always stays local. `metrics` requires native mode.
-`registration` accepts native or proxy. `heartbeat`, `claims`, `messages`, `cold`
-and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
+`registration` and `claims` accept native or proxy. `heartbeat`, `messages`,
+`cold` and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
 startup. Native handlers and housekeeping audits for those families land in
 S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
 
@@ -144,6 +144,15 @@ kind. Labels and logs omit request queries, identities and bearer material.
 S5 registration handlers run with `--route-mode registration=native` (proxy by
 default). This serves `GET /nodes`, `POST /nodes` and `POST /message-principals`
 natively. Registration flips last in cutover phase 3. The Python hub remains the schema owner throughout rollback.
+
+S7 claims handlers run with `--route-mode claims=native` (proxy by default).
+This serves `GET /claims` and every `POST /claims` action natively, with
+generation fencing, retired holders, lease expiry and `claim.expired` events
+through the same writer as registration. Three cases stay on the Python
+upstream: `GET /owners`, which joins policy, sessions and Grok Bot state; a
+`GET /claims` while Grok Bot leases are active, which needs Python's display
+projection; and a `POST /claims` whose target is not ASCII, since its refusal
+text carries Python's `repr()` of the target.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.
