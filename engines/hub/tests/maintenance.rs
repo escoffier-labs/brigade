@@ -134,6 +134,14 @@ async fn shadow_samples_use_one_dedicated_watch_connection() {
         .args(["-c","from brigade import fleet_hub; from pathlib import Path; import sys; fleet_hub.init_db(Path(sys.argv[1])).close()"]).arg(&hub).status().unwrap().success());
     let maintenance =
         Maintenance::start(&hub, &dir.join("memory.db"), std::sync::Arc::new(NoSweeps)).unwrap();
+    let until = Instant::now() + Duration::from_millis(600);
+    while Instant::now() < until {
+        assert!(
+            maintenance.schema.ready(),
+            "a valid startup schema lost readiness on the first tick"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let before = maintenance.sample_data_version().await.unwrap();
     let writer = Connection::open(&hub).unwrap();
     writer.execute_batch("PRAGMA user_version=48").unwrap();

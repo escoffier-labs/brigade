@@ -60,6 +60,12 @@ impl DiskPressure {
     }
 }
 pub fn checkpoint(c: &Connection, truncate: bool) -> rusqlite::Result<(i64, i64, i64)> {
+    // SQLite holds WAL_WRITE_LOCK while a TRUNCATE busy handler waits for
+    // readers. Return busy immediately and retry on a later tick so a pinned
+    // reader cannot stall the writer. Zero is within the 250 ms busy ceiling.
+    if truncate {
+        c.busy_timeout(Duration::ZERO)?;
+    }
     c.query_row(
         if truncate {
             "PRAGMA wal_checkpoint(TRUNCATE)"
@@ -168,6 +174,16 @@ impl Maintenance {
         let hub = FileState::new(hub.into())?;
         let schema = Arc::new(SchemaGate::default());
         schema.recheck(&hub.connection)?;
+        // Startup already validated this cookie. Repeating a valid check on the
+        // first timer tick would briefly close the shared admission gate.
+        let initial_cookie = Some((
+            hub.connection
+                .pragma_query_value(None, "schema_version", |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?,
+            hub.connection
+                .pragma_query_value(None, "user_version", |r| r.get::<_, i64>(0))
+                .map_err(|e| e.to_string())?,
+        ));
         let mut files = vec![hub];
         if memory.exists() {
             files.push(FileState::new(memory.into())?);
@@ -192,7 +208,7 @@ impl Maintenance {
         let (d, s, m) = (disk.clone(), schema.clone(), metrics.clone());
         let thread = std::thread::spawn(move || {
             let mut sweep_at = Instant::now();
-            let mut schema_cookie = None;
+            let mut schema_cookie = initial_cookie;
             let mut space_sample = Instant::now() - Duration::from_secs(1);
             let mut free = 0;
             loop {

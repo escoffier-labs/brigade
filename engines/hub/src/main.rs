@@ -304,18 +304,6 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             serde_json::json!({"ready":ready}),
         );
     }
-    if let Some(storage) = &app.storage {
-        if req.method() != "GET" && !storage.schema.ready() {
-            return busy("schema-changed");
-        }
-        // S6's event/session writes are non-durable admission classes. Other
-        // families adopt the gate with their writer commands as they go native.
-        if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
-            if let Err(reason) = storage.disk.admit(false) {
-                return busy(reason);
-            }
-        }
-    }
     if req.headers().contains_key("transfer-encoding")
         || req.headers().get_all("content-length").iter().count() > 1
     {
@@ -332,6 +320,18 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         .unwrap_or(0);
     if length > BODY_LIMIT as u64 {
         return body_too_large();
+    }
+    if let Some(storage) = &app.storage {
+        if req.method() != "GET" && !storage.schema.ready() {
+            return busy("schema-changed");
+        }
+        // S6's event/session writes are non-durable admission classes. Other
+        // families adopt the gate with their writer commands as they go native.
+        if req.method() == "POST" && matches!(req.uri().path(), "/events" | "/sessions") {
+            if let Err(reason) = storage.disk.admit(false) {
+                return busy(reason);
+            }
+        }
     }
     // Buffer the whole body before admission. A slow upload then holds only
     // its connection and its share of the byte budget, never a proxied slot,
