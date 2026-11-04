@@ -23,7 +23,8 @@ Open findings appear in the existing owners holdings view.
 ```
 
 Canonicalization removes email angle brackets and lowercases the Message-ID.
-Job URLs use HTTPS, lowercase hosts, no fragment or trailing slash, and omit
+Job URLs use HTTPS, lowercase hosts, no fragment or trailing slash, keep any
+port other than the input scheme's default, and omit
 `utm_*`, `gclid`, `fbclid`, `msclkid`, `mc_cid`, `mc_eid`, `ref`, `source`,
 `trk`, `trackingid`, `refid`, `gh_src`, `lever-source`, and `lever-origin`
 parameters. Other query parameters remain sorted. ATS identifiers remain

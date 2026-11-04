@@ -76,7 +76,8 @@ def canonical_key(kind: str, key: str) -> str:
         host = url.hostname.lower()
         if ":" in host:
             host = f"[{host}]"
-        if url.port and url.port not in (80, 443):
+        # Drop only the input scheme's default port: https on port 80 is a different endpoint.
+        if url.port and url.port != {"http": 80, "https": 443}[url.scheme]:
             host += f":{url.port}"
         query = urlencode(
             sorted(

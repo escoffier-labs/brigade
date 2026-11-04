@@ -232,3 +232,17 @@ def test_pull_request_alias_shares_one_finding_and_reservation(tmp_path):
         assert conn.execute("SELECT COUNT(*), MIN(kind) FROM fleet_findings").fetchone() == (1, "pull-request")
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("https://Example.test:443/jobs/1/", "https://example.test/jobs/1"),
+        ("http://example.test:80/jobs/1", "https://example.test/jobs/1"),
+        ("https://example.test:80/jobs/1", "https://example.test:80/jobs/1"),
+        ("http://example.test:443/jobs/1", "https://example.test:443/jobs/1"),
+        ("https://example.test:8443/jobs/1", "https://example.test:8443/jobs/1"),
+    ],
+)
+def test_job_url_keeps_ports_that_are_not_the_scheme_default(raw, expected):
+    assert f.canonical_key("job", raw) == expected
