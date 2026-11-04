@@ -39,6 +39,27 @@ fn refuse(status: u16, error: &str, code: Option<&str>) -> Response<Body> {
     respond(Reply::new(status, body))
 }
 
+/// A body that ended before its declared length, or one past the limit.
+pub fn body_refusal(too_large: bool) -> Response<Body> {
+    if too_large {
+        refuse(
+            413,
+            "memory request body is too large",
+            Some("memory_card_too_large"),
+        )
+    } else {
+        refuse(
+            400,
+            "incomplete request body",
+            Some("memory_request_invalid"),
+        )
+    }
+}
+/// A body that did not arrive within the read deadline.
+pub fn timeout() -> Response<Body> {
+    refuse(408, "request body timeout", Some("memory_request_invalid"))
+}
+
 impl MemoryRoute {
     /// Runs before the body is read: availability, method, size and the
     /// credential. The token is hashed inside `authenticate` and never kept.
@@ -48,10 +69,29 @@ impl MemoryRoute {
             return fail(crate::busy("memory-unavailable"));
         };
         if parts.method != "POST" {
-            return fail(refuse(
+            let mut refusal = refuse(
                 405,
                 "memory accepts POST only",
                 Some("memory_method_invalid"),
+            );
+            // RFC 9110 section 15.5.6: a 405 names the allowed methods.
+            refusal
+                .headers_mut()
+                .insert("allow", axum::http::HeaderValue::from_static("POST"));
+            return fail(refusal);
+        }
+        if parts.headers.contains_key("transfer-encoding") {
+            return fail(refuse(
+                411,
+                "Content-Length is required",
+                Some("memory_request_invalid"),
+            ));
+        }
+        if parts.headers.get_all("content-length").iter().count() > 1 {
+            return fail(refuse(
+                400,
+                "bad Content-Length or Transfer-Encoding",
+                Some("memory_request_invalid"),
             ));
         }
         let length = parts

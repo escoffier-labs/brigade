@@ -1,17 +1,23 @@
 """Memory route availability (D21) and persistence through the managed front."""
 
+import http.client
+import json
+import os
+import socket
 import sys
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from urllib.parse import urlsplit
 
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "registry/skills/verify-brigade"))
 import hub_contract as hc  # noqa: E402 - repository-local drive helper
 import hub_contract_memory as hm  # noqa: E402
 
-BINARY = ROOT / "engines/hub/target/debug/brigade-hub"
+# CI builds into engines/hub/target. A build elsewhere names its binary here.
+BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", ROOT / "engines/hub/target/debug/brigade-hub"))
 BASE = f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} --route-mode registration=native"
 UNAVAILABLE = {"error": "hub busy", "reason": "memory-unavailable"}
 
@@ -117,25 +123,72 @@ class Memory(unittest.TestCase):
         hub = self.run_hub("bounds", "--route-mode memory=native")
         junk = hc.request(hub.url, "POST", "/memory", body={"action": "status"}, token=hm.JUNK)
         self.assertEqual((junk.status, junk.json), (401, {"error": "unauthorized"}))
-        # A declared length over the memory bound is refused from the headers.
-        import http.client
-        import json
-        from urllib.parse import urlsplit
+        # Declared lengths over the memory bound are refused from the headers,
+        # the one past the hub's 8 MiB transport limit included.
+        for length in (3 * 1024 * 1024, 9_000_000):
+            status_code, headers, body = raw(
+                hub, "POST", {"Authorization": "Bearer " + hub.admin_token, "Content-Length": str(length)}
+            )
+            self.assertEqual(status_code, 413, length)
+            self.assertEqual(json.loads(body)["code"], "memory_card_too_large", length)
 
+    def test_shared_refusals_carry_memory_codes(self):
+        hub = self.run_hub("codes", "--route-mode memory=native")
+        bearer = {"Authorization": "Bearer " + hub.admin_token}
+        # 405 names the allowed method (RFC 9110 section 15.5.6).
+        status_code, headers, body = raw(hub, "GET", bearer)
+        self.assertEqual(status_code, 405)
+        self.assertEqual(headers.get("allow"), "POST")
+        self.assertEqual(json.loads(body)["code"], "memory_method_invalid")
+        # A chunked body has no Content-Length: 411, never the shared code-less 400.
+        status_code, _, body = raw(hub, "POST", {**bearer, "Transfer-Encoding": "chunked"}, b"0\r\n\r\n")
+        self.assertEqual(
+            (status_code, json.loads(body)),
+            (411, {"error": "Content-Length is required", "code": "memory_request_invalid"}),
+        )
+        # A body that ends before its declared length.
         origin = urlsplit(hub.url)
-        connection = http.client.HTTPConnection(origin.hostname, origin.port, timeout=30)
-        try:
-            connection.putrequest("POST", "/memory")
-            connection.putheader("Authorization", "Bearer " + hub.admin_token)
-            connection.putheader("Content-Type", "application/json")
-            connection.putheader("Content-Length", str(3 * 1024 * 1024))
-            connection.endheaders()
-            response = connection.getresponse()
-            body = json.loads(response.read())
-        finally:
-            connection.close()
-        self.assertEqual(response.status, 413)
-        self.assertEqual(body["code"], "memory_card_too_large")
+        with socket.create_connection((origin.hostname, origin.port), timeout=30) as conn:
+            conn.sendall(
+                (
+                    "POST /memory HTTP/1.1\r\nHost: hub\r\nContent-Type: application/json\r\n"
+                    f"Authorization: Bearer {hub.admin_token}\r\nContent-Length: 100\r\n\r\n"
+                ).encode("ascii")
+                + b'{"action":'
+            )
+            conn.shutdown(socket.SHUT_WR)
+            reply = b""
+            while chunk := conn.recv(65536):
+                reply += chunk
+        head, _, payload = reply.partition(b"\r\n\r\n")
+        self.assertTrue(head.startswith(b"HTTP/1.1 400"), head)
+        self.assertEqual(
+            json.loads(payload), {"error": "incomplete request body", "code": "memory_request_invalid"}
+        )
+
+    def test_token_query_keeps_the_shared_refusal(self):
+        # Python refuses a `token` query on every GET and POST before routing
+        # (fleet_hub_http._route); the hub front answers it before memory runs.
+        hub = self.run_hub("query", "--route-mode memory=native")
+        response = hc.request(hub.url, "POST", "/memory?token=x", body={"action": "status"}, token=hub.admin_token)
+        self.assertEqual((response.status, response.body), (401, b"Dashboard request refused.\n"))
+
+
+def raw(hub: hc.Hub, method: str, headers: dict, body: bytes = b"") -> "tuple[int, dict, bytes]":
+    """One request with exactly the given framing headers, through http.client."""
+    origin = urlsplit(hub.url)
+    connection = http.client.HTTPConnection(origin.hostname, origin.port, timeout=30)
+    try:
+        connection.putrequest(method, "/memory")
+        connection.putheader("Content-Type", "application/json")
+        for name, value in headers.items():
+            connection.putheader(name, value)
+        connection.endheaders(body or None)
+        response = connection.getresponse()
+        payload = response.read()
+        return response.status, {k.lower(): v for k, v in response.getheaders()}, payload
+    finally:
+        connection.close()
 
 
 if __name__ == "__main__":

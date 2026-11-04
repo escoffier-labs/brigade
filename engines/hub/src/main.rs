@@ -619,8 +619,12 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             serde_json::json!({"ready":ready}),
         );
     }
-    if req.headers().contains_key("transfer-encoding")
-        || req.headers().get_all("content-length").iter().count() > 1
+    // Native memory answers framing and size refusals itself, each with its
+    // memory error code (D21), in `MemoryRoute::admit`.
+    let memory_request = app.memory.is_some() && req.uri().path() == "/memory";
+    if !memory_request
+        && (req.headers().contains_key("transfer-encoding")
+            || req.headers().get_all("content-length").iter().count() > 1)
     {
         return json(
             StatusCode::BAD_REQUEST,
@@ -633,7 +637,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(0);
-    if length > BODY_LIMIT as u64 {
+    if length > BODY_LIMIT as u64 && !memory_request {
         return body_too_large();
     }
     if let Some(storage) = &app.storage {
@@ -742,6 +746,10 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
     let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
         Ok(Ok(collected)) => collected.to_bytes(),
+        Ok(Err(e)) if memory.is_some() => {
+            return memory_route::body_refusal(e.is::<http_body_util::LengthLimitError>());
+        }
+        Err(_) if memory.is_some() => return memory_route::timeout(),
         Ok(Err(e)) if e.is::<http_body_util::LengthLimitError>() => return body_too_large(),
         Ok(Err(_)) => {
             return json(
