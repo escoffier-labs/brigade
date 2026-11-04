@@ -235,61 +235,61 @@ def launch(
     phase: int,
     startup_timeout: float,
 ) -> hc.Hub:
-    port = hc.free_port()
-    values = {
-        "host": hc.LOOPBACK,
-        "port": str(port),
-        "state_dir": str(state_dir),
-        "db": str(state_dir / "hub.db"),
-        "token_file": str(state_dir / "admin-token"),
-        "clock_file": str(state_dir / "clock"),
-        "python": python_for(brigade),
-        "launcher": str(LAUNCHER),
-    }
-    try:
-        argv = hc.expand_command(engine.template, brigade=brigade, values=values)
-    except hc.ContractError as exc:
-        raise ParityError(str(exc)) from exc
     log = state_dir / f"hub-{phase}-{engine.name}.log"
-    handle = open(log, "wb")  # closed by hc.stop_hub
-    os.chmod(log, 0o600)
     env = hc.hub_env(state_dir, admin_token, OPERATOR)
     env.update(env_extra)
-    popen: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            env=env,
-            cwd=str(state_dir),
-            **popen,
+
+    def start(port: int) -> hc.Hub:
+        values = {
+            "host": hc.LOOPBACK,
+            "port": str(port),
+            "state_dir": str(state_dir),
+            "db": str(state_dir / "hub.db"),
+            "token_file": str(state_dir / "admin-token"),
+            "clock_file": str(state_dir / "clock"),
+            "python": python_for(brigade),
+            "launcher": str(LAUNCHER),
+        }
+        try:
+            argv = hc.expand_command(engine.template, brigade=brigade, values=values)
+        except hc.ContractError as exc:
+            raise ParityError(str(exc)) from exc
+        handle = open(log, "wb")  # closed by hc.stop_hub
+        os.chmod(log, 0o600)
+        popen: dict[str, Any] = {"start_new_session": True} if os.name == "posix" else {}
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env=env,
+                cwd=str(state_dir),
+                **popen,
+            )
+        except OSError as exc:
+            handle.close()
+            raise ParityError(f"could not start hub engine {engine.name}: {exc}") from exc
+        return hc.Hub(
+            url=f"http://{hc.LOOPBACK}:{port}",
+            admin_token=admin_token,
+            mode="launched",
+            operator=OPERATOR,
+            argv=argv,
+            state_dir=state_dir,
+            log=log,
+            process=process,
+            log_handle=handle,
         )
-    except OSError as exc:
-        handle.close()
-        raise ParityError(f"could not start hub engine {engine.name}: {exc}") from exc
-    hub = hc.Hub(
-        url=f"http://{hc.LOOPBACK}:{port}",
-        admin_token=admin_token,
-        mode="launched",
-        operator=OPERATOR,
-        argv=argv,
-        state_dir=state_dir,
-        log=log,
-        process=process,
-        log_handle=handle,
+
+    return hc.launch_on_free_port(
+        start,
+        startup_timeout=startup_timeout,
+        exited=lambda code, tail: ParityError(f"the {engine.name} hub exited with {code}: {tail}"),
+        timed_out=lambda tail: ParityError(
+            f"the {engine.name} hub did not answer /health within {startup_timeout:g}s: {tail}"
+        ),
     )
-    deadline = time.monotonic() + startup_timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            hc.stop_hub(hub)
-            raise ParityError(f"the {engine.name} hub exited with {process.returncode}: {hc.log_tail(log)}")
-        if hc.request(hub.url, "GET", "/health", timeout=1.0).status is not None:
-            return hub
-        time.sleep(0.1)
-    hc.stop_hub(hub)
-    raise ParityError(f"the {engine.name} hub did not answer /health within {startup_timeout:g}s: {hc.log_tail(log)}")
 
 
 # ----------------------------------------------------------- the outbox sink

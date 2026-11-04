@@ -10,27 +10,39 @@ use std::{
     ptr,
 };
 #[derive(Default)]
-struct Disk {
-    writer: bool,
-    skip_directory_sync: bool,
-    stable: BTreeMap<PathBuf, Vec<u8>>,
-    names: BTreeMap<PathBuf, bool>,
-    paths: Vec<PathBuf>,
-    count: usize,
-    cut: usize,
-    crashed: bool,
-    ordered: bool,
-    inside_sync: bool,
-    phase: usize,
-    active: Option<usize>,
-    commit_frame: bool,
-    commit_complete: bool,
-    volatile: BTreeMap<PathBuf, Vec<u8>>,
-    loss_mode: usize,
+pub(crate) struct Disk {
+    /// Memory power-cut runs (S13a): the NORMAL control, an SQLITE_FULL on
+    /// the next commit frame, and a delay added to syncs of matching files.
+    pub(crate) normal: bool,
+    pub(crate) full_on_commit: bool,
+    pub(crate) sync_delay: Option<(String, std::time::Duration, usize)>,
+    pub(crate) writer: bool,
+    pub(crate) skip_directory_sync: bool,
+    pub(crate) stable: BTreeMap<PathBuf, Vec<u8>>,
+    pub(crate) names: BTreeMap<PathBuf, bool>,
+    pub(crate) paths: Vec<PathBuf>,
+    pub(crate) count: usize,
+    pub(crate) cut: usize,
+    pub(crate) crashed: bool,
+    pub(crate) ordered: bool,
+    pub(crate) inside_sync: bool,
+    pub(crate) phase: usize,
+    pub(crate) active: Option<usize>,
+    pub(crate) commit_frame: bool,
+    pub(crate) commit_complete: bool,
+    pub(crate) volatile: BTreeMap<PathBuf, Vec<u8>>,
+    pub(crate) loss_mode: usize,
 }
-thread_local! { static DISK: RefCell<Disk> = RefCell::default(); }
+thread_local! { pub(crate) static DISK: RefCell<Disk> = RefCell::default(); }
 // Registration is process-global, while fault state and writer switches are thread-local.
-static VFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) static VFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) fn synchronous() -> (&'static str, i64) {
+    if DISK.with(|d| d.borrow().normal) {
+        ("NORMAL", 1)
+    } else {
+        ("FULL", 2)
+    }
+}
 pub(super) fn writer_vfs() -> Option<&'static str> {
     DISK.with(|d| d.borrow().writer.then_some("hub-powercut"))
 }
@@ -67,7 +79,7 @@ unsafe fn f<'a>(p: *mut sqlite3_file) -> &'a mut File {
 unsafe fn io(p: *mut sqlite3_file) -> &'static sqlite3_io_methods {
     &*(*f(p).real).pMethods
 }
-fn step(phase: usize) -> bool {
+pub(crate) fn step(phase: usize) -> bool {
     DISK.with(|d| {
         let mut d = d.borrow_mut();
         if d.crashed {
@@ -171,6 +183,19 @@ unsafe extern "C" fn write(p: *mut sqlite3_file, b: *const c_void, n: c_int, o: 
     if step(kind) {
         return SQLITE_IOERR_WRITE;
     }
+    if wal
+        && n > 24
+        && DISK.with(|d| {
+            let mut d = d.borrow_mut();
+            let full = d.commit_frame && d.full_on_commit;
+            if full {
+                d.full_on_commit = false;
+            }
+            full
+        })
+    {
+        return SQLITE_FULL;
+    }
     let rc = (io(p).xWrite.unwrap())(f(p).real, b, n, o);
     if wal && n > 24 && DISK.with(|d| d.borrow().commit_frame) {
         DISK.with(|d| d.borrow_mut().commit_complete = true);
@@ -194,6 +219,21 @@ unsafe extern "C" fn sync(p: *mut sqlite3_file, flags: c_int) -> c_int {
         return SQLITE_IOERR_FSYNC;
     }
     let path = f(p).path.clone();
+    let delay = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        match d.sync_delay.as_mut() {
+            Some((suffix, delay, remaining))
+                if *remaining > 0 && path.to_string_lossy().ends_with(suffix.as_str()) =>
+            {
+                *remaining -= 1;
+                Some(*delay)
+            }
+            _ => None,
+        }
+    });
+    if let Some(delay) = delay {
+        std::thread::sleep(delay);
+    }
     let rc = (io(p).xSync.unwrap())(f(p).real, flags);
     // A separate cut inside sync persists a sector prefix of its dirty image.
     let partial_cut = DISK.with(|d| d.borrow().inside_sync) && step(2);
@@ -298,9 +338,9 @@ static METHODS: sqlite3_io_methods = sqlite3_io_methods {
     xFetch: None,
     xUnfetch: None,
 };
-struct Registration(*mut sqlite3_vfs);
+pub(crate) struct Registration(*mut sqlite3_vfs);
 impl Registration {
-    unsafe fn new() -> Self {
+    pub(crate) unsafe fn new() -> Self {
         let parent = sqlite3_vfs_find(ptr::null());
         let mut v = Box::new(ptr::read(parent));
         v.zName = c"hub-powercut".as_ptr();
@@ -330,21 +370,27 @@ fn connect(path: &std::path::Path) -> rusqlite::Result<rusqlite::Connection> {
     )
 }
 fn seed(path: &std::path::Path, ordered: bool) {
+    seed_files(&[path], ordered);
+}
+/// Treat the current bytes of each file and its WAL as durable.
+pub(crate) fn seed_files(files: &[&std::path::Path], ordered: bool) {
     let mut disk = Disk {
         ordered,
         ..Disk::default()
     };
-    for suffix in ["", "-wal"] {
-        let p = PathBuf::from(format!("{}{suffix}", path.display()));
-        if let Ok(bytes) = std::fs::read(&p) {
-            disk.stable.insert(p.clone(), bytes);
-            disk.names.insert(p.clone(), true);
+    for path in files {
+        for suffix in ["", "-wal"] {
+            let p = PathBuf::from(format!("{}{suffix}", path.display()));
+            if let Ok(bytes) = std::fs::read(&p) {
+                disk.stable.insert(p.clone(), bytes);
+                disk.names.insert(p.clone(), true);
+            }
+            disk.paths.push(p);
         }
-        disk.paths.push(p);
     }
     DISK.with(|d| *d.borrow_mut() = disk);
 }
-fn restore() {
+pub(crate) fn restore() {
     DISK.with(|d| {
         let mut d = d.borrow_mut();
         d.cut = 0;
@@ -381,7 +427,8 @@ fn restore() {
 #[test]
 #[ignore = "storage fault matrix, run alone with --ignored --exact writer::powercut::power_cut_matrix"]
 fn power_cut_matrix() {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     let mut normal_losses = 0;
     let mut sync_losses = [0usize; 2];
@@ -669,7 +716,8 @@ fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
 }
 
 fn writer_creation_schedule(long: bool) {
-    let _lock = VFS_LOCK.lock().unwrap();
+    // A failed test elsewhere must not poison every later power-cut run.
+    let _lock = VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let _vfs = unsafe { Registration::new() };
     for skip in [false, true] {
         let (operations, ack, lost) = writer_creation_cut(0, skip);
@@ -714,4 +762,184 @@ fn writer_wal_creation_short() {
 #[ignore = "all writer WAL creation operation cuts, run manually"]
 fn writer_wal_creation_matrix() {
     writer_creation_schedule(true);
+}
+
+// S7: native claim writes through the real worker, one commit per command, with
+// cuts across the short schedule's storage operations. The fence never moves
+// behind an acknowledged decision, and recovery never reissues a generation a
+// client was told about.
+fn claim_template() -> PathBuf {
+    let path = super::tests::fixture();
+    std::fs::remove_file(&path).unwrap();
+    let python = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+    let status = std::process::Command::new(python)
+        .args(["-c", "from pathlib import Path; import sys; from brigade.fleet_hub import init_db; init_db(Path(sys.argv[1])).close()"])
+        .arg(&path)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    db.execute(
+        "INSERT INTO nodes(node_id,token_sha256,label,created_at,revoked_at) VALUES('cut-node',?1,NULL,'2026-01-01T00:00:00+00:00',NULL)",
+        [CUT_KEY],
+    )
+    .unwrap();
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    drop(db);
+    for suffix in ["-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{suffix}", path.display()));
+    }
+    path
+}
+/// The node token digest the template enrolls.
+const CUT_KEY: &str = "cut-node-token-digest";
+fn claim(action: &str, holder: &str) -> crate::claims::Claim {
+    let raw = serde_json::json!({"action": action, "target": "cut-repo", "node_id": "cut-node", "holder": holder});
+    crate::claims::Claim {
+        request: crate::claims::validate(&raw).unwrap_or_else(|_| panic!("valid claim")),
+        key: CUT_KEY.into(),
+        admin: "admin-digest".into(),
+        allow_admin_writes: false,
+        clock: None,
+        events: false,
+    }
+}
+/// Fence values after each acknowledged command of the schedule.
+const CLAIM_SCHEDULE: [(&str, &str, i64); 4] = [
+    ("acquire", "holder-one", 1),
+    ("renew", "holder-one", 1),
+    ("release", "holder-one", 2),
+    ("acquire", "holder-two", 3),
+];
+/// One claim command through the real worker, committed on its own.
+fn run_claim(path: &std::path::Path, action: &str, holder: &str) -> Option<serde_json::Value> {
+    use super::*;
+    let arbiter = std::sync::Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(1);
+    let (reply, result) = oneshot::channel();
+    sender
+        .try_send(Envelope {
+            command: Box::new(claim(action, holder)),
+            budget: Budget {
+                events: 1,
+                bytes: 100,
+                durable: false,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+            reply: Some(reply),
+            _permits: vec![],
+            arbiter: arbiter.clone(),
+        })
+        .unwrap_or_else(|_| panic!("queue"));
+    drop(sender);
+    match worker::open(path) {
+        Ok(db) => worker::run(
+            db,
+            receiver,
+            Config::new(path.to_path_buf()),
+            arbiter,
+            Arc::default(),
+        ),
+        Err(_) => drop(receiver),
+    }
+    result.blocking_recv().ok()?.ok()
+}
+fn claim_cut(template: &std::path::Path, cut: usize) -> (usize, i64) {
+    let path = super::tests::fixture();
+    std::fs::copy(template, &path).unwrap();
+    seed(&path, false);
+    DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.writer = true;
+        d.cut = cut;
+        d.active = Some(8);
+        d.phase = 8;
+    });
+    let mut acknowledged = 0;
+    for (action, holder, fence) in CLAIM_SCHEDULE {
+        let Some(answer) = run_claim(&path, action, holder) else {
+            break;
+        };
+        assert_eq!(answer["status"], 200, "{answer}");
+        acknowledged = fence;
+    }
+    let count = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.crashed = true;
+        d.writer = false;
+        d.count
+    });
+    restore();
+    DISK.with(|d| *d.borrow_mut() = Disk::default());
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let fence: i64 = db
+        .query_row(
+            "SELECT COALESCE((SELECT generation FROM claim_fences WHERE target='cut-repo'),0)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        fence >= acknowledged,
+        "cut {cut}: fence {fence} behind acknowledged {acknowledged}"
+    );
+    // At most one live holder, and it holds the generation the fence names.
+    let holders: Vec<(String, i64)> = db
+        .prepare(
+            "SELECT c.holder_token, f.generation FROM claims c JOIN claim_fences f USING(target)",
+        )
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap();
+    assert!(holders.len() <= 1 && holders.iter().all(|(_, g)| *g == fence));
+    drop(db);
+    // Recovery issues a fresh generation above everything acknowledged, and a
+    // released holder stays retired.
+    let after = |action, holder| {
+        let answer = run_claim(&path, action, holder).expect("recovered writer answers");
+        serde_json::from_str::<serde_json::Value>(answer["body"].as_str().unwrap()).unwrap()
+    };
+    if acknowledged >= 2 {
+        assert_eq!(after("renew", "holder-one")["reason"], "stale-holder");
+    }
+    let granted = after("acquire", "holder-three");
+    if granted["granted"] == true {
+        assert!(granted["claim"]["generation"].as_i64().unwrap() > acknowledged);
+    } else {
+        assert_eq!(granted["owner"]["generation"].as_i64().unwrap(), fence);
+    }
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    (count, acknowledged)
+}
+#[test]
+fn claim_writes_short_schedule() {
+    let _lock = VFS_LOCK.lock().unwrap();
+    let _vfs = unsafe { Registration::new() };
+    let template = claim_template();
+    let (operations, acknowledged) = claim_cut(&template, 0);
+    assert_eq!(acknowledged, 3, "uncut schedule acknowledges every command");
+    let mut cuts = vec![
+        1,
+        2,
+        operations / 4,
+        operations / 2,
+        operations - 1,
+        operations,
+    ];
+    cuts.sort();
+    cuts.dedup();
+    let mut partial = 0;
+    for cut in cuts {
+        let (_, acknowledged) = claim_cut(&template, cut);
+        partial += usize::from(acknowledged < 3);
+    }
+    assert!(partial > 0, "the schedule must cut inside the claim writes");
+    std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
 }

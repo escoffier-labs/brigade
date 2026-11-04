@@ -420,3 +420,88 @@ def test_storage_parity_clock_launcher_needs_its_file(tmp_path):
     )
     assert proc.returncode == 2
     assert "does not exist" in proc.stderr
+
+
+def _port_stub(tmp_path):
+    """A hub stand-in: `serve PORT` answers /health; `die PORT` exits 3 with no address error."""
+    script = tmp_path / "stub_hub.py"
+    script.write_text(
+        "import sys\n"
+        "from http.server import BaseHTTPRequestHandler, HTTPServer\n"
+        "mode, port = sys.argv[1], int(sys.argv[2])\n"
+        "if mode == 'die':\n"
+        "    print('boom: bad configuration', file=sys.stderr)\n"
+        "    sys.exit(3)\n"
+        "class H(BaseHTTPRequestHandler):\n"
+        "    def do_GET(self):\n"
+        "        self.send_response(200)\n"
+        "        self.send_header('Content-Length', '2')\n"
+        "        self.end_headers()\n"
+        "        self.wfile.write(b'{}')\n"
+        "    def log_message(self, *args):\n"
+        "        pass\n"
+        "HTTPServer(('127.0.0.1', port), H).serve_forever()\n",
+        encoding="utf-8",
+    )
+    return script
+
+
+def _held_port():
+    """A listening socket, so the port is taken until the caller closes it."""
+    import socket
+
+    held = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    held.bind(("127.0.0.1", 0))
+    held.listen(1)
+    return held, held.getsockname()[1]
+
+
+def _parity_launch(sp, tmp_path, mode):
+    state = tmp_path / "state"
+    state.mkdir()
+    template = " ".join([shlex.quote(sys.executable), shlex.quote(str(_port_stub(tmp_path))), mode, "{port}"])
+    return sp.launch(
+        sp.Engine("a", template),
+        brigade=["brigade"],
+        state_dir=state,
+        admin_token="t",
+        env_extra={},
+        phase=1,
+        startup_timeout=30.0,
+    )
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows lets a second socket share a port with SO_REUSEADDR")
+def test_storage_parity_launch_retries_when_the_port_was_taken(sp, tmp_path, monkeypatch):
+    held, taken = _held_port()
+    ports = []
+    real_free_port = sp.hc.free_port
+
+    def free_port():
+        ports.append(taken if not ports else real_free_port())
+        return ports[-1]
+
+    monkeypatch.setattr(sp.hc, "free_port", free_port)
+    try:
+        hub = _parity_launch(sp, tmp_path, "serve")
+        try:
+            assert len(ports) == 2 and ports[0] == taken and ports[1] != taken
+            assert hub.url.endswith(f":{ports[1]}")
+        finally:
+            sp.hc.stop_hub(hub)
+    finally:
+        held.close()
+
+
+def test_storage_parity_launch_does_not_retry_another_early_exit(sp, tmp_path, monkeypatch):
+    ports = []
+    real_free_port = sp.hc.free_port
+
+    def free_port():
+        ports.append(real_free_port())
+        return ports[-1]
+
+    monkeypatch.setattr(sp.hc, "free_port", free_port)
+    with pytest.raises(sp.ParityError, match="the a hub exited with 3: .*boom"):
+        _parity_launch(sp, tmp_path, "die")
+    assert len(ports) == 1

@@ -772,9 +772,9 @@ def audit(
 def add_arguments(p: Any) -> None:
     p.add_argument(
         "--profile",
-        choices=("contract", "findings", PROFILE),
+        choices=("contract", "findings", "memory", PROFILE),
         default="contract",
-        help="contract (default), findings, or prod-readonly.",
+        help="contract (default), findings, memory (the S13a POST /memory cases), or prod-readonly.",
     )
     p.add_argument(
         "--node-token-env", default=NODE_TOKEN_ENV, help="prod-readonly with --hub-url: env var with a node token."

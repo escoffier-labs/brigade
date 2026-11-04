@@ -21,7 +21,10 @@ impl Modes {
                 "proxy" => Mode::Proxy,
                 _ => return Err("unknown route mode".into()),
             };
-            let native = matches!(family, "health" | "metrics" | "registration");
+            let native = matches!(
+                family,
+                "health" | "metrics" | "registration" | "claims" | "memory"
+            );
             // Only health has a shadow comparator and housekeeping audit so far.
             let shadow = family == "health";
             if !matches!(
@@ -32,6 +35,7 @@ impl Modes {
                     | "heartbeat"
                     | "claims"
                     | "messages"
+                    | "memory"
                     | "cold"
                     | "browser"
             ) {
@@ -45,9 +49,16 @@ impl Modes {
             if family == "metrics" && mode != Mode::Native {
                 return Err("metrics requires native mode".into());
             }
+            // Python has no memory routes. `memory=proxy` configures memory
+            // with no handler, which answers 503 memory-unavailable (D21).
             modes.0.insert(family.into(), mode);
         }
         Ok(modes)
+    }
+    /// The mode named on the command line, if any. Memory is configured only
+    /// when its mode is named; otherwise `/memory` is an unknown path (404).
+    pub fn configured(&self, family: &str) -> Option<Mode> {
+        self.0.get(family).copied()
     }
     pub fn get(&self, family: &str) -> Mode {
         self.0
@@ -68,6 +79,7 @@ pub fn family(method: &str, path: &str, action: &str) -> &'static str {
         (_, "/events" | "/status" | "/sessions") => "heartbeat",
         (_, "/claims" | "/owners") => "claims",
         ("POST", "/messages") if !action.starts_with("events_") => "messages",
+        (_, "/memory") => "memory",
         _ if path == "/"
             || [
                 "/deck",
@@ -93,9 +105,28 @@ mod tests {
         assert_eq!(modes.get("registration"), Mode::Native);
         assert_eq!(Modes::default().get("registration"), Mode::Proxy);
         assert!(Modes::parse(&["registration=shadow".into()]).is_err());
-        assert!(Modes::parse(&["claims=native".into()]).is_err());
+        assert!(Modes::parse(&["heartbeat=native".into()]).is_err());
+    }
+    #[test]
+    fn claims_accept_native_and_proxy_but_not_shadow() {
+        let modes = Modes::parse(&["claims=native".into()]).unwrap();
+        assert_eq!(modes.get("claims"), Mode::Native);
+        assert_eq!(Modes::default().get("claims"), Mode::Proxy);
+        assert!(Modes::parse(&["claims=shadow".into()]).is_err());
     }
     use super::*;
+    #[test]
+    fn memory_is_configured_only_when_named_and_never_shadowed() {
+        assert_eq!(Modes::default().configured("memory"), None);
+        let native = Modes::parse(&["memory=native".into()]).unwrap();
+        assert_eq!(native.configured("memory"), Some(Mode::Native));
+        let forced = Modes::parse(&["memory=proxy".into()]).unwrap();
+        assert_eq!(forced.configured("memory"), Some(Mode::Proxy));
+        assert!(Modes::parse(&["memory=shadow".into()]).is_err());
+        assert_eq!(family("POST", "/memory", ""), "memory");
+        assert_eq!(family("GET", "/memory", ""), "memory");
+        assert_eq!(family("POST", "/memoryx", ""), "cold");
+    }
     #[test]
     fn modes_reject_unimplemented_handlers_and_keep_last_override() {
         assert!(Modes::parse(&["claims=shadow".into()]).is_err());

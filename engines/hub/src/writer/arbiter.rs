@@ -43,6 +43,11 @@ impl Default for Arbiter {
     }
 }
 impl Arbiter {
+    /// The memory residence bucket in seconds, refilled to now. Negative after a slow batch.
+    pub fn balance(&self) -> f64 {
+        let s = self.state.lock().unwrap();
+        (s.balance + s.updated.elapsed().as_secs_f64() * 0.25).min(0.250)
+    }
     pub(crate) fn durable(&self, delta: i32) {
         let mut s = self.state.lock().unwrap();
         if delta > 0 {

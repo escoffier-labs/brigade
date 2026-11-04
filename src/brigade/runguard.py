@@ -23,6 +23,11 @@ from time import sleep as _sleep
 from uuid import uuid4
 
 from . import dirfd, localio, proc, receipt_schema, run_dirfd
+from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
+
+# Re-exported for tests to call. Patch these on runguard_gate: the gate looks them up there.
+from .runguard_gate import _recovery_gate_path as _recovery_gate_path
+from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
@@ -54,6 +59,8 @@ _UNTRACKED_ENUM_BUDGET_BYTES = proc.MAX_DELIMITED_BYTES
 _UNTRACKED_ENUM_TIMEOUT_SECONDS = 120.0
 _WINDOWS_LOCK_RELEASE_RETRY_SECONDS = 1.0
 _WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS = 0.025
+_RECOVERY_GATE_BUSY_RETRY_SECONDS = 2.0
+_RECOVERY_GATE_BUSY_POLL_SECONDS = 0.02
 
 # Receipt copies of a snapshot summarize path sets beyond this many entries so
 # run.json and pre-run-snapshot.json stay bounded; totals make the truncation
@@ -319,18 +326,73 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     return enriched
 
 
-def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None:
-    if not _lock_is_stale(path):
-        return None
-    claimed = _recovery_claim_path(path)
+def _lock_fingerprint(path: Path) -> tuple[int, int, object] | None:
+    """Identity of the lock directory now at ``path``, or ``None`` when absent.
+
+    The owner token is part of it because a released lock's inode number is
+    usually handed straight to the next lock directory.
+    """
     try:
-        path.rename(claimed)
+        info = path.lstat()
     except FileNotFoundError:
         return None
-    if not _lock_is_stale(claimed):
-        if not path.exists():
-            claimed.rename(path)
+    except OSError as exc:
+        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+    owner = _read_lock_owner(path)
+    return info.st_dev, info.st_ino, owner.get("owner_token") if owner is not None else None
+
+
+def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | None] | None:
+    """``_claim_stale_lock``, waiting a bounded time while another recoverer holds the gate."""
+    deadline: float | None = None  # read the clock only once the gate is busy
+    while (result := _claim_stale_lock(path)) is _RecoveryGate.BUSY:
+        now = time.monotonic()
+        deadline = now + _RECOVERY_GATE_BUSY_RETRY_SECONDS if deadline is None else deadline
+        if now >= deadline:
+            raise _recovery_gate_busy_error(path)
+        time.sleep(_RECOVERY_GATE_BUSY_POLL_SECONDS)
+    return result
+
+
+def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None | _RecoveryGate:
+    # Renaming ``path`` takes whatever directory is there at that instant, so a
+    # stale verdict is only safe to act on if nothing can replace the judged
+    # lock before the rename. Two things move a lock directory off ``path``: its
+    # own holder releasing it, and a recoverer renaming it here. A stale lock's
+    # holder is dead, so serializing recoverers behind one gate leaves the
+    # judged lock exactly one possible renamer. Without the gate, recoverers B
+    # and C can both judge a dead lock stale; B recovers it and publishes its
+    # own lock, and C's rename then takes B's live lock out of sight (B crashes
+    # on `stat`, or B's lock is stranded under C's claim name while another
+    # acquirer publishes beside it). A busy gate returns BUSY, never None: the lock may still be dead.
+    judged = _lock_fingerprint(path)
+    if judged is None or not _lock_is_stale(path):
         return None
+    with _stale_recovery_gate(path) as gated:
+        if not gated:
+            return _RecoveryGate.BUSY
+        # Re-judge under the gate: the same lock before and after the stale check means the verdict is
+        # about that lock. Ungated renames into ``path`` (publish, restores, `_release_lock`'s put-back)
+        # all need ``path`` empty, so none can displace a judged lock.
+        if _lock_fingerprint(path) != judged or not _lock_is_stale(path) or _lock_fingerprint(path) != judged:
+            return None
+        claimed = _recovery_claim_path(path)
+        try:
+            path.rename(claimed)
+        except FileNotFoundError:
+            return None
+        except PermissionError as error:
+            # Windows refuses to rename a directory while another process has a
+            # file inside it open (owner.json during a stale check). Back off
+            # like `_release_lock`; the lock is untouched.
+            if getattr(error, "winerror", None) in {5, 32}:
+                return None
+            raise
+        # Defense in depth: a recycled owner pid can make the claimed lock look
+        # live again. Put it back only if ``path`` is still free.
+        if _lock_fingerprint(claimed) != judged or not _lock_is_stale(claimed):
+            _restore_claimed_lock(path, claimed)
+            return None
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
 
 
@@ -773,7 +835,7 @@ def reconcile_run_lock(workspace: Path) -> str:
     if not _lock_is_reconcileable(path, owner):
         return "skipped"
     claimed_owner = _claim_stale_lock(path)
-    if claimed_owner is None:
+    if claimed_owner is None or claimed_owner is _RecoveryGate.BUSY:
         return "skipped"
     claimed, claimed_meta = claimed_owner
     _finish_claimed_recovery(path, claimed, claimed_meta)
@@ -982,9 +1044,14 @@ def recover_stale_run(
     if _lock_path_is_directory(path) is not None:
         owner = _read_lock_owner(path)
         if owner is not None and _owner_matches_run(owner, run_dir):
-            stale = _claim_stale_lock(path)
+            stale = _claim_stale_lock_patiently(path)
             if stale is None:
-                if _lock_path_is_directory(path) is not None:
+                # A gate holder may have recovered this run's lock and published its own during the wait.
+                # A published lock always has its owner file, so an unreadable owner still counts as active.
+                current = _read_lock_owner(path)
+                if _lock_path_is_directory(path) is not None and (
+                    current is None or _owner_matches_run(current, run_dir)
+                ):
                     raise RunLockError(f"run owner process is still active: {path}")
             else:
                 claimed, claimed_owner = stale
@@ -1305,7 +1372,7 @@ def _acquire_lock(
         except FileExistsError:
             if _lock_path_is_directory(path) is None:
                 continue
-            stale = _claim_stale_lock(path)
+            stale = _claim_stale_lock_patiently(path)
             if stale is None:
                 if _lock_path_is_directory(path) is None:
                     continue
@@ -1341,7 +1408,10 @@ def _acquire_lock(
         if stale_action == "claim":
             # Claim mode takes over this run's lock only. Broad pending-claim
             # recovery would terminalize unrelated .stale claims that the
-            # reaper has not selected, aged, or containment-checked.
+            # reaper has not selected, aged, or containment-checked. Skipping
+            # the check cannot yield a second holder: a live lock leaves
+            # ``path`` only when its holder releases it, because recoverers
+            # rename a lock only after judging it stale under the recovery gate.
             return ownership
         _release_lock(path, ownership)
         if _recover_pending_claims(path) and on_reconcile is not None:

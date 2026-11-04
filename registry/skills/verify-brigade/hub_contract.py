@@ -463,64 +463,119 @@ def hub_env(state_dir: Path, admin_token: str, operator: str) -> dict[str, str]:
     return env
 
 
+LAUNCH_ATTEMPTS = 5
+# What a hub's log says when its port was taken between free_port() and its bind.
+_ADDRESS_IN_USE = ("address already in use", "wsaeaddrinuse") + (("10048",) if os.name == "nt" else ())
+
+
+def address_in_use(log_text: str) -> bool:
+    lowered = log_text.lower()
+    return any(marker in lowered for marker in _ADDRESS_IN_USE)
+
+
+def _await_hub(hub: Hub, deadline: float) -> str:
+    """Wait for `/health`: "healthy", "exited" (the process died first) or "timeout"."""
+    process = hub.process
+    assert process is not None
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return "exited"
+        if request(hub.url, "GET", "/health", timeout=1.0).status is not None:
+            # Another worker's hub can take the port and answer; ours must still be running.
+            return "healthy" if process.poll() is None else "exited"
+        time.sleep(0.1)
+    return "timeout"
+
+
+def launch_on_free_port(
+    start: Callable[[int], Hub],
+    *,
+    startup_timeout: float,
+    exited: Callable[[int | None, str], Exception],
+    timed_out: Callable[[str], Exception],
+) -> Hub:
+    """Start a hub on a free port and wait for it, picking a fresh port if the port was taken.
+
+    free_port() releases the port before the hub binds it, so a parallel run can
+    take it in between. A hub that exits early with "address already in use" is
+    stopped and started again on a new port, up to LAUNCH_ATTEMPTS times within
+    the one startup budget. Any other early exit raises at once.
+    """
+    deadline = time.monotonic() + startup_timeout
+    attempt = 0
+    while True:
+        attempt += 1
+        hub = start(free_port())
+        state = _await_hub(hub, deadline)
+        if state == "healthy":
+            return hub
+        assert hub.process is not None
+        returncode = hub.process.poll()
+        stop_hub(hub)
+        assert hub.log is not None
+        tail = log_tail(hub.log)
+        if state == "timeout":
+            raise timed_out(tail)
+        if attempt < LAUNCH_ATTEMPTS and time.monotonic() < deadline and address_in_use(tail):
+            continue
+        raise exited(returncode, tail)
+
+
 def launch_hub(template: str, *, brigade: list[str], state_dir: Path, startup_timeout: float) -> Hub:
     admin_token = "contract-admin-" + secrets.token_urlsafe(18)
     operator = new_operator()
     token_file = state_dir / "admin-token"
     token_file.write_text(admin_token + "\n", encoding="utf-8")
     token_file.chmod(0o600)
-    port = free_port()
-    values = {
-        "host": LOOPBACK,
-        "port": str(port),
-        "state_dir": str(state_dir),
-        "db": str(state_dir / "hub.db"),
-        "token_file": str(token_file),
-    }
-    argv = expand_command(template, brigade=brigade, values=values)
     log = state_dir / "hub.log"
-    handle = open(log, "wb")  # closed in stop_hub
-    os.chmod(log, 0o600)
-    popen_kwargs: dict[str, Any] = {}
-    if os.name == "posix":
-        popen_kwargs["start_new_session"] = True
-    else:  # pragma: no cover - Windows process groups
-        popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-    try:
-        process = subprocess.Popen(
-            argv,
-            stdin=subprocess.DEVNULL,
-            stdout=handle,
-            stderr=subprocess.STDOUT,
-            env=hub_env(state_dir, admin_token, operator),
-            cwd=str(state_dir),
-            **popen_kwargs,
+
+    def start(port: int) -> Hub:
+        values = {
+            "host": LOOPBACK,
+            "port": str(port),
+            "state_dir": str(state_dir),
+            "db": str(state_dir / "hub.db"),
+            "token_file": str(token_file),
+        }
+        argv = expand_command(template, brigade=brigade, values=values)
+        handle = open(log, "wb")  # closed in stop_hub
+        os.chmod(log, 0o600)
+        popen_kwargs: dict[str, Any] = {}
+        if os.name == "posix":
+            popen_kwargs["start_new_session"] = True
+        else:  # pragma: no cover - Windows process groups
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        try:
+            process = subprocess.Popen(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                env=hub_env(state_dir, admin_token, operator),
+                cwd=str(state_dir),
+                **popen_kwargs,
+            )
+        except OSError as exc:
+            handle.close()
+            raise ContractError(f"could not start the hub: {exc}") from exc
+        return Hub(
+            url=f"http://{LOOPBACK}:{port}",
+            admin_token=admin_token,
+            mode="launched",
+            operator=operator,
+            argv=argv,
+            state_dir=state_dir,
+            log=log,
+            process=process,
+            log_handle=handle,
         )
-    except OSError as exc:
-        handle.close()
-        raise ContractError(f"could not start the hub: {exc}") from exc
-    hub = Hub(
-        url=f"http://{LOOPBACK}:{port}",
-        admin_token=admin_token,
-        mode="launched",
-        operator=operator,
-        argv=argv,
-        state_dir=state_dir,
-        log=log,
-        process=process,
-        log_handle=handle,
+
+    return launch_on_free_port(
+        start,
+        startup_timeout=startup_timeout,
+        exited=lambda code, tail: ContractError(f"the hub exited with {code} before it was healthy: {tail}"),
+        timed_out=lambda tail: ContractError(f"the hub did not answer /health within {startup_timeout:g}s: {tail}"),
     )
-    deadline = time.monotonic() + startup_timeout
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            stop_hub(hub)
-            raise ContractError(f"the hub exited with {process.returncode} before it was healthy: {log_tail(log)}")
-        status = request(hub.url, "GET", "/health", timeout=1.0).status
-        if status is not None:
-            return hub
-        time.sleep(0.1)
-    stop_hub(hub)
-    raise ContractError(f"the hub did not answer /health within {startup_timeout:g}s: {log_tail(log)}")
 
 
 def _group_alive(pgid: int) -> bool:

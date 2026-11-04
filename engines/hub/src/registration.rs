@@ -19,6 +19,8 @@ use subtle::ConstantTimeEq;
 #[path = "registration_principals.rs"]
 mod principals;
 
+pub use brigade_hub::wire::{array, now, object, py_trim, quote, string, text, valid_node, value};
+
 pub fn digest(token: &str) -> String {
     let mut output = String::with_capacity(64);
     const HEX: &[u8] = b"0123456789abcdef";
@@ -27,53 +29,6 @@ pub fn digest(token: &str) -> String {
         output.push(HEX[(b & 15) as usize] as char);
     }
     output
-}
-/// Python's str.strip(): Rust's White_Space set plus U+001C..U+001F, which
-/// Python's isspace() also counts.
-pub fn py_trim(s: &str) -> &str {
-    s.trim_matches(|c: char| c.is_whitespace() || ('\u{1c}'..='\u{1f}').contains(&c))
-}
-pub fn quote(s: &str) -> String {
-    let encoded = serde_json::to_string(s).unwrap();
-    let mut out = String::new();
-    for c in encoded.chars() {
-        // json.dumps(ensure_ascii=True) escapes everything outside ' '..'~', DEL included.
-        if c.is_ascii() && c != '\x7f' {
-            out.push(c);
-        } else {
-            let mut buf = [0; 2];
-            for unit in c.encode_utf16(&mut buf) {
-                out.push_str(&format!("\\u{unit:04x}"));
-            }
-        }
-    }
-    out
-}
-pub fn object(fields: &[(&str, String)]) -> String {
-    format!(
-        "{{{}}}",
-        fields
-            .iter()
-            .map(|(k, v)| format!("{}: {v}", quote(k)))
-            .collect::<Vec<_>>()
-            .join(", ")
-    )
-}
-pub fn array(items: impl IntoIterator<Item = String>) -> String {
-    format!("[{}]", items.into_iter().collect::<Vec<_>>().join(", "))
-}
-pub fn value(v: &Value) -> String {
-    match v {
-        Value::Text(s) => quote(s),
-        Value::Null => "null".into(),
-        _ => unreachable!(),
-    }
-}
-pub fn text(s: &str) -> Value {
-    Value::Text(s.into())
-}
-pub fn string(v: &Value) -> &str {
-    if let Value::Text(s) = v { s } else { "" }
 }
 #[derive(Clone)]
 pub struct Reply {
@@ -143,55 +98,6 @@ pub fn random(bytes: usize) -> Result<String> {
         out.push(alphabet[((acc << (6 - bits)) & 63) as usize] as char);
     }
     Ok(out)
-}
-pub fn now(clock: Option<&str>) -> String {
-    let d = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap();
-    let epoch = clock
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|s| s.trim().parse::<f64>().ok())
-        .filter(|v| v.is_finite() && *v >= 0.0 && *v < 253402300799.0);
-    // Round the whole epoch to microseconds first, so 1.9999996 carries into
-    // the next second as Python's datetime.fromtimestamp does.
-    let (secs, micros) = match epoch {
-        Some(v) => {
-            let total = (v * 1_000_000.0).round() as u64;
-            (
-                (total / 1_000_000) as libc::time_t,
-                (total % 1_000_000) as u32,
-            )
-        }
-        None => (d.as_secs() as libc::time_t, d.subsec_micros()),
-    };
-    let mut tm = std::mem::MaybeUninit::<libc::tm>::uninit();
-    // gmtime_r writes the supplied structure and keeps no shared mutable state.
-    let tm = unsafe {
-        libc::gmtime_r(&secs, tm.as_mut_ptr());
-        tm.assume_init()
-    };
-    let fraction = if micros == 0 {
-        String::new()
-    } else {
-        format!(".{micros:06}")
-    };
-    format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}{fraction}+00:00",
-        tm.tm_year + 1900,
-        tm.tm_mon + 1,
-        tm.tm_mday,
-        tm.tm_hour,
-        tm.tm_min,
-        tm.tm_sec
-    )
-}
-pub fn valid_node(s: &str) -> bool {
-    s != "unknown"
-        && !s.is_empty()
-        && s.len() <= 128
-        && s.as_bytes()[0].is_ascii_alphanumeric()
-        && s.bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
 }
 fn node(row: &[Value]) -> String {
     object(&[
@@ -345,6 +251,11 @@ struct Mutation {
 }
 impl writer::Command for Mutation {
     fn apply(&self, tx: &dyn WriteTx) -> std::result::Result<Json, writer::ApplyError> {
+        if brigade_hub::schema::newer_than_supported(tx)? {
+            return Err(writer::ApplyError::Refused(
+                Reply::error(503, brigade_hub::schema::NEWER_SCHEMA).packed(),
+            ));
+        }
         if let Some(reply) = authorize(tx, &self.key, &self.admin, &self.path)? {
             return Ok(reply.packed());
         }
@@ -451,7 +362,7 @@ impl Registration {
     }
 }
 
-fn parse_body(body: &[u8]) -> std::result::Result<Json, String> {
+pub fn parse_body(body: &[u8]) -> std::result::Result<Json, String> {
     if body.is_empty() {
         return Err("missing body".into());
     }
@@ -532,32 +443,7 @@ fn parse_body(body: &[u8]) -> std::result::Result<Json, String> {
 mod tests {
     use super::*;
     #[test]
-    fn clock_epoch_carries_rounded_microseconds_into_seconds() {
-        let dir = std::env::temp_dir().join(format!("hub-clock-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let clock = dir.join("clock");
-        let at = |value: &str| {
-            std::fs::write(&clock, value).unwrap();
-            now(Some(clock.to_str().unwrap()))
-        };
-        // Python: datetime.fromtimestamp(1.9999996, timezone.utc).isoformat()
-        assert_eq!(at("1.9999996"), "1970-01-01T00:00:02+00:00");
-        assert_eq!(at("1.25"), "1970-01-01T00:00:01.250000+00:00");
-        assert_eq!(at("1700000000"), "2023-11-14T22:13:20+00:00");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-    #[test]
-    fn python_strip_and_ascii_escapes() {
-        assert_eq!(py_trim("\u{1c}n1\u{1f} "), "n1");
-        assert_eq!(py_trim("\u{85}x\u{3000}"), "x");
-        assert_eq!(quote("a\u{7f}b"), r#""a\u007fb""#);
-    }
-    #[test]
     fn python_json_spacing_unicode_and_bounds() {
-        assert_eq!(
-            object(&[("label", quote("café 🎉"))]),
-            r#"{"label": "caf\u00e9 \ud83c\udf89"}"#
-        );
         assert_eq!(
             parse_body(b"null").unwrap_err(),
             "body must be a JSON object or array"

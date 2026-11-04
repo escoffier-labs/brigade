@@ -1122,8 +1122,27 @@ class TestNativeContainment:
         final = record.read_bytes()
         # Actual writers have exited before finalization, including their jobs.
         log = native.path / "out" / "logs" / "test_slow.py.log"
+
+        def release_log():
+            # Windows tears down a terminated process's handle table after the
+            # process object is already signaled, so a rename issued the instant
+            # the driver returns can still hit WinError 32 for a few milliseconds
+            # (CI showed every process signaled and every driver handle closed
+            # when it failed). Wait for that teardown, not for a fixed delay. A
+            # writer that is really alive keeps the log open for its whole 30 s
+            # sleep, so it still fails here: the bound is below that sleep.
+            give_up = time.monotonic() + 10
+            while True:
+                try:
+                    log.rename(log.with_suffix(".finished"))
+                    return
+                except PermissionError as exc:
+                    if getattr(exc, "winerror", None) != 32 or time.monotonic() >= give_up:
+                        raise
+                    time.sleep(0.01)
+
         try:
-            log.rename(log.with_suffix(".finished"))
+            release_log()
         except OSError:
             diagnostic = {
                 "elapsed_seconds": time.monotonic() - started,
@@ -1131,8 +1150,8 @@ class TestNativeContainment:
                 "streams": [{"name": stream.name, "closed": stream.closed} for stream in streams],
                 "futures": [{"done": future.done(), "cancelled": future.cancelled()} for future in futures],
             }
-            # Inspect only after the first rename failed, without retrying it or
-            # waiting for worker/process completion to change the observation.
+            # Inspect only after the bounded rename wait failed, without waiting
+            # for worker/process completion to change the observation.
             if job._LIFECYCLE.acquire(timeout=0.5):
                 try:
                     diagnostic["roots"] = [

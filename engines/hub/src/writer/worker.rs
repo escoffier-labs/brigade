@@ -5,7 +5,11 @@ use std::{
     path::Path,
 };
 
-pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
+pub(crate) fn open(path: &Path) -> rusqlite::Result<Connection> {
+    open_file(path, false)
+}
+/// `create` is for files Rust owns (the memory file). The hub file is never created here.
+pub(crate) fn open_file(path: &Path, create: bool) -> rusqlite::Result<Connection> {
     // Match Python: relocated parent directories are allowed, file symlinks are not.
     let parent = path
         .parent()
@@ -31,9 +35,12 @@ pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
             _ => {}
         }
     }
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+    let mut flags = OpenFlags::SQLITE_OPEN_READ_WRITE
         | OpenFlags::SQLITE_OPEN_NO_MUTEX
         | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    if create {
+        flags |= OpenFlags::SQLITE_OPEN_CREATE;
+    }
     #[cfg(test)]
     let vfs = super::powercut::writer_vfs();
     #[cfg(not(test))]
@@ -44,9 +51,13 @@ pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
     }
     .map_err(|e| rusqlite::Error::ToSqlConversionFailure(e.into()))?;
     db.busy_timeout(Duration::ZERO)?;
-    db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;")?;
+    #[cfg(test)]
+    let (level_sql, expected) = super::powercut::synchronous();
+    #[cfg(not(test))]
+    let (level_sql, expected) = ("FULL", 2);
+    db.execute_batch(&format!("PRAGMA journal_mode=WAL; PRAGMA synchronous={level_sql}; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;"))?;
     let level: i64 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
-    if level != 2 {
+    if level != expected {
         return Err(rusqlite::Error::InvalidQuery);
     }
     db.set_prepared_statement_cache_capacity(128);
@@ -62,7 +73,7 @@ pub(super) fn database_directory(db: &Connection) -> std::io::Result<PathBuf> {
         .expect("database has a parent")
         .to_path_buf())
 }
-fn sync_directory(db: &Connection) -> std::io::Result<()> {
+pub(crate) fn sync_directory(db: &Connection) -> std::io::Result<()> {
     let parent = database_directory(db)?;
     #[cfg(test)]
     if super::powercut::skip_directory_sync() {
@@ -95,7 +106,7 @@ fn flush_directory(parent: &Path) -> std::io::Result<()> {
         other => other,
     }
 }
-struct Tx<'a>(&'a Connection);
+pub(crate) struct Tx<'a>(pub(crate) &'a Connection);
 impl ReadTx for Tx<'_> {
     fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
         let mut stmt = self.0.prepare_cached(sql)?;
@@ -118,7 +129,7 @@ fn answer(mut e: Envelope, result: Answer) {
         let _ = reply.send(result);
     }
 }
-fn begin(db: &Connection, deadline: Instant) -> rusqlite::Result<()> {
+pub(crate) fn begin(db: &Connection, deadline: Instant) -> rusqlite::Result<()> {
     let mut pause = Duration::from_millis(1);
     loop {
         match db.execute_batch("BEGIN IMMEDIATE") {
@@ -153,8 +164,9 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         });
     }
     let result = match result {
-        Ok(Ok(value)) if Instant::now() < deadline => Ok(value),
-        Ok(Ok(_)) => Err(Failure::timeout(e.budget.durable)),
+        Ok(Ok(value)) if Instant::now() < deadline => Ok((value, true)),
+        Ok(Err(ApplyError::Refused(value))) if Instant::now() < deadline => Ok((value, false)),
+        Ok(Ok(_) | Err(ApplyError::Refused(_))) => Err(Failure::timeout(e.budget.durable)),
         Ok(Err(ApplyError::Sqlite(error)))
             if error.sqlite_error_code() == Some(ErrorCode::OperationInterrupted) =>
         {
@@ -163,7 +175,7 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         Ok(Err(ApplyError::Rejected(failure))) => Err(failure),
         _ => Err(Failure::storage("command-failed")),
     };
-    let finish = if result.is_ok() {
+    let finish = if matches!(result, Ok((_, true))) {
         "RELEASE command"
     } else {
         "ROLLBACK TO command; RELEASE command"
@@ -172,7 +184,7 @@ fn apply(db: &Connection, e: &Envelope) -> Answer {
         let _ = db.execute_batch("ROLLBACK");
         return Err(Failure::storage("storage-error"));
     }
-    result
+    result.map(|(value, _)| value)
 }
 
 pub(super) fn run(
