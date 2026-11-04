@@ -56,9 +56,9 @@ impl Lookup {
                 std::thread::sleep(Duration::from_millis(400));
             }
             let mut statement = connection.prepare_cached(
-                "SELECT 1 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 1 FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
+                "SELECT token_sha256 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT token_hash FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
             )?;
-            let found = statement.query_row([lookup_key], |_| Ok(())).optional()?.is_some();
+            let found = statement.query_row([&lookup_key], |r| r.get::<_, String>(0)).optional()?.is_some_and(|stored| bool::from(stored.as_bytes().ct_eq(lookup_key.as_bytes())));
             drop(statement);
             Ok(found)
         });

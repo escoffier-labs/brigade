@@ -1,5 +1,6 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
+mod registration;
 mod response;
 
 use axum::{
@@ -44,6 +45,12 @@ const DRAIN: Duration = Duration::from_secs(25);
 struct Config {
     #[arg(long)]
     host: String,
+    /// Opt in to S5 handlers until S9 owns family selection.
+    #[arg(long, hide = true)]
+    native_registration: bool,
+    /// Acceptance-only clock, shared with the Python upstream.
+    #[arg(long, hide = true)]
+    test_clock_file: Option<String>,
     #[arg(long, default_value_t = 3774, allow_hyphen_values = true)]
     port: i64,
     #[arg(long)]
@@ -209,6 +216,7 @@ struct App {
     client: HttpClient,
     budgets: admission::Budgets,
     lookup: Option<admission::Lookup>,
+    registration: Option<registration::Registration>,
     trust_identity: bool,
     trust_proto: bool,
     storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
@@ -225,6 +233,7 @@ impl App {
             client,
             budgets: admission::Budgets::default(),
             lookup: None,
+            registration: None,
             trust_identity,
             trust_proto,
             storage: None,
@@ -433,6 +442,15 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
     let (parts, body) = req.into_parts();
+    let native = app
+        .registration
+        .as_ref()
+        .filter(|_| registration::Registration::route(parts.method.as_str(), parts.uri.path()));
+    if let Some(native) = native {
+        if let Some(refusal) = native.auth(&parts).await {
+            return refusal;
+        }
+    }
     let _budget = if headers_only {
         vec![]
     } else {
@@ -461,6 +479,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             );
         }
     };
+    if let Some(native) = native {
+        return native.handle(&parts, &body).await;
+    }
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
     let bodyless = body.is_empty();
     let outgoing = if headers_only {
@@ -653,9 +674,22 @@ async fn upstream(
         }
         return Ok((url.trim_end_matches('/').into(), None));
     }
+    let upstream_args = if let Some(clock) = &config.test_clock_file {
+        let mut args = vec![
+            "-c".to_owned(),
+            include_str!("../../../registry/skills/verify-brigade/hub_clock.py").to_owned(),
+            "--clock-file".into(),
+            clock.clone(),
+            "--".into(),
+        ];
+        args.extend(config.python_args(0).into_iter().skip(2));
+        args
+    } else {
+        config.python_args(0)
+    };
     let mut child =
         Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
-            .args(config.python_args(0))
+            .args(upstream_args)
             .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
             .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
@@ -811,7 +845,20 @@ async fn run(mut config: Config) -> Result<(), String> {
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
-    state.lookup = Some(admission::Lookup::new(Arc::new(readers), &admin));
+    let readers = Arc::new(readers);
+    state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
+    if config.native_registration {
+        state.registration = Some(registration::Registration {
+            readers,
+            writer: brigade_hub::writer::Writer::start(
+                brigade_hub::writer::Config::new(path.clone()),
+                Arc::default(),
+            )
+            .map_err(|_| "registration writer unavailable")?,
+            admin: registration::digest(&admin),
+            clock: config.test_clock_file.clone(),
+        });
+    }
     let probe = state.clone();
     tokio::spawn(async move {
         loop {

@@ -106,3 +106,12 @@ The frozen contract drive launches the managed front with:
 registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
   'engines/hub/target/release/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}'
 ```
+
+S5 registration handlers ship behind `--native-registration` (off by default).
+This enables `GET /nodes`, `POST /nodes` and `POST /message-principals`.
+S9's `registration` family selection can replace this boolean at the
+`Registration::route` dispatch seam. Registration flips last in cutover
+phase 3. The Python hub remains the schema owner throughout rollback.
+
+Acceptance drives can use `--test-clock-file PATH` to share a deterministic
+clock with the managed Python upstream. This flag is for throwaway fixtures.
