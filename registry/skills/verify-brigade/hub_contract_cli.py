@@ -63,6 +63,10 @@ def add_parser(sub: Any, helper: Any, add_dry_run: Callable[[Any, str], None]) -
         helper.load_sibling("hub_readonly").add_arguments(p)
     except ImportError:
         pass
+    try:  # the memory profile (S13a) likewise
+        helper.load_sibling("hub_contract_memory").add_arguments(p)
+    except ImportError:
+        pass
     return p
 
 
@@ -159,6 +163,8 @@ def command(args: Any, helper: Any) -> int:
         return helper.load_sibling("hub_findings").command(args, helper)
     if getattr(args, "profile", "contract") == "prod-readonly":
         return helper.load_sibling("hub_readonly").command(args, helper)
+    if getattr(args, "profile", "contract") == "memory":
+        return helper.load_sibling("hub_contract_memory").command(args, helper)
     root = helper.state_root(args)
     external, clocked, skip = _plan(args, helper)
     try:

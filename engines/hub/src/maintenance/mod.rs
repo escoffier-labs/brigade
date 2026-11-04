@@ -237,7 +237,9 @@ impl Maintenance {
                 .map_err(|e| e.to_string())?,
         ));
         let mut files = vec![hub];
-        if memory.exists() {
+        // Only a regular file: a memory path the store cannot use leaves memory
+        // unavailable (503) and must not stop the hub's own maintenance.
+        if memory.is_file() {
             files.push(FileState::new(memory.into())?);
         }
         let memory_path = memory.to_path_buf();
@@ -274,7 +276,7 @@ impl Maintenance {
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
                 }
-                if files.len() == 1 && memory_path.exists() {
+                if files.len() == 1 && memory_path.is_file() {
                     match FileState::new(memory_path.clone()) {
                         Ok(file) => files.push(file),
                         Err(_) => m.lock().unwrap().failures += 1,

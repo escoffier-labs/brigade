@@ -76,11 +76,13 @@ pub struct Options {
 
 pub struct Store {
     writer: writer::Writer,
+    arbiter: Arc<Arbiter>,
     readers: ReaderPool,
     hub: Arc<ReaderPool>,
     admin: String,
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
+    last_sweep: std::sync::atomic::AtomicI64,
 }
 
 struct Conn<'a>(&'a rusqlite::Connection);
@@ -108,23 +110,37 @@ impl Store {
             options.admin_digest.clone(),
         );
         config.hook = options.hook;
-        let writer =
-            writer::Writer::start(config, db, options.arbiter).map_err(|e| e.to_string())?;
+        let writer = writer::Writer::start(config, db, options.arbiter.clone())
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             writer,
+            arbiter: options.arbiter,
             readers,
             hub,
             admin: options.admin_digest,
             clock: options.clock,
             scanner: options.scanner,
+            last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
         })
     }
     pub fn metrics(&self) -> writer::Metrics {
         self.writer.metrics.lock().unwrap().clone()
     }
-    /// Queues one bounded idempotency retention sweep on the memory writer.
+    /// Queues one bounded idempotency retention sweep on the memory writer,
+    /// at most once a minute. Maintenance asks every second.
     pub fn sweep(&self) -> bool {
-        self.writer.sweep(self.clock.now_ms())
+        use std::sync::atomic::Ordering;
+        let now = self.clock.now_ms();
+        let last = self.last_sweep.load(Ordering::Relaxed);
+        if last != i64::MIN && now.saturating_sub(last) < 60_000 {
+            return true;
+        }
+        self.last_sweep.store(now, Ordering::Relaxed);
+        self.writer.sweep(now)
+    }
+    /// The arbiter's residence bucket, for `/metrics`.
+    pub fn bucket(&self) -> f64 {
+        self.arbiter.balance()
     }
     /// Admission: the bearer token's digest against the admin token and the
     /// hub's credential rows. The token itself is hashed here and dropped.

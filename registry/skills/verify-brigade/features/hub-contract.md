@@ -212,6 +212,28 @@ Start that hub with its default flags, an empty database, and
 principal, so pick a new name for every run. Nodes get fresh random names, so
 a second run against the same hub still passes.
 
+### Memory profile (`--profile memory`)
+
+`--profile memory` drives `POST /memory`, the hub memory route S13a adds under
+contract v1 (D21), on a Rust hub launched with `--route-mode memory=native`.
+The cases live in `hub_contract_memory.py`. They pin the status, keys, types
+and `code` of every answer: the same card id in two scopes, bytes A then B
+then A, a stale edit after retire and revival, a base revision under another
+`log_epoch`, an admin put stored as `agent-unreviewed`, an import refused
+without its grant and refused while the scan hook is unavailable, grants and
+private scopes, idempotent retries and the `client_event_id` window, log
+paging and visibility, and the refusal of a revoked node token. The drive
+enrolls a fresh node and principal per run.
+
+`--memory-absent` runs the one case a hub without memory answers instead:
+`404 {"error": "not found"}`. The in-repo Python hub has no memory, so the
+profile needs `--hub-cmd` (or `--hub-url`) unless `--memory-absent` is set.
+
+```bash
+$C hub-contract --profile memory --hub-cmd "/path/to/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file} --route-mode memory=native"
+$C hub-contract --profile memory --memory-absent --hub-cmd "/path/to/brigade-hub --host {host} --port {port} --db {db} --token-file {token_file}"
+```
+
 ### Read-only production profile (`--profile prod-readonly`)
 
 `--profile prod-readonly` runs an exact list of operations and nothing else:

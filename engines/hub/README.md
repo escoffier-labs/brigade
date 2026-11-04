@@ -112,7 +112,7 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
 Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
 value wins. `health` defaults to native and supports proxy and shadow on
 `GET /health`. `/ready` always stays local. `metrics` requires native mode.
-`registration` accepts native or proxy. `heartbeat`, `claims`, `messages`, `cold`
+`registration` accepts native or proxy. `memory` accepts native or proxy (see below). `heartbeat`, `claims`, `messages`, `cold`
 and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
 startup. Native handlers and housekeeping audits for those families land in
 S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
@@ -144,6 +144,22 @@ kind. Labels and logs omit request queries, identities and bearer material.
 S5 registration handlers run with `--route-mode registration=native` (proxy by
 default). This serves `GET /nodes`, `POST /nodes` and `POST /message-principals`
 natively. Registration flips last in cutover phase 3. The Python hub remains the schema owner throughout rollback.
+
+Hub memory (S13a) runs with `--route-mode memory=native`. This serves
+`POST /memory` from `fleet-hub-memory.db` beside the hub database, which the
+Rust hub creates on first start and owns (Python never opens it). Without a
+`memory` route mode, `/memory` is an unknown path and the Python upstream
+answers `404 {"error": "not found"}`, which clients read as "this hub has no
+memory". `memory=proxy`, or a memory file that cannot be opened or migrated,
+answers `503 {"error": "hub busy", "reason": "memory-unavailable"}` while the
+rest of the hub keeps serving. Every memory write commits while the memory
+writer holds the hub file's write lock, after re-reading the caller's
+credential (D23). The content scan hook reports unavailable until S18, so no
+write raises a card's trust, and `import` answers `503 memory_scan_unavailable`.
+After restoring the memory file from a copy, start a new `log_epoch` before
+serving it (`brigade_hub::memory::schema::rotate_epoch`, which S31's restore
+tool calls). `/metrics` adds `brigade_hub_memory_*` lines for batches,
+hub-lock residence and wait, authority timeouts and the residence bucket.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.
