@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 	_ "modernc.org/sqlite"
 )
 

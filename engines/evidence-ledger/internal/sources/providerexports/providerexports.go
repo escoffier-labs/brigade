@@ -12,8 +12,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 )
 
 func GenerateChatGPT(path string, opts sources.Options, w io.Writer) (sources.Result, error) {

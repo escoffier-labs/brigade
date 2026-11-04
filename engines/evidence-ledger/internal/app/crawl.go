@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/escoffier-labs/miseledger/internal/sources/cursor"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/cursor"
 )
 
 func cmdCrawl(args []string, out, errw io.Writer) int {

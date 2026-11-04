@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/app"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/app"
 )
 
 // Exercise compiled entry points so argument slicing, streams, and os.Exit
