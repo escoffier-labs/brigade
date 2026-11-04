@@ -39,6 +39,13 @@ def target(tmp_path: Path, monkeypatch, inherited_cache) -> Path:
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
     monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
+    # The content check hashes the indexed files on a bounded thread (0.5 s in
+    # production). On a loaded CI shard that thread can miss the budget, the
+    # check records unseen_dependents=None, and every test that is not about the
+    # budget fails. Give them a budget that load cannot exhaust; the stalled-read
+    # test sets its own tiny one after this fixture runs.
+    monkeypatch.setattr(dependencies, "CONTENT_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(dependencies, "GRAPH_TIMEOUT_SECONDS", 60.0)
     return target
 
 
@@ -577,7 +584,8 @@ def test_seen_file_cap_retains_recent_reads_for_dependency_checks(target, monkey
     expected = {"z.py", {"reread": "a.py", "parallel_read": "zz.py"}.get(interleaving, "m.py")}
     assert set(runtime.read_session_state(target, "session-one")["read_files"]) == expected
     result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
-    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
+    check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
+    assert check["unseen_dependents"] == [], check["reason"]
     assert result is None
 
 
