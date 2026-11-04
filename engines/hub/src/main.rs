@@ -1134,13 +1134,20 @@ async fn run(mut config: Config) -> Result<(), String> {
     } else {
         None
     };
-    let _cpu = brigade_hub::read::CpuPool::default();
+    let cpu = brigade_hub::read::CpuPool::default();
     let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
     );
+    state.telemetry.attach_readers(readers.queue_probe());
+    if let Some(memory_route::MemoryRoute::Store(store)) = &memory {
+        state.telemetry.attach_readers(store.reader_probe());
+    }
+    state.telemetry.attach_cpu(cpu.queue_probe());
+    // Only a native family's writer commits here. Without one the writer
+    // metrics stay NaN, because the Python upstream commits every write.
     state.modes = modes;
     state.memory = memory;
     state.arbiter = arbiter.clone();
@@ -1154,13 +1161,16 @@ async fn run(mut config: Config) -> Result<(), String> {
     }
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     if state.modes.get("registration") == brigade_hub::modes::Mode::Native {
+        let writer = brigade_hub::writer::Writer::start(
+            brigade_hub::writer::Config::new(path.clone()),
+            arbiter.clone(),
+        )
+        .map_err(|_| "registration writer unavailable")?;
+        // The first native family that starts a writer owns the writer metrics.
+        state.telemetry.attach_writer(writer.stats());
         state.registration = Some(registration::Registration {
             readers,
-            writer: brigade_hub::writer::Writer::start(
-                brigade_hub::writer::Config::new(path.clone()),
-                arbiter.clone(),
-            )
-            .map_err(|_| "registration writer unavailable")?,
+            writer,
             admin: registration::digest(&admin),
             clock: config.test_clock_file.clone(),
         });

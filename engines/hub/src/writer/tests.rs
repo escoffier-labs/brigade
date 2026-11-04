@@ -35,6 +35,9 @@ fn budget(durable: bool) -> Budget {
     }
 }
 fn batch(path: &Path, commands: Vec<Sql>) -> Vec<Answer> {
+    batch_with_stats(path, commands, Arc::default())
+}
+fn batch_with_stats(path: &Path, commands: Vec<Sql>, stats: Arc<WriterStats>) -> Vec<Answer> {
     let arbiter = Arc::new(Arbiter::default());
     let (sender, receiver) = mpsc::channel(100);
     let mut replies = Vec::new();
@@ -57,6 +60,7 @@ fn batch(path: &Path, commands: Vec<Sql>) -> Vec<Answer> {
         receiver,
         Config::new(path.to_path_buf()),
         arbiter,
+        stats,
     );
     replies
         .into_iter()
@@ -461,7 +465,7 @@ fn batch_budgets_and_no_linger() {
         replies.push(r);
     }
     drop(sender);
-    worker::run(db, receiver, Config::new(path), arbiter);
+    worker::run(db, receiver, Config::new(path), arbiter, Arc::default());
     for r in replies {
         assert!(r.blocking_recv().unwrap().is_ok());
     }
@@ -574,6 +578,7 @@ fn second_abort_fails_prior_commands_instead_of_replaying_again() {
         receiver,
         Config::new(path.clone()),
         arbiter,
+        Arc::default(),
     );
     let results: Vec<_> = replies
         .into_iter()
@@ -686,4 +691,101 @@ fn maintenance_admission_is_bounded_and_releases_partial_permits() {
     assert_eq!(writer.slots.available_permits(), 4096);
     assert_eq!(writer.regular.available_permits(), 3584);
     assert_eq!(writer.bytes.available_permits(), 1024);
+}
+
+fn metric(text: &str, name: &str) -> f64 {
+    let prefix = format!("brigade_hub_{name} ");
+    text.lines()
+        .find_map(|line| line.strip_prefix(&prefix))
+        .unwrap_or_else(|| panic!("{name} missing from {text}"))
+        .parse()
+        .unwrap()
+}
+
+#[tokio::test]
+async fn writer_metrics_move_under_writes() {
+    let path = fixture();
+    let writer = start_fixture(Config::new(path.clone()), Arc::default()).unwrap();
+    let telemetry = crate::telemetry::Telemetry::default();
+    let before = telemetry.render();
+    assert!(before.contains("brigade_hub_writer_queue_depth NaN"));
+    assert!(before.contains("No writer in this process"));
+    telemetry.attach_writer(writer.stats());
+    let idle = telemetry.render();
+    for name in [
+        "writer_queue_depth",
+        "writer_batch_size",
+        "writer_apply_seconds",
+        "writer_commit_seconds",
+        "writer_lock_wait_seconds",
+        "writer_aborted_batches_total",
+    ] {
+        assert_eq!(metric(&idle, name), 0.0, "{name} starts at zero");
+    }
+    // A foreign write lock holds the worker in its BEGIN retry. The first command is
+    // already off the queue, so the other two are what the depth gauge reports.
+    let lock = Connection::open(&path).unwrap();
+    lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let mut replies = Vec::new();
+    for n in 0..3 {
+        let command = Sql(Box::leak(
+            format!("INSERT INTO rows(value) VALUES('metric-{n}')").into_boxed_str(),
+        ));
+        replies.push(writer.submit(command, budget(false)).await.unwrap());
+    }
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while writer.stats().snapshot().queue_depth != 2 {
+        assert!(Instant::now() < deadline, "queue depth never reached 2");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(metric(&telemetry.render(), "writer_queue_depth"), 2.0);
+    std::thread::sleep(Duration::from_millis(250));
+    lock.execute_batch("ROLLBACK").unwrap();
+    for reply in replies {
+        assert!(reply.await.unwrap().is_ok());
+    }
+    assert_eq!(values(&path), 3);
+    let after = telemetry.render();
+    assert_eq!(metric(&after, "writer_queue_depth"), 0.0);
+    assert_eq!(metric(&after, "writer_batch_size"), 3.0);
+    assert!(metric(&after, "writer_apply_seconds") > 0.0);
+    assert!(metric(&after, "writer_commit_seconds") > 0.0);
+    assert!(
+        metric(&after, "writer_lock_wait_seconds") >= 0.2,
+        "lock wait covers the BEGIN retries"
+    );
+    assert_eq!(metric(&after, "writer_aborted_batches_total"), 0.0);
+}
+
+#[test]
+fn aborted_batches_count_once_per_batch() {
+    let clean = Arc::new(WriterStats::default());
+    let path = fixture();
+    batch_with_stats(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('b')"),
+        ],
+        clean.clone(),
+    );
+    // A refused command rolls back to its savepoint and is not an abort.
+    let snapshot = clean.snapshot();
+    assert_eq!((snapshot.batch_size, snapshot.aborted_batches), (3, 0));
+
+    let aborted = Arc::new(WriterStats::default());
+    let path = fixture();
+    batch_with_stats(
+        &path,
+        vec![
+            Sql("INSERT INTO rows(value) VALUES('a')"),
+            Sql("INSERT OR ROLLBACK INTO rows(value) VALUES('a')"),
+            Sql("INSERT INTO rows(value) VALUES('b')"),
+        ],
+        aborted.clone(),
+    );
+    let snapshot = aborted.snapshot();
+    assert_eq!((snapshot.batch_size, snapshot.aborted_batches), (2, 1));
+    assert!(snapshot.commit_seconds > 0.0);
 }

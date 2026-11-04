@@ -138,6 +138,10 @@ impl Store {
         self.last_sweep.store(now, Ordering::Relaxed);
         self.writer.sweep(now)
     }
+    /// The memory reader queue, for `/metrics`.
+    pub fn reader_probe(&self) -> crate::telemetry::QueueProbe {
+        self.readers.queue_probe()
+    }
     /// The arbiter's residence bucket, for `/metrics`.
     pub fn bucket(&self) -> f64 {
         self.arbiter.balance()

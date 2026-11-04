@@ -41,6 +41,13 @@ impl CpuPool {
             workers,
         }
     }
+    /// For `Telemetry::attach_cpu`.
+    pub fn queue_probe(&self) -> crate::telemetry::QueueProbe {
+        match &self.sender {
+            Some(sender) => crate::telemetry::queue_probe(sender),
+            None => Box::new(|| 0),
+        }
+    }
     pub async fn submit<T: Send + 'static>(
         &self,
         work: impl FnOnce() -> T + Send + 'static,

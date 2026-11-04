@@ -94,6 +94,13 @@ impl ReaderPool {
             checked,
         })
     }
+    /// For `Telemetry::attach_readers`.
+    pub fn queue_probe(&self) -> crate::telemetry::QueueProbe {
+        match &self.sender {
+            Some(sender) => crate::telemetry::queue_probe(sender),
+            None => Box::new(|| 0),
+        }
+    }
     pub async fn submit<T: Send + 'static>(
         &self,
         query: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
