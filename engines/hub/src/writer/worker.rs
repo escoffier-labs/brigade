@@ -6,10 +6,42 @@ use std::{
 };
 
 pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
-    let db = Connection::open_with_flags(
-        path,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+    // Match Python: relocated parent directories are allowed, file symlinks are not.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let parent = std::fs::canonicalize(parent)
+        .map_err(|_| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let filename = path
+        .file_name()
+        .ok_or_else(|| rusqlite::Error::InvalidPath(path.to_path_buf()))?;
+    let resolved = parent.join(filename);
+    let path = resolved.as_path();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let mut name = path.as_os_str().to_os_string();
+        name.push(suffix);
+        match std::fs::symlink_metadata(Path::new(&name)) {
+            Ok(info) if !info.file_type().is_file() => {
+                return Err(rusqlite::Error::InvalidPath(name.into()));
+            }
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                return Err(rusqlite::Error::InvalidPath(name.into()));
+            }
+            _ => {}
+        }
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX
+        | OpenFlags::SQLITE_OPEN_NOFOLLOW;
+    #[cfg(test)]
+    let vfs = super::powercut::writer_vfs();
+    #[cfg(not(test))]
+    let vfs: Option<&str> = None;
+    let db = match vfs {
+        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs)?,
+        None => Connection::open_with_flags(path, flags)?,
+    };
     db.busy_timeout(Duration::ZERO)?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA wal_autocheckpoint=0;")?;
     let level: i64 = db.query_row("PRAGMA synchronous", [], |r| r.get(0))?;
@@ -18,6 +50,27 @@ pub(super) fn open(path: &Path) -> rusqlite::Result<Connection> {
     }
     db.set_prepared_statement_cache_capacity(128);
     Ok(db)
+}
+pub(super) fn database_directory(db: &Connection) -> std::io::Result<PathBuf> {
+    let path = db
+        .path()
+        .ok_or_else(|| std::io::Error::other("missing database path"))?;
+    let resolved = std::fs::canonicalize(path)?;
+    Ok(resolved
+        .parent()
+        .expect("database has a parent")
+        .to_path_buf())
+}
+fn sync_directory(db: &Connection) -> std::io::Result<()> {
+    let parent = database_directory(db)?;
+    #[cfg(test)]
+    if super::powercut::skip_directory_sync() {
+        return Ok(());
+    }
+    std::fs::File::open(&parent)?.sync_all()?;
+    #[cfg(test)]
+    super::powercut::directory_synced(&parent)?;
+    Ok(())
 }
 struct Tx<'a>(&'a Connection);
 impl ReadTx for Tx<'_> {
@@ -126,15 +179,7 @@ pub(super) fn run(
             continue;
         }
         if !directory_synced {
-            let parent = config
-                .path
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .unwrap_or(Path::new("."));
-            if std::fs::File::open(parent)
-                .and_then(|f| f.sync_all())
-                .is_err()
-            {
+            if sync_directory(&db).is_err() {
                 let _ = db.execute_batch("ROLLBACK");
                 answer(first, Err(Failure::storage("storage-error")));
                 continue;

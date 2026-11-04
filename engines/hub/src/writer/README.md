@@ -6,7 +6,9 @@ Python. S5 will submit domain commands and connect their wakeups to
 
 `Writer::start` opens an existing database, without DDL. Its private opener
 sets WAL, FULL (and verifies level 2), foreign keys, zero automatic checkpoint
-and a statement cache. It syncs the parent directory after the first BEGIN,
+and a statement cache. It refuses symlinks and non-regular database or sidecar
+files, matching Python, while allowing relocated parent directories. It syncs
+the canonical database directory after the first BEGIN,
 so a newly created WAL has a durable directory entry before any answer.
 Every reopened connection gets these settings and passes `quick_check`.
 
@@ -49,7 +51,24 @@ RSS growth, the memory bucket and a Python transaction held for three seconds.
 `tests/writer_front.rs` repeats the lock case with the managed front running.
 Set `PYTHONPATH=src` from the repository root for Python subprocesses.
 
-The two storage fault tests are ignored by default. The power-cut matrix
+The normal CI test `writer::powercut::writer_wal_creation_short` starts with a
+checkpointed database and no WAL. It seeds only the database as durable, then
+runs the real writer opener and commit loop through the fault VFS. Five cuts
+sample opening, writing, sync and acknowledgement operations. The writer's
+explicit directory sync updates the model's durable names after the real
+sync succeeds. A cut after acknowledgement prevents shutdown and close from
+persisting more bytes. The external ledger records the actual reply.
+
+The same schedule disables directory sync with a thread-local, test-only
+switch and requires acknowledged-write loss. With sync enabled every
+acknowledged row must survive. The ignored version visits every operation cut,
+including both sides of directory sync, plus the post-acknowledgement cut:
+
+```sh
+brigade work verify run --target . --argv-json '["cargo","test","--locked","--manifest-path","engines/hub/Cargo.toml","--lib","writer::powercut::writer_wal_creation_matrix","--","--ignored","--exact","--nocapture"]' --timeout 180 --capture brigade-work
+```
+
+The original two storage fault tests are ignored by default. The power-cut matrix
 runs 100 operation cut points in seven phases, in both directory modes, at
 FULL and NORMAL. It models whole loss, sector prefixes, reordered sectors,
 partial sync, unsynced sizes and directory entries, and discards shared

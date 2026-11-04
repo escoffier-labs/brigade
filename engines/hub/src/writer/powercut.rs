@@ -11,6 +11,8 @@ use std::{
 };
 #[derive(Default)]
 struct Disk {
+    writer: bool,
+    skip_directory_sync: bool,
     stable: BTreeMap<PathBuf, Vec<u8>>,
     names: BTreeMap<PathBuf, bool>,
     paths: Vec<PathBuf>,
@@ -27,6 +29,32 @@ struct Disk {
     loss_mode: usize,
 }
 thread_local! { static DISK: RefCell<Disk> = RefCell::default(); }
+// Registration is process-global, while fault state and writer switches are thread-local.
+static VFS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(super) fn writer_vfs() -> Option<&'static str> {
+    DISK.with(|d| d.borrow().writer.then_some("hub-powercut"))
+}
+pub(super) fn skip_directory_sync() -> bool {
+    DISK.with(|d| d.borrow().writer && d.borrow().skip_directory_sync)
+}
+pub(super) fn directory_synced(parent: &std::path::Path) -> std::io::Result<()> {
+    if !DISK.with(|d| d.borrow().writer) {
+        return Ok(());
+    }
+    if step(8) {
+        return Err(std::io::Error::other("power cut before directory sync"));
+    }
+    DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        for entry in std::fs::read_dir(parent).unwrap() {
+            d.names.insert(entry.unwrap().path(), true);
+        }
+    });
+    if step(8) {
+        return Err(std::io::Error::other("power cut after directory sync"));
+    }
+    Ok(())
+}
 #[repr(C)]
 struct File {
     base: sqlite3_file,
@@ -353,6 +381,7 @@ fn restore() {
 #[test]
 #[ignore = "storage fault matrix, run alone with --ignored --exact writer::powercut::power_cut_matrix"]
 fn power_cut_matrix() {
+    let _lock = VFS_LOCK.lock().unwrap();
     let _vfs = unsafe { Registration::new() };
     let mut normal_losses = 0;
     let mut sync_losses = [0usize; 2];
@@ -548,4 +577,135 @@ fn power_cut_matrix() {
     );
     eprintln!("NORMAL acknowledged losses: {normal_losses}, sync phases: {sync_losses:?}");
     std::fs::remove_dir_all(template.parent().unwrap()).unwrap();
+}
+
+// Start with only the checkpointed database durable. No anchor may pre-create a WAL.
+// Run synchronously so the real opener, worker and VFS share the fault state.
+fn writer_creation_cut(cut: usize, skip: bool) -> (usize, bool, bool) {
+    use super::*;
+    struct Insert;
+    impl Command for Insert {
+        fn apply(&self, tx: &dyn WriteTx) -> Result<Json, ApplyError> {
+            tx.execute("INSERT INTO rows(value) VALUES('acknowledged')", &[])?;
+            Ok(Json::Null)
+        }
+        fn post_commit(&self, _: bool) {
+            step(8); // Cut immediately after the real reply was sent.
+            // Power loss also stops the shutdown checkpoint and connection-close writes.
+            DISK.with(|d| d.borrow_mut().crashed = true);
+        }
+    }
+    let path = super::tests::fixture();
+    let wal = PathBuf::from(format!("{}-wal", path.display()));
+    assert!(!wal.exists(), "schedule must start without a WAL");
+    seed(&path, false);
+    DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        assert!(!d.names.contains_key(&wal));
+        d.writer = true;
+        d.skip_directory_sync = skip;
+        d.cut = cut;
+        d.active = Some(8);
+        d.phase = 8;
+    });
+    let arbiter = std::sync::Arc::new(Arbiter::default());
+    let (sender, receiver) = mpsc::channel(1);
+    let (reply, result) = oneshot::channel();
+    sender
+        .try_send(Envelope {
+            command: Box::new(Insert),
+            budget: Budget {
+                events: 1,
+                bytes: 100,
+                durable: false,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+            reply: Some(reply),
+            _permits: vec![],
+            arbiter: arbiter.clone(),
+        })
+        .unwrap_or_else(|_| panic!("queue"));
+    drop(sender);
+    match worker::open(&path) {
+        Ok(db) => worker::run(db, receiver, Config::new(path.clone()), arbiter),
+        Err(_) => drop(receiver),
+    }
+    let acknowledged = matches!(result.blocking_recv(), Ok(Ok(_)));
+    // This ledger is outside VFS-managed storage, like the long matrix's ledger.
+    let ledger = path.with_extension("ledger");
+    std::fs::write(&ledger, if acknowledged { "acknowledged" } else { "" }).unwrap();
+    let count = DISK.with(|d| {
+        let mut d = d.borrow_mut();
+        d.crashed = true;
+        d.writer = false;
+        d.count
+    });
+    restore();
+    DISK.with(|d| d.borrow_mut().active = None);
+    let db = rusqlite::Connection::open(&path).unwrap();
+    assert_eq!(
+        db.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0))
+            .unwrap(),
+        "ok"
+    );
+    let present: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM rows WHERE value='acknowledged')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let lost = !std::fs::read_to_string(ledger).unwrap().is_empty() && !present;
+    drop(db);
+    DISK.with(|d| *d.borrow_mut() = Disk::default());
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+    (count, acknowledged, lost)
+}
+
+fn writer_creation_schedule(long: bool) {
+    let _lock = VFS_LOCK.lock().unwrap();
+    let _vfs = unsafe { Registration::new() };
+    for skip in [false, true] {
+        let (operations, ack, lost) = writer_creation_cut(0, skip);
+        assert!(ack);
+        assert_eq!(lost, skip, "directory sync negative control");
+        let cuts: Vec<_> = if long {
+            (1..=operations + 1).collect()
+        } else {
+            vec![
+                1,
+                operations / 2,
+                operations - 1,
+                operations,
+                operations + 1,
+            ]
+        };
+        let mut losses = usize::from(lost);
+        let mut acknowledgements = usize::from(ack);
+        for cut in cuts {
+            let (_, ack, lost) = writer_creation_cut(cut, skip);
+            acknowledgements += usize::from(ack);
+            losses += usize::from(lost);
+            if !skip {
+                assert!(!lost, "writer acknowledged loss at cut {cut}");
+            }
+        }
+        eprintln!(
+            "writer WAL creation: sync_disabled={skip}, acknowledgements={acknowledgements}, losses={losses}"
+        );
+        if skip {
+            assert!(losses > 0, "sync-disabled control must detect loss");
+        }
+    }
+}
+
+#[test]
+fn writer_wal_creation_short() {
+    writer_creation_schedule(false);
+}
+
+#[test]
+#[ignore = "all writer WAL creation operation cuts, run manually"]
+fn writer_wal_creation_matrix() {
+    writer_creation_schedule(true);
 }

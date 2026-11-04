@@ -601,3 +601,43 @@ async fn interrupted_write_abort_keeps_durable_timeout_status() {
     assert_eq!(reply.await.unwrap(), Err(Failure::timeout(true)));
     assert_eq!(values(&path), 0);
 }
+
+#[test]
+fn sync_directory_is_canonical_database_directory() {
+    let path = fixture();
+    let db = worker::open(&path).unwrap();
+    assert_eq!(
+        worker::database_directory(&db).unwrap(),
+        std::fs::canonicalize(&path).unwrap().parent().unwrap()
+    );
+    drop(db);
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn opener_refuses_symlinked_database_and_sidecars() {
+    use std::os::unix::fs::symlink;
+    let path = fixture();
+    let alias = path.with_extension("link");
+    symlink(&path, &alias).unwrap();
+    assert!(worker::open(&alias).is_err());
+    std::fs::remove_file(alias).unwrap();
+    for suffix in ["-wal", "-shm", "-journal"] {
+        let sidecar = PathBuf::from(format!("{}{suffix}", path.display()));
+        symlink(&path, &sidecar).unwrap();
+        assert!(worker::open(&path).is_err(), "accepted {suffix} symlink");
+        std::fs::remove_file(sidecar).unwrap();
+    }
+    // Python permits a symlinked parent. Sync still uses the canonical directory.
+    let parent_alias = path.parent().unwrap().with_extension("link");
+    symlink(path.parent().unwrap(), &parent_alias).unwrap();
+    let db = worker::open(&parent_alias.join(path.file_name().unwrap())).unwrap();
+    assert_eq!(
+        worker::database_directory(&db).unwrap(),
+        std::fs::canonicalize(path.parent().unwrap()).unwrap()
+    );
+    drop(db);
+    std::fs::remove_file(parent_alias).unwrap();
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
