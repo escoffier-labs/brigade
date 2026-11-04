@@ -433,7 +433,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
                             (status.as_u16(), 200),
                             class,
                             &path,
-                            (&bytes, native.to_string().as_bytes())
+                            (&bytes, shadow::HEALTH_BODY.as_bytes())
                         )
                     );
                 }
@@ -503,7 +503,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             .header("server", "brigade-fleet-hub/1")
             .header("cache-control", "no-store")
             .header("referrer-policy", "no-referrer")
-            .body(Body::from(brigade_hub::shadow::health_shape().to_string()))
+            .body(Body::from(brigade_hub::shadow::HEALTH_BODY))
             .unwrap();
     }
     if req.method() == "GET" && req.uri().path() == "/metrics" {

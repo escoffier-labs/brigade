@@ -193,7 +193,20 @@ impl Watch {
 }
 
 /// The native health shape and the drive read the same contract data.
+/// The exact bytes the Python hub sends for `GET /health`. Contract v1 is
+/// frozen, so the native handler sends these bytes, not a re-serialized shape.
+pub const HEALTH_BODY: &str = r#"{"ok": true, "service": "brigade-fleet-hub"}"#;
+
 pub fn health_shape() -> Value {
     let rules: Value = serde_json::from_str(RULES).expect("checked-in shadow rules");
     rules["families"]["health"]["shape"].clone()
+}
+
+#[cfg(test)]
+mod health_body_tests {
+    #[test]
+    fn native_health_bytes_match_the_shadow_shape() {
+        let parsed: serde_json::Value = serde_json::from_str(super::HEALTH_BODY).unwrap();
+        assert_eq!(parsed, super::health_shape());
+    }
 }
