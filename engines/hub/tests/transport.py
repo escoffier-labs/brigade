@@ -26,7 +26,7 @@ def free_port():
 
 
 @contextlib.contextmanager
-def front(upstream=None, extra=()):
+def front(upstream=None, extra=(), env_overrides=None):
     with tempfile.TemporaryDirectory() as work:
         port = free_port()
         command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
@@ -34,6 +34,11 @@ def front(upstream=None, extra=()):
         if upstream:
             command += ["--upstream", f"http://{HOST}:{upstream}"]
         env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+        for name, value in (env_overrides or {}).items():
+            if value is None:
+                env.pop(name, None)
+            else:
+                env[name] = value
         with tempfile.TemporaryFile() as log:
             child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
             try:

@@ -3,6 +3,7 @@
 import asyncio
 import contextlib
 import http.client
+import json
 import socket
 import ssl
 import subprocess
@@ -97,6 +98,49 @@ def connect(port):
 
 
 class Admission(unittest.TestCase):
+    def test_enrollment_trusted_https_scheme(self):
+        for trusted in (False, True):
+            with self.subTest(trusted=trusted):
+                extra = ("--trust-forwarded-proto",) if trusted else ()
+                with front(extra=extra) as (_, public), https_front(public) as https:
+                    status, _, body = request(
+                        public, "/dashboard/enrollment", "POST", b"{}",
+                        {"Authorization": "Bearer fake-admin-token", "Content-Type": "application/json"},
+                    )
+                    self.assertEqual(status, 201)
+                    code = json.loads(body)["code"]
+                    with connect(https) as sock:
+                        body = f"code={code}".encode()
+                        sock.sendall(
+                            b"POST /enroll HTTP/1.1\r\nHost: example.invalid\r\n"
+                            b"Origin: https://example.invalid\r\nX-Forwarded-Proto: https\r\n"
+                            b"Content-Type: application/x-www-form-urlencoded\r\n"
+                            + f"Content-Length: {len(body)}\r\nConnection: close\r\n\r\n".encode()
+                            + body
+                        )
+                        response = http.client.HTTPResponse(sock)
+                        response.begin()
+                        self.assertEqual(response.status, 303 if trusted else 403)
+                        if trusted:
+                            self.assertIn("Secure", response.getheader("Set-Cookie"))
+                        response.read()
+
+    def test_home_relative_cli_paths(self):
+        for flag in ("--db", "--token-file"):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as home:
+                Path(home, "token").write_text("fake-admin-token")
+                env = {"HOME": home, "USERPROFILE": home}
+                value = "~/hub.db" if flag == "--db" else "~/token"
+                if flag == "--token-file":
+                    env["BRIGADE_FLEET_TOKEN"] = None
+                with front(extra=(flag, value), env_overrides=env) as (_, public):
+                    self.assertEqual(
+                        request(public, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})[0],
+                        200,
+                    )
+                    if flag == "--db":
+                        self.assertTrue(Path(home, "hub.db").exists())
+
     def test_every_proxied_route_refuses_before_body_bytes(self):
         from brigade import fleet_hub
 

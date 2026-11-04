@@ -117,3 +117,16 @@ fn loopback_is_front_only_on_loopback_bind() {
     assert!(front_peer(peer, peer));
     assert!(!front_peer(Ipv4Addr::UNSPECIFIED.into(), peer));
 }
+
+#[test]
+fn enrollment_stays_anonymous_and_home_paths_expand() {
+    assert!(!admission::browser("/enroll"));
+    assert_eq!(expand_user("relative/hub.db"), "relative/hub.db");
+    assert_eq!(expand_user("~another/hub.db"), "~another/hub.db");
+    let home = expand_user("~");
+    assert_ne!(home, "~");
+    assert_eq!(
+        std::path::Path::new(&expand_user("~/hub.db")),
+        std::path::Path::new(&home).join("hub.db")
+    );
+}

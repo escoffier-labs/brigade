@@ -75,6 +75,39 @@ fn loopback(host: &str) -> bool {
         })
         .unwrap_or(false)
 }
+/// Match Python's unnamed-user expanduser for native CLI file reads.
+fn expand_user(path: &str) -> String {
+    let Some(suffix) = path.strip_prefix('~') else {
+        return path.into();
+    };
+    if !suffix.is_empty() && !suffix.starts_with(std::path::is_separator) {
+        return path.into();
+    }
+    #[cfg(not(windows))]
+    #[allow(deprecated)]
+    let home = std::env::home_dir().and_then(|p| p.into_os_string().into_string().ok());
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok().or_else(|| {
+        std::env::var("HOMEPATH")
+            .ok()
+            .map(|p| format!("{}{p}", std::env::var("HOMEDRIVE").unwrap_or_default()))
+    });
+    match home {
+        Some(home) => {
+            #[cfg(windows)]
+            let expanded = format!("{home}{suffix}");
+            #[cfg(not(windows))]
+            let expanded = format!("{}{suffix}", home.trim_end_matches('/'));
+            if expanded.is_empty() {
+                std::path::MAIN_SEPARATOR.to_string()
+            } else {
+                expanded
+            }
+        }
+        None => path.into(),
+    }
+}
+
 impl Config {
     fn validate(&self) -> Result<(), String> {
         u16::try_from(self.port).map_err(|_| "port must be 0-65535")?;
@@ -429,7 +462,10 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if !app.trust_identity || !browser {
         req.headers_mut().remove("tailscale-user-login");
     }
-    if !app.trust_proto || !browser {
+    // Enrollment stays anonymous for admission, but its origin and Secure
+    // cookie checks need the trusted terminator's scheme.
+    let trusted_scheme_route = browser || req.uri().path() == "/enroll";
+    if !app.trust_proto || !trusted_scheme_route {
         req.headers_mut().remove("x-forwarded-proto");
     }
     // Preserve framing for Python's exact route-specific refusals. Hyper rejects
@@ -697,12 +733,7 @@ async fn run(config: Config) -> Result<(), String> {
     );
     state.upstream_key = key;
     state.front_bind = address.ip().is_loopback();
-    let database = config.db.clone().unwrap_or_else(|| {
-        format!(
-            "{}/.brigade/fleet-hub.db",
-            std::env::var("HOME").unwrap_or_default()
-        )
-    });
+    let database = expand_user(config.db.as_deref().unwrap_or("~/.brigade/fleet-hub.db"));
     let admin = std::env::var("BRIGADE_FLEET_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -711,7 +742,7 @@ async fn run(config: Config) -> Result<(), String> {
             config
                 .token_file
                 .as_ref()
-                .and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|p| std::fs::read_to_string(expand_user(p)).ok())
                 .map(|v| v.trim().to_owned())
         })
         .ok_or("no fleet hub token")?;
