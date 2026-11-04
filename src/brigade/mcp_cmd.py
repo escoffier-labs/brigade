@@ -1170,7 +1170,8 @@ def _servers_for_verification(
         if not server.enabled:
             continue
         if any(_server_targets_harness(server, harness) for harness in harnesses):
-            selected[server_name] = server
+            # Probe the same command sync projects, not the bare catalog engine name.
+            selected[server_name] = replace(server, command=canonical_command(server.command))
     return selected
 
 
