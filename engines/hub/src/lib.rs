@@ -9,3 +9,7 @@ pub mod writer;
 pub mod modes;
 pub mod shadow;
 pub mod telemetry;
+
+// S5 and S7 native route domains.
+pub mod claims;
+pub mod wire;
