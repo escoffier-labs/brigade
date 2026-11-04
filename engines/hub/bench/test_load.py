@@ -120,6 +120,33 @@ class Driver(unittest.TestCase):
             )
         )
 
+    def test_open_loop_throughput_excludes_queue_drain(self):
+        # 16 arrivals at 100/s against a 100 ms server drain for about 1.6 s.
+        with hub(delay=0.1) as url:
+            result = self.run_load(url, "--rate", "100", "--backlog", "64")
+        summary = result["summary"]
+        self.assertLess(summary["completed_per_second"], 25)
+        self.assertGreater(summary["completed_after_window"], 0)
+        self.assertGreater(summary["drain_seconds"], 0.5)
+        self.assertTrue(all(r["completed_s"] is not None for r in result["attempts"]))
+
+    def test_flags_value_that_starts_with_dashes_parses(self):
+        # matrix.py passes the flags as one token because argparse rejects a
+        # separate value that starts with "--".
+        args = load.parser().parse_args(
+            [
+                "--url",
+                "http://127.0.0.1:1",
+                "--output",
+                "report.json",
+                "--target",
+                "python",
+                "--flags=--allow-admin-writes; managed upstream",
+            ]
+        )
+        self.assertEqual(args.flags, "--allow-admin-writes; managed upstream")
+        self.assertIn('"--flags=--allow-admin-writes"', Path(matrix.__file__).read_text(encoding="utf-8"))
+
     def test_truncated_success_is_error_and_never_retried(self):
         with hub(truncated=True) as url:
             result = self.run_load(url)

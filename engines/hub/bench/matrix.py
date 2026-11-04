@@ -205,8 +205,8 @@ def main():
                                     args.connection,
                                     "--database",
                                     str(db),
-                                    "--flags",
-                                    "--allow-admin-writes"
+                                    # One token: argparse rejects a separate value that starts with "--".
+                                    "--flags=--allow-admin-writes"
                                     + (
                                         "; managed upstream"
                                         if target == "rust-proxy"

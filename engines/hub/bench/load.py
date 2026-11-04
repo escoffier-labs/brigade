@@ -160,6 +160,7 @@ def run(args):
             record["errno"] = getattr(exc, "errno", None)
         end = time.monotonic()
         record.update(
+            completed_s=end - start,
             service_ms=(end - begin) * 1000,
             latency_ms=(end - due) * 1000,
             dispatch_lag_ms=(begin - due) * 1000,
@@ -243,6 +244,7 @@ def run(args):
                         "phase": "warmup" if due < start + args.warmup else "measure",
                         "scheduled_s": due - start,
                         "started_s": None,
+                        "completed_s": None,
                         "status": None,
                         "reason": "client-backlog-full",
                         "error": "not sent",
@@ -262,6 +264,13 @@ def run(args):
     measured = [r for r in results if r["phase"] == "measure"]
     latencies = [r["latency_ms"] for r in measured if r["latency_ms"] is not None]
     errors = [r for r in measured if r["error"] is not None]
+    # Open-loop workers drain queued requests after the window closes. Throughput
+    # counts only completions inside the window; later ones keep their latency.
+    window_end = args.warmup + args.seconds
+    in_window = [
+        r for r in measured if r["completed_s"] is not None and r["completed_s"] <= window_end
+    ]
+    drained = [r["completed_s"] for r in measured if r["completed_s"] is not None]
     report = {
         "schema_version": 1,
         "provisional": True,
@@ -306,7 +315,9 @@ def run(args):
         "summary": {
             "attempts": len(measured),
             "errors": len(errors),
-            "completed_per_second": len(latencies) / args.seconds,
+            "completed_per_second": len(in_window) / args.seconds,
+            "completed_after_window": len(latencies) - len(in_window),
+            "drain_seconds": max(0.0, max(drained) - window_end) if drained else 0.0,
             "latency_ms": percentiles(latencies),
             "mean_service_ms": statistics.mean(
                 r["service_ms"] for r in measured if r["service_ms"] is not None
