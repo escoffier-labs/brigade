@@ -210,8 +210,10 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   drop-in and `"shutdown-timeout": 45` keep a host shutdown from cutting it
   short. On SIGTERM the hub logs `brigade fleet hub stopped cleanly` and exits
   0, which the restart and UPS checks look for.
-- Fence the hub with `docker compose stop hub front`. `restart: unless-stopped`
-  does not undo a stop at boot.
+- Fence the hub with `touch hub.fenced && docker compose stop hub front` in
+  the project directory. The boot unit and the watchdog leave the hub down
+  while `hub.fenced` exists, so the fence survives a reboot or a Docker
+  restart. Unfence with `rm hub.fenced && docker compose up -d --no-build`.
 - Never run `docker compose down -v`. It deletes the named volume and every
   row in it.
 
@@ -252,7 +254,9 @@ committed after the copy is gone. Never put a copy back with a plain file
 copy: use the restore tool, which keeps ids, claim generations and revisions
 moving forward.
 
-1. Fence the hub: `docker compose stop hub front`. Clients spool from here on.
+1. Fence the hub: `touch hub.fenced && docker compose stop hub front` in the
+   project directory. Clients spool from here on, and the fence holds across
+   a reboot or Docker restart until step 5 removes it.
 2. Restore on the host, as the compose account, with a Brigade at least as
    new as the copy's schema. Name both ledger copies, one beside the backups
    and one on the hub host:
@@ -300,7 +304,7 @@ moving forward.
    identity record changed after the copy, publish that too. Re-apply every
    credential revocation, roster change and policy edit made since the copy,
    from your own record, because the hub's audit rows for that time are gone.
-5. Start: `docker compose up -d --no-build`. Nodes enrolled after the copy get
+5. Start: `rm hub.fenced && docker compose up -d --no-build`. Nodes enrolled after the copy get
    401 and enroll again. Messages acknowledged after the copy are gone, and a
    message can arrive twice.
 

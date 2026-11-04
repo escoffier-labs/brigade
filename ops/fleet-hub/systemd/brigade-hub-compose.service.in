@@ -6,6 +6,9 @@
 # every Docker start, including a daemon restart.
 [Unit]
 Description=Brigade dogfood hub compose project
+# An operator's fence (the runbook's step 1 touches hub.fenced) survives a
+# reboot or daemon restart: the unit does not start the project while it exists.
+ConditionPathExists=!@PROJECT_DIR@/hub.fenced
 BindsTo=docker.service
 After=docker.service network-online.target
 Wants=network-online.target

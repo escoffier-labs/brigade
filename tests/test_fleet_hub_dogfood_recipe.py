@@ -259,6 +259,7 @@ def test_units_render_every_placeholder(project, tmp_path):
     boot = rendered["brigade-hub-compose.service"]
     assert "BindsTo=docker.service" in boot and "WantedBy=docker.service" in boot
     assert f"compose --project-directory {project} up -d --no-build" in boot
+    assert f"ConditionPathExists=!{project}/hub.fenced" in boot
     assert "AllowedCPUs=6-7" in rendered["brigade-hub.slice"]
     assert "IODeviceLatencyTargetSec=/dev/nvme0n1 10ms" in rendered["brigade-hub.slice"]
     assert "AllowedCPUs=0-4,8-23" in rendered["user.slice.d/50-brigade-agent-cpus.conf"]
@@ -567,3 +568,20 @@ def test_restore_drive_gives_the_hub_and_the_drive_the_same_operator():
     assert shlex.split(serve)[0] == "BRIGADE_FLEET_OPERATOR_RECIPIENT=agent:restore-drive-ab12cd34"
     words = shlex.split(drive)
     assert words[words.index("--operator-recipient") + 1] == "agent:restore-drive-ab12cd34"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="runs the watchdog under /bin/sh")
+def test_watchdog_never_restarts_a_fenced_hub(tmp_path):
+    (tmp_path / "hub.fenced").write_text("", encoding="utf-8")
+    docker = tmp_path / "docker"
+    docker.write_text('#!/bin/sh\necho "$@" >> "$0.calls"\n', encoding="utf-8")
+    docker.chmod(0o755)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "BRIGADE_DOCKER": str(docker),
+        "BRIGADE_HUB_PROJECT_DIR": str(tmp_path),
+        "BRIGADE_WATCHDOG_STATE_DIR": str(tmp_path / "state"),
+    }
+    done = subprocess.run(["/bin/sh", str(RECIPE / "bin" / "hub-watchdog.sh")], env=env, timeout=30)
+    assert done.returncode == 0
+    assert not (tmp_path / "docker.calls").exists()

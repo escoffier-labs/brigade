@@ -25,6 +25,10 @@ except Exception:
 sys.exit(12 if sick and lonely else 10 if sick else 11 if lonely else 0)
 '
 
+# A fenced hub stays down: never restart it while the operator's fence exists.
+if [ -e "$PROJECT_DIR/hub.fenced" ]; then
+  exit 0
+fi
 mkdir -p "$STATE_DIR"
 count() { cat "$STATE_DIR/$1" 2>/dev/null || echo 0; }
 store() { printf '%s\n' "$2" > "$STATE_DIR/$1"; }
