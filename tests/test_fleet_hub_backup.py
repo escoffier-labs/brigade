@@ -175,6 +175,23 @@ def test_backup_writes_an_integrity_checked_private_copy(tmp_path):
     assert not list(dest.glob(".partial-*"))
 
 
+def test_backup_copies_a_database_whose_path_contains_uri_characters(tmp_path):
+    # A raw `file:` URI reads `#` as a fragment and drops the rest of the name and
+    # `?mode=rw`, which backed up an empty database at a truncated path.
+    db = _populated(tmp_path)
+    odd = db.with_name("hub#primary?x%41.db")
+    db.rename(odd)
+    report = backup.take_backup([odd], tmp_path / "backups", now=T0, disk_usage=_plenty)
+    copy = Path(report["copy"]) / odd.name
+    restored = sqlite3.connect(copy)
+    try:
+        assert restored.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 3
+        assert restored.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+    finally:
+        restored.close()
+    assert not (odd.parent / "hub").exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX modes")
 def test_backup_refuses_a_directory_others_can_read(tmp_path):
     db = _populated(tmp_path)
