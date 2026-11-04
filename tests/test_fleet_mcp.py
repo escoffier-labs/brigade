@@ -278,13 +278,18 @@ def test_inbox_long_poll_wakes_on_arrival_with_two_list_requests(stations, monke
     thread = threading.Thread(target=lambda: results.append(call(b, "fleet_inbox", wait_secs=10)), daemon=True)
     thread.start()
     try:
-        _wait_for_active_waiters(NODE_B, 1, timeout=0.5)
+        # Returns as soon as the long-poll registers. The deadline is only the
+        # failure bound: thread start, the MCP call and the first HTTP list
+        # request all queue behind other work on a loaded CI shard.
+        _wait_for_active_waiters(NODE_B, 1, timeout=30)
     finally:
         start = time.monotonic()
         sent = call(a, "fleet_send", to=NODE_B, body="Wake waiter")["message"]
-        thread.join(timeout=2)
+        # The poll is 10 s. A wake is the thread finishing as the send returns,
+        # so any bound well under the poll tells a wake from an expiry.
+        thread.join(timeout=5)
     assert not thread.is_alive()
-    assert time.monotonic() - start < 2
+    assert time.monotonic() - start < 5
     assert [row["id"] for row in results[0]["messages"]] == [sent["id"]]
     assert len(lists) <= 2
 

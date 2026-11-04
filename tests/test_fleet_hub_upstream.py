@@ -159,8 +159,6 @@ def test_standalone_ignores_internal_address_header(monkeypatch):
 
 
 def test_upstream_writes_reuse_checkpointed_wal(tmp_path, monkeypatch):
-    import time
-
     from brigade import fleet_hub_upstream
 
     monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-key")
@@ -168,16 +166,21 @@ def test_upstream_writes_reuse_checkpointed_wal(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_hub_upstream, "PASSIVE_WAL_BYTES", 256 * 1024, raising=False)
     path = tmp_path / "hub.db"
     server = fleet_hub.make_server(str(ipaddress.IPv4Address(2130706433)), 0, path, "fake-admin")
+    maintenance = server._checkpoint_maintenance
     conn = fleet_hub.open_db(path)
     try:
         conn.execute("CREATE TABLE checkpoint_probe (value BLOB)")
         conn.execute("INSERT INTO checkpoint_probe VALUES (zeroblob(16384))")
         conn.commit()
-        for _batch in range(30):
+        # Each batch writes about 0.5 MiB, so a WAL that was never reused would pass
+        # 2 MiB by the fifth batch. Wait for the checkpoint thread to finish a pass
+        # that starts after the batch (the second attempt; the first may have begun
+        # mid-batch) rather than sleeping and hoping the host schedules it in time.
+        for _batch in range(12):
             for _ in range(30):
                 conn.execute("UPDATE checkpoint_probe SET value = randomblob(16384)")
                 conn.commit()
-            time.sleep(0.12)
+            assert maintenance.wait_for_attempts(maintenance.attempts + 2, timeout=60)
         assert path.with_suffix(".db-wal").stat().st_size < 2 * 1024 * 1024
     finally:
         conn.close()

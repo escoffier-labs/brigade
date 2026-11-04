@@ -59,10 +59,29 @@ class CheckpointMaintenance:
         self.path = db_path.expanduser().resolve()
         self.stop = threading.Event()
         self.thread = threading.Thread(target=self._run, name="hub-checkpoints", daemon=True)
+        # Count of finished checkpoint attempts. Tests wait on it instead of
+        # sleeping, so they do not depend on how fast the host schedules this thread.
+        self._attempts = 0
+        self._attempted = threading.Condition()
 
     def close(self) -> None:
         self.stop.set()
         self.thread.join()
+
+    @property
+    def attempts(self) -> int:
+        with self._attempted:
+            return self._attempts
+
+    def wait_for_attempts(self, count: int, timeout: float) -> bool:
+        """Block until ``count`` checkpoint attempts have finished; False on timeout."""
+        with self._attempted:
+            return self._attempted.wait_for(lambda: self._attempts >= count, timeout)
+
+    def _finish_attempt(self) -> None:
+        with self._attempted:
+            self._attempts += 1
+            self._attempted.notify_all()
 
     def _run(self) -> None:
         # Open and close on the maintenance thread, never on a writer connection.
@@ -89,6 +108,7 @@ class CheckpointMaintenance:
                     else:
                         continue
                     busy, pages, done = conn.execute(f"PRAGMA wal_checkpoint({mode})").fetchone()
+                    self._finish_attempt()
                     pending = bool(busy or done < pages)
                     if pending:
                         _LOG.warning("upstream %s checkpoint busy (%s/%s pages); retrying later", mode, done, pages)
