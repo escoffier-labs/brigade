@@ -532,3 +532,28 @@ def test_bench_summary_keeps_conditions_and_drops_attempts():
     assert kept["conditions"] == {"clients": 8}
     assert kept["attempt_count"] == 500 and "attempts" not in kept
     assert checks.bench_summary("no json here") == "no json here"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="runs the recipe command under /bin/sh")
+def test_model_pull_stops_the_server_by_pid_and_keeps_the_pull_status(tmp_path):
+    # A noninteractive dash has no job control, so `kill %1` failed after a
+    # successful pull. Run the recipe's command under sh with stand-ins.
+    # PyYAML is not a dependency, so read the one command line directly.
+    lines = (RECIPE / "compose.yaml").read_text(encoding="utf-8").splitlines()
+    start = lines.index("  model-pull:")
+    marker = next(i for i in range(start, len(lines)) if lines[i].strip() == "command:")
+    command = lines[marker + 1].strip().removeprefix("- ").replace("$$", "$")
+    assert "%1" not in command
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for pull_status in (0, 7):
+        (bin_dir / "ollama").write_text(
+            f'#!/bin/sh\nif [ "$1" = serve ]; then exec sleep 60; fi\nexit {pull_status}\n',
+            encoding="utf-8",
+        )
+        (bin_dir / "ollama").chmod(0o755)
+        (bin_dir / "sleep").write_text('#!/bin/sh\nexec /bin/sleep "$@"\n', encoding="utf-8")
+        (bin_dir / "sleep").chmod(0o755)
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "BRIGADE_EMBED_MODEL": "m"}
+        done = subprocess.run(["/bin/sh", "-c", command.replace("sleep 3", "sleep 0.2")], env=env, timeout=30)
+        assert done.returncode == pull_status
