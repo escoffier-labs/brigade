@@ -92,11 +92,13 @@ def generate_manifest(
         "components": components,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    output.write_bytes((json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     manifest_digest = sha256(output)
     checksum_entries = {**native_digests, output.name: manifest_digest}
     checksums_output.parent.mkdir(parents=True, exist_ok=True)
-    checksums_output.write_text("".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_entries.items())))
+    checksums_output.write_bytes(
+        "".join(f"{digest}  {name}\n" for name, digest in sorted(checksum_entries.items())).encode("utf-8")
+    )
     return manifest
 
 
