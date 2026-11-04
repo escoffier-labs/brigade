@@ -319,18 +319,17 @@ def test_canonical_engine_usage_lines_are_rebranded(monkeypatch, capsys):
 
 
 def test_legacy_entry_point_notice_is_dropped_but_variable_warnings_stay(monkeypatch, capsys):
+    # The first line is the exact notice the engine prints (engines/code-graph/src/cli.rs).
     stderr = (
-        "warning: graphtrail is deprecated and will be removed in v0.33.0; use brigade-code-graph\n"
-        "warning: BRIGADE_X is deprecated and will be removed in v0.33.0; set BRIGADE_Y instead\n"
+        "graphtrail is deprecated; use brigade-code-graph; removed in v0.33.0\n"
+        "BRIGADE_X is deprecated; use BRIGADE_Y; removed in v0.33.0\n"
         "error: boom\n"
     )
     _patch_engine(monkeypatch, stderr=stderr)
 
     cli.main(["code", "sync"])
 
-    assert capsys.readouterr().err == (
-        "warning: BRIGADE_X is deprecated and will be removed in v0.33.0; set BRIGADE_Y instead\nerror: boom\n"
-    )
+    assert capsys.readouterr().err == "BRIGADE_X is deprecated; use BRIGADE_Y; removed in v0.33.0\nerror: boom\n"
 
 
 def test_non_usage_engine_output_passes_through_verbatim(monkeypatch, capsys):
