@@ -641,6 +641,8 @@ async fn run(config: Config) -> Result<(), String> {
             .trim()
             .to_owned()
     };
+    axum::http::HeaderValue::from_str(&key)
+        .map_err(|_| "invalid upstream key header".to_owned())?;
     let (upstream, mut child) = upstream(&config, &client, &key).await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
