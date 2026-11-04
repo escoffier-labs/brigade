@@ -313,7 +313,8 @@ def test_managed_loopback_opt_in(tmp_path, monkeypatch, enabled, backlog, capsys
 
     monkeypatch.delenv("BRIGADE_HUB_MANAGED_LOOPBACK", raising=False)
     if enabled:
-        monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+        monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "fake-start-key")
+        monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-start-key")
     server = fleet_hub.make_server(str(IPv4Address(2130706433)), 0, tmp_path / "hub.db", "fake-token")
     try:
         assert server._loopback_bind is True
@@ -326,7 +327,8 @@ def test_managed_loopback_opt_in(tmp_path, monkeypatch, enabled, backlog, capsys
 def test_managed_upstream_refuses_non_loopback(tmp_path, monkeypatch):
     from ipaddress import IPv4Address
 
-    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "fake-start-key")
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-start-key")
     with pytest.raises(ValueError, match="numeric loopback"):
         fleet_hub.make_server(str(IPv4Address(0)), 0, tmp_path / "hub.db", "fake-token")
 
@@ -336,7 +338,8 @@ def test_managed_deferred_bind_skips_port_announcement(tmp_path, monkeypatch, ca
 
     from brigade.fleet_hub_server import BoundedThreadingHTTPServer
 
-    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+    monkeypatch.setenv("BRIGADE_HUB_MANAGED_LOOPBACK", "fake-start-key")
+    monkeypatch.setenv("BRIGADE_HUB_UPSTREAM_KEY", "fake-start-key")
     db = tmp_path / "hub.db"
     sqlite3.connect(db).close()
     server = BoundedThreadingHTTPServer(

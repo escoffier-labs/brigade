@@ -54,8 +54,15 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
         db_path: Path,
     ) -> None:
         # Private managed-front escape hatch. Never lift admission on a public bind.
-        managed = os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") == "1"
-        if managed and not ipaddress.ip_address(server_address[0]).is_loopback:
+        managed = bool(os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK"))
+        from . import fleet_hub_upstream
+
+        upstream_key = fleet_hub_upstream.key()
+        if managed and not upstream_key:
+            raise ValueError("managed upstream requires a per-start key")
+        if managed and os.environ.get("BRIGADE_HUB_MANAGED_LOOPBACK") != upstream_key:
+            raise ValueError("managed upstream switch must match the per-start key")
+        if upstream_key and not ipaddress.ip_address(server_address[0]).is_loopback:
             raise ValueError("managed upstream requires a numeric loopback bind")
         # Set from the bound address in server_bind; nothing is exempt before it.
         self._loopback_bind = False
@@ -71,6 +78,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
             f"{db_path.expanduser().resolve().as_uri()}?mode=rw", uri=True, check_same_thread=False
         )
         try:
+            fleet_hub_upstream.configure_connection(self._db_keepalive)
             # Merely opening a handle does not join the WAL. Finish a real
             # read so the connection retains a shared lock without a snapshot.
             self._db_keepalive.execute("SELECT name FROM sqlite_schema LIMIT 1").fetchall()

@@ -125,8 +125,13 @@ class Transport(unittest.TestCase):
 
                 worker = threading.Thread(target=healthy)
                 worker.start()
+                for _ in range(150):
+                    if request(public, "/ready")[0] == 200:
+                        break
+                    time.sleep(0.02)
                 self.assertEqual(request(public, "/ready")[0], 200)
                 worker.join(3)
+            time.sleep(1.2)
             self.assertEqual(request(public, "/ready")[0], 503)
 
     def test_reset_after_commit_has_no_retry(self):

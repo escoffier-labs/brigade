@@ -178,6 +178,8 @@ struct App {
     inflight: Arc<Semaphore>,
     bodies: Arc<Semaphore>,
     hashes: RandomState,
+    upstream_key: String,
+    ready: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 impl App {
     fn new(upstream: String, client: HttpClient, trust_identity: bool, trust_proto: bool) -> Self {
@@ -190,6 +192,8 @@ impl App {
             inflight: Arc::new(Semaphore::new(24)),
             bodies: Arc::new(Semaphore::new(BODY_BUDGET)),
             hashes: RandomState::new(),
+            upstream_key: String::new(),
+            ready: Arc::default(),
         }
     }
 }
@@ -235,6 +239,25 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
         headers.remove(name);
     }
 }
+fn req_path(parts: &axum::http::request::Parts) -> &str {
+    parts.uri.path()
+}
+fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
+    if path == "/messages" && bytes.len() <= BODY_LIMIT {
+        if let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(bytes) {
+            if body.get("action").and_then(|v| v.as_str()) == Some("list") {
+                if let Some(wait) = body
+                    .get("wait_ms")
+                    .and_then(|v| v.as_u64())
+                    .filter(|v| *v > 0)
+                {
+                    return Duration::from_millis(wait.min(20_000) + 5_000);
+                }
+            }
+        }
+    }
+    Duration::from_secs(30)
+}
 async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if req
         .uri()
@@ -278,18 +301,11 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             .unwrap();
     }
     if req.method() == "GET" && req.uri().path() == "/ready" {
-        let Ok(_probe_slot) = app.inflight.clone().try_acquire_owned() else {
-            return json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({"ready":false}),
-            );
-        };
-        let probe = Request::builder()
-            .uri(format!("{}/health", app.upstream))
-            .body(Body::empty())
-            .unwrap();
-        let ready = matches!(tokio::time::timeout(Duration::from_secs(1), app.client.request(probe)).await,
-            Ok(Ok(r)) if r.status() == StatusCode::OK);
+        let ready = app
+            .ready
+            .lock()
+            .unwrap()
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(5));
         return json(
             if ready {
                 StatusCode::OK
@@ -346,6 +362,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             );
         }
     };
+    let header_timeout = long_poll_deadline(req_path(&parts), &body);
     let bodyless = body.is_empty();
     let mut req = Request::from_parts(parts, Body::from(body));
     let (key, cap) = if let Some(value) = req.headers().get("authorization") {
@@ -381,6 +398,20 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     // ambiguous HTTP framing before dispatch; valid Content-Length is unchanged.
     strip_hop(req.headers_mut());
     req.headers_mut().remove("x-brigade-client-address");
+    req.headers_mut().remove("x-brigade-upstream-key");
+    if !app.upstream_key.is_empty() {
+        let peer = req
+            .extensions()
+            .get::<SocketAddr>()
+            .map(|p| p.ip())
+            .unwrap_or(Ipv4Addr::LOCALHOST.into());
+        req.headers_mut().insert(
+            "x-brigade-client-address",
+            peer.to_string().parse().unwrap(),
+        );
+        req.headers_mut()
+            .insert("x-brigade-upstream-key", app.upstream_key.parse().unwrap());
+    }
     let origin = match app.upstream.parse::<axum::http::Uri>() {
         Ok(uri) => uri,
         Err(_) => return upstream_error(StatusCode::BAD_GATEWAY, "upstream-down", browser),
@@ -405,7 +436,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     // Python reads wait_ms from the JSON body only, and its bounded wait plus
     // processing fits this deadline. The body is already buffered, so the
     // deadline covers only Python's handling.
-    let header_timeout = Duration::from_secs(30);
+
     let retry = req.method() == "GET" && bodyless;
     let retry_head = (
         req.method().clone(),
@@ -522,7 +553,11 @@ fn body_too_large() -> Response<Body> {
         .unwrap()
 }
 
-async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Option<Child>), String> {
+async fn upstream(
+    config: &Config,
+    client: &HttpClient,
+    key: &str,
+) -> Result<(String, Option<Child>), String> {
     if let Some(url) = &config.upstream {
         let status =
             Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
@@ -541,7 +576,8 @@ async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Optio
     let mut child =
         Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
             .args(config.python_args(0))
-            .env("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+            .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
+            .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -568,6 +604,8 @@ async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Optio
         }
         let req = Request::builder()
             .uri(format!("{url}/health"))
+            .header("x-brigade-upstream-key", key)
+            .header("x-brigade-client-address", Ipv4Addr::LOCALHOST.to_string())
             .body(Body::empty())
             .unwrap();
         if matches!(client.request(req).await, Ok(r) if r.status() == StatusCode::OK) {
@@ -585,7 +623,25 @@ async fn run(config: Config) -> Result<(), String> {
         .retry_canceled_requests(false)
         .pool_max_idle_per_host(0)
         .build(connector);
-    let (upstream, mut child) = upstream(&config, &client).await?;
+    // Generate in the existing Python runtime, without a shell or secret output.
+    let key = if config.upstream.is_some() {
+        std::env::var("BRIGADE_HUB_UPSTREAM_KEY").unwrap_or_default()
+    } else {
+        let output =
+            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+                .args(["-c", "import secrets; print(secrets.token_hex(32))"])
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("per-start key generation failed".into());
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|_| "invalid per-start key")?
+            .trim()
+            .to_owned()
+    };
+    let (upstream, mut child) = upstream(&config, &client, &key).await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
         .await
@@ -605,12 +661,33 @@ async fn run(config: Config) -> Result<(), String> {
         "listening on {}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    let app = Router::new().fallback(any(handle)).with_state(App::new(
+    let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
-    ));
+    );
+    state.upstream_key = key;
+    let probe = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let request = Request::builder()
+                .uri(format!("{}/health", probe.upstream))
+                .header("x-brigade-upstream-key", &probe.upstream_key)
+                .header("x-brigade-client-address", Ipv4Addr::LOCALHOST.to_string())
+                .body(Body::empty())
+                .unwrap();
+            if matches!(tokio::time::timeout(Duration::from_secs(1), probe.client.request(request)).await,
+                Ok(Ok(response)) if response.status() == StatusCode::OK)
+            {
+                *probe.ready.lock().unwrap() = Some(tokio::time::Instant::now());
+            } else {
+                *probe.ready.lock().unwrap() = None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    let app = Router::new().fallback(any(handle)).with_state(state);
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
@@ -713,6 +790,45 @@ async fn main() {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    #[test]
+    fn long_poll_uses_body_and_caps_wait() {
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"list","wait_ms":12000}"#),
+            Duration::from_secs(17)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"list","wait_ms":999999}"#),
+            Duration::from_secs(25)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"send","wait_ms":1}"#),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", b"invalid"),
+            Duration::from_secs(30)
+        );
+    }
+    #[tokio::test]
+    async fn ready_ignores_full_proxy_pool_and_expires() {
+        let app = App::new(
+            "http://localhost:1".into(),
+            Client::builder(TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
+        let _slots = app.inflight.clone().acquire_many_owned(24).await.unwrap();
+        *app.ready.lock().unwrap() = Some(tokio::time::Instant::now());
+        let request = || {
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(handle(State(app.clone()), request()).await.status(), 200);
+        *app.ready.lock().unwrap() = Some(tokio::time::Instant::now() - Duration::from_secs(6));
+        assert_eq!(handle(State(app), request()).await.status(), 503);
+    }
     #[test]
     fn required_and_typed_flags() {
         assert!(Config::try_parse_from(["hub"]).is_err());

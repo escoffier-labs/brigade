@@ -1,4 +1,4 @@
-# brigade-hub (S3b)
+# brigade-hub (S3c)
 
 A Rust HTTP front for the Python Fleet Hub. Run where `python3 -m brigade`
 resolves this matching Python package, or set `BRIGADE_HUB_PYTHON` to its
@@ -8,21 +8,22 @@ interpreter.
 brigade-hub --host localhost --token-file ./admin-token --db ./hub.db
 ```
 
-**Do not deploy this front in front of a live hub until S10's upstream mode
-lands.** This slice does not preserve real client addresses in Python.
+Managed mode launches Python on a numeric loopback ephemeral port. It creates
+a random per-start key, passes it only to the child, and requires it on every
+upstream request before routing. The managed switch must equal that key.
+Every upstream SQLite connection disables automatic WAL checkpoints and reads
+back the setting. Standalone Python keeps its existing checkpoint policy.
 
-Managed mode launches Python on a numeric loopback ephemeral port. Python
-reports its bound port, avoiding a port reservation race. Only that child gets
-`BRIGADE_HUB_MANAGED_LOOPBACK=1`, a default-off escape hatch that lifts Python's
-per-source cap from 8 to 32 while retaining the 32-thread global cap. Python
-refuses the escape hatch on non-loopback binds. Do not set it on a standalone
-hub. The front admits at most 24 proxied requests, leaving room for cleanup
-and health probes. It disables idle upstream pooling so idle keepalive sockets
-cannot occupy Python handler threads.
+Rust replaces incoming internal key and client-address headers with its key
+and the TCP peer address. Python keeps that address for audit records while
+browser trust checks continue using the actual socket peer.
+
+Live deployment remains outside this slice. S3c owns upstream mode and client
+address forwarding. S10 owns packaging and deployment recipes.
 
 The front exits nonzero if its managed child dies. `/health` retains the v1
-liveness bytes and server header. `GET /ready` probes upstream health with a
-one-second deadline and returns only `{"ready":true}` or `{"ready":false}`,
+liveness bytes and server header. `GET /ready` reads a background health probe that runs every
+second on its own connection with a one-second deadline and returns only `{"ready":true}` or `{"ready":false}`,
 with status 200 or 503. A service manager must restart the pair after failure.
 Shutdown stops accepting, closes idle keep-alive connections, lets in-flight
 requests finish for at most 25 seconds, then stops the child. A container stop
@@ -40,8 +41,8 @@ retry, only after a connect failure. Other transport failures return 502
 `upstream-outcome-unknown`, since Python may have committed. Header timeouts
 return 504. Connect timeout is 1 second, response header timeout 30 seconds,
 response idle-body timeout 30 seconds and total response timeout 120 seconds.
-The header timeout starts after the request body is buffered. The front never
-reads `wait_ms` from the query, since Python reads it only from the JSON body.
+The header timeout starts after the request body is buffered. For message lists the header deadline is the body
+`wait_ms`, capped at 20 seconds, plus 5 seconds. The original bytes pass unchanged.
 After response headers have reached a client, a body failure terminates the
 stream. HTTP cannot replace that status with a 504. Clients must treat an
 incomplete response as a transport failure.
@@ -68,7 +69,7 @@ Request bytes are forwarded unchanged after buffering, and response bytes
 stream, both without JSON re-encoding.
 
 Deferred: S4 storage, S8 native waiters, S9 metrics and route modes, and S10
-packaging, upstream identity, real source forwarding and deployment recipes.
+packaging and deployment recipes.
 
 Verification: execute `engines/hub/verify` through `brigade work verify run`.
 The frozen contract drive launches the managed front with:
