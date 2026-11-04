@@ -67,6 +67,13 @@ ACL, which the operator must restrict to the hub account.
 Fingerprint and report keys are derived separately with HMAC-SHA256 from the
 master, under `brigade.findings.fingerprint.v1` and `brigade.findings.report.v1`. Back up this
 file with the database. A missing key with existing findings fails closed.
+
+A container install can supply the master key as a read-only secret instead:
+set `BRIGADE_FLEET_FINDINGS_KEY_FILE` to the mounted file, which must hold
+exactly 32 bytes and must not be writable by group or others. The hub then
+never creates or rewrites a key, a missing file answers 503, and a copy of the
+state volume alone holds no key. The Compose recipe in `ops/fleet-hub/` does
+this. Back the secret up apart from the database copies.
 Creation writes and syncs a staging file, publishes it with an exclusive hard
 link, removes the staging link, and syncs the directory. Directory sync is best
 effort on Windows. An interrupted staging file is removed on the next attempt.

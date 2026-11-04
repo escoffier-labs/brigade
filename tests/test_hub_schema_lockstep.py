@@ -85,3 +85,22 @@ def test_findings_are_required_startup_objects(tmp_path: Path) -> None:
             assert not lockstep["compatible"](removed, required)
     finally:
         conn.close()
+
+
+def test_recovery_floor_bump_is_in_the_rust_contract(tmp_path: Path) -> None:
+    # v50 adds no DDL: the claim recovery floor is a hub_meta row. The version
+    # bump alone keeps a Python or Rust hub that predates the floor rule from
+    # serving a restored file.
+    lockstep = runpy.run_path(str(LOCKSTEP))
+    import json
+
+    required = json.loads(lockstep["REQUIRED"].read_text(encoding="utf-8"))
+    assert required["user_version"] == fleet_hub.SCHEMA_VERSION >= 50
+    assert "hub_meta" in required["tables"] and "hub_meta" not in required["optional"]["tables"]
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        conn.execute("""INSERT INTO hub_meta (key, value) VALUES ('recovery', '{"claim_floor": 4294967296}')""")
+        conn.commit()
+        assert lockstep["compatible"](lockstep["snapshot"](conn), required)
+    finally:
+        conn.close()

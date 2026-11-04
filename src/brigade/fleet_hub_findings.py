@@ -2,6 +2,9 @@
 
 The private sidecar key must be backed up with the hub database. It is never
 returned. Only a reservation holder receives the domain-separated report HMAC.
+A container install supplies the key as a read-only secret file named by
+``BRIGADE_FLEET_FINDINGS_KEY_FILE`` instead, so a copy of the state volume
+alone cannot test guesses.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from . import dirfd
 
 LEASE_SECONDS = 600
+KEY_FILE_ENV = "BRIGADE_FLEET_FINDINGS_KEY_FILE"
 TRACKING = frozenset(
     {
         "gclid",
@@ -92,8 +96,35 @@ def canonical_key(kind: str, key: str) -> str:
     return key
 
 
+def _secret_key(path: Path) -> bytes:
+    """Read an operator-supplied key file. It is never created or rewritten here.
+
+    A Compose file secret is a read-only bind mount of a host file the
+    container's own UID cannot own, so ownership is not checked. The host keeps
+    it in a 0700 directory, and a key anyone but its owner could write is refused.
+    """
+    flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    try:
+        fd = os.open(path, os.O_RDONLY | flags)
+    except FileNotFoundError as exc:
+        raise FindingError("findings key file missing", "finding_unavailable", 503) from exc
+    except OSError as exc:
+        raise FindingError("unsafe findings key file", "finding_unavailable", 503) from exc
+    with os.fdopen(fd, "rb") as stream:
+        info = os.fstat(stream.fileno())
+        if not stat.S_ISREG(info.st_mode) or (os.name == "posix" and info.st_mode & 0o022):
+            raise FindingError("unsafe findings key file", "finding_unavailable", 503)
+        key = stream.read(33)
+    if len(key) != 32:
+        raise FindingError("invalid findings key file", "finding_unavailable", 503)
+    return key
+
+
 def _key(conn: sqlite3.Connection) -> bytes:
     """Load or create a private key under the database's writer lock."""
+    explicit = os.environ.get(KEY_FILE_ENV)
+    if explicit:
+        return _secret_key(Path(explicit))
     db = conn.execute("PRAGMA database_list").fetchone()[2]
     if not db:
         raise FindingError("findings require a persistent database", "finding_unavailable", 503)
