@@ -58,7 +58,7 @@ Brigade Stack coordinates autonomous agent work across machines and cloud seats 
 
 ## Installing for a user (you run this)
 
-Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.10 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
+Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.11 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
 
 Work in the **target** directory (the repo or operator workspace the user named), not the Brigade Stack source tree unless they asked to develop Brigade Stack.
 

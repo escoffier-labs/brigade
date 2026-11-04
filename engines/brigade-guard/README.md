@@ -53,15 +53,38 @@ Checked against PCRE2 10.42 (Ubuntu 24.04's system library) and the bundled
 10.46. On 10.42 the other eight default rules match Python span for span on
 the guard's Unicode fixture (`tests/guard/unicode_fixture.py`). Every character in that fixture was assigned by Unicode 3.2. Characters assigned in
 only one of the two Unicode databases still classify differently, so compare
-`unicode_version` with Python's `unicodedata.unidata_version`. A build links
-the system PCRE2 when pkg-config finds one and otherwise builds the bundled
-copy, so the build decides which rows apply. `PCRE2_SYS_STATIC=1` forces the
-bundled copy.
+`unicode_version` with Python's `unicodedata.unidata_version`. Builds from this
+repository always link the bundled 10.46 (see PCRE2 pin below), so all three
+rows apply.
 
 PCRE2 JIT is required by the binary. A build without available JIT fails its
 request and Python falls back. Python uses a 30-second subprocess timeout.
 Custom rules always use Python, including patterns with empty-match iteration
 or constructs whose behavior differs between the engines.
+
+## PCRE2 pin
+
+Pinned PCRE2 library: **10.46 (2025-08-27), Unicode database 16.0.0**.
+
+- `Cargo.toml` pins `pcre2 = "=0.2.11"` and `pcre2-sys = "=0.2.10"`. The
+  `pcre2-sys` crate vendors the PCRE2 source; 0.2.10 vendors 10.46.
+- `pcre2-sys` links a system libpcre2 whenever pkg-config finds one, so hosts
+  with different system libraries would run different regex engines (Ubuntu 24.04
+  ships 10.42). The repository's `.cargo/config.toml` sets
+  `PCRE2_SYS_STATIC=1` with `force = true`, which makes the build script compile
+  the vendored copy and ignore any system library or exported override. Cargo
+  reads that file for any working directory under the repository root,
+  including `--manifest-path` builds. A build run from outside the repository
+  does not get it and must export `PCRE2_SYS_STATIC=1` itself.
+- The unit test `linked_pcre2_is_the_pinned_bundled_release` reads the linked
+  library's version and Unicode version through `pcre2_config` and fails when
+  either differs from the constants next to it. It runs in `cargo test` inside
+  `./scripts/verify-rust-guard` on every guard CI run, so a system-library
+  build, a crate bump or a lockfile change that moves the vendored release
+  cannot pass unnoticed.
+
+To move to a newer PCRE2, bump both crate pins, update the two constants in
+`src/main.rs` and the version above, and recheck the parity table.
 
 ## Verification and distribution
 
@@ -71,6 +94,16 @@ parity drive with Python selected, then the focused gate on all guard tests
 with native selected. The binary integration test asserts raw native matching
 actually ran, so an unavailable or incompatible binary cannot silently pass it.
 CI also checks Rust 1.85. There are no optional crate features yet.
+
+`scripts/benchmark-guard-native.py` times `brigade guard scan` on the Python,
+native and auto backends and asserts their output is identical. Run it after
+`cargo build --release`; the full run scans a 21 MiB corpus twice per backend.
+`--smoke` scans inputs up to 256 KiB once per backend under a 90 second cap
+(`--time-limit`) and `--output FILE` writes every record as JSON lines. The
+`Native guard` workflow runs the smoke mode and uploads the file as the
+`guard-native-benchmark-smoke` artifact. It checks that the benchmark runs and
+the backends agree and sets no timing threshold, since shared runners are too
+noisy for one.
 
 Release artifacts, checksums, signing and `brigade setup` installation are
 not wired in this PR. Local and CI builds use Cargo directly.

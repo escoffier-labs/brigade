@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import toml_compat as tomllib
+
 from ..config import load_config as load_brigade_config
 from ..install import apply_gitignore
 from ..render import emit
@@ -49,11 +51,9 @@ def init(*, target: Path, force: bool = False, update_gitignore: bool = True, de
 def _read_tool_entries(path: Path) -> tuple[list[dict[str, Any]], list[str]]:
     if not path.is_file():
         return [], []
-    if tomllib is None:
-        return [], ["tool catalog requires Python tomllib support"]
     try:
         payload = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid tool catalog config: {exc}"]
     values = payload.get("tool")
     if values is None:

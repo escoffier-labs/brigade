@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
-import sys
+import tomllib
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -14,36 +14,16 @@ SRC_BRIGADE = REPO_ROOT / "src" / "brigade"
 
 def _ignored_module_patterns() -> list[str]:
     text = PYPROJECT.read_text(encoding="utf-8")
-    if sys.version_info >= (3, 11):
-        import tomllib
-
-        data = tomllib.loads(text)
-        patterns: list[str] = []
-        for override in data.get("tool", {}).get("mypy", {}).get("overrides", []):
-            if override.get("ignore_errors") is not True:
-                continue
-            module = override.get("module", [])
-            if isinstance(module, str):
-                patterns.append(module)
-            else:
-                patterns.extend(str(item) for item in module)
-        return patterns
-    return _ignored_module_patterns_from_text(text)
-
-
-def _ignored_module_patterns_from_text(text: str) -> list[str]:
-    """Python 3.10 path: keep this ratchet independent from the TOML parser."""
+    data = tomllib.loads(text)
     patterns: list[str] = []
-    blocks = text.split("[[tool.mypy.overrides]]")[1:]
-    for block in blocks:
-        nxt = block.find("\n[")
-        body = block if nxt < 0 else block[:nxt]
-        if "ignore_errors = true" not in body:
+    for override in data.get("tool", {}).get("mypy", {}).get("overrides", []):
+        if override.get("ignore_errors") is not True:
             continue
-        for line in body.splitlines():
-            stripped = line.strip().rstrip(",")
-            if stripped.startswith('"') and stripped.endswith('"'):
-                patterns.append(stripped[1:-1])
+        module = override.get("module", [])
+        if isinstance(module, str):
+            patterns.append(module)
+        else:
+            patterns.extend(str(item) for item in module)
     return patterns
 
 

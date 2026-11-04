@@ -8,13 +8,16 @@ existing roster seats only: no tokens, env values, or home paths.
 
 from __future__ import annotations
 
+import tomllib
+
 import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import toml_compat
+
+from . import toml_format
 
 SCHEMA = "brigade.run_preference.v1"
 CACHE_REL_PATH = Path(".brigade") / "run-preference.toml"
@@ -119,7 +122,7 @@ def load_cached(home: Path | None = None) -> RunPreference:
     except OSError:
         return RunPreference()
     try:
-        return parse_preference(toml_compat.loads(text))
+        return parse_preference(tomllib.loads(text))
     except (RunPreferenceError, ValueError):
         return RunPreference()
 
@@ -133,7 +136,7 @@ def write_cached(preference: RunPreference, home: Path | None = None) -> Path:
     ]
     payload = preference.payload()
     if payload:
-        lines.extend(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in payload.items())
+        lines.extend(f"{key} = {toml_format.format_toml_value(value)}" for key, value in payload.items())
     tmp = path.with_suffix(".toml.tmp")
     tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     os.replace(tmp, path)

@@ -32,6 +32,72 @@ def percentiles(values):
     }
 
 
+def parse_metrics(raw):
+    """Decode a /metrics body. Metrics text maps each sample line to a float.
+
+    A NaN or infinite value is stored as None, since it means "unavailable" and
+    JSON cannot carry it. A JSON object body is kept as is.
+    """
+    text = raw.decode("utf-8", errors="replace")
+    try:
+        value = json.loads(text)
+        if isinstance(value, dict):
+            return value
+    except ValueError:
+        pass
+    samples = {}
+    for line in text.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        name, _, number = line.rpartition(" ")
+        try:
+            parsed = float(number)
+        except ValueError:
+            continue
+        samples[name] = parsed if math.isfinite(parsed) else None
+    return samples
+
+
+# Short column key -> exported metric. The key drops the brigade_hub_ prefix.
+COLUMNS = {
+    "queue_depth": (
+        "writer_queue_depth",
+        "reader_queue_depth",
+        "cpu_queue_depth",
+    ),
+    "batch_sizes": ("writer_batch_size",),
+    "checkpoint_stalls": ("checkpoint_busy_total", "checkpoint_stall_frames"),
+}
+
+
+def telemetry_column(samples, column):
+    """Summarize one column from the collected /metrics samples.
+
+    A metric with no finite value in any sample is left out, and a column with
+    none returns UNAVAILABLE. Values are the sampled readings in order, so a
+    gauge such as batch size is as fine as the sample interval.
+    """
+    found = {}
+    for key in COLUMNS[column]:
+        values = []
+        for sample in samples:
+            value = sample["value"]
+            number = value.get(f"brigade_hub_{key}") if isinstance(value, dict) else None
+            if isinstance(number, (int, float)) and math.isfinite(number):
+                values.append(number)
+        if values:
+            found[key] = {
+                "metric": f"brigade_hub_{key}",
+                "samples": len(values),
+                "min": min(values),
+                "max": max(values),
+                "first": values[0],
+                "last": values[-1],
+                "values": values,
+            }
+    return found or UNAVAILABLE
+
+
 def endpoint(url):
     parsed = urlsplit(url)
     if (
@@ -203,7 +269,7 @@ def run(args):
             while not stop.is_set():
                 try:
                     status, raw, _ = client.request("GET", "/metrics", None)
-                    value = json.loads(raw) if status == 200 else None
+                    value = parse_metrics(raw) if status == 200 else None
                     metrics.append(
                         {
                             "elapsed_s": time.monotonic() - start,
@@ -326,9 +392,9 @@ def run(args):
             else None,
         },
         "telemetry": {
-            "queue_depth": UNAVAILABLE,
-            "batch_sizes": UNAVAILABLE,
-            "checkpoint_stalls": UNAVAILABLE,
+            "queue_depth": telemetry_column(metrics, "queue_depth"),
+            "batch_sizes": telemetry_column(metrics, "batch_sizes"),
+            "checkpoint_stalls": telemetry_column(metrics, "checkpoint_stalls"),
             "samples": metrics,
         },
         "attempts": sorted(results, key=lambda r: r["attempt"]),

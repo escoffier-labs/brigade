@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import json
 import sys
 from pathlib import Path
 from typing import Any
 
-from . import toml_compat as tomllib
+
 from . import work_cmd
 from .localio import read_json_dict as _read_json, utc_now as _now, write_json as _write_json
 

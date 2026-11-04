@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import hashlib
 import json
 import re
@@ -10,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import toml_compat as tomllib
+
 from .install import apply_gitignore
 from .selection import Selection
 from .localio import utc_now as _now
@@ -177,8 +179,6 @@ def _load_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
     path = _config_path(target)
     if not path.is_file():
         return [], [f"chat surface config missing: {path}"]
-    if tomllib is None:
-        return [], ["tomllib is not available"]
     try:
         payload = tomllib.loads(path.read_text())
     except Exception as exc:
