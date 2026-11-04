@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from . import dirfd
+
 LEASE_SECONDS = 600
 TRACKING = frozenset(
     {
@@ -77,7 +79,7 @@ def canonical_key(kind: str, key: str) -> str:
         if ":" in host:
             host = f"[{host}]"
         # Drop only the input scheme's default port: https on port 80 is a different endpoint.
-        if url.port and url.port != {"http": 80, "https": 443}[url.scheme]:
+        if url.port is not None and url.port != {"http": 80, "https": 443}[url.scheme]:
             host += f":{url.port}"
         query = urlencode(
             sorted(
@@ -100,15 +102,31 @@ def _key(conn: sqlite3.Connection) -> bytes:
         raise FindingError("findings key missing", "finding_unavailable", 503)
     # O_BINARY keeps Windows from translating newline bytes in the raw key.
     flags = getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_BINARY", 0)
+    # A fixed staging name is safe under the database writer lock. Remove an
+    # interrupted publication's extra link before checking the final link count.
+    pending = path.with_name(path.name + ".tmp")
+    parent = dirfd.open_directory_nofollow(path.parent)
     try:
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
-    except FileExistsError:
-        pass
-    else:
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(secrets.token_bytes(32))
-            stream.flush()
-            os.fsync(stream.fileno())
+        if pending.exists() or pending.is_symlink():
+            dirfd.unlink_child(parent, pending.name)
+        if not path.exists():
+            fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_EXCL | flags, 0o600)
+            try:
+                with os.fdopen(fd, "wb") as stream:
+                    stream.write(secrets.token_bytes(32))
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                try:
+                    os.link(pending, path)
+                except FileExistsError:
+                    pass
+            finally:
+                dirfd.unlink_child(parent, pending.name)
+        # Sync even when reusing a key: an earlier publication may have stopped
+        # after linking, before syncing the directory or committing the finding.
+        dirfd.fsync_directory(parent)
+    finally:
+        os.close(parent)
     fd = os.open(path, os.O_RDONLY | flags)
     with os.fdopen(fd, "rb") as stream:
         info = os.fstat(stream.fileno())
@@ -122,7 +140,7 @@ def _key(conn: sqlite3.Connection) -> bytes:
         key = stream.read(33)
     if len(key) != 32:
         raise FindingError("invalid findings key file", "finding_unavailable", 503)
-    return hmac.digest(key, b"brigade.findings.v1", "sha256")
+    return key
 
 
 def _text(raw: dict[str, Any], name: str, limit: int = 2048) -> str:
@@ -212,7 +230,9 @@ def handle(
             from .fleet_hub_policy import current_policy
 
             owners = current_policy(conn)["document"].get("owners", {})
-        key = _key(conn)
+        master = _key(conn)
+        key = hmac.digest(master, b"brigade.findings.fingerprint.v1", "sha256")
+        report_key = hmac.digest(master, b"brigade.findings.report.v1", "sha256")
         reservation = None
         if action == "observe":
             kind = _text(raw, "kind", 64)
@@ -248,9 +268,11 @@ def handle(
                 "reservation_id": rid,
                 "generation": generation,
                 "expires_at": expiry,
-                "report_key": hmac.new(key, f"report:{finding_id}".encode("utf-8"), hashlib.sha256).hexdigest(),
+                "report_key": hmac.new(report_key, f"report:{finding_id}".encode("utf-8"), hashlib.sha256).hexdigest(),
             }
         elif action == "reported":
+            if state == "resolved":
+                raise FindingError("finding resolved before report was recorded", "finding_resolved", 409, report_ref)
             if report_ref is not None:
                 raise FindingError("finding already reported", "finding_already_reported", 409, report_ref)
             supplied = _text(raw, "reservation_id", 128)
@@ -270,7 +292,10 @@ def handle(
                 "UPDATE fleet_findings SET report_ref=?,state='reported' WHERE finding_id=?", (report_ref, finding_id)
             )
         elif action == "resolve":
-            if not admin and caller not in eligible and caller != holder:
+            live = expiry is not None and expiry > now
+            if not admin and live and caller != holder:
+                raise FindingError("finding has a live reservation", "finding_reserved", 409)
+            if not admin and caller not in eligible and not (caller == holder and live):
                 raise FindingError("finding owner required", "finding_forbidden", 403)
             state = "resolved"
             conn.execute("UPDATE fleet_findings SET state='resolved' WHERE finding_id=?", (finding_id,))

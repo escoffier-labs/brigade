@@ -78,5 +78,9 @@ def _parse_match(raw: Any, where: str) -> dict[str, Any]:
         for key in MATCH_LIST_KEYS
         if key != "findings" or key in body
     }
+    if "findings" in parsed:
+        from .fleet_hub_findings import KIND_ALIASES
+
+        parsed["findings"] = sorted({KIND_ALIASES.get(kind, kind) for kind in parsed["findings"]})
     parsed["grokbot_jobs"] = policy._bool(body.get("grokbot_jobs"), f"{where} field 'grokbot_jobs'", default=False)
     return parsed
