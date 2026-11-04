@@ -413,8 +413,11 @@ class _LockedLedgers:
     def __enter__(self) -> _LockedLedgers:
         # Two names for one file (a symlink, or a relative and an absolute
         # path) would take the same lock twice and block on themselves, and
-        # would read and append each record twice. Keep the first name only.
-        seen: set[tuple[int, int]] = set()
+        # would read and append each record twice, so the first name is kept.
+        # Locks are then taken in file-identity order, not name order, so two
+        # restores that reach shared ledgers through different names cannot
+        # each hold one lock while waiting for the other's.
+        opened: dict[tuple[int, int], tuple[Path, int]] = {}
         try:
             for path in self.paths:
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -422,15 +425,20 @@ class _LockedLedgers:
                 flags = os.O_RDWR | os.O_CREAT | os.O_APPEND | getattr(os, "O_BINARY", 0)
                 fd = os.open(path, flags, 0o600)
                 info = os.fstat(fd)
-                if (info.st_dev, info.st_ino) in seen:
+                identity = (info.st_dev, info.st_ino)
+                if identity in opened:
                     os.close(fd)
                     continue
-                seen.add((info.st_dev, info.st_ino))
+                opened[identity] = (path, fd)
                 if created:
                     self.created.append(path)
+            for identity in sorted(opened):
+                path, fd = opened.pop(identity)
                 self.fds[path] = fd
                 _lock(fd)
         except BaseException:
+            for _path, fd in opened.values():
+                os.close(fd)
             self.__exit__(None, None, None)
             raise
         return self

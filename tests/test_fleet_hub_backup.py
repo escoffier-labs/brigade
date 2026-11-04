@@ -431,6 +431,51 @@ def test_two_names_for_one_ledger_lock_and_record_it_once(tmp_path):
     assert len(store.read_text(encoding="utf-8").splitlines()) == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need privileges on Windows")
+def test_restores_reaching_shared_ledgers_through_other_names_lock_in_one_order(tmp_path, monkeypatch):
+    db = _populated(tmp_path)
+    copy = _copy(tmp_path, db)
+    first = tmp_path / "ledgers" / "a.jsonl"
+    second = tmp_path / "ledgers" / "z.jsonl"
+    first.parent.mkdir()
+    first.touch()
+    second.touch()
+    alias = tmp_path / "ledgers" / "zz-alias.jsonl"
+    alias.symlink_to(first)
+    # Each restore holds its first lock until the other holds one too (or a
+    # second passes). Locking by name, one restore takes a then z and the other
+    # z then a (through the alias), and each then waits forever for the other.
+    held = threading.Barrier(2)
+    state = threading.local()
+    real_lock = backup._lock
+
+    def lock(fd):
+        real_lock(fd)
+        if not getattr(state, "locked", False):
+            state.locked = True
+            try:
+                held.wait(timeout=1)
+            except threading.BrokenBarrierError:
+                pass
+
+    monkeypatch.setattr(backup, "_lock", lock)
+    results = {}
+
+    def run(name, ledgers):
+        results[name] = backup.restore(copy, tmp_path / f"{name}.db", ledgers=ledgers, now=T0)
+
+    workers = [
+        threading.Thread(target=run, args=("one", [first, second]), daemon=True),
+        threading.Thread(target=run, args=("two", [second, alias]), daemon=True),
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(30)
+    assert not any(worker.is_alive() for worker in workers), "restores deadlocked on their ledger locks"
+    assert results["one"]["claim_floor"] != results["two"]["claim_floor"]
+
+
 def test_restore_refuses_without_a_ledger_unless_the_operator_states_no_prior_restore(tmp_path):
     db = _populated(tmp_path)
     copy = _copy(tmp_path, db)
