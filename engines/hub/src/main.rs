@@ -1,4 +1,8 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
+mod admission;
+mod audit;
+mod response;
+
 use axum::{
     Router,
     body::Body,
@@ -15,8 +19,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use std::{
-    collections::{HashMap, hash_map::RandomState},
-    hash::BuildHasher,
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
@@ -72,6 +75,39 @@ fn loopback(host: &str) -> bool {
         })
         .unwrap_or(false)
 }
+/// Match Python's unnamed-user expanduser for native CLI file reads.
+fn expand_user(path: &str) -> String {
+    let Some(suffix) = path.strip_prefix('~') else {
+        return path.into();
+    };
+    if !suffix.is_empty() && !suffix.starts_with(std::path::is_separator) {
+        return path.into();
+    }
+    #[cfg(not(windows))]
+    #[allow(deprecated)]
+    let home = std::env::home_dir().and_then(|p| p.into_os_string().into_string().ok());
+    #[cfg(windows)]
+    let home = std::env::var("USERPROFILE").ok().or_else(|| {
+        std::env::var("HOMEPATH")
+            .ok()
+            .map(|p| format!("{}{p}", std::env::var("HOMEDRIVE").unwrap_or_default()))
+    });
+    match home {
+        Some(home) => {
+            #[cfg(windows)]
+            let expanded = format!("{home}{suffix}");
+            #[cfg(not(windows))]
+            let expanded = format!("{}{suffix}", home.trim_end_matches('/'));
+            if expanded.is_empty() {
+                std::path::MAIN_SEPARATOR.to_string()
+            } else {
+                expanded
+            }
+        }
+        None => path.into(),
+    }
+}
+
 impl Config {
     fn validate(&self) -> Result<(), String> {
         u16::try_from(self.port).map_err(|_| "port must be 0-65535")?;
@@ -172,24 +208,30 @@ type HttpClient = Client<HttpConnector, Body>;
 struct App {
     upstream: String,
     client: HttpClient,
-    credentials: Arc<Counts>,
+    budgets: admission::Budgets,
+    lookup: Option<admission::Lookup>,
     trust_identity: bool,
     trust_proto: bool,
-    inflight: Arc<Semaphore>,
-    bodies: Arc<Semaphore>,
-    hashes: RandomState,
+    buffers: Arc<Semaphore>,
+    buffer_fallbacks: Arc<std::sync::atomic::AtomicU64>,
+    upstream_key: axum::http::HeaderValue,
+    front_bind: bool,
+    ready: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 impl App {
     fn new(upstream: String, client: HttpClient, trust_identity: bool, trust_proto: bool) -> Self {
         App {
             upstream,
             client,
-            credentials: Arc::default(),
+            budgets: admission::Budgets::default(),
+            lookup: None,
             trust_identity,
             trust_proto,
-            inflight: Arc::new(Semaphore::new(24)),
-            bodies: Arc::new(Semaphore::new(BODY_BUDGET)),
-            hashes: RandomState::new(),
+            buffers: Arc::new(Semaphore::new(BODY_BUDGET)),
+            buffer_fallbacks: Arc::default(),
+            upstream_key: axum::http::HeaderValue::from_static(""),
+            front_bind: false,
+            ready: Arc::default(),
         }
     }
 }
@@ -235,6 +277,25 @@ fn strip_hop(headers: &mut axum::http::HeaderMap) {
         headers.remove(name);
     }
 }
+fn req_path(parts: &axum::http::request::Parts) -> &str {
+    parts.uri.path()
+}
+fn long_poll_deadline(path: &str, bytes: &[u8]) -> Duration {
+    if path == "/messages" && bytes.len() <= BODY_LIMIT {
+        if let Ok(serde_json::Value::Object(body)) = serde_json::from_slice(bytes) {
+            if body.get("action").and_then(|v| v.as_str()) == Some("list") {
+                if let Some(wait) = body
+                    .get("wait_ms")
+                    .and_then(|v| v.as_u64())
+                    .filter(|v| *v > 0)
+                {
+                    return Duration::from_millis(wait.min(20_000) + 10_000);
+                }
+            }
+        }
+    }
+    Duration::from_secs(30)
+}
 async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if req
         .uri()
@@ -277,19 +338,18 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             ))
             .unwrap();
     }
+    if req.method() == "GET" && req.uri().path() == "/metrics" {
+        return json(
+            StatusCode::OK,
+            serde_json::json!({"proxy_buffer_fallback_total":app.buffer_fallbacks.load(std::sync::atomic::Ordering::Relaxed)}),
+        );
+    }
     if req.method() == "GET" && req.uri().path() == "/ready" {
-        let Ok(_probe_slot) = app.inflight.clone().try_acquire_owned() else {
-            return json(
-                StatusCode::SERVICE_UNAVAILABLE,
-                serde_json::json!({"ready":false}),
-            );
-        };
-        let probe = Request::builder()
-            .uri(format!("{}/health", app.upstream))
-            .body(Body::empty())
-            .unwrap();
-        let ready = matches!(tokio::time::timeout(Duration::from_secs(1), app.client.request(probe)).await,
-            Ok(Ok(r)) if r.status() == StatusCode::OK);
+        let ready = app
+            .ready
+            .lock()
+            .unwrap()
+            .is_some_and(|last| last.elapsed() < Duration::from_secs(5));
         return json(
             if ready {
                 StatusCode::OK
@@ -316,19 +376,58 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if length > BODY_LIMIT as u64 {
         return body_too_large();
     }
-    // Buffer the whole body before admission. A slow upload then holds only
-    // its connection and its share of the byte budget, never a proxied slot,
-    // so unvalidated Authorization values cannot occupy Python's threads.
-    let (parts, body) = req.into_parts();
-    let _budget = if length == 0 {
-        None
+    let browser = admission::browser(req.uri().path());
+    let credential = match &app.lookup {
+        Some(lookup) => match lookup
+            .credential(
+                req.headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok()),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(()) => return busy("credential-lookup"),
+        },
+        None => None,
+    };
+    let source = req
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|p| {
+            if app.front_bind && p.ip().is_loopback() {
+                "front".into()
+            } else {
+                p.ip().to_string()
+            }
+        })
+        .unwrap_or_default();
+    let login = if app.trust_identity {
+        req.headers()
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok())
     } else {
-        let wanted = app.bodies.clone().acquire_many_owned(length as u32);
-        match tokio::time::timeout(Duration::from_secs(1), wanted).await {
-            Ok(Ok(permit)) => Some(permit),
-            _ => return busy("body-budget-full"),
+        None
+    };
+    let Some(credential) = app
+        .budgets
+        .admit(credential, req.uri().path(), &source, login)
+    else {
+        return busy("credential-inflight-full");
+    };
+    let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
+    let (parts, body) = req.into_parts();
+    let _budget = if headers_only {
+        vec![]
+    } else {
+        match credential.reserve(length as u32).await {
+            Ok(permits) => permits,
+            Err(()) => return busy("body-budget-full"),
         }
     };
+    // Large unvalidated bodies are never read or reserved. Python refuses them
+    // from headers. Dropping the incoming stream closes the client connection.
+    let body = if headers_only { Body::empty() } else { body };
     let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
     let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
         Ok(Ok(collected)) => collected.to_bytes(),
@@ -346,41 +445,47 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             );
         }
     };
+    let header_timeout = long_poll_deadline(req_path(&parts), &body);
     let bodyless = body.is_empty();
-    let mut req = Request::from_parts(parts, Body::from(body));
-    let (key, cap) = if let Some(value) = req.headers().get("authorization") {
-        (
-            format!("credential:{}", app.hashes.hash_one(value.as_bytes())),
-            64,
-        )
+    let outgoing = if headers_only {
+        Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >())
     } else {
-        let peer = req
-            .extensions()
-            .get::<SocketAddr>()
-            .map(|p| p.ip().to_string())
-            .unwrap_or_default();
-        (format!("source:{peer}"), 8)
+        Body::from(body)
     };
-    let Some(credential) = app.credentials.acquire(key, cap) else {
-        return busy("credential-inflight-full");
+    let mut req = Request::from_parts(parts, outgoing);
+    let inflight = match credential.proxy() {
+        Ok(slot) => slot,
+        Err(reason) => return busy(reason),
     };
-    let Ok(inflight) = app.inflight.clone().try_acquire_owned() else {
-        return busy("proxy-inflight-full");
-    };
-    let browser = req.uri().path() == "/"
-        || ["/deck", "/view/", "/enroll", "/dashboard/"]
-            .iter()
-            .any(|p| req.uri().path().starts_with(p));
     if !app.trust_identity || !browser {
         req.headers_mut().remove("tailscale-user-login");
     }
-    if !app.trust_proto || !browser {
+    // Enrollment stays anonymous for admission, but its origin and Secure
+    // cookie checks need the trusted terminator's scheme.
+    let trusted_scheme_route = browser || req.uri().path() == "/enroll";
+    if !app.trust_proto || !trusted_scheme_route {
         req.headers_mut().remove("x-forwarded-proto");
     }
     // Preserve framing for Python's exact route-specific refusals. Hyper rejects
     // ambiguous HTTP framing before dispatch; valid Content-Length is unchanged.
     strip_hop(req.headers_mut());
     req.headers_mut().remove("x-brigade-client-address");
+    req.headers_mut().remove("x-brigade-upstream-key");
+    if !app.upstream_key.is_empty() {
+        let peer = req
+            .extensions()
+            .get::<SocketAddr>()
+            .map(|p| p.ip())
+            .unwrap_or(Ipv4Addr::LOCALHOST.into());
+        req.headers_mut().insert(
+            "x-brigade-client-address",
+            peer.to_string().parse().unwrap(),
+        );
+        req.headers_mut()
+            .insert("x-brigade-upstream-key", app.upstream_key.clone());
+    }
     let origin = match app.upstream.parse::<axum::http::Uri>() {
         Ok(uri) => uri,
         Err(_) => return upstream_error(StatusCode::BAD_GATEWAY, "upstream-down", browser),
@@ -405,7 +510,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     // Python reads wait_ms from the JSON body only, and its bounded wait plus
     // processing fits this deadline. The body is already buffered, so the
     // deadline covers only Python's handling.
-    let header_timeout = Duration::from_secs(30);
+
     let retry = req.method() == "GET" && bodyless;
     let retry_head = (
         req.method().clone(),
@@ -425,30 +530,20 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     }
     match result {
         Ok(Ok(response)) => {
+            drop(_budget);
+            let response = response::prepare(
+                response,
+                browser,
+                app.buffers.clone(),
+                app.buffer_fallbacks.clone(),
+                total_deadline,
+            )
+            .await;
             let (mut parts, body) = response.into_parts();
-            strip_hop(&mut parts.headers);
-            let mut body = body.into_data_stream();
-            let first_deadline =
-                total_deadline.min(tokio::time::Instant::now() + Duration::from_secs(30));
-            let first = match tokio::time::timeout_at(first_deadline, body.next()).await {
-                Ok(Some(Ok(bytes))) => Some(Ok(bytes)),
-                Ok(None) => None,
-                Ok(Some(Err(_))) => {
-                    return upstream_error(
-                        StatusCode::BAD_GATEWAY,
-                        "upstream-outcome-unknown",
-                        browser,
-                    );
-                }
-                Err(_) => {
-                    return upstream_error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "upstream-body-timeout",
-                        browser,
-                    );
-                }
-            };
-            let body = futures_util::stream::iter(first).chain(body);
+            if headers_only {
+                parts.headers.insert("connection", "close".parse().unwrap());
+            }
+            let body = body.into_data_stream();
             // Once headers have been sent, a body failure terminates the stream.
             // HTTP cannot replace an already sent status with a 504.
             let stream = futures_util::stream::unfold(
@@ -522,7 +617,11 @@ fn body_too_large() -> Response<Body> {
         .unwrap()
 }
 
-async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Option<Child>), String> {
+async fn upstream(
+    config: &Config,
+    client: &HttpClient,
+    key: &str,
+) -> Result<(String, Option<Child>), String> {
     if let Some(url) = &config.upstream {
         let status =
             Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
@@ -541,7 +640,8 @@ async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Optio
     let mut child =
         Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
             .args(config.python_args(0))
-            .env("BRIGADE_HUB_MANAGED_LOOPBACK", "1")
+            .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
+            .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -568,6 +668,8 @@ async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Optio
         }
         let req = Request::builder()
             .uri(format!("{url}/health"))
+            .header("x-brigade-upstream-key", key)
+            .header("x-brigade-client-address", Ipv4Addr::LOCALHOST.to_string())
             .body(Body::empty())
             .unwrap();
         if matches!(client.request(req).await, Ok(r) if r.status() == StatusCode::OK) {
@@ -577,6 +679,13 @@ async fn upstream(config: &Config, client: &HttpClient) -> Result<(String, Optio
     }
     Err("Python upstream startup timed out".into())
 }
+fn parse_upstream_key(key: &str, managed: bool) -> Result<axum::http::HeaderValue, String> {
+    if managed && key.is_empty() {
+        return Err("managed upstream key must not be empty".into());
+    }
+    axum::http::HeaderValue::from_str(key).map_err(|_| "invalid upstream key header".to_owned())
+}
+
 async fn run(config: Config) -> Result<(), String> {
     config.validate()?;
     let mut connector = HttpConnector::new();
@@ -585,7 +694,26 @@ async fn run(config: Config) -> Result<(), String> {
         .retry_canceled_requests(false)
         .pool_max_idle_per_host(0)
         .build(connector);
-    let (upstream, mut child) = upstream(&config, &client).await?;
+    // Generate in the existing Python runtime, without a shell or secret output.
+    let key = if config.upstream.is_some() {
+        std::env::var("BRIGADE_HUB_UPSTREAM_KEY").unwrap_or_default()
+    } else {
+        let output =
+            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+                .args(["-c", "import secrets; print(secrets.token_hex(32))"])
+                .output()
+                .await
+                .map_err(|e| e.to_string())?;
+        if !output.status.success() {
+            return Err("per-start key generation failed".into());
+        }
+        String::from_utf8(output.stdout)
+            .map_err(|_| "invalid per-start key")?
+            .trim()
+            .to_owned()
+    };
+    let parsed_key = parse_upstream_key(&key, config.upstream.is_none())?;
+    let (upstream, mut child) = upstream(&config, &client, &key).await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
         .await
@@ -605,12 +733,48 @@ async fn run(config: Config) -> Result<(), String> {
         "listening on {}",
         listener.local_addr().map_err(|e| e.to_string())?
     );
-    let app = Router::new().fallback(any(handle)).with_state(App::new(
+    let mut state = App::new(
         upstream,
         client,
         config.trust_tailscale_identity,
         config.trust_forwarded_proto,
-    ));
+    );
+    state.upstream_key = parsed_key;
+    state.front_bind = address.ip().is_loopback();
+    let database = expand_user(config.db.as_deref().unwrap_or("~/.brigade/fleet-hub.db"));
+    let admin = std::env::var("BRIGADE_FLEET_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.trim().to_owned())
+        .or_else(|| {
+            config
+                .token_file
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(expand_user(p)).ok())
+                .map(|v| v.trim().to_owned())
+        })
+        .ok_or("no fleet hub token")?;
+    state.lookup = Some(admission::Lookup::open(&database, &admin)?);
+    let probe = state.clone();
+    tokio::spawn(async move {
+        loop {
+            let request = Request::builder()
+                .uri(format!("{}/health", probe.upstream))
+                .header("x-brigade-upstream-key", &probe.upstream_key)
+                .header("x-brigade-client-address", Ipv4Addr::LOCALHOST.to_string())
+                .body(Body::empty())
+                .unwrap();
+            if matches!(tokio::time::timeout(Duration::from_secs(1), probe.client.request(request)).await,
+                Ok(Ok(response)) if response.status() == StatusCode::OK)
+            {
+                *probe.ready.lock().unwrap() = Some(tokio::time::Instant::now());
+            } else {
+                *probe.ready.lock().unwrap() = None;
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
+    let app = Router::new().fallback(any(handle)).with_state(state);
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
@@ -637,7 +801,10 @@ async fn run(config: Config) -> Result<(), String> {
                     }
                 };
                 let Ok(global) = connections.clone().try_acquire_owned() else { continue; };
-                let Some(source) = sources.acquire(peer.ip().to_string(), 256) else { continue; };
+                let source = if front_peer(address.ip(), peer.ip()) { None } else {
+                    let Some(slot) = sources.acquire(peer.ip().to_string(), 256) else { continue; };
+                    Some(slot)
+                };
                 let mut app = app.clone();
                 app = app.layer(axum::Extension(peer));
                 let service = TowerToHyperService::new(app);
@@ -660,12 +827,15 @@ async fn run(config: Config) -> Result<(), String> {
     }
     Ok(())
 }
+fn front_peer(bind: IpAddr, peer: IpAddr) -> bool {
+    bind.is_loopback() && peer.is_loopback()
+}
 async fn serve(
     stream: tokio::net::TcpStream,
     service: TowerToHyperService<Router>,
     mut stopping: watch::Receiver<bool>,
     _global: OwnedSemaphorePermit,
-    _source: Slot,
+    _source: Option<Slot>,
 ) {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
@@ -713,6 +883,60 @@ async fn main() {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+    #[test]
+    fn upstream_keys_are_validated_once() {
+        assert!(parse_upstream_key("", true).is_err());
+        assert!(parse_upstream_key("", false).is_ok());
+        for key in ["fake\nkey", "fake\rkey", "fake\u{7f}key"] {
+            assert!(parse_upstream_key(key, true).is_err());
+            assert!(parse_upstream_key(key, false).is_err());
+        }
+        assert_eq!(parse_upstream_key("fake-key", true).unwrap(), "fake-key");
+    }
+
+    #[test]
+    fn long_poll_uses_body_and_caps_wait() {
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"list","wait_ms":12000}"#),
+            Duration::from_secs(22)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"list","wait_ms":999999}"#),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", br#"{"action":"send","wait_ms":1}"#),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            long_poll_deadline("/messages", b"invalid"),
+            Duration::from_secs(30)
+        );
+    }
+    #[tokio::test]
+    async fn ready_ignores_full_proxy_pool_and_expires() {
+        let app = App::new(
+            "http://localhost:1".into(),
+            Client::builder(TokioExecutor::new()).build_http(),
+            false,
+            false,
+        );
+        let _slots = app.budgets.lanes[2]
+            .clone()
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
+        *app.ready.lock().unwrap() = Some(tokio::time::Instant::now());
+        let request = || {
+            Request::builder()
+                .uri("/ready")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(handle(State(app.clone()), request()).await.status(), 200);
+        *app.ready.lock().unwrap() = Some(tokio::time::Instant::now() - Duration::from_secs(6));
+        assert_eq!(handle(State(app), request()).await.status(), 503);
+    }
     #[test]
     fn required_and_typed_flags() {
         assert!(Config::try_parse_from(["hub"]).is_err());
@@ -773,12 +997,8 @@ mod tests {
             false,
             false,
         );
-        let key = format!(
-            "credential:{}",
-            app.hashes.hash_one(b"Bearer fake".as_slice())
-        );
-        let slots: Vec<_> = (0..64)
-            .map(|_| app.credentials.acquire(key.clone(), 64).unwrap())
+        let slots: Vec<_> = (0..8)
+            .map(|_| app.budgets.admit(None, "/nodes", "", None).unwrap())
             .collect();
         let reply = handle(
             State(app.clone()),
@@ -802,7 +1022,11 @@ mod tests {
             .contains("credential-inflight-full")
         );
         drop(slots);
-        let _slots = app.inflight.clone().acquire_many_owned(24).await.unwrap();
+        let _slots = app.budgets.lanes[2]
+            .clone()
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
         let reply = handle(
             State(app),
             Request::builder()
@@ -883,7 +1107,10 @@ mod tests {
                 .unwrap(),
             "exact err"
         );
-        assert!(app.credentials.0.lock().unwrap().is_empty());
+
         server.await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests_s3c;

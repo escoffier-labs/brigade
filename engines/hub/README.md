@@ -1,4 +1,4 @@
-# brigade-hub (S3b)
+# brigade-hub (S3c)
 
 A Rust HTTP front for the Python Fleet Hub. Run where `python3 -m brigade`
 resolves this matching Python package, or set `BRIGADE_HUB_PYTHON` to its
@@ -8,21 +8,23 @@ interpreter.
 brigade-hub --host localhost --token-file ./admin-token --db ./hub.db
 ```
 
-**Do not deploy this front in front of a live hub until S10's upstream mode
-lands.** This slice does not preserve real client addresses in Python.
+Managed mode launches Python on a numeric loopback ephemeral port. It creates
+a random per-start key, passes it only to the child, and requires it on every
+upstream request before routing. The managed switch must equal that key.
+Every upstream SQLite connection disables automatic WAL checkpoints and reads
+back the setting. Standalone Python keeps its existing checkpoint policy.
 
-Managed mode launches Python on a numeric loopback ephemeral port. Python
-reports its bound port, avoiding a port reservation race. Only that child gets
-`BRIGADE_HUB_MANAGED_LOOPBACK=1`, a default-off escape hatch that lifts Python's
-per-source cap from 8 to 32 while retaining the 32-thread global cap. Python
-refuses the escape hatch on non-loopback binds. Do not set it on a standalone
-hub. The front admits at most 24 proxied requests, leaving room for cleanup
-and health probes. It disables idle upstream pooling so idle keepalive sockets
-cannot occupy Python handler threads.
+Rust replaces incoming internal key and client-address headers with its key
+and the TCP peer address. Every Python request address consumer uses that
+validated address, including browser trust checks and request logging.
+Persisted per-request address auditing is deferred to a later schema slice.
+
+Live deployment remains outside this slice. S3c owns upstream mode and client
+address forwarding. S10 owns packaging and deployment recipes.
 
 The front exits nonzero if its managed child dies. `/health` retains the v1
-liveness bytes and server header. `GET /ready` probes upstream health with a
-one-second deadline and returns only `{"ready":true}` or `{"ready":false}`,
+liveness bytes and server header. `GET /ready` reads a background health probe that runs every
+second on its own connection with a one-second deadline and returns only `{"ready":true}` or `{"ready":false}`,
 with status 200 or 503. A service manager must restart the pair after failure.
 Shutdown stops accepting, closes idle keep-alive connections, lets in-flight
 requests finish for at most 25 seconds, then stops the child. A container stop
@@ -40,35 +42,52 @@ retry, only after a connect failure. Other transport failures return 502
 `upstream-outcome-unknown`, since Python may have committed. Header timeouts
 return 504. Connect timeout is 1 second, response header timeout 30 seconds,
 response idle-body timeout 30 seconds and total response timeout 120 seconds.
-The header timeout starts after the request body is buffered. The front never
-reads `wait_ms` from the query, since Python reads it only from the JSON body.
+The header timeout starts after the request body is buffered. For message lists the header deadline is the body
+`wait_ms`, capped at 20 seconds, plus 5 seconds. The original bytes pass unchanged.
 After response headers have reached a client, a body failure terminates the
 stream. HTTP cannot replace that status with a 504. Clients must treat an
 incomplete response as a transport failure.
 
-Limits: 4,096 connections (`--max-connections` overrides), 256 connections per
-TCP source, backlog 1,024, 64 requests per hashed Authorization value, and 8
-requests per source without Authorization. The 24-request global proxy cap
-applies to both. Request headers have 10 seconds and request bodies 30 seconds
-and 8 MiB. The front buffers each body before request admission, so an upload
-that is still arriving holds no proxied slot. Buffered bodies share a 64 MiB
-budget. A body that cannot reserve its declared length within 1 second gets
-503 `body-budget-full`. Body overflow returns 413, an unfinished body 408, and
-a truncated body 400. HTTP framing ambiguity is refused with 400. Connection
-admission closes the socket. Request admission returns 503 with
-`Retry-After: 1`. Slots remain held through response completion or
-disconnect. Startup raises the soft descriptor limit to the hard limit and
-refuses a hard limit below max_connections + 24 upstream sockets + 64 margin.
+Limits: 4,096 connections (`--max-connections` overrides), with 256 per TCP
+source except a loopback peer of a loopback bind. D29 treats that peer as the
+HTTPS front. Global connection limits still apply. A non-loopback bind keeps
+the per-source cap even for loopback peers.
+
+Before reading a body, Rust validates bearer digests against active node and
+message-principal rows on one dedicated query-only connection. Admin digest
+comparison uses constant-time equality. Revocation takes effect on the next
+lookup. Lookup and connection wait together have a two-second deadline.
+Lookup failure returns 503 `credential-lookup` with `Retry-After: 1`.
+
+Requests have separate credential, browser and anonymous budgets. Validated
+credentials admit 64 requests each and hold at most four of the 16 credential
+proxy slots. Browser requests share four proxy slots and anonymous requests
+share four. Unvalidated credentials share the anonymous budget of eight
+requests, or the browser budget of four on browser routes. Trusted browser
+logins hold at most two browser requests. Enrollment is anonymous.
+
+Bodies have an 8 MiB limit and a 30-second read deadline. The 64 MiB request
+budget is split into 61 MiB for credentials, 2 MiB anonymous and 1 MiB browser.
+One credential reserves at most 16 MiB. Reservation waits at most one second.
+A request without a validated credential declaring more than 256 KiB forwards
+headers without body bytes, then closes the connection after Python answers.
+Python's route-specific status and body survive. Body bytes are released when
+upstream response headers arrive. Proxy slots remain held through the response.
+
+JSON responses up to 8 MiB buffer before downstream headers. A separate
+64 MiB response budget waits at most one second, then falls back to streaming.
+`GET /metrics` reports `proxy_buffer_fallback_total`. Browser and oversized JSON
+responses stream with backpressure. A buffered failure returns 502 or 504.
+A streamed failure closes the connection and preserves `Content-Length`.
 
 Python remains the route and authorization authority. Authorization and Cookie
 pass unchanged, duplicate Set-Cookie headers survive, and hop-by-hop headers
 are removed. Identity and scheme headers are stripped unless explicitly trusted
 on browser routes. Incoming internal client-address headers are always dropped.
-Request bytes are forwarded unchanged after buffering, and response bytes
-stream, both without JSON re-encoding.
+Request and response bytes pass unchanged, without JSON re-encoding.
 
 Deferred: S4 storage, S8 native waiters, S9 metrics and route modes, and S10
-packaging, upstream identity, real source forwarding and deployment recipes.
+packaging and deployment recipes.
 
 Verification: execute `engines/hub/verify` through `brigade work verify run`.
 The frozen contract drive launches the managed front with:

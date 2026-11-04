@@ -312,6 +312,11 @@ def make_handler(
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
 
+        def parse_request(self) -> bool:
+            from .fleet_hub_upstream import authorize
+
+            return super().parse_request() and authorize(self)
+
         def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
             pass
 

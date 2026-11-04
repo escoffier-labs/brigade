@@ -443,7 +443,7 @@ Example service unit that binds loopback and trusts the proxy header:
 ExecStart=/usr/local/bin/brigade fleet serve --host 127.0.0.1 --port 3774 --db /var/lib/brigade/fleet-hub.db --trust-tailscale-identity
 ```
 
-Pair this with a Tailscale Serve rule on the same host that forwards `https://<HUB_TAILNET_FQDN>` (or a funnel you control) to `http://127.0.0.1:3774`. Do not configure a Serve rule that points at a routable or remote backend address; the whole point is that the proxy is the only thing that can legitimately present the header, and it must speak to the hub over loopback.
+Pair this with a Tailscale Serve rule on the same host that forwards `https://<HUB_TAILNET_FQDN>`  to `http://127.0.0.1:3774`. Public fronts, including funnels, are unsupported until a verified `--trust-forwarded-for` mode ships. Do not configure a Serve rule that points at a routable or remote backend address. Only the proxy can present the header. It must speak to the hub over loopback.
 
 ## Migration from the shared token
 
