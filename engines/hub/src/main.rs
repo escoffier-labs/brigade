@@ -235,8 +235,6 @@ struct App {
     claims: Option<claims_route::Claims>,
     /// None: memory is not configured and `/memory` is proxied like any unknown path.
     memory: Option<memory_route::MemoryRoute>,
-    /// Shared by every writer of the hub file, the memory writer included (D23).
-    arbiter: Arc<brigade_hub::writer::Arbiter>,
     trust_identity: bool,
     trust_proto: bool,
     storage: Option<Arc<brigade_hub::maintenance::Maintenance>>,
@@ -260,7 +258,6 @@ impl App {
             registration: None,
             claims: None,
             memory: None,
-            arbiter: Arc::default(),
             trust_identity,
             trust_proto,
             storage: None,
@@ -1139,6 +1136,7 @@ async fn run(mut config: Config) -> Result<(), String> {
         brigade_hub::read::hub_threads(),
         brigade_hub::read::HUB_QUEUE,
     )?);
+    // Shared by every writer of the hub file, the memory writer included (D23).
     let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
     let memory_path = path.with_file_name("fleet-hub-memory.db");
     let memory =
@@ -1195,7 +1193,6 @@ async fn run(mut config: Config) -> Result<(), String> {
     // metrics stay NaN, because the Python upstream commits every write.
     state.modes = modes;
     state.memory = memory;
-    state.arbiter = arbiter.clone();
     state.shadow_db = Some(path.clone());
     state.storage = storage.map(Arc::new);
     state.upstream_key = parsed_key;

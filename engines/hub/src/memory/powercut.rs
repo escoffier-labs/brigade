@@ -420,3 +420,41 @@ fn sqlite_full_on_memory_commit_releases_the_hub_lock() {
     assert_eq!(events, 1);
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+/// An `SQLITE_FULL` on a retention commit ends the transaction, so the
+/// writer's next `BEGIN IMMEDIATE` on the same connection still works.
+#[test]
+fn sqlite_full_on_sweep_commit_rolls_back() {
+    let _lock = shim::VFS_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _vfs = unsafe { shim::Registration::new() };
+    let dir = temp_dir();
+    let memory = dir.join("fleet-hub-memory.db");
+    {
+        let c = worker::open_file(&memory, true).unwrap();
+        schema::migrate(&c, NOW).unwrap();
+        for i in 0..3 {
+            c.execute(
+                "INSERT INTO memory_idempotency VALUES('node:node-1',?1,'d',201,'{}',0)",
+                [format!("expired-{i}")],
+            )
+            .unwrap();
+        }
+    }
+    DISK.with(|d| d.borrow_mut().writer = true);
+    let db = worker::open(&memory).unwrap();
+    DISK.with(|d| d.borrow_mut().full_on_commit = true);
+    let failed = writer::sweep(&db, NOW);
+    let injected = DISK.with(|d| !d.borrow().full_on_commit);
+    let open_after_failure = !db.is_autocommit();
+    let retried = writer::sweep(&db, NOW);
+    drop(db);
+    DISK.with(|d| *d.borrow_mut() = Default::default());
+    assert!(injected, "the shim never reached the commit frame");
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(
+        !open_after_failure,
+        "a failed COMMIT left the transaction open"
+    );
+    assert_eq!(retried.unwrap(), 3);
+    std::fs::remove_dir_all(&dir).unwrap();
+}

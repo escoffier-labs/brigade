@@ -4,6 +4,7 @@ import http.client
 import json
 import os
 import socket
+import sqlite3
 import sys
 import tempfile
 import time
@@ -172,6 +173,30 @@ class Memory(unittest.TestCase):
         for attempt in (1, 2):
             result = hm.run_memory(hub)
             self.assertEqual(result["mismatches"], [], attempt)
+
+    def test_drive_profile_passes_after_a_full_scan_window_of_earlier_events(self):
+        # The log reader scans 5,000 events per page before it filters by
+        # scope. A reused hub with more earlier events than that, none readable
+        # by this run's principals, must not hide the run's own events.
+        hub = self.run_hub("history", "--route-mode memory=native")
+        self.assertEqual(status(hub).status, 200)
+        hc.stop_hub(hub)
+        time.sleep(0.2)
+        db = sqlite3.connect(self.work / "history" / "fleet-hub-memory.db")
+        try:
+            with db:
+                db.executemany(
+                    "INSERT INTO memory_events(event_id,client_event_id,kind,principal,payload,created_at)"
+                    " VALUES(?,?,'recall.capture','node:earlier-run','{}','2026-01-01T00:00:00.000000+00:00')",
+                    [(hm.event_id(), hm.event_id()) for _ in range(5_001)],
+                )
+        finally:
+            db.close()
+        again = launch(self.work / "history", "--route-mode memory=native")
+        self.addCleanup(hc.stop_hub, again)
+        self.assertEqual(status(again).json["seq"], 5_001)
+        result = hm.run_memory(again)
+        self.assertEqual(result["mismatches"], [])
 
     def test_token_query_keeps_the_shared_refusal(self):
         # Python refuses a `token` query on every GET and POST before routing

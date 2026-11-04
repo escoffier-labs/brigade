@@ -234,7 +234,7 @@ fn answer(p: Pending, result: Answer) {
 
 /// Rows one retention transaction deletes at most.
 const SWEEP_BATCH: usize = 256;
-fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
+pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     worker::begin(db, Instant::now() + Duration::from_millis(250))?;
     // At most 256 rows or 20 ms per transaction, never under the hub lock.
     let deadline = Instant::now() + Duration::from_millis(20);
@@ -245,10 +245,16 @@ fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
     );
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
-        Ok(n) => {
-            db.execute_batch("COMMIT")?;
-            Ok(n)
-        }
+        Ok(n) => match db.execute_batch("COMMIT") {
+            Ok(()) => Ok(n),
+            // SQLite can leave the transaction open after a failed COMMIT
+            // (SQLITE_FULL, an I/O error). End it, as the batch path does, or
+            // every later BEGIN IMMEDIATE on this connection fails.
+            Err(e) => {
+                let _ = db.execute_batch("ROLLBACK");
+                Err(e)
+            }
+        },
         Err(e) => {
             let _ = db.execute_batch("ROLLBACK");
             Err(e)

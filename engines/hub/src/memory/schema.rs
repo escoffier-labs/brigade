@@ -158,12 +158,10 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
                 "PRAGMA application_id={APPLICATION_ID}; PRAGMA user_version={USER_VERSION};"
             ))
         })();
-        match created {
-            Ok(()) => c.execute_batch("COMMIT").map_err(err)?,
-            Err(e) => {
-                let _ = c.execute_batch("ROLLBACK");
-                return Err(e.to_string());
-            }
+        // A failed COMMIT can leave the transaction open; end it either way.
+        if let Err(e) = created.and_then(|()| c.execute_batch("COMMIT")) {
+            let _ = c.execute_batch("ROLLBACK");
+            return Err(e.to_string());
         }
         return Ok(());
     }
@@ -213,7 +211,12 @@ pub fn rotate_epoch(c: &Connection, now_ms: i64) -> rusqlite::Result<String> {
         [&epoch],
     );
     match result {
-        Ok(1) => c.execute_batch("COMMIT")?,
+        Ok(1) => {
+            if let Err(e) = c.execute_batch("COMMIT") {
+                let _ = c.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
         Ok(_) => {
             c.execute_batch("ROLLBACK")?;
             return Err(rusqlite::Error::QueryReturnedNoRows);

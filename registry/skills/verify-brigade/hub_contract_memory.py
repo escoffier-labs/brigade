@@ -21,6 +21,8 @@ CROCKFORD = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 DAY_MS = 24 * 3600 * 1000
 # A bearer value no hub issued.
 JUNK = "fake-memory-junk-credential"
+# Pages the principal log check follows before it stops.
+LOG_PAGES = 20
 HEX64 = hc.Pred(lambda v: isinstance(v, str) and len(v) == 64 and all(c in "0123456789abcdef" for c in v), "sha256 hex")
 
 
@@ -79,6 +81,10 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
 
     status = mem("memory-status", {"action": "status"}, shape=STATUS)
     epoch = status.get("log_epoch", "")
+    # Log checks start after the hub's sequence at the start of the run. A
+    # reused --hub-url can hold more earlier events than one log page scans,
+    # and a principal enrolled by this run cannot read them.
+    start_seq = status.get("seq") if isinstance(status.get("seq"), int) else 0
     mem("memory-no-token", {"action": "status"}, token=None, status=401, shape={"error": hc.Eq("unauthorized")})
     mem(
         "memory-junk-token",
@@ -361,7 +367,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
     # The log: ascending, next_seq is the last seq on the page, private scopes stay private.
     page = mem(
         "memory-log",
-        {"action": "log", "after_seq": 0, "limit": 500},
+        {"action": "log", "after_seq": start_seq, "limit": 500},
         token=node_token,
         shape={"events": [{"seq": int, "kind": str, "principal": str}], "next_seq": int, "log_epoch": hc.Eq(epoch)},
     )
@@ -372,8 +378,17 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         "ascending seq with next_seq equal to the last",
         {"seqs": seqs, "next_seq": page.get("next_seq")},
     )
-    agent_page = mem("memory-log-principal", {"action": "log"}, token=agent_token)
-    scopes = {e.get("scope") for e in agent_page.get("events", []) if isinstance(e, dict)}
+    # Follow next_seq to the end of the log, in case other writers on a shared
+    # hub pushed this run's events past one page's scan window.
+    scopes: set = set()
+    after = start_seq
+    for _ in range(LOG_PAGES):
+        agent_page = mem("memory-log-principal", {"action": "log", "after_seq": after}, token=agent_token)
+        scopes |= {e.get("scope") for e in agent_page.get("events", []) if isinstance(e, dict)}
+        next_seq = agent_page.get("next_seq")
+        if not isinstance(next_seq, int) or next_seq <= after:
+            break
+        after = next_seq
     d.invariant(
         "memory-log-principal",
         scopes == {repo_one},
