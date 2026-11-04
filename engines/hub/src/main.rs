@@ -1,4 +1,8 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
+mod admission;
+mod audit;
+mod response;
+
 use axum::{
     Router,
     body::Body,
@@ -15,8 +19,7 @@ use hyper_util::{
     service::TowerToHyperService,
 };
 use std::{
-    collections::{HashMap, hash_map::RandomState},
-    hash::BuildHasher,
+    collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     sync::{Arc, Mutex},
     time::Duration,
@@ -172,13 +175,14 @@ type HttpClient = Client<HttpConnector, Body>;
 struct App {
     upstream: String,
     client: HttpClient,
-    credentials: Arc<Counts>,
+    budgets: admission::Budgets,
+    lookup: Option<admission::Lookup>,
     trust_identity: bool,
     trust_proto: bool,
-    inflight: Arc<Semaphore>,
-    bodies: Arc<Semaphore>,
-    hashes: RandomState,
+    buffers: Arc<Semaphore>,
+    buffer_fallbacks: Arc<std::sync::atomic::AtomicU64>,
     upstream_key: String,
+    front_bind: bool,
     ready: Arc<Mutex<Option<tokio::time::Instant>>>,
 }
 impl App {
@@ -186,13 +190,14 @@ impl App {
         App {
             upstream,
             client,
-            credentials: Arc::default(),
+            budgets: admission::Budgets::default(),
+            lookup: None,
             trust_identity,
             trust_proto,
-            inflight: Arc::new(Semaphore::new(24)),
-            bodies: Arc::new(Semaphore::new(BODY_BUDGET)),
-            hashes: RandomState::new(),
+            buffers: Arc::new(Semaphore::new(BODY_BUDGET)),
+            buffer_fallbacks: Arc::default(),
             upstream_key: String::new(),
+            front_bind: false,
             ready: Arc::default(),
         }
     }
@@ -300,6 +305,12 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
             ))
             .unwrap();
     }
+    if req.method() == "GET" && req.uri().path() == "/metrics" {
+        return json(
+            StatusCode::OK,
+            serde_json::json!({"proxy_buffer_fallback_total":app.buffer_fallbacks.load(std::sync::atomic::Ordering::Relaxed)}),
+        );
+    }
     if req.method() == "GET" && req.uri().path() == "/ready" {
         let ready = app
             .ready
@@ -332,19 +343,58 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     if length > BODY_LIMIT as u64 {
         return body_too_large();
     }
-    // Buffer the whole body before admission. A slow upload then holds only
-    // its connection and its share of the byte budget, never a proxied slot,
-    // so unvalidated Authorization values cannot occupy Python's threads.
-    let (parts, body) = req.into_parts();
-    let _budget = if length == 0 {
-        None
+    let browser = admission::browser(req.uri().path());
+    let credential = match &app.lookup {
+        Some(lookup) => match lookup
+            .credential(
+                req.headers()
+                    .get("authorization")
+                    .and_then(|v| v.to_str().ok()),
+            )
+            .await
+        {
+            Ok(value) => value,
+            Err(()) => return busy("credential-lookup"),
+        },
+        None => None,
+    };
+    let source = req
+        .extensions()
+        .get::<SocketAddr>()
+        .map(|p| {
+            if app.front_bind && p.ip().is_loopback() {
+                "front".into()
+            } else {
+                p.ip().to_string()
+            }
+        })
+        .unwrap_or_default();
+    let login = if app.trust_identity {
+        req.headers()
+            .get("tailscale-user-login")
+            .and_then(|v| v.to_str().ok())
     } else {
-        let wanted = app.bodies.clone().acquire_many_owned(length as u32);
-        match tokio::time::timeout(Duration::from_secs(1), wanted).await {
-            Ok(Ok(permit)) => Some(permit),
-            _ => return busy("body-budget-full"),
+        None
+    };
+    let Some(credential) = app
+        .budgets
+        .admit(credential, req.uri().path(), &source, login)
+    else {
+        return busy("credential-inflight-full");
+    };
+    let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
+    let (parts, body) = req.into_parts();
+    let _budget = if headers_only {
+        vec![]
+    } else {
+        match credential.reserve(length as u32).await {
+            Ok(permits) => permits,
+            Err(()) => return busy("body-budget-full"),
         }
     };
+    // Large unvalidated bodies are never read or reserved. Python refuses them
+    // from headers. Dropping the incoming stream closes the client connection.
+    let body = if headers_only { Body::empty() } else { body };
     let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
     let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
         Ok(Ok(collected)) => collected.to_bytes(),
@@ -364,30 +414,18 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     let header_timeout = long_poll_deadline(req_path(&parts), &body);
     let bodyless = body.is_empty();
-    let mut req = Request::from_parts(parts, Body::from(body));
-    let (key, cap) = if let Some(value) = req.headers().get("authorization") {
-        (
-            format!("credential:{}", app.hashes.hash_one(value.as_bytes())),
-            64,
-        )
+    let outgoing = if headers_only {
+        Body::from_stream(futures_util::stream::pending::<
+            Result<axum::body::Bytes, std::io::Error>,
+        >())
     } else {
-        let peer = req
-            .extensions()
-            .get::<SocketAddr>()
-            .map(|p| p.ip().to_string())
-            .unwrap_or_default();
-        (format!("source:{peer}"), 8)
+        Body::from(body)
     };
-    let Some(credential) = app.credentials.acquire(key, cap) else {
-        return busy("credential-inflight-full");
+    let mut req = Request::from_parts(parts, outgoing);
+    let inflight = match credential.proxy() {
+        Ok(slot) => slot,
+        Err(reason) => return busy(reason),
     };
-    let Ok(inflight) = app.inflight.clone().try_acquire_owned() else {
-        return busy("proxy-inflight-full");
-    };
-    let browser = req.uri().path() == "/"
-        || ["/deck", "/view/", "/enroll", "/dashboard/"]
-            .iter()
-            .any(|p| req.uri().path().starts_with(p));
     if !app.trust_identity || !browser {
         req.headers_mut().remove("tailscale-user-login");
     }
@@ -456,30 +494,20 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     }
     match result {
         Ok(Ok(response)) => {
+            drop(_budget);
+            let response = response::prepare(
+                response,
+                browser,
+                app.buffers.clone(),
+                app.buffer_fallbacks.clone(),
+                total_deadline,
+            )
+            .await;
             let (mut parts, body) = response.into_parts();
-            strip_hop(&mut parts.headers);
-            let mut body = body.into_data_stream();
-            let first_deadline =
-                total_deadline.min(tokio::time::Instant::now() + Duration::from_secs(30));
-            let first = match tokio::time::timeout_at(first_deadline, body.next()).await {
-                Ok(Some(Ok(bytes))) => Some(Ok(bytes)),
-                Ok(None) => None,
-                Ok(Some(Err(_))) => {
-                    return upstream_error(
-                        StatusCode::BAD_GATEWAY,
-                        "upstream-outcome-unknown",
-                        browser,
-                    );
-                }
-                Err(_) => {
-                    return upstream_error(
-                        StatusCode::GATEWAY_TIMEOUT,
-                        "upstream-body-timeout",
-                        browser,
-                    );
-                }
-            };
-            let body = futures_util::stream::iter(first).chain(body);
+            if headers_only {
+                parts.headers.insert("connection", "close".parse().unwrap());
+            }
+            let body = body.into_data_stream();
             // Once headers have been sent, a body failure terminates the stream.
             // HTTP cannot replace an already sent status with a 504.
             let stream = futures_util::stream::unfold(
@@ -668,6 +696,26 @@ async fn run(config: Config) -> Result<(), String> {
         config.trust_forwarded_proto,
     );
     state.upstream_key = key;
+    state.front_bind = address.ip().is_loopback();
+    let database = config.db.clone().unwrap_or_else(|| {
+        format!(
+            "{}/.brigade/fleet-hub.db",
+            std::env::var("HOME").unwrap_or_default()
+        )
+    });
+    let admin = std::env::var("BRIGADE_FLEET_TOKEN")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+        .map(|v| v.trim().to_owned())
+        .or_else(|| {
+            config
+                .token_file
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|v| v.trim().to_owned())
+        })
+        .ok_or("no fleet hub token")?;
+    state.lookup = Some(admission::Lookup::open(&database, &admin)?);
     let probe = state.clone();
     tokio::spawn(async move {
         loop {
@@ -714,7 +762,10 @@ async fn run(config: Config) -> Result<(), String> {
                     }
                 };
                 let Ok(global) = connections.clone().try_acquire_owned() else { continue; };
-                let Some(source) = sources.acquire(peer.ip().to_string(), 256) else { continue; };
+                let source = if front_peer(address.ip(), peer.ip()) { None } else {
+                    let Some(slot) = sources.acquire(peer.ip().to_string(), 256) else { continue; };
+                    Some(slot)
+                };
                 let mut app = app.clone();
                 app = app.layer(axum::Extension(peer));
                 let service = TowerToHyperService::new(app);
@@ -737,12 +788,15 @@ async fn run(config: Config) -> Result<(), String> {
     }
     Ok(())
 }
+fn front_peer(bind: IpAddr, peer: IpAddr) -> bool {
+    bind.is_loopback() && peer.is_loopback()
+}
 async fn serve(
     stream: tokio::net::TcpStream,
     service: TowerToHyperService<Router>,
     mut stopping: watch::Receiver<bool>,
     _global: OwnedSemaphorePermit,
-    _source: Slot,
+    _source: Option<Slot>,
 ) {
     let mut builder = hyper::server::conn::http1::Builder::new();
     builder
@@ -817,7 +871,11 @@ mod tests {
             false,
             false,
         );
-        let _slots = app.inflight.clone().acquire_many_owned(24).await.unwrap();
+        let _slots = app.budgets.lanes[2]
+            .clone()
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
         *app.ready.lock().unwrap() = Some(tokio::time::Instant::now());
         let request = || {
             Request::builder()
@@ -889,12 +947,8 @@ mod tests {
             false,
             false,
         );
-        let key = format!(
-            "credential:{}",
-            app.hashes.hash_one(b"Bearer fake".as_slice())
-        );
-        let slots: Vec<_> = (0..64)
-            .map(|_| app.credentials.acquire(key.clone(), 64).unwrap())
+        let slots: Vec<_> = (0..8)
+            .map(|_| app.budgets.admit(None, "/nodes", "", None).unwrap())
             .collect();
         let reply = handle(
             State(app.clone()),
@@ -918,7 +972,11 @@ mod tests {
             .contains("credential-inflight-full")
         );
         drop(slots);
-        let _slots = app.inflight.clone().acquire_many_owned(24).await.unwrap();
+        let _slots = app.budgets.lanes[2]
+            .clone()
+            .acquire_many_owned(4)
+            .await
+            .unwrap();
         let reply = handle(
             State(app),
             Request::builder()
@@ -999,7 +1057,10 @@ mod tests {
                 .unwrap(),
             "exact err"
         );
-        assert!(app.credentials.0.lock().unwrap().is_empty());
+
         server.await.unwrap();
     }
 }
+
+#[cfg(test)]
+mod tests_s3c;

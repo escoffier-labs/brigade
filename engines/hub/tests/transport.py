@@ -206,7 +206,7 @@ class Transport(unittest.TestCase):
                 response = request(port, "/nodes", headers={"Authorization": "Bearer fake-admin-token"})
                 self.assertEqual(response[0], 503)
                 self.assertIn(("retry-after", "1"), response[1])
-                self.assertIn(b"proxy-inflight-full", response[2])
+                self.assertIn(b"credential-inflight-full", response[2])
                 listener.close()
 
     def test_slow_bodies_with_fake_credentials_leave_proxy_capacity(self):
