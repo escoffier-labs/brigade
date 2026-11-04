@@ -11,8 +11,9 @@ import os
 import shlex
 import shutil
 import stat
+import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -335,28 +336,111 @@ def _lock_fingerprint(path: Path) -> tuple[int, int, object] | None:
     return info.st_dev, info.st_ino, owner.get("owner_token") if owner is not None else None
 
 
+def _recovery_gate_path(path: Path) -> Path:
+    return path.with_name(f".{path.name}.recovery-gate")
+
+
+def _try_lock_descriptor(descriptor: int) -> bool:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(descriptor, msvcrt.LK_NBLCK, 1)
+        except OSError:
+            return False
+        return True
+    import fcntl
+
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        return False
+    return True
+
+
+def _unlock_descriptor(descriptor: int) -> None:
+    if sys.platform == "win32":
+        import msvcrt
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+        return
+    import fcntl
+
+    fcntl.flock(descriptor, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def _stale_recovery_gate(path: Path) -> Iterator[bool]:
+    """Hold the recovery gate for the lock at ``path``; yield False when another recoverer holds it.
+
+    The gate is an OS file lock on a sibling file, so the kernel drops it when
+    its holder exits. It never needs aging out by pid, so no recoverer can reap
+    it from under a live one. Each call opens its own descriptor, which makes
+    threads of one process exclude each other too. The gate file stays beside
+    the lock: unlinking it would let two recoverers lock different inodes.
+    """
+    gate = _recovery_gate_path(path)
+    try:
+        descriptor = os.open(gate, os.O_RDWR | os.O_CREAT | getattr(os, "O_BINARY", 0), 0o600)
+    except OSError as exc:
+        raise RunLockError(f"could not open run lock recovery gate {gate}: {exc}") from exc
+    try:
+        try:
+            acquired = _try_lock_descriptor(descriptor)
+        except OSError as exc:
+            raise RunLockError(f"could not lock run lock recovery gate {gate}: {exc}") from exc
+        if not acquired:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _unlock_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None:
-    # `_lock_is_stale` reads pid and owner.json in separate steps and treats a
-    # lock with no readable owner as stale. If the holder releases between those
-    # reads and a new holder publishes at the same path, the "stale" verdict
-    # describes a lock that is gone while the rename below would take the live
-    # replacement out of sight (its holder then fails `stat` on its own lock, and
-    # a third acquirer can publish beside it). Bind the verdict to the lock that
-    # was judged and rename only that one.
+    # Renaming ``path`` takes whatever directory is there at that instant, so a
+    # stale verdict is only safe to act on if nothing can replace the judged
+    # lock before the rename. Two things move a lock directory off ``path``: its
+    # own holder releasing it, and a recoverer renaming it here. A stale lock's
+    # holder is dead, so serializing recoverers behind one gate leaves the
+    # judged lock exactly one possible renamer. Without the gate, recoverers B
+    # and C can both judge a dead lock stale; B recovers it and publishes its
+    # own lock, and C's rename then takes B's live lock out of sight (B crashes
+    # on `stat`, or B's lock is stranded under C's claim name while another
+    # acquirer publishes beside it).
     judged = _lock_fingerprint(path)
     if judged is None or not _lock_is_stale(path):
         return None
-    if _lock_fingerprint(path) != judged:
-        return None
-    claimed = _recovery_claim_path(path)
-    try:
-        path.rename(claimed)
-    except FileNotFoundError:
-        return None
-    if _lock_fingerprint(claimed) != judged or not _lock_is_stale(claimed):
-        if not path.exists():
-            claimed.rename(path)
-        return None
+    with _stale_recovery_gate(path) as gated:
+        if not gated:
+            return None
+        # Re-judge under the gate. The same lock seen before and after the
+        # stale check means the verdict is about that lock: a lock that left
+        # ``path`` comes back only through a gated restore.
+        if _lock_fingerprint(path) != judged or not _lock_is_stale(path) or _lock_fingerprint(path) != judged:
+            return None
+        claimed = _recovery_claim_path(path)
+        try:
+            path.rename(claimed)
+        except FileNotFoundError:
+            return None
+        except PermissionError as error:
+            # Windows refuses to rename a directory while another process has a
+            # file inside it open (owner.json during a stale check). Back off
+            # like `_release_lock`; the lock is untouched.
+            if getattr(error, "winerror", None) in {5, 32}:
+                return None
+            raise
+        # Defense in depth: a recycled owner pid can make the claimed lock look
+        # live again. Put it back only if ``path`` is still free.
+        if _lock_fingerprint(claimed) != judged or not _lock_is_stale(claimed):
+            _restore_claimed_lock(path, claimed)
+            return None
     return claimed, _owner_with_workspace(_read_lock_owner(claimed), path)
 
 
@@ -1367,7 +1451,10 @@ def _acquire_lock(
         if stale_action == "claim":
             # Claim mode takes over this run's lock only. Broad pending-claim
             # recovery would terminalize unrelated .stale claims that the
-            # reaper has not selected, aged, or containment-checked.
+            # reaper has not selected, aged, or containment-checked. Skipping
+            # the check cannot yield a second holder: a live lock leaves
+            # ``path`` only when its holder releases it, because recoverers
+            # rename a lock only after judging it stale under the recovery gate.
             return ownership
         _release_lock(path, ownership)
         if _recover_pending_claims(path) and on_reconcile is not None:
