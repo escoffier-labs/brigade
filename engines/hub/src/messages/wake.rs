@@ -231,17 +231,17 @@ mod tests {
             per_source: 3,
         }));
         let a = [
-            wake.register("a", Some("10.0.0.1")).unwrap(),
-            wake.register("a", Some("10.0.0.1")).unwrap(),
+            wake.register("a", Some("192.0.2.1")).unwrap(),
+            wake.register("a", Some("192.0.2.1")).unwrap(),
         ];
         assert!(wake.register("a", None).is_none());
-        let b = wake.register("b", Some("10.0.0.1")).unwrap();
-        assert!(wake.register("c", Some("10.0.0.1")).is_none());
+        let b = wake.register("b", Some("192.0.2.1")).unwrap();
+        assert!(wake.register("c", Some("192.0.2.1")).is_none());
         let front = wake.register("c", None).unwrap();
         assert!(wake.register("d", None).is_none(), "total cap");
         drop((a, b, front));
         assert_eq!(wake.waiting(), 0);
-        assert!(wake.register("a", Some("10.0.0.1")).is_some());
+        assert!(wake.register("a", Some("192.0.2.1")).is_some());
     }
     #[tokio::test]
     async fn a_wait_times_out_without_a_wake() {
