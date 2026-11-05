@@ -31,6 +31,8 @@ CONFLICT_CODES = {
     "memory_client_event_expired",
     "memory_client_event_conflict",
 }
+# Card metadata a head keeps beside its text. Replicas pulled before S18 lack all of it.
+SCAN_FIELDS = ("state", "scan_state", "writer", "updated_at")
 HEAD_KINDS = {"card.put", "card.import", "card.retire", "card.trust", "proposal.apply", "proposal.rollback"}
 
 
@@ -188,6 +190,62 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     return report
 
 
+def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> int:
+    """Fill in scan metadata on readable heads that lack `scan_state`, in place. Returns how many it refreshed.
+
+    The live replica keeps serving the whole time: nothing is discarded or
+    rebuilt. Each stale head costs one `card` read of its own revision, made
+    under the pull lock, and the results are written back under the state lock
+    only if the replica is still the same hub, principal and log_epoch.
+    Raises HubConfigError when the hub answers without `scan_state` (it predates
+    scan metadata) or the replica or log moved meanwhile. A HubUnavailable
+    propagates, with the replica untouched.
+    """
+    hub = client.identity
+    with store.pulling(target):
+        with store.locked(target):
+            live = store.replica(target)
+            epoch, principal = str(live.meta.get("log_epoch") or ""), live.meta.get("principal")
+            stale = {
+                key: head for key, head in live.readable_heads(settings.read_scopes).items() if "scan_state" not in head
+            }
+        fetched: dict[str, dict[str, Any]] = {}
+        for key, head in stale.items():
+            try:
+                body = client.call(
+                    "card", scope=head["scope"], card_id=head["card_id"], revision=head["revision"], offset=0
+                )
+            except hubc.HubRefusal as exc:
+                if exc.code in ("memory_card_not_found", "memory_grant_missing"):
+                    raise hubc.HubConfigError(
+                        f"the hub no longer serves {head['scope']}/{head['card_id']} at revision {head['revision']}"
+                        ". Run memory hub pull"
+                    ) from exc
+                raise
+            if str(body.get("log_epoch") or "") != epoch:
+                raise hubc.HubConfigError(
+                    "the hub's log_epoch changed during the metadata refresh. Run memory hub pull"
+                )
+            card = hubc.obj(body.get("card"))
+            if "scan_state" not in card:
+                raise hubc.HubConfigError("the hub's card read has no scan_state: the hub predates scan metadata")
+            if head.get("content_hash") and card.get("content_hash") not in (None, head["content_hash"]):
+                raise hubc.HubConfigError(
+                    f"the hub's {head['scope']}/{head['card_id']} differs from the replica. Run memory hub pull"
+                )
+            fetched[key] = {name: card[name] for name in SCAN_FIELDS if name in card}
+        with store.locked(target):
+            live = store.replica(target)
+            if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
+                raise hubc.HubConfigError("the replica changed during the metadata refresh. Run memory hub pull")
+            for key, fields in fetched.items():
+                if key in live.heads and live.heads[key].get("revision") == stale[key].get("revision"):
+                    live.heads[key].update(fields)
+            if fetched:
+                live.save()
+    return len(fetched)
+
+
 def _prepare(
     target: Path, hub: str, epoch: str, principal: str, readable: set[str], report: dict[str, Any]
 ) -> tuple[bool, store.Replica]:
@@ -338,7 +396,7 @@ def _apply(
         "content_hash": card.get("content_hash", ""),
         "trust": card.get("trust", ""),
         "text": card["text"],
-        **{name: card[name] for name in ("state", "scan_state", "writer", "updated_at") if name in card},
+        **{name: card[name] for name in SCAN_FIELDS if name in card},
     }
     size = store.head_size(key, head)
     if used + size > settings.replica_max_bytes:
@@ -613,7 +671,6 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "card_id": card["card_id"],
         "base_revision": base.get("revision") if base else None,
         "text": card["text"],
-        **{name: card[name] for name in ("state", "scan_state", "writer", "updated_at") if name in card},
         "origin": "interactive",
         "path": card["rel"],
     }

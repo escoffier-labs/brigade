@@ -2599,19 +2599,28 @@ Use `--init` to initialize a non-empty output folder. Existing foreign files
 are preserved, and a foreign file at a generated path causes a refusal.
 The `.brigade-memory-mirror.json` marker records owned files. Keep it with the
 notes. Deleting the entire mirror folder is safe. The next run rebuilds it.
+The marker is written before any note changes, so a run killed midway leaves
+nothing unowned. A file the marker does not own but whose bytes equal the
+generated note is adopted rather than refused. The destination itself must not
+be a symlink, but a symlinked parent such as a symlinked home is fine.
 
 Only live, scan-clean, non-private heads are exported. Flagged, pending,
 unknown-scan and superseded cards are counted by reason. The client's privacy
 withholding rules apply, including malformed visibility declarations.
-An older hub that does not return scan metadata exports no cards until
-upgraded. Older S14 replicas are rebuilt after a successful pull to collect
-that metadata. Retirement events remove cards from the replica before export.
+A head without scan metadata is never treated as skippable, because that
+would delete its note. The mirror refetches only those heads in place under the
+pull lock, with the live replica serving throughout and nothing discarded. If
+the hub is unreachable or still returns no `scan_state`, the run exits non-zero
+and the folder stays unchanged until the hub is upgraded and `memory hub pull`
+has run. Retirement events remove cards from the replica before export.
 Supersession metadata uses `supersedes` for predecessor ids or `superseded_by`
 for a successor id in card front matter, within the same scope.
 
 Each note includes card identity, scope, revision, update time, source, tags
-and scan state in YAML front matter. Its body preserves card text and wiki
-links. Notes have readable slugs and a scope-and-id hash suffix. Filenames
+and scan state in one YAML front matter block. A card's own front matter is
+removed from the body and kept under a `card` key in that block, with its
+`tags` in the top-level `tags`. The body preserves the rest of the card text
+and its wiki links. Notes have readable slugs and a scope-and-id hash suffix. Filenames
 remain stable across title changes while the marker is retained. The generated
 index links to notes by scope. Unchanged files retain their bytes and mtimes.
 Changed files use a temporary file in the output folder and an atomic rename.

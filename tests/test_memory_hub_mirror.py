@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -106,7 +107,8 @@ def test_safe_names(setup, title):
         ({"scan_state": "flagged"}, "flagged"),
         ({"scan_state": "pending"}, "scan-pending"),
         ({"scan_state": None}, "scan-unknown"),
-        ({"visibility": "private"}, "visibility-private"),
+        ({"text": "---\nvisibility: private\n---\nsecret"}, "visibility-private"),
+        ({"text": "\ufeff---\nvisibility: private\n---\nsecret"}, "visibility-private"),
         ({"text": '---\n"Visibility": private\n---\nsecret'}, "visibility-private"),
         ({"text": "---\nvisibility: mystery\n---\nsecret"}, "visibility-unrecognized"),
         ({"text": "---\nvisibility: private\nsecret"}, "visibility-unrecognized"),
@@ -292,3 +294,303 @@ def test_missing_replica_heads_never_wipes_mirror(setup, monkeypatch):
     with pytest.raises(hubc.HubConfigError, match="missing or inconsistent"):
         run(setup)
     assert before == {p.name: p.read_bytes() for p in out.iterdir()}
+
+
+PREDATES = "predates scan metadata"
+
+
+def legacy(replica, card_id="alpha"):
+    """A head written by a pre-scan-metadata pull: no state, scan_state, writer or updated_at."""
+    head = card(replica, card_id)
+    for name in ("state", "scan_state", "writer", "updated_at"):
+        head.pop(name)
+    replica.save()
+    return head
+
+
+def hub_transport(replica, calls, **overrides):
+    """A hub whose `card` read answers with the head's metadata, recording each call."""
+
+    def transport(url, token, body, timeout):
+        assert body["action"] == "card", body
+        calls.append(body)
+        head = replica.heads[store.Replica.key(body["scope"], body["card_id"])]
+        reply = {
+            "scope": body["scope"],
+            "card_id": body["card_id"],
+            "revision": body["revision"],
+            "text": head["text"],
+            "next_offset": None,
+            "trust": "reviewed",
+            "state": "live",
+            "scan_state": "clean",
+            "writer": "node-test",
+            "updated_at": "2026-11-05T00:00:00Z",
+            **overrides,
+        }
+        return 200, {"card": reply, "log_epoch": "epoch"}
+
+    return transport
+
+
+def with_transport(setup, transport):
+    target, settings, _, out, replica = setup
+    client = hubc.client_for(settings, transport=transport)
+    return target, settings, client, out, replica
+
+
+def unchanged(out, before):
+    return before == {p.name: p.read_bytes() for p in out.iterdir()}
+
+
+def mirror_with_note(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    return out, replica, {p.name: p.read_bytes() for p in out.iterdir()}
+
+
+def test_legacy_replica_during_outage_never_deletes(setup, monkeypatch):
+    target, settings, client, out, replica = with_transport(setup, lambda *_: pytest.fail("no card call offline"))
+    out, replica, before = mirror_with_note(setup)
+
+    def down(*_):
+        raise hubc.HubUnavailable("unreachable")
+
+    legacy(replica)
+    monkeypatch.setattr(sync, "pull", down)
+    with pytest.raises(hubc.HubConfigError, match=PREDATES):
+        mirror.mirror(target, client, settings, out)
+    assert unchanged(out, before)
+    assert "scan_state" not in store.replica(target).heads["fleet\nalpha"]
+
+
+def test_reachable_hub_without_scan_state_never_deletes(setup):
+    out, replica, before = mirror_with_note(setup)
+    legacy(replica)
+    target, settings, _, _, _ = setup
+    transport = hub_transport(replica, [])
+
+    def without(url, token, body, timeout):
+        status, reply = transport(url, token, body, timeout)
+        del reply["card"]["scan_state"]
+        return status, reply
+
+    client = hubc.client_for(settings, transport=without)
+    with pytest.raises(hubc.HubConfigError, match=PREDATES):
+        mirror.mirror(target, client, settings, out)
+    assert unchanged(out, before)
+
+
+def test_legacy_heads_refetched_in_place_under_pull_lock(setup, monkeypatch):
+    from brigade.inbox_lock import InboxLockTimeout
+
+    calls: list[dict] = []
+    out, replica, before = mirror_with_note(setup)
+    legacy(replica)
+    legacy(replica, "beta")
+    base = hub_transport(replica, calls)
+    target = setup[0]
+
+    def transport(url, token, body, timeout):
+        # The live replica keeps serving and the pull lock is held for every card read.
+        assert store.replica(target).exists
+        with pytest.raises(InboxLockTimeout), store.pulling(target, deadline_seconds=0):
+            pass
+        return base(url, token, body, timeout)
+
+    monkeypatch.setattr(store, "discard_replica", lambda *_: pytest.fail("mirror must not discard the replica"))
+    _, settings, client, _, _ = with_transport(setup, transport)
+    report = mirror.mirror(target, client, settings, out)
+    assert len(calls) == 2
+    assert report["deleted"] == []
+    assert store.replica(target).heads["fleet\nalpha"]["scan_state"] == "clean"
+    assert any(p.name.startswith("beta-") for p in out.iterdir())
+    assert (out / next(p.name for p in out.glob("alpha-*.md"))).exists()
+
+
+def test_refetch_skips_heads_that_already_have_scan_state(setup):
+    calls: list[dict] = []
+    *_, replica = setup
+    card(replica, "alpha")
+    legacy(replica, "beta")
+    target, settings, client, out, _ = with_transport(setup, hub_transport(replica, calls))
+    mirror.mirror(target, client, settings, out)
+    assert [call["card_id"] for call in calls] == ["beta"]
+
+
+def test_note_crash_after_one_write_recovers(setup, monkeypatch):
+    *_, out, replica = setup
+    card(replica, "alpha")
+    card(replica, "beta")
+    real = mirror._atomic
+    writes: list[str] = []
+
+    def crash(path, text):
+        if path.name.endswith(".md") and path.name != mirror.INDEX:
+            if writes:
+                raise OSError("simulated kill")
+            writes.append(path.name)
+        real(path, text)
+
+    monkeypatch.setattr(mirror, "_atomic", crash)
+    with pytest.raises(OSError, match="simulated"):
+        run(setup)
+    monkeypatch.setattr(mirror, "_atomic", real)
+    # The first note landed on disk and the marker already owns it and every desired file.
+    marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
+    assert writes[0] in marker["files"]
+    assert mirror.INDEX in marker["files"]
+    report = run(setup)
+    assert report["ok"]
+    assert {p.name for p in out.iterdir()} == set(json.loads((out / mirror.MARKER).read_text())["files"]) | {
+        mirror.MARKER
+    }
+
+
+def test_crash_before_final_marker_write_is_recoverable(setup, monkeypatch):
+    *_, out, replica = setup
+    card(replica, "alpha")
+    run(setup)
+    gone = next(p.name for p in out.glob("alpha-*.md"))
+    card(replica, "alpha", scan_state="pending")
+    real = mirror._atomic
+    markers: list[int] = []
+
+    def crash(path, text):
+        if path.name == mirror.MARKER:
+            markers.append(1)
+            if len(markers) == 2:
+                raise OSError("simulated kill")
+        real(path, text)
+
+    monkeypatch.setattr(mirror, "_atomic", crash)
+    with pytest.raises(OSError, match="simulated"):
+        run(setup)
+    monkeypatch.setattr(mirror, "_atomic", real)
+    # The note is gone and the marker from before the deletion still lists it.
+    assert not (out / gone).exists()
+    assert gone in json.loads((out / mirror.MARKER).read_text())["files"]
+    assert run(setup)["ok"]
+    assert gone not in json.loads((out / mirror.MARKER).read_text())["files"]
+
+
+def test_unowned_file_equal_to_desired_output_is_adopted(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    (out / mirror.MARKER).unlink()
+    report = run(setup, init=True)
+    assert report["written"] == []
+    assert json.loads((out / mirror.MARKER).read_text())["files"]
+
+
+def test_front_matter_in_card_becomes_one_block(setup):
+    *_, out, replica = setup
+    text = "---\ntitle: Alpha\ntags: [one]\naliases: [Al]\nrelated: Beta\n---\n\nBody [[Beta]]\n"
+    card(replica, text=text)
+    run(setup)
+    note = next(out.glob("alpha-*.md")).read_text(encoding="utf-8")
+    assert note.count("---\n") == 2
+    assert note.startswith("---\n")
+    front, body = note[4:].split("\n---\n", 1)
+    assert body.lstrip("\n") == "Body [[Beta]]\n"
+    assert front.count("tags:") == 1
+    assert 'card: {"aliases": ["Al"], "related": "Beta", "title": "Alpha"}' in front
+
+
+def test_bom_front_matter_keeps_title_and_strips_block(setup):
+    *_, out, replica = setup
+    card(replica, text="\ufeff---\ntitle: Bom Title\ntags: [x]\n---\nbody\n")
+    run(setup)
+    note = next(out.glob("bom-title-*.md")).read_text(encoding="utf-8")
+    assert note.count("---\n") == 2
+    assert "\ufeff" not in note
+    assert note.endswith("\nbody\n")
+
+
+def test_card_without_front_matter_keeps_body(setup):
+    *_, out, replica = setup
+    card(replica, text="plain --- body\n")
+    run(setup)
+    assert next(out.glob("alpha-*.md")).read_text(encoding="utf-8").endswith("\n---\n\nplain --- body\n")
+
+
+def test_symlinked_ancestor_of_out_is_allowed(setup, tmp_path):
+    *_, replica = setup
+    card(replica)
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    target, settings, client, _, _ = setup
+    report = mirror.mirror(target, client, settings, link / "vault" / "hub")
+    assert len(report["written"]) == 2
+    assert (real / "vault" / "hub" / mirror.MARKER).is_file()
+
+
+def test_symlinked_out_is_refused(setup, tmp_path):
+    target, settings, client, _, replica = setup
+    card(replica)
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(real)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    with pytest.raises(hubc.HubConfigError, match="symlink"):
+        mirror.mirror(target, client, settings, link)
+    assert list(real.iterdir()) == []
+    dangling = tmp_path / "dangling"
+    dangling.symlink_to(tmp_path / "nowhere")
+    with pytest.raises(hubc.HubConfigError, match="symlink"):
+        mirror.mirror(target, client, settings, dangling)
+    assert not (tmp_path / "nowhere").exists()
+
+
+def test_relative_out_works(setup, tmp_path, monkeypatch):
+    target, settings, client, _, replica = setup
+    card(replica)
+    monkeypatch.chdir(tmp_path)
+    assert len(mirror.mirror(target, client, settings, __import__("pathlib").Path("Hub Memory"))["written"]) == 2
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW"), reason="needs O_NOFOLLOW")
+def test_owned_file_swapped_to_symlink_is_refused_by_open(setup, tmp_path, monkeypatch):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    owned = next(out.glob("alpha-*.md"))
+    foreign = tmp_path / "foreign.md"
+    foreign.write_text("mine", encoding="utf-8")
+    owned.unlink()
+    owned.symlink_to(foreign)
+    # A swap between the is_symlink check and the open must still fail closed.
+    monkeypatch.setattr(type(owned), "is_symlink", lambda self: False)
+    with pytest.raises(hubc.HubConfigError, match="symlink"):
+        run(setup)
+    assert foreign.read_text(encoding="utf-8") == "mine"
+
+
+def test_owned_name_that_is_a_directory_is_a_config_error(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    owned = next(out.glob("alpha-*.md"))
+    owned.unlink()
+    owned.mkdir()
+    with pytest.raises(hubc.HubConfigError, match="not a regular file"):
+        run(setup)
+    assert owned.is_dir()
+
+
+def test_out_that_is_a_file_is_a_config_error(setup, tmp_path):
+    *_, out, _ = setup
+    out.write_text("file", encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="not a directory"):
+        run(setup)
+    assert out.read_text(encoding="utf-8") == "file"
