@@ -734,6 +734,29 @@ fn inbox<T: ReadTx + ?Sized>(
 }
 /// `list_messages` up to its first wait. The caller marks the wake epoch
 /// before this snapshot begins, as Python's `_wake_epoch` call precedes its read.
+/// The part of a `list` body that `list` reads: `after`, `unacked` and
+/// `wait_ms`. Any other key, and any value that is not a number or a boolean
+/// (each fails its check either way), is dropped, so a padded body is freed
+/// before the route releases its byte reservation and the poll waits.
+pub struct ListFields(Map<String, Json>);
+impl ListFields {
+    pub fn new(mut raw: Map<String, Json>) -> Self {
+        let mut kept = Map::new();
+        for name in ["after", "unacked", "wait_ms"] {
+            if let Some(value) = raw.remove(name) {
+                let value = match value {
+                    Json::Number(_) | Json::Bool(_) => value,
+                    _ => Json::Null,
+                };
+                kept.insert(name.into(), value);
+            }
+        }
+        Self(kept)
+    }
+    pub fn raw(&self) -> &Map<String, Json> {
+        &self.0
+    }
+}
 pub fn list<T: ReadTx + ?Sized>(tx: &T, r: &Request) -> Result<Listed, Fail> {
     require_active(tx, r.caller)?;
     let Some(after) = r

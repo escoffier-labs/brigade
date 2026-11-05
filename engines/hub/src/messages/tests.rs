@@ -305,3 +305,38 @@ fn an_expired_row_without_a_tombstone_never_returns_its_ciphertext() {
     let (_, shown) = message(&row, "2026-03-09T00:00:01+00:00");
     assert!(shown.contains(r#""content_state": "sealed""#), "{shown}");
 }
+
+#[test]
+fn a_list_keeps_only_the_fields_it_reads() {
+    let pad = "x".repeat(1024 * 1024);
+    let Json::Object(raw) = json!({
+        "action": "list",
+        "after": 3,
+        "unacked": true,
+        "wait_ms": 20000,
+        "pad": pad,
+        "more": [pad.clone(), pad.clone()],
+    }) else {
+        unreachable!()
+    };
+    let fields = ListFields::new(raw);
+    assert_eq!(
+        Json::Object(fields.raw().clone()),
+        json!({"after": 3, "unacked": true, "wait_ms": 20000})
+    );
+    // A padded value in a field `list` reads fails its check either way, so
+    // only a null stands in for it, and the refusal is the same.
+    let Json::Object(raw) = json!({"after": pad, "unacked": [pad], "wait_ms": {"x": pad}}) else {
+        unreachable!()
+    };
+    let fields = ListFields::new(raw);
+    assert!(serde_json::to_string(fields.raw()).unwrap().len() < 64);
+    let Json::Object(raw) = json!({"after": pad, "wait_ms": 5}) else {
+        unreachable!()
+    };
+    assert!(integer(ListFields::new(raw).raw().get("after"), true).is_none());
+    let Json::Object(raw) = json!({"action": "list"}) else {
+        unreachable!()
+    };
+    assert!(ListFields::new(raw).raw().is_empty());
+}

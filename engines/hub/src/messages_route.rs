@@ -180,10 +180,12 @@ impl Messages {
         match action.as_str() {
             "list" => {
                 // `list` never leaves the request to Python after this point.
+                // Only the fields it reads outlive the reservation.
+                let fields = messages::ListFields::new(raw);
                 drop(body);
                 budget.clear();
                 Ok(self
-                    .list(caller, key, raw, source)
+                    .list(caller, key, fields, source)
                     .await
                     .unwrap_or_else(|| crate::busy("messages-unavailable")))
             }
@@ -298,7 +300,7 @@ impl Messages {
         &self,
         caller: String,
         key: String,
-        raw: Map<String, Json>,
+        fields: messages::ListFields,
         source: Option<String>,
     ) -> Option<Response<Body>> {
         let (policy, now) = (self.policy.clone(), self.now());
@@ -307,7 +309,8 @@ impl Messages {
         // Plan step 1: a poll that may wait is watched before its first mark,
         // so the external-commit watcher cannot absorb a row that another
         // process commits between this snapshot and the registration below.
-        let first_read = raw
+        let first_read = fields
+            .raw()
             .get("wait_ms")
             .and_then(Json::as_u64)
             .is_some_and(|w| w > 0)
@@ -322,7 +325,7 @@ impl Messages {
                 let request = Request {
                     caller: &caller,
                     key: &key,
-                    raw: &raw,
+                    raw: fields.raw(),
                     now,
                     policy: &policy,
                 };
