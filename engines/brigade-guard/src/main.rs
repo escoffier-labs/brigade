@@ -1,6 +1,5 @@
-use pcre2::bytes::{Regex, RegexBuilder};
+use pcre2::bytes::Regex;
 use serde::{Deserialize, Serialize};
-use std::ffi::c_void;
 use std::io;
 
 const PROTOCOL: u32 = 1;
@@ -66,14 +65,7 @@ struct Response {
 /// Read a string from the linked library, not the compile-time header, so a
 /// system PCRE2 reports its own version.
 fn pcre2_config_string(what: u32) -> Result<String, Box<dyn std::error::Error>> {
-    let mut buffer = [0u8; 64];
-    // SAFETY: both options write a NUL-terminated string of at most 24 code
-    // units and return its length including the NUL, or a negative error.
-    let used = unsafe { pcre2_sys::pcre2_config_8(what, buffer.as_mut_ptr() as *mut c_void) };
-    if used <= 0 || used as usize > buffer.len() {
-        return Err("PCRE2 config unavailable".into());
-    }
-    Ok(std::str::from_utf8(&buffer[..used as usize - 1])?.to_owned())
+    brigade_guard::config_string(what)
 }
 
 fn engine() -> Result<Engine, Box<dyn std::error::Error>> {
@@ -124,25 +116,7 @@ fn scan(request: Request) -> Result<Response, Box<dyn std::error::Error>> {
     let engine = if utf { Some(engine()?) } else { None };
     let mut rules = Vec::new();
     for rule in request.rules {
-        // Python flags: IGNORECASE=2, MULTILINE=8, DOTALL=16, UNICODE=32,
-        // VERBOSE=64, ASCII=256. Reject all unknown flags.
-        if rule.flags & !(2 | 8 | 16 | 32 | 64 | 256) != 0 || !rule.pattern.is_ascii() {
-            return Err("unsupported Python regex flags or pattern".into());
-        }
-        // Python's ASCII flag restricts classes and case folding together.
-        // UCP off alone would keep Unicode case folding, so UTF mode refuses it.
-        if utf && rule.flags & 256 != 0 {
-            return Err("ASCII flag is unsupported in UTF mode".into());
-        }
-        let regex = RegexBuilder::new()
-            .caseless(rule.flags & 2 != 0)
-            .multi_line(rule.flags & 8 != 0)
-            .dotall(rule.flags & 16 != 0)
-            .extended(rule.flags & 64 != 0)
-            .utf(utf)
-            .ucp(utf)
-            .jit(true)
-            .build(&rule.pattern)?;
+        let regex = brigade_guard::compile(&rule.pattern, rule.flags, utf)?;
         if utf {
             let spans = utf_spans(&regex, &request.text)?;
             rules.push(Matches { id: rule.id, spans });

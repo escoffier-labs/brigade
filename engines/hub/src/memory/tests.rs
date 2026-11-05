@@ -1397,3 +1397,103 @@ fn disk_pressure_refuses_memory_writes_but_not_reads() {
     assert_eq!(pressure_refusal(&disk, b"{"), Some("disk-pressure"));
     assert_eq!(pressure_refusal(&disk, b"[]"), Some("disk-pressure"));
 }
+
+#[tokio::test]
+async fn s18_scans_after_authorization_under_both_locks_and_skips_replays() {
+    type Observations = Arc<Mutex<Vec<(String, Vec<writer::Step>)>>>;
+    struct Observe {
+        steps: Arc<Mutex<Vec<writer::Step>>>,
+        scans: Observations,
+    }
+    impl Scanner for Observe {
+        fn scan(&self, text: &str) -> Scan {
+            self.scans
+                .lock()
+                .unwrap()
+                .push((text.into(), self.steps.lock().unwrap().clone()));
+            Scan::Clean {
+                ruleset: "observed".into(),
+            }
+        }
+        fn describe(&self) -> (bool, Option<String>) {
+            (true, Some("observed".into()))
+        }
+    }
+    let steps = Arc::new(Mutex::new(Vec::new()));
+    let scans = Arc::new(Mutex::new(Vec::new()));
+    let record = steps.clone();
+    let h = Hub::with(
+        Arc::new(Observe {
+            steps: steps.clone(),
+            scans: scans.clone(),
+        }),
+        Some(Arc::new(move |step| record.lock().unwrap().push(step))),
+    );
+    let denied = h
+        .put(AGENT_TOKEN, "fleet", "denied-scan", None, "secret text")
+        .await;
+    assert_eq!(denied.status, 403);
+    assert!(
+        scans.lock().unwrap().is_empty(),
+        "grant failure must not invoke scanner"
+    );
+    steps.lock().unwrap().clear();
+    let body = json!({"action":"put","scope":"fleet","card_id":"ordered-scan", "text":"e\u{301}\r\nexact", "client_event_id":h.id()});
+    assert_eq!(h.call(NODE_TOKEN, body.clone()).await.status, 201);
+    let observed = scans.lock().unwrap().clone();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].0, "e\u{301}\nexact\n");
+    assert_eq!(
+        observed[0].1,
+        vec![writer::Step::MemoryLocked, writer::Step::HubLocked]
+    );
+    assert_eq!(h.call(NODE_TOKEN, body).await.status, 201);
+    assert_eq!(
+        scans.lock().unwrap().len(),
+        1,
+        "idempotent replay must not rescan"
+    );
+    #[cfg(feature = "memory-scan")]
+    assert_s18_push_boundary().await;
+}
+
+#[cfg(feature = "memory-scan")]
+async fn assert_s18_push_boundary() {
+    let h = Hub::with(scan::bundled(), None);
+    let body = |action: &str, card: &str, text: &str| json!({"action":action,"scope":"fleet","card_id":card,"text":text,"client_event_id":h.id()});
+    assert_eq!(
+        h.call(ADMIN_TOKEN, body("import", "trusted", "release checklist"))
+            .await
+            .status,
+        201
+    );
+    assert_eq!(
+        h.call(ADMIN_TOKEN, body("put", "unreviewed", "release checklist"))
+            .await
+            .status,
+        201
+    );
+    let store = h.store.as_ref().unwrap();
+    let admin = store.authenticate(ADMIN_TOKEN).await.unwrap();
+    let query = json!({"query":"release"});
+    let pushed = store.push(&admin, query.as_object().unwrap()).await;
+    assert_eq!(pushed.body["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(pushed.body["matches"][0]["card_id"], "trusted");
+    let c = Connection::open(h.memory()).unwrap();
+    c.execute("UPDATE memory_scans SET ruleset_version='old-rules'", [])
+        .unwrap();
+    assert_eq!(
+        store.push(&admin, query.as_object().unwrap()).await.body["matches"],
+        json!([])
+    );
+    // Missing engine also blocks preexisting imported trust.
+    drop(c);
+    let mut h = h;
+    h.store.take();
+    h.open(Arc::new(scan::Unavailable), None);
+    let store = h.store.as_ref().unwrap();
+    assert_eq!(
+        store.push(&admin, query.as_object().unwrap()).await.body["matches"],
+        json!([])
+    );
+}

@@ -57,7 +57,7 @@ STATUS = {
     "indexed_seq": int,
     "log_epoch": hc.NonEmpty(),
     "hub_time": hc.NonEmpty(),
-    "scan": {"available": hc.Eq(False), "ruleset_version": hc.NONE},
+    "scan": {"available": bool},
     "embedders": list,
     "default_mode": str,
 }
@@ -111,6 +111,7 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         return _result(d)
 
     status = mem("memory-status", {"action": "status"}, shape=STATUS)
+    scan_available = hc._obj(status.get("scan")).get("available") is True
     epoch = status.get("log_epoch", "")
     # Log checks start after the hub's sequence at the start of the run. A
     # reused --hub-url can hold more earlier events than one log page scans,
@@ -296,10 +297,10 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape=err("memory_grant_missing"),
     )
     mem(
-        "memory-import-scan-unavailable",
+        "memory-import-scan-gated",
         {**imported, "client_event_id": event_id()},
-        status=503,
-        shape=err("memory_scan_unavailable"),
+        status=201 if scan_available else 503,
+        shape=event("imported") if scan_available else err("memory_scan_unavailable"),
     )
     # Grants and scopes.
     put(

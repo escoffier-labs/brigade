@@ -52,6 +52,46 @@ brigade memory hub proposals list --target .
 
 `memory hub import --scope <scope> <card.md>...` sends one `import` call per card and needs the hub's import grant. `memory hub card <card_id>` prints one hub card's text from the read scopes. When the id is in more than one of them it answers `memory_card_ambiguous`, and `--scope` picks one. With `--all`, every chunk must come from the first chunk's revision and `log_epoch`: a restore between chunks restarts the read once and then refuses with `memory_epoch_changed`, and joined text that does not hash to the card's `content_hash` is refused. While the hub is unavailable (the same answers that send search to the replica), the card comes from this host's replica, with `source: "replica"` and a warning on stderr. A refusal never falls back. A scope the hub refused the card in during the read (`memory_grant_missing` or `memory_card_not_found`) is never served from the replica, whether the hub then turns unavailable on another scope, on a later chunk, or on the restarted read after an epoch change. The replica serves nothing at all when the hub's `status` answered 403 `memory_grant_missing` (this credential can read no scope) or when the `log_epoch` moved during the read. When `status` or a scope's first chunk answered before the hub turned unavailable, the replica stands in only if it was pulled as the principal `status` named and under the `log_epoch` every answer carried. A restore since the last pull, or a node token that now belongs to another principal, means no replica answer until the next pull. If `status` itself is unavailable, nothing was learned, so the replica still stands in. Dot and Duet `memory_card` take the same optional `scope`, as a search match reports it. Every hub refusal is reported with its `code`, for example `memory_grant_missing`.
 
+Hub writes scan the normalized UTF-8 bytes under the write authorization and
+memory transaction. The hub links the guard's pinned PCRE2 engine and bundles
+its default rules with the connector's injection rules. Repository policies,
+baselines and allow comments do not apply. `status.scan.ruleset_version` and
+`memory_meta.scan_ruleset_version` identify the bundle by version and digest.
+
+| Input or operation | Result |
+|---|---|
+| Blocking guard rule, bidi control, invisible operator, embedded BOM or tag character | `422 memory_content_blocked` with rule ids only. No bytes are stored |
+| Warning, role override, U+200C or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
+| Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
+| `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
+| Scanner unavailable or failed | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` |
+| Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
+
+The `memory-scan` Cargo feature is enabled by default. A build with
+`--no-default-features` has no scanner and serves pending writes and explicit
+searches only. Restarting with the scanner does not promote or rescan old
+versions automatically. A later authorized write scans its exact bytes.
+
+Searches with `query_source: "prompt"` scan the returned fields and card bytes
+again. Any finding replaces the match with `{card_id, blocked: "<rule id>"}`.
+The response carries `content_trust: "untrusted"`. Explicit searches can still
+inspect flagged versions. Local connector prompt loads share the same rule
+bundle and placeholder. Every finding, including a warning, withholds prompt
+text. Leading BOM handling applies to each field separately.
+
+The internal `Store::push` boundary requires a current, live, trusted head with
+a clean scan under the current bundle. It then applies the prompt-load scan.
+An unavailable scanner, a pending scan or an old rule-set receipt produces no
+push hits. S23 connects this boundary to native tool responses. The public
+search API continues to reject `query_source: "push"`.
+
+The bundle uses conservative raw guard matches in both PCRE2 UTF and byte
+modes. A hit in either mode counts. Python prompt loads use the same bundled
+patterns with Python `re`. Engine Unicode class differences remain documented
+in the guard's UTF parity table. Context exceptions from the publication guard
+are deliberately absent from memory scans.
+
+
 - `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
 - `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
 - If the hub is unreachable, times out, or answers a redirect, 404, 408, 429 or 503, the answer comes from local cards and the replica and carries a warning with the reason. If the hub refuses (401, 403 or another coded answer), the answer comes from local cards only and the warning names the refusal. The replica never stands in for a hub that said no.

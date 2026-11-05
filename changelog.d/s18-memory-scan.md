@@ -1,0 +1,1 @@
+- Scan hub memory writes with the pinned native guard. Block unsafe content without echoing it, store warnings as flagged, and require a clean current scan for imports and internal push hits. Prompt recall replaces findings with rule-only placeholders. Builds without the scanner keep writes pending and refuse trust raises.

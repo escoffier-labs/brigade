@@ -5,8 +5,8 @@
 //! `search` answers from the lexical index in [`index`] (S13b), with the
 //! scorer and tokenizer copied from Python in [`text`].
 //!
-//! Not here yet: proposals and decisions (S19a), embedding (S15) and content
-//! scanning (S18). The scan hook reports unavailable, so no write raises trust.
+//! Writes and prompt loads use the versioned guard scanner (S18).
+//! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
 pub mod auth;
 pub mod ids;
 pub mod index;
@@ -140,6 +140,12 @@ impl Store {
         let created = !options.memory.exists();
         let db = worker::open_file(&options.memory, true).map_err(|e| e.to_string())?;
         schema::migrate(&db, options.clock.now_ms())?;
+        let ruleset = options
+            .scanner
+            .describe()
+            .1
+            .unwrap_or_else(|| "unavailable".into());
+        db.execute("INSERT INTO memory_meta(key,value) VALUES('scan_ruleset_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&ruleset]).map_err(|e| e.to_string())?;
         // A restart rebuilds the index from the store before the hub serves.
         let index = index::Index::open(&db, options.memory.clone()).map_err(|e| e.to_string())?;
         if created {
@@ -154,6 +160,7 @@ impl Store {
             options.admin_digest.clone(),
         );
         config.hook = options.hook;
+        config.scanner = options.scanner.clone();
         config.index = Some(index.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
@@ -253,7 +260,7 @@ impl Store {
         }
     }
 
-    /// Validation, normalization, hashing and the scan, outside every lock.
+    /// Validation, normalization and hashing outside locks. Scanning is authorized in apply.
     pub fn prepare(
         &self,
         credential: &Credential,
@@ -363,7 +370,7 @@ impl Store {
                 return Err(error(413, "memory_card_too_large", "text is too large"));
             }
             let hash = ids::sha256_hex(normalized.as_bytes());
-            let scan = self.scanner.scan(&normalized);
+            let scan = Scan::Unavailable;
             Ok((normalized, hash, scan))
         };
         let short = |key: &str, limit: usize, required: bool| -> Result<Option<String>, Reply> {
@@ -515,19 +522,38 @@ impl Store {
         })
     }
 
+    /// S23's internal push boundary. The public search contract stays unchanged.
+    pub async fn push(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        self.search_for(credential, map, true).await
+    }
+
     async fn search(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
-        let request = match search::parse(map) {
+        self.search_for(credential, map, false).await
+    }
+
+    async fn search_for(
+        &self,
+        credential: &Credential,
+        map: &Map<String, Json>,
+        push: bool,
+    ) -> Reply {
+        let mut request = match search::parse(map) {
             Ok(r) => r,
             Err(reply) => return reply,
         };
+        request.push = push;
+        request.prompt |= push;
         let snapshot = match request.min_seq {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
             None => self.index.current(),
         };
         let credential = credential.clone();
+        let scanner = self.scanner.clone();
         match self
             .readers
-            .submit(move |c| search::run(&Conn(c), &credential, &request, &snapshot))
+            .submit(move |c| {
+                search::run(&Conn(c), &credential, &request, &snapshot, scanner.as_ref())
+            })
             .await
         {
             Ok(reply) => reply,
