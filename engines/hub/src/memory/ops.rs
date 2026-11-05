@@ -36,6 +36,7 @@ pub enum Action {
         hash: String,
         scan: Scan,
     },
+    // Audit-only free-form strings. Capture fields never reach a prompt.
     Capture {
         payload: Json,
     },
@@ -432,6 +433,9 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             scan,
             import,
         } => {
+            if matches!(scan, Scan::Failed) {
+                return Ok(error(503, "memory_scan_failed", "input scan failed"));
+            }
             // Only import raises trust here, and only on a clean scan (D24).
             if *import && !scan.permits_raise() {
                 return Ok(match scan {
@@ -560,6 +564,9 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             hash,
             scan,
         } => {
+            if matches!(scan, Scan::Failed) {
+                return Ok(error(503, "memory_scan_failed", "input scan failed"));
+            }
             if let Scan::Blocked { rules, .. } = scan {
                 return Ok(blocked(rules));
             }

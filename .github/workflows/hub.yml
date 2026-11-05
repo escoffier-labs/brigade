@@ -2,9 +2,9 @@ name: Hub
 on:
   push:
     branches: [main]
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'engines/brigade-guard/**', 'src/brigade/guard/**', 'src/brigade/untrusted.py', 'src/brigade/memory_content_scan.py', 'scripts/memory_scan_bundle.py', 'tests/test_memory_content_scan.py', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
   pull_request:
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'engines/brigade-guard/**', 'src/brigade/guard/**', 'src/brigade/untrusted.py', 'src/brigade/memory_content_scan.py', 'scripts/memory_scan_bundle.py', 'tests/test_memory_content_scan.py', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
 permissions:
   contents: read
 jobs:

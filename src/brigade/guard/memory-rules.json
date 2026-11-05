@@ -1,5 +1,5 @@
 {
-  "version": "brigade-memory-scan.v1",
+  "version": "brigade-memory-scan.v2",
   "injections": [
     {
       "id": "classic-injection",

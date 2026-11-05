@@ -124,6 +124,21 @@ class Memory(unittest.TestCase):
         self.assertEqual(hit, {"card_id": "override", "blocked": "role-override"})
         self.assertEqual(found.json["content_trust"], "untrusted")
 
+    def test_s18_per_input_match_limit_refuses_without_storage(self):
+        hub = self.run_hub("scan-failed", "--route-mode memory=native")
+        for action in ("put", "import", "handoff"):
+            body = {"action": action, "text": "a" * (512 * 1024 - 1), "client_event_id": hm.event_id()}
+            if action == "handoff":
+                body["kind"] = "note"
+            else:
+                body.update(scope="fleet", card_id="failed")
+            response = hc.request(hub.url, "POST", "/memory", token=hub.admin_token, body=body)
+            self.assertEqual((response.status, response.json["code"]), (503, "memory_scan_failed"))
+            self.assertNotIn("rules", response.json)
+        with sqlite3.connect(self.work / "scan-failed/fleet-hub-memory.db") as db:
+            for table in ("memory_blobs", "memory_scans", "memory_events", "memory_idempotency"):
+                self.assertEqual(db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+
     def test_not_configured_is_the_upstream_404(self):
         hub = self.run_hub("absent")
         response = status(hub)

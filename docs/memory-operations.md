@@ -64,7 +64,8 @@ baselines and allow comments do not apply. `status.scan.ruleset_version` and
 | Warning, role override, U+200C or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
 | Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
 | `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
-| Scanner unavailable or failed | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` |
+| Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` |
+| Input-specific engine failure | `503 memory_scan_failed`. No bytes are stored |
 | Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
 
 The `memory-scan` Cargo feature is enabled by default. A build with
@@ -85,12 +86,30 @@ An unavailable scanner, a pending scan or an old rule-set receipt produces no
 push hits. S23 connects this boundary to native tool responses. The public
 search API continues to reject `query_source: "push"`.
 
-The bundle uses conservative raw guard matches in both PCRE2 UTF and byte
-modes. A hit in either mode counts. Python prompt loads use the same bundled
-patterns with Python `re`. Engine Unicode class differences remain documented
-in the guard's UTF parity table. Context exceptions from the publication guard
-are deliberately absent from memory scans.
+Input-specific PCRE2 failures return `503 memory_scan_failed` for puts,
+imports and handoffs. No blobs, events, scan receipts or idempotency rows are
+stored. An earlier or later blocking finding still returns
+`422 memory_content_blocked`. Missing engines retain the pending-write policy.
+Each native regex has an explicit 100,000 match limit.
 
+The bundle uses conservative guard matches in both PCRE2 UTF and byte modes.
+Python prompt loads also run Unicode and ASCII-class passes. The scanned
+copies preserve every Python `str.splitlines()` boundary as LF, remove
+Unicode 16 default-ignorable characters, and fold full-width ASCII
+U+FF01-U+FF5E plus U+3000 to ASCII. Every injection rule also runs on a copy
+with an explicit shared whitespace set collapsed to single spaces. These
+copies never replace stored bytes. Publication-guard context exceptions do
+not apply.
+
+Bidi marks U+061C, U+200E and U+200F block alongside overrides and isolates.
+Default-ignorable characters and U+FFF9-FFFB block, except U+200C/U+200D
+flag and an initial BOM is allowed. U+E0100-E01EF always block. Selectors
+U+FE00-FE0F are allowed only immediately after a conservative emoji-base
+allowlist: U+2600, U+2764, U+1F680 and U+1F600-U+1F64F. Other selector
+positions block, including emoji bases outside this allowlist.
+
+Full NFKC remains deferred pending a maintainer decision on a normalization
+dependency. This release performs only the explicit full-width ASCII fold.
 
 - `off`: `memory search` behaves exactly as before and never contacts the hub. A config that cannot be read or is not UTF-8 gives the same error and exit status as before.
 - `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. The same bytes under one card id in one scope appear once, and a local card joins the hub entry with its bytes. Each match says where it came from (`source`: `hub`, `local` or `replica`). The hub returns at most 20 matches, so a larger `--limit` is capped there with a warning, and `hub_match_count` reports how many the hub found.
