@@ -314,7 +314,8 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert hub["build"]["target"] == "dogfood"
     assert hub["entrypoint"] == ["python", "/brigade/entry.py"]
     assert hub["command"][hub["command"].index("--route-mode") + 1] == "memory=native"
-    assert "/var/lib/brigade/fleet-hub-memory.db" in full["services"]["backup"]["command"]
+    assert full["services"]["backup"]["entrypoint"] == ["python", "/brigade/backup.py"]
+    assert "--db" not in full["services"]["backup"]["command"]
 
 
 # --------------------------------------------------------- front wrapper
@@ -848,42 +849,120 @@ def test_containerfile_stage_defaults_match_the_compose_pin():
     assert pins["BRIGADE_SHA256"] == "3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce"
 
 
-def test_backup_job_copies_the_memory_file_beside_the_hub_file(tmp_path):
+backup_job = _load("brigade_hub_backup_job", RECIPE / "hub" / "backup.py")
+
+
+def _hub_files(data, *, hub=True, memory=True):
     import sqlite3
 
-    from brigade import fleet_hub, fleet_hub_backup
+    from brigade import fleet_hub
+
+    data.mkdir()
+    if hub:
+        fleet_hub.init_db(data / "fleet-hub.db").close()
+    if memory:
+        conn = sqlite3.connect(data / "fleet-hub-memory.db")
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT)")
+            conn.execute("INSERT INTO memory_meta VALUES ('log_epoch', 'fake-epoch')")
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _run_backup_job(tmp_path, data):
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(ROOT / "src"), os.environ.get("PYTHONPATH", "")])}
+    argv = ["--state-dir", str(data), "--dest", str(tmp_path / "copies"), "--min-free-gib", "0", "--json"]
+    return subprocess.run(
+        [sys.executable, str(RECIPE / "hub" / "backup.py"), *argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_backup_job_copies_each_file_in_its_own_call(tmp_path):
+    import sqlite3
 
     command = _service_list("backup", "command")
-    sources = [command[i + 1] for i, item in enumerate(command) if item == "--db"]
-    assert sources == ["/var/lib/brigade/fleet-hub.db", "/var/lib/brigade/fleet-hub-memory.db"]
-    # The same two files through the real backup tool and the check's verifier.
+    assert command[:2] == ["--dest", "/backups"] and "--db" not in command
+    assert (
+        "      - ./hub:/brigade:ro\n" in (RECIPE / "compose.yaml").read_text(encoding="utf-8").split("\n  backup:\n")[1]
+    )
+    calls = backup_job.calls(Path("/var/lib/brigade"), Path("/backups"), ["--json"])
+    assert [argv[argv.index("--db") + 1] for _, argv in calls] == [
+        "/var/lib/brigade/fleet-hub.db",
+        "/var/lib/brigade/fleet-hub-memory.db",
+    ]
+    assert [argv[argv.index("--dest") + 1] for _, argv in calls] == ["/backups", "/backups/memory"]
     data = tmp_path / "data"
-    data.mkdir()
-    fleet_hub.init_db(data / "fleet-hub.db").close()
-    memory = sqlite3.connect(data / "fleet-hub-memory.db")
-    memory.execute("PRAGMA journal_mode=WAL")
-    memory.execute("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT)")
-    memory.execute("INSERT INTO memory_meta VALUES ('log_epoch', 'fake-epoch')")
-    memory.commit()
-    try:
-        report = fleet_hub_backup.take_backup(
-            [data / Path(item).name for item in sources],
-            tmp_path / "copies",
-            disk_usage=lambda _p: type("U", (), {"free": 10**15}),
-        )
-    finally:
-        memory.close()
-    files = checks.verify_copy(Path(report["copy"]))
-    assert set(files) == {"fleet-hub.db", "fleet-hub-memory.db"}
-    assert all(item["integrity_check"] == "ok" for item in files.values())
-    copied = sqlite3.connect(Path(report["copy"]) / "fleet-hub-memory.db")
+    _hub_files(data)
+    done = _run_backup_job(tmp_path, data)
+    assert done.returncode == 0, done.stderr
+    hub_copies = checks.completed_copies(tmp_path / "copies")
+    memory_copies = checks.completed_copies(tmp_path / "copies" / "memory")
+    assert len(hub_copies) == 1 and len(memory_copies) == 1
+    # Each copy holds its own file, checked by the verifier the S31 check uses.
+    assert set(checks.verify_copy(hub_copies[0])) == {"fleet-hub.db"}
+    files = checks.verify_copy(memory_copies[0])
+    assert set(files) == {"fleet-hub-memory.db"} and files["fleet-hub-memory.db"]["integrity_check"] == "ok"
+    copied = sqlite3.connect(memory_copies[0] / "fleet-hub-memory.db")
     try:
         assert copied.execute("SELECT value FROM memory_meta").fetchone() == ("fake-epoch",)
     finally:
         copied.close()
-    # The refusal check runs the job with the same two files.
+
+
+def test_backup_job_skips_a_missing_memory_file_and_still_copies_the_hub_file(tmp_path):
+    data = tmp_path / "data"
+    _hub_files(data, memory=False)
+    done = _run_backup_job(tmp_path, data)
+    assert done.returncode == 0, done.stderr
+    assert f"memory backup skipped: {data / 'fleet-hub-memory.db'} does not exist" in done.stderr
+    assert len(checks.completed_copies(tmp_path / "copies")) == 1
+    assert checks.completed_copies(tmp_path / "copies" / "memory") == []
+
+
+def test_backup_job_still_copies_memory_when_the_hub_copy_fails(tmp_path):
+    data = tmp_path / "data"
+    _hub_files(data, hub=False)
+    done = _run_backup_job(tmp_path, data)
+    assert done.returncode != 0
+    assert "fleet-hub.db does not exist" in done.stderr
+    assert checks.completed_copies(tmp_path / "copies") == []
+    assert len(checks.completed_copies(tmp_path / "copies" / "memory")) == 1
+
+
+def test_backup_job_refuses_a_db_argument():
+    with pytest.raises(SystemExit):
+        backup_job.main(["--db", "/elsewhere.db"])
+
+
+def test_backups_check_reads_hub_and_memory_copies_apart(tmp_path, monkeypatch):
+    import argparse
+
+    data = tmp_path / "data"
+    _hub_files(data, memory=False)
+    assert _run_backup_job(tmp_path, data).returncode == 0
+    folder = tmp_path / "copies"
+    monkeypatch.setattr(checks, "env_file", lambda *_a, **_k: {"BRIGADE_BACKUP_OWNER": f"{os.getuid()}:{os.getgid()}"})
+    result = checks.Result("backups")
+    include = tmp_path / "include.txt"
+    include.write_text(f"{folder}\n", encoding="utf-8")
+    namespace = argparse.Namespace(backup_dir=str(folder), last=3, include_file=str(include), refusal=False)
+    checks.check_backups(namespace, result)
+    # No memory copy is reported, never failed.
+    assert result.status == "pass", result.items
+    memory = next(item for item in result.items if item["name"] == "memory copies")
+    assert memory["status"] == "INFO"
+    # The refusal run names no --db: the job picks both files.
     source = (RECIPE / "checks" / "s31_checks.py").read_text(encoding="utf-8")
-    assert '"--db",\n                "/var/lib/brigade/fleet-hub-memory.db",' in source
+    refusal = source[source.index("if args.refusal:") :]
+    refusal = refusal[: refusal.index("def check_restore")]
+    assert '"--db"' not in refusal and '"--dest",\n                "/backups",' in refusal
 
 
 def _memory_fakes(monkeypatch, report):

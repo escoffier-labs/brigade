@@ -238,17 +238,22 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
 ## Backups
 
 The backup timer (`brigade-hub-backup.timer`, HOST-ACTIONS 4) runs
-`docker compose --profile backup run --rm --no-deps backup` every hour.
-`brigade fleet backup` copies each database file, `fleet-hub.db` and
-`fleet-hub-memory.db`, through SQLite's online
-backup API into a dated directory under `BRIGADE_BACKUP_DIR` on the home
-volume, never Docker's data root. It runs `integrity_check` on every copy and
-keeps 48 hourly copies and the newest copy of each of the last 14 days.
+`docker compose --profile backup run --rm --no-deps backup` every hour. The
+job (`hub/backup.py`) runs `brigade fleet backup` twice, once per file, and
+runs both calls whatever the other did. `fleet-hub.db` goes into a dated
+directory under `BRIGADE_BACKUP_DIR`, and `fleet-hub-memory.db` into a dated
+directory under `BRIGADE_BACKUP_DIR/memory`. Both are on the home volume,
+never Docker's data root. Each copy goes through SQLite's online backup API
+and gets an `integrity_check`. Each directory keeps 48 hourly copies and the
+newest copy of each of the last 14 days. A missing memory file is logged and
+skipped, so it never stops the hub file's copy. Any other failure of either
+call fails the job.
 
 Size the retention once, from the real file sizes:
 
 ```bash
-docker compose --profile backup run --rm --no-deps backup \
+docker compose --profile backup run --rm --no-deps --entrypoint brigade backup \
+  fleet backup \
   --db /var/lib/brigade/fleet-hub.db --db /var/lib/brigade/fleet-hub-memory.db \
   --dest /backups --owner "$(id -u):$(id -g)" --plan --json
 ```
@@ -279,7 +284,8 @@ The restore below replaces only `fleet-hub.db`. Leave the live
 copy yet: a restored memory file needs a new `log_epoch` before it is served,
 and nothing outside the Rust crate's tests sets one (#2292). If the memory
 file itself is lost, the hub creates an empty one on its next start, and the
-hourly copies keep the lost cards for when #2292 lands.
+copies under `BRIGADE_BACKUP_DIR/memory` keep the lost cards for when #2292
+lands.
 
 1. Fence the hub: `touch hub.fenced && docker compose stop hub front` in the
    project directory. Clients spool from here on, and the fence holds across

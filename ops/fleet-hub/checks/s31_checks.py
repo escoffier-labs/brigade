@@ -863,20 +863,43 @@ def verify_copy(copy: Path) -> dict[str, Any]:
     return files
 
 
+def completed_copies(folder: Path) -> list[Path]:
+    """Copy directories that have a manifest, oldest first."""
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.iterdir() if path.is_dir() and (path / "manifest.json").exists())
+
+
 def check_backups(args: argparse.Namespace, result: Result) -> None:
-    """Hourly copies, their integrity, the directory's owner and mode, the off-host include set and retention."""
+    """Hourly copies, their integrity, the directory's owner and mode, the off-host include set and retention.
+
+    The job copies fleet-hub.db into the backup directory and, in a separate
+    call, fleet-hub-memory.db into its `memory` subdirectory, so the hub
+    file's copies are checked on their own and a missing memory file fails
+    nothing here.
+    """
     folder = Path(args.backup_dir or env_file().get("BRIGADE_BACKUP_DIR", "")).expanduser()
     info = folder.stat()
     result.ok(stat.S_IMODE(info.st_mode) == 0o700, "backup directory mode 0700", oct(stat.S_IMODE(info.st_mode)))
     owner = env_file().get("BRIGADE_BACKUP_OWNER", f"{os.getuid()}:{os.getgid()}")
     result.ok(str(info.st_uid) == owner.split(":")[0], "backup directory belongs to the compose account", info.st_uid)
-    copies = sorted(path for path in folder.iterdir() if path.is_dir() and (path / "manifest.json").exists())
+    copies = completed_copies(folder)
     result.ok(bool(copies), "at least one copy exists", len(copies))
     for copy in copies[-args.last :]:
         files = verify_copy(copy)
         result.ok(
             all(item["integrity_check"] == "ok" for item in files.values()),
             f"{copy.name} passes integrity_check",
+            files,
+        )
+    memory_copies = completed_copies(folder / "memory")
+    if not memory_copies:
+        result.add("INFO", "memory copies", "none: the memory file was absent at every run, or no run has happened")
+    for copy in memory_copies[-args.last :]:
+        files = verify_copy(copy)
+        result.ok(
+            set(files) == {"fleet-hub-memory.db"} and all(item["integrity_check"] == "ok" for item in files.values()),
+            f"memory/{copy.name} passes integrity_check",
             files,
         )
     stamps = [copy.name for copy in copies]
@@ -898,10 +921,6 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
                 "--rm",
                 "--no-deps",
                 "backup",
-                "--db",
-                "/var/lib/brigade/fleet-hub.db",
-                "--db",
-                "/var/lib/brigade/fleet-hub-memory.db",
                 "--dest",
                 "/backups",
                 "--owner",
@@ -912,9 +931,13 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
             ),
             timeout=300,
         )
-        after = sorted(path.name for path in folder.iterdir() if path.is_dir())
+        after = [path.name for path in completed_copies(folder)]
+        memory_after = [path.name for path in completed_copies(folder / "memory")]
         result.ok(
-            done.returncode != 0 and "refusing copy" in done.stderr and after == [c.name for c in copies],
+            done.returncode != 0
+            and "refusing copy" in done.stderr
+            and after == [c.name for c in copies]
+            and memory_after == [c.name for c in memory_copies],
             "a copy past the free-space floor is refused and removes nothing",
         )
 

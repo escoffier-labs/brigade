@@ -177,17 +177,16 @@ services:
   # container with three capabilities: it reads the hub's files, SQLite gives
   # any -wal or -shm file it creates the database file's owner, and the copies
   # are handed to the compose account in the 0700 backup directory.
+  # hub/backup.py runs `brigade fleet backup` once per file: fleet-hub.db into
+  # /backups, fleet-hub-memory.db into /backups/memory, and skips a missing
+  # memory file, so it never stops the hub file's copy.
   backup:
     profiles: [backup]
     image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
     network_mode: none
     user: "0:0"
-    entrypoint: ["brigade", "fleet", "backup"]
+    entrypoint: ["python", "/brigade/backup.py"]
     command:
-      - --db
-      - /var/lib/brigade/fleet-hub.db
-      - --db
-      - /var/lib/brigade/fleet-hub-memory.db
       - --dest
       - /backups
       - --owner
@@ -200,6 +199,7 @@ services:
     volumes:
       - brigade-state:/var/lib/brigade
       - ${BRIGADE_BACKUP_DIR:?run bin/hub-setup.py init first}:/backups
+      - ./hub:/brigade:ro
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
     security_opt:
