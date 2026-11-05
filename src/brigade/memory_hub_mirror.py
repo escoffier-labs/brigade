@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import tempfile
+import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -20,9 +21,15 @@ from typing import Any
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from . import memory_hub_sync as sync
+from .inbox_lock import held_file_lock
 from .memory_vault import parse_frontmatter
 
 MARKER = ".brigade-memory-mirror.json"
+# Held for a whole run, so two runs on one folder never interleave. A dotfile the
+# mirror never owns: it is not a safe note name, so it is never deleted or foreign.
+LOCK = ".brigade-memory-mirror.lock"
+LOCK_DEADLINE_SECONDS = 30.0
+STALE_TEMP_SECONDS = 10 * 60
 INDEX = "Hub Memory Index.md"
 KIND = "brigade.memory-mirror.v1"
 # Windows has no O_NOFOLLOW; _read then checks is_symlink before it opens.
@@ -51,6 +58,16 @@ def _read(path: Path) -> bytes | None:
     refusal = hubc.HubConfigError(f"mirror refuses symlink: {path}")
     if not _NOFOLLOW and path.is_symlink():
         raise refusal
+    try:
+        # Opening a directory raises PermissionError on Windows, so look first.
+        if stat.S_ISDIR(os.lstat(path).st_mode):
+            raise hubc.HubConfigError(f"mirror refuses {path}: not a regular file")
+    except FileNotFoundError:
+        return None
+    except NotADirectoryError as exc:
+        raise hubc.HubConfigError(f"mirror destination is not a directory: {path.parent}") from exc
+    except OSError:
+        pass  # The open below reports it.
     try:
         fd = os.open(path, _OPEN_FLAGS)
     except FileNotFoundError:
@@ -128,7 +145,8 @@ def _split(text: str) -> tuple[dict[str, Any], str]:
     """A card's leading front matter and the body after it. A leading BOM is ignored."""
     text = text.removeprefix("\ufeff")
     meta = parse_frontmatter(text)
-    if text.startswith(("---\n", "---\r\n")):
+    # A block that parses to nothing stays in the body, so none of it is lost.
+    if meta and text.startswith(("---\n", "---\r\n")):
         lines = text.splitlines(keepends=True)
         for index in range(1, len(lines)):
             if lines[index].strip() == "---":
@@ -214,6 +232,22 @@ def _marker_value(files: dict[str, Any], notes: dict[str, str]) -> bytes:
     return (json.dumps({"kind": KIND, "files": files, "notes": notes}, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _foreign_entries(out: Path) -> bool:
+    return out.is_dir() and any(path.name != LOCK for path in out.iterdir())
+
+
+def _drop_stale_temps(out: Path) -> None:
+    """Remove `.mirror-*.tmp` files a killed run left behind. A live run holds the lock, so none is in use."""
+    cutoff = time.time() - STALE_TEMP_SECONDS
+    for path in out.glob(".mirror-*.tmp"):
+        try:
+            info = path.lstat()
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                path.unlink(missing_ok=True)
+        except OSError:
+            continue
+
+
 def mirror(
     target: Path,
     client: hubc.MemoryHubClient,
@@ -225,6 +259,36 @@ def mirror(
 ) -> dict[str, Any]:
     out = out.absolute()
     _check_destination(out)
+    if not init and not os.path.lexists(out / MARKER) and _foreign_entries(out):
+        # Refuse before taking the lock, which would leave a file in a folder that is not ours.
+        raise hubc.HubConfigError(
+            "non-empty mirror destination lacks ownership marker. Use --init to preserve foreign files"
+        )
+    heads, warnings = _heads(target, client, settings)
+    selected, skipped = _select(heads)
+    if dry_run:
+        return _transact(out, heads, selected, skipped, warnings, init=init, dry_run=True)
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise hubc.HubConfigError(f"cannot create mirror destination {out}: {exc.strerror or exc}") from exc
+    _check_destination(out)
+    # The lock helper refuses a symlinked path component, which a destination may legitimately have.
+    with held_file_lock(out.resolve() / LOCK, deadline_seconds=LOCK_DEADLINE_SECONDS):
+        return _transact(out, heads, selected, skipped, warnings, init=init, dry_run=False)
+
+
+def _transact(
+    out: Path,
+    heads: list[dict],
+    selected: list[tuple[dict, dict]],
+    skipped: dict[str, int],
+    warnings: list[str],
+    *,
+    init: bool,
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Marker read, plan, writes, deletes and the final marker. A real run holds the destination lock throughout."""
     raw = _read(out / MARKER)
     try:
         marker: dict[str, Any] = json.loads(raw) if raw is not None else {"kind": KIND, "files": {}, "notes": {}}
@@ -238,14 +302,14 @@ def mirror(
             raise ValueError("unsafe owned filename")
     except (ValueError, AttributeError) as exc:
         raise hubc.HubConfigError(f"invalid mirror marker: {exc}") from exc
-    if raw is None and out.is_dir() and any(out.iterdir()) and not init:
+    if raw is None and not init and _foreign_entries(out):
         raise hubc.HubConfigError(
             "non-empty mirror destination lacks ownership marker. Use --init to preserve foreign files"
         )
-    heads, warnings = _heads(target, client, settings)
-    selected, skipped = _select(heads)
+    if not dry_run:
+        _drop_stale_temps(out)
     desired: dict[str, str] = {}
-    notes = {}
+    notes: dict[str, str] = {}
     groups: dict[str, list[str]] = {}
     for head, meta in sorted(selected, key=lambda row: (row[0]["scope"], row[0]["card_id"])):
         key = store.Replica.key(head["scope"], head["card_id"])
@@ -255,6 +319,12 @@ def mirror(
         notes[key] = name
         desired[name] = _note(head, meta)
         groups.setdefault(head["scope"], []).append(f"- [[{name[:-3]}]]")
+    # A card skipped for now keeps its filename, so it returns under the name its links use.
+    for head in heads:
+        key = store.Replica.key(head["scope"], head["card_id"])
+        kept = marker["notes"].get(key)
+        if key not in notes and kept is not None and _safe_name(kept) and kept != INDEX:
+            notes[key] = kept
     desired[INDEX] = "# Hub Memory\n\nGenerated from hub memory. Local edits are replaced.\n" + "".join(
         f"\n## {scope}\n\n" + "\n".join(links) + "\n" for scope, links in sorted(groups.items())
     )
@@ -271,11 +341,6 @@ def mirror(
     for name in deleted:
         _read(out / name)  # Refuse symlinks before making any changes.
     if not dry_run:
-        try:
-            out.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise hubc.HubConfigError(f"cannot create mirror destination {out}: {exc.strerror or exc}") from exc
-        _check_destination(out)
         current = raw
         if written or deleted:
             # Own everything about to be written or removed before touching it, so a

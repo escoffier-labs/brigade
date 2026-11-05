@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+from pathlib import Path
 
 import pytest
 
@@ -444,7 +446,8 @@ def test_note_crash_after_one_write_recovers(setup, monkeypatch):
     report = run(setup)
     assert report["ok"]
     assert {p.name for p in out.iterdir()} == set(json.loads((out / mirror.MARKER).read_text())["files"]) | {
-        mirror.MARKER
+        mirror.MARKER,
+        mirror.LOCK,
     }
 
 
@@ -460,15 +463,14 @@ def test_crash_before_final_marker_write_is_recoverable(setup, monkeypatch):
     def crash(path, text):
         if path.name == mirror.MARKER:
             markers.append(1)
-            if len(markers) == 2:
-                raise OSError("simulated kill")
+            raise OSError("simulated kill")
         real(path, text)
 
     monkeypatch.setattr(mirror, "_atomic", crash)
     with pytest.raises(OSError, match="simulated"):
         run(setup)
     monkeypatch.setattr(mirror, "_atomic", real)
-    # The note is gone and the marker from before the deletion still lists it.
+    # The marker already owned every file, so only the final write is left. The note is gone and still listed.
     assert not (out / gone).exists()
     assert gone in json.loads((out / mirror.MARKER).read_text())["files"]
     assert run(setup)["ok"]
@@ -594,3 +596,225 @@ def test_out_that_is_a_file_is_a_config_error(setup, tmp_path):
     with pytest.raises(hubc.HubConfigError, match="not a directory"):
         run(setup)
     assert out.read_text(encoding="utf-8") == "file"
+
+
+def refuse_grant(url, token, body, timeout):
+    assert body["action"] == "card", body
+    return 403, {"error": "no read grant", "code": "memory_grant_missing"}
+
+
+def test_revoked_scope_during_metadata_refresh_drops_its_heads(setup):
+    from brigade import memory_hub_search
+
+    target, settings, _, out, replica = setup
+    card(replica, "gamma", text="gamma link\n")
+    legacy(replica)
+    client = hubc.client_for(settings, transport=refuse_grant)
+    with pytest.raises(hubc.HubConfigError):
+        mirror.mirror(target, client, settings, out)
+    saved = store.replica(target)
+    assert saved.heads == {}
+    assert "fleet" not in saved.meta["read_scopes"]
+    # Offline search reads the saved replica: nothing may come back from the revoked scope.
+    assert memory_hub_search._replica_matches(target, "link", client.identity, settings) == ([], False)
+
+
+def test_unavailable_hub_during_metadata_refresh_leaves_the_replica(setup):
+    target, settings, _, out, replica = setup
+    card(replica, "gamma")
+    legacy(replica)
+
+    def down(*_):
+        raise hubc.HubUnavailable("unreachable")
+
+    client = hubc.client_for(settings, transport=down)
+    with pytest.raises(hubc.HubConfigError, match=PREDATES):
+        mirror.mirror(target, client, settings, out)
+    saved = store.replica(target)
+    assert len(saved.heads) == 2
+    assert saved.meta["read_scopes"] == ["fleet"]
+
+
+def _second_workspace(setup, tmp_path):
+    """Another workspace with its own replica that targets the same output folder."""
+    target, settings, client, out, _ = setup
+    other = tmp_path / "other-workspace"
+    other.mkdir()
+    store.ensure_root(other)
+    replica = store.Replica(store.root(other) / store.REPLICA)
+    replica.meta = dict(store.replica(target).meta)
+    replica.save()
+    return other, replica
+
+
+def test_overlapping_runs_on_one_folder_serialize(setup, tmp_path, monkeypatch):
+    from brigade.inbox_lock import InboxLockTimeout
+
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    other, other_replica = _second_workspace(setup, tmp_path)
+    card(other_replica, "beta")
+    monkeypatch.setattr(mirror, "LOCK_DEADLINE_SECONDS", 0.2)
+    seen: list[str] = []
+    real_note = mirror._note
+
+    def note_then_overlap(head, meta):
+        if not seen:
+            seen.append(head["card_id"])
+            # The second run starts while the first holds the folder, mid-plan.
+            with pytest.raises(InboxLockTimeout):
+                mirror.mirror(other, client, settings, out)
+        return real_note(head, meta)
+
+    monkeypatch.setattr(mirror, "_note", note_then_overlap)
+    assert len(mirror.mirror(target, client, settings, out)["written"]) == 2
+    monkeypatch.setattr(mirror, "_note", real_note)
+    # Run in turn, the second run sees the first run's marker and owns its note.
+    report = mirror.mirror(other, client, settings, out)
+    assert [name.split("-")[0] for name in report["deleted"]] == ["alpha"]
+    marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
+    assert sorted(marker["files"]) == sorted([mirror.INDEX, *(p.name for p in out.glob("beta-*.md"))])
+    assert not list(out.glob("alpha-*.md"))
+    assert len(list(out.glob("beta-*.md"))) == 1
+
+
+def test_lock_file_is_never_deleted_or_foreign(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    lock = out / mirror.LOCK
+    assert lock.is_file()
+    replica.heads.clear()
+    replica.save()
+    run(setup)
+    assert lock.is_file()
+    assert json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))["files"] == {mirror.INDEX: True}
+    # A folder holding only the lock file counts as empty: no --init needed.
+    for path in out.iterdir():
+        if path != lock:
+            path.unlink()
+    run(setup)
+
+
+def test_lock_file_alone_does_not_block_a_markerless_folder(setup):
+    *_, out, replica = setup
+    out.mkdir()
+    (out / mirror.LOCK).write_bytes(b"")
+    card(replica)
+    assert len(run(setup)["written"]) == 2
+
+
+def test_refused_markerless_folder_gets_no_lock_file(setup):
+    *_, out, _ = setup
+    out.mkdir()
+    (out / "foreign.md").write_text("mine", encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="--init"):
+        run(setup)
+    assert [p.name for p in out.iterdir()] == ["foreign.md"]
+
+
+def test_busy_destination_exits_75(setup, monkeypatch, capsys):
+    from brigade.inbox_lock import held_file_lock
+
+    target, settings, client, out, replica = setup
+    card(replica)
+    run(setup)
+    monkeypatch.setattr(mirror, "LOCK_DEADLINE_SECONDS", 0.1)
+    monkeypatch.setattr(hubc, "load_settings", lambda _: settings)
+    monkeypatch.setattr(hubc, "client_for", lambda *_args, **_kw: client)
+    with held_file_lock(out.resolve() / mirror.LOCK, deadline_seconds=1):
+        code = cli.main(["memory", "hub", "mirror", "--target", str(target), "--out", str(out)])
+    assert code == 75
+    assert "another memory hub" in capsys.readouterr().err
+
+
+def test_skipped_card_keeps_its_filename_when_it_returns(setup):
+    *_, out, replica = setup
+    card(replica, text="---\ntitle: Original\n---\nbody")
+    run(setup)
+    original = next(p.name for p in out.glob("*.md") if p.name != mirror.INDEX)
+    assert original.startswith("original-")
+    card(replica, scan_state="pending", text="---\ntitle: Retitled\n---\nbody")
+    assert len(run(setup)["deleted"]) == 1
+    assert not (out / original).exists()
+    marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
+    assert original in marker["notes"].values()
+    assert original not in marker["files"]
+    card(replica, text="---\ntitle: Retitled\n---\nbody")
+    run(setup)
+    assert [p.name for p in out.glob("*.md") if p.name != mirror.INDEX] == [original]
+
+
+def test_card_gone_from_the_heads_forgets_its_filename(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    replica.heads.clear()
+    replica.save()
+    run(setup)
+    assert json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))["notes"] == {}
+
+
+def test_unparseable_leading_block_stays_in_the_body(setup):
+    *_, out, replica = setup
+    card(replica, text="---\njust a loose note\nno pairs here\n---\nbody\n")
+    meta, body = mirror._split("---\njust a loose note\nno pairs here\n---\nbody\n")
+    assert meta == {}
+    assert body.startswith("---\njust a loose note")
+    run(setup)
+    note = next(out.glob("alpha-*.md")).read_text(encoding="utf-8")
+    assert "just a loose note\nno pairs here\n---\nbody" in note
+
+
+def test_stale_temp_files_are_removed_under_the_lock(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    stale = out / ".mirror-old.tmp"
+    fresh = out / ".mirror-new.tmp"
+    unrelated = out / ".mirror-notes.txt"
+    for path in (stale, fresh, unrelated):
+        path.write_text("partial", encoding="utf-8")
+    old = time.time() - 11 * 60
+    os.utime(stale, (old, old))
+    os.utime(unrelated, (old, old))
+    run(setup, dry_run=True)
+    assert stale.exists()
+    run(setup)
+    assert not stale.exists()
+    assert fresh.exists()
+    assert unrelated.exists()
+
+
+def test_stale_temp_cleanup_skips_a_refused_folder(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    stale = out / ".mirror-old.tmp"
+    stale.write_text("partial", encoding="utf-8")
+    old = time.time() - 11 * 60
+    os.utime(stale, (old, old))
+    (out / mirror.MARKER).write_text("{}", encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="invalid mirror marker"):
+        run(setup)
+    assert stale.exists()
+
+
+def test_owned_name_that_is_a_directory_is_refused_before_open(setup, monkeypatch):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    owned = next(out.glob("alpha-*.md"))
+    owned.unlink()
+    owned.mkdir()
+    # Windows raises PermissionError when a directory is opened. The check must not rely on the open.
+    real_open = os.open
+
+    def deny_directories(path, *args, **kwargs):
+        if Path(path) == owned:
+            raise PermissionError(13, "Permission denied")
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", deny_directories)
+    with pytest.raises(hubc.HubConfigError, match="not a regular file"):
+        run(setup)

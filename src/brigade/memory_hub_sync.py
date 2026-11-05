@@ -216,6 +216,8 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     "card", scope=head["scope"], card_id=head["card_id"], revision=head["revision"], offset=0
                 )
             except hubc.HubRefusal as exc:
+                if exc.code == "memory_grant_missing":
+                    _drop_revoked_scope(target, hub, principal, epoch, head["scope"])
                 if exc.code in ("memory_card_not_found", "memory_grant_missing"):
                     raise hubc.HubConfigError(
                         f"the hub no longer serves {head['scope']}/{head['card_id']} at revision {head['revision']}"
@@ -244,6 +246,22 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
             if fetched:
                 live.save()
     return len(fetched)
+
+
+def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, scope: str) -> None:
+    """Take a scope the hub just refused out of the live replica and save it, as `_apply` does. Hold the pull lock.
+
+    Only when the replica is still this hub, principal and log_epoch. A refusal
+    that is not about a grant never reaches here, so an ordinary outage keeps the replica.
+    """
+    with store.locked(target):
+        live = store.replica(target)
+        if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
+            return
+        kept = {name for name in live.meta.get("read_scopes") or [] if name != scope}
+        live.retain_scopes(kept)
+        live.meta["read_scopes"] = sorted(kept)
+        live.save()
 
 
 def _prepare(

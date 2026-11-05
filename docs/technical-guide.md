@@ -2603,6 +2603,12 @@ The marker is written before any note changes, so a run killed midway leaves
 nothing unowned. A file the marker does not own but whose bytes equal the
 generated note is adopted rather than refused. The destination itself must not
 be a symlink, but a symlinked parent such as a symlinked home is fine.
+A real run holds an exclusive lock on the output folder from the marker read to
+the final marker write, so two runs on one folder, even from different
+workspaces, take turns. The lock is the dotfile `.brigade-memory-mirror.lock`
+inside the folder. The mirror never deletes it or counts it as a foreign file.
+A run that cannot get the lock exits busy with code 75. A real run also removes
+`.mirror-*.tmp` files older than 10 minutes, which a killed run leaves behind.
 
 Only live, scan-clean, non-private heads are exported. Flagged, pending,
 unknown-scan and superseded cards are counted by reason. The client's privacy
@@ -2612,7 +2618,10 @@ would delete its note. The mirror refetches only those heads in place under the
 pull lock, with the live replica serving throughout and nothing discarded. If
 the hub is unreachable or still returns no `scan_state`, the run exits non-zero
 and the folder stays unchanged until the hub is upgraded and `memory hub pull`
-has run. Retirement events remove cards from the replica before export.
+has run. A card that is `pending` because the scanner was unavailable stays out
+of the mirror until a new revision is written. A card the hub refuses with
+`memory_grant_missing` during that refresh is dropped from the replica, along
+with the rest of its scope. Retirement events remove cards from the replica before export.
 Supersession metadata uses `supersedes` for predecessor ids or `superseded_by`
 for a successor id in card front matter, within the same scope.
 
@@ -2621,7 +2630,8 @@ and scan state in one YAML front matter block. A card's own front matter is
 removed from the body and kept under a `card` key in that block, with its
 `tags` in the top-level `tags`. The body preserves the rest of the card text
 and its wiki links. Notes have readable slugs and a scope-and-id hash suffix. Filenames
-remain stable across title changes while the marker is retained. The generated
+remain stable across title changes while the marker is retained, even if the
+card is skipped for a few runs and comes back. The generated
 index links to notes by scope. Unchanged files retain their bytes and mtimes.
 Changed files use a temporary file in the output folder and an atomic rename.
 
