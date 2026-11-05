@@ -1073,6 +1073,9 @@ if mode == "crash":
     sys.exit(3)
 done = threading.Event()
 signal.signal(signal.SIGTERM, lambda *_: done.set())
+# entry.py starts the hub with TERM and INT blocked; like brigade-hub, unblock them
+# once the handler is in place, or the stop is never delivered.
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGTERM, signal.SIGINT})
 done.wait(30)
 sys.exit(0 if mode == "clean" else 5)
 """
