@@ -25,9 +25,7 @@ HOST = str(ipaddress.IPv4Address(2130706433))
 def percentiles(values):
     ordered = sorted(values)
     return {
-        f"p{p}": ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)]
-        if ordered
-        else None
+        f"p{p}": ordered[max(0, math.ceil(len(ordered) * p / 100) - 1)] if ordered else None
         for p in (50, 90, 95, 99, 100)
     }
 
@@ -100,12 +98,7 @@ def telemetry_column(samples, column):
 
 def endpoint(url):
     parsed = urlsplit(url)
-    if (
-        parsed.scheme not in ("http", "https")
-        or not parsed.hostname
-        or parsed.username
-        or parsed.password
-    ):
+    if parsed.scheme not in ("http", "https") or not parsed.hostname or parsed.username or parsed.password:
         raise ValueError("expected an http(s) endpoint without credentials")
     if parsed.path not in ("", "/") or parsed.query or parsed.fragment:
         raise ValueError("endpoint must have no path, query or fragment")
@@ -127,11 +120,7 @@ class Client:
 
     def request(self, method, path, body):
         if self.conn is None:
-            cls = (
-                http.client.HTTPSConnection
-                if self.url.scheme == "https"
-                else http.client.HTTPConnection
-            )
+            cls = http.client.HTTPSConnection if self.url.scheme == "https" else http.client.HTTPConnection
             source = (HOST, 0) if self.url.scheme == "http" else None
             self.conn = cls(
                 self.url.hostname,
@@ -149,9 +138,7 @@ class Client:
             self.conn.request(method, path, body, headers)
             response = self.conn.getresponse()
             status = response.status
-            raw = (
-                response.read()
-            )  # A truncated body is a transport error, even after HTTP 200.
+            raw = response.read()  # A truncated body is a transport error, even after HTTP 200.
             retry_after = response.getheader("Retry-After")
             if self.connection == "close":
                 self.close()
@@ -212,9 +199,7 @@ def run(args):
             if status >= 400:
                 try:
                     answer = json.loads(raw)
-                    record["reason"] = (
-                        answer.get("reason") if isinstance(answer, dict) else None
-                    )
+                    record["reason"] = answer.get("reason") if isinstance(answer, dict) else None
                 except (ValueError, UnicodeError):
                     pass
                 # Keep complete error bytes, including HTML 502/504 and responses without a reason.
@@ -264,7 +249,7 @@ def run(args):
     stop = threading.Event()
 
     def sample():
-        client = Client(args.url, token, "close", args.timeout)
+        client = Client(args.url, os.environ.get("BRIGADE_BENCH_METRICS_TOKEN", token), "close", args.timeout)
         try:
             while not stop.is_set():
                 try:
@@ -333,9 +318,7 @@ def run(args):
     # Open-loop workers drain queued requests after the window closes. Throughput
     # counts only completions inside the window; later ones keep their latency.
     window_end = args.warmup + args.seconds
-    in_window = [
-        r for r in measured if r["completed_s"] is not None and r["completed_s"] <= window_end
-    ]
+    in_window = [r for r in measured if r["completed_s"] is not None and r["completed_s"] <= window_end]
     drained = [r["completed_s"] for r in measured if r["completed_s"] is not None]
     report = {
         "schema_version": 1,
@@ -353,9 +336,7 @@ def run(args):
         "conditions": {
             "target": args.target,
             "allotment": args.allotment,
-            "transport": "operator-tls"
-            if args.url.startswith("https:")
-            else "single-loopback-source",
+            "transport": "operator-tls" if args.url.startswith("https:") else "single-loopback-source",
             "tls_gated": False,
             "mode": args.mode,
             "connection": args.connection,
@@ -371,9 +352,7 @@ def run(args):
             "path": args.path,
             "payload": {
                 "kind": "file" if payload is not None else "unique-event-v1",
-                "sha256": hashlib.sha256(payload).hexdigest()
-                if payload is not None
-                else None,
+                "sha256": hashlib.sha256(payload).hexdigest() if payload is not None else None,
             },
             "database": db_info(args.database),
             "flags": args.flags,
@@ -385,9 +364,7 @@ def run(args):
             "completed_after_window": len(latencies) - len(in_window),
             "drain_seconds": max(0.0, max(drained) - window_end) if drained else 0.0,
             "latency_ms": percentiles(latencies),
-            "mean_service_ms": statistics.mean(
-                r["service_ms"] for r in measured if r["service_ms"] is not None
-            )
+            "mean_service_ms": statistics.mean(r["service_ms"] for r in measured if r["service_ms"] is not None)
             if latencies
             else None,
         },
@@ -409,9 +386,7 @@ def db_info(path):
     return {
         "status": "observed after run",
         "main_bytes": db.stat().st_size,
-        "wal_bytes": Path(str(db) + "-wal").stat().st_size
-        if Path(str(db) + "-wal").exists()
-        else 0,
+        "wal_bytes": Path(str(db) + "-wal").stat().st_size if Path(str(db) + "-wal").exists() else 0,
     }
 
 
@@ -419,10 +394,8 @@ def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--url", required=True)
     p.add_argument("--output", type=Path, required=True)
-    p.add_argument("--target", choices=("python", "rust-proxy"), required=True)
-    p.add_argument(
-        "--allotment", choices=("reference", "1cpu-512m"), default="reference"
-    )
+    p.add_argument("--target", choices=("python", "rust-proxy", "rust-native"), required=True)
+    p.add_argument("--allotment", choices=("reference", "1cpu-512m"), default="reference")
     p.add_argument("--mode", choices=("closed", "open"), default="open")
     p.add_argument("--connection", choices=("close", "keep-alive"), default="close")
     p.add_argument("--seconds", type=float, default=2)

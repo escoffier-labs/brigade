@@ -297,3 +297,36 @@ characters as Python does.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.
+
+### Native heartbeat (S6)
+
+`--route-mode heartbeat=native` serves `POST /events`, `GET /status`,
+`POST /sessions` and `GET /sessions`. The default stays `proxy`. Shadow mode
+is refused until a heartbeat shadow audit exists. The native commands share
+one hub-file writer with registration, claims and messages. Event and session
+admission is non-durable, with the durable queue reserve left for claims and
+credentials. Every commit still uses `FULL`.
+
+An event object or an array of up to 1,000 events validates before insertion.
+Dedupe keys, receipt timestamps, optional fields and `run.failed` outbox rows
+follow Python. A refusal rolls its command back. The writer rechecks the schema
+version and caller under its write lock. Local sessions retain their start time
+while active, end a prior checkout identity on a Claude or Codex move, and keep
+T3 provider links when an update omits the link field. Reads project active and
+historical sessions, cloud presence, last known seats and stale T3 observations.
+
+Compatibility fallbacks remain on the matching Python upstream: event bodies
+with execution context, non-ASCII or control-bearing node identities, negative
+integer zero and integers beyond SQLite's range, cloud session writes, session
+requests with keys needing Python string representation, JSON spellings that
+serde rejects, token query parameters, and status rows with exotic datetime
+spellings. Cloud session reads are native. These fallbacks preserve the existing
+validators and error bytes and are not a claim that every heartbeat input has
+been ported. Port the extended validators before requiring heartbeat to survive
+upstream failure for those inputs.
+
+The S6 load procedure and deployment observation are in
+[bench/README.md](bench/README.md). `writer_commit_duration_seconds` adds
+cumulative histogram buckets for every COMMIT attempt, failed commits included.
+Subtract the buckets at the run boundaries to bound commit p99. The existing
+last-batch gauges keep their meaning and cannot measure every commit.

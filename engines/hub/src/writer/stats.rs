@@ -7,6 +7,30 @@ use std::{
     time::Duration,
 };
 
+const COMMIT_BOUNDS: [f64; 21] = [
+    0.0001,
+    0.00025,
+    0.0005,
+    0.001,
+    0.002,
+    0.003,
+    0.005,
+    0.01,
+    0.02,
+    0.025,
+    0.05,
+    0.1,
+    0.25,
+    0.5,
+    1.0,
+    2.0,
+    3.0,
+    5.0,
+    10.0,
+    30.0,
+    f64::INFINITY,
+];
+
 #[derive(Default)]
 pub struct WriterStats {
     queue: Option<QueueProbe>,
@@ -15,6 +39,7 @@ pub struct WriterStats {
     commit_nanos: AtomicU64,
     lock_wait_nanos: AtomicU64,
     aborted_batches: AtomicU64,
+    commit_buckets: [AtomicU64; 21],
 }
 /// One scrape. The gauges describe the same most recent batch only loosely: each
 /// field is loaded on its own, which is enough for a sampled metric.
@@ -57,9 +82,24 @@ impl WriterStats {
         self.batch_size.store(size as u64, Relaxed);
         self.apply_nanos.store(nanos(apply), Relaxed);
         self.commit_nanos.store(commit.map_or(0, nanos), Relaxed);
+        if let Some(commit) = commit {
+            let bucket = COMMIT_BOUNDS
+                .iter()
+                .position(|b| commit.as_secs_f64() <= *b)
+                .unwrap();
+            self.commit_buckets[bucket].fetch_add(1, Relaxed);
+        }
         if aborted {
             self.aborted_batches.fetch_add(1, Relaxed);
         }
+    }
+    /// Exclusive buckets count every COMMIT attempt, including failed commits.
+    /// Scrapes can subtract cumulative buckets to bound p99 over a run window.
+    pub fn commit_histogram(&self) -> ([f64; 21], [u64; 21]) {
+        (
+            COMMIT_BOUNDS,
+            std::array::from_fn(|i| self.commit_buckets[i].load(Relaxed)),
+        )
     }
     pub fn snapshot(&self) -> WriterSnapshot {
         WriterSnapshot {
@@ -70,5 +110,22 @@ impl WriterStats {
             lock_wait_seconds: seconds(&self.lock_wait_nanos),
             aborted_batches: self.aborted_batches.load(Relaxed),
         }
+    }
+}
+
+#[cfg(test)]
+mod commit_histogram_tests {
+    use super::*;
+    #[test]
+    fn every_attempted_commit_is_counted_once_including_failures() {
+        let stats = WriterStats::default();
+        stats.batch(1, Duration::ZERO, Some(Duration::from_millis(2)), false);
+        stats.batch(1, Duration::ZERO, Some(Duration::from_millis(21)), true);
+        stats.batch(0, Duration::ZERO, None, true);
+        let (bounds, counts) = stats.commit_histogram();
+        assert_eq!(counts.iter().sum::<u64>(), 2);
+        let bucket = bounds.iter().position(|b| *b >= 0.002).unwrap();
+        assert_eq!(counts[bucket], 1);
+        assert_eq!(counts[bounds.iter().position(|b| *b >= 0.021).unwrap()], 1);
     }
 }

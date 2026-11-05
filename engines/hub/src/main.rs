@@ -1,6 +1,7 @@
 //! S3 transport front. Python remains the authority for route semantics and storage.
 mod admission;
 mod claims_route;
+mod heartbeat;
 mod memory_route;
 mod messages_route;
 mod registration;
@@ -358,6 +359,7 @@ struct App {
     lookup: Option<admission::Lookup>,
     registration: Option<registration::Registration>,
     claims: Option<claims_route::Claims>,
+    heartbeat: Option<heartbeat::Heartbeat>,
     messages: Option<messages_route::Messages>,
     /// None: memory is not configured and `/memory` is proxied like any unknown path.
     memory: Option<memory_route::MemoryRoute>,
@@ -383,6 +385,7 @@ impl App {
             lookup: None,
             registration: None,
             claims: None,
+            heartbeat: None,
             messages: None,
             memory: None,
             trust_identity,
@@ -869,6 +872,16 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    let heartbeat = app
+        .heartbeat
+        .as_ref()
+        .filter(|_| heartbeat::Heartbeat::route(parts.method.as_str(), parts.uri.path()))
+        .filter(|_| !query_names_token(parts.uri.query()));
+    if let Some(route) = heartbeat {
+        if let Some(refusal) = route.auth(&parts).await {
+            return refusal;
+        }
+    }
     let messages = app
         .messages
         .as_ref()
@@ -946,6 +959,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         // The same serde_json gap as registration: Python answers those bodies.
         if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
             if let Some(response) = claims.handle(&parts, node, &body).await {
+                return response;
+            }
+        }
+    }
+    if let Some(route) = heartbeat {
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            if let Some(response) = route.handle(&parts, &body).await {
                 return response;
             }
         }
@@ -1458,7 +1478,11 @@ async fn start_and_serve(
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
     // One S4a writer per file, shared by every native family. It owns the writer metrics.
-    let writer = if native("registration") || native("claims") || native("messages") {
+    let writer = if native("registration")
+        || native("claims")
+        || native("messages")
+        || native("heartbeat")
+    {
         let writer = brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
             arbiter.clone(),
@@ -1506,6 +1530,17 @@ async fn start_and_serve(
             policy,
             wake,
         ));
+    }
+    if native("heartbeat") {
+        state.heartbeat = Some(heartbeat::Heartbeat {
+            readers: readers.clone(),
+            writer: writer.clone().unwrap(),
+            admin: registration::digest(&admin),
+            clock: native_clock.clone(),
+            allow_admin_writes: config.allow_admin_writes,
+            events: brigade_hub::claims::events_enabled(),
+            stale_after: heartbeat::stale_after(config.deck_config.as_deref()).await?,
+        });
     }
     if native("claims") {
         state.claims = Some(claims_route::Claims {
