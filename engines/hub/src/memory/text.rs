@@ -610,6 +610,9 @@ fn radix_int(digits: &str, radix: u32) -> Option<String> {
 /// `memory_cmd._parse_frontmatter`: keys in order, the last duplicate wins.
 pub fn front_matter(text: &str) -> Vec<(String, Value)> {
     let mut data: Vec<(String, Value)> = Vec::new();
+    // Position of each key in `data`, so a card with many keys parses in linear time while
+    // `data` keeps Python's dict order (first insertion wins the position, last value wins).
+    let mut positions: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     if !text.starts_with("---\n") {
         return data;
     }
@@ -635,9 +638,12 @@ pub fn front_matter(text: &str) -> Vec<(String, Value)> {
         } else {
             Value::Str(value.trim_matches(['\'', '"']).into())
         };
-        match data.iter_mut().find(|(k, _)| k == key) {
-            Some(slot) => slot.1 = parsed,
-            None => data.push((key.into(), parsed)),
+        match positions.get(key) {
+            Some(&at) => data[at].1 = parsed,
+            None => {
+                positions.insert(key.into(), data.len());
+                data.push((key.into(), parsed));
+            }
         }
     }
     data

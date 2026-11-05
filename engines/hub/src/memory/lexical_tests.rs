@@ -576,6 +576,29 @@ fn literal_nesting_stops_at_cpythons_limit() {
 }
 
 #[test]
+fn front_matter_keys_keep_dict_order_and_parse_in_linear_time() {
+    // A repeated key keeps its first position and takes the last value, like a Python dict.
+    let data = text::front_matter("---\ntitle: a\ntags: [x]\ntitle: b\n---\nbody\n");
+    let keys: Vec<&str> = data.iter().map(|(k, _)| k.as_str()).collect();
+    assert_eq!(keys, vec!["title", "tags"]);
+    assert!(matches!(&data[0].1, text::Value::Str(s) if s == "b"));
+    // 80,000 distinct keys stay under the card size limit and must not parse quadratically.
+    let mut card = String::from("---\n");
+    for n in 0..80_000 {
+        card.push_str(&format!("k{n}: v\n"));
+    }
+    card.push_str("title: last\n---\nbody\n");
+    let started = std::time::Instant::now();
+    let f = text::fields(&card, "wide");
+    assert_eq!(f.title, "last");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+}
+
+#[test]
 fn radix_integers_convert_to_decimal_within_pythons_digit_limit() {
     use text::{Lit, literal_eval};
     let int = |s: &str| match literal_eval(s) {
