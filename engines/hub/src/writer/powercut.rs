@@ -986,7 +986,7 @@ fn message(caller: &str, key: &str, raw: serde_json::Value) -> Box<dyn super::Co
         },
         events: false,
         operator: String::new(),
-        wake: std::sync::Arc::new(wake::Wake::new(wake::Limits::for_connections(16).0)),
+        wake: std::sync::Arc::new(wake::Wake::new(wake::Limits::for_connections(16))),
         notified: Default::default(),
     })
 }

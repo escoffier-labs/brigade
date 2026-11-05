@@ -194,3 +194,114 @@ fn policy_reads_the_environment_like_python() {
         .is_err()
     );
 }
+
+struct Memory(rusqlite::Connection);
+impl ReadTx for Memory {
+    fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+        let mut statement = self.0.prepare(sql)?;
+        let width = statement.column_count();
+        let rows = statement.query_map(rusqlite::params_from_iter(params.iter()), |row| {
+            (0..width).map(|i| row.get::<_, Value>(i)).collect()
+        })?;
+        rows.collect()
+    }
+}
+impl WriteTx for Memory {
+    fn execute(&self, sql: &str, params: &[Value]) -> rusqlite::Result<usize> {
+        self.0
+            .execute(sql, rusqlite::params_from_iter(params.iter()))
+    }
+}
+
+#[test]
+fn retention_deletes_a_bounded_batch_per_command_and_drains_the_backlog() {
+    let tx = Memory(rusqlite::Connection::open_in_memory().unwrap());
+    tx.0.execute_batch(
+        "CREATE TABLE fleet_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT, \
+         reply_to INTEGER, acked_at TEXT, envelope TEXT, envelope_bytes INTEGER, content_state TEXT); \
+         CREATE INDEX fleet_messages_created_at ON fleet_messages (created_at); \
+         CREATE TABLE fleet_message_sends(id INTEGER PRIMARY KEY, sender TEXT, received_at TEXT);",
+    )
+    .unwrap();
+    let policy = Policy {
+        retention_days: 7,
+        ..Policy::default()
+    };
+    let now = 400 * DAY_US;
+    let old = iso_us(now - 30 * DAY_US);
+    let fresh = iso_us(now - DAY_US);
+    // Ten expired rows; each fresh row replies to one of them.
+    for _ in 0..10 {
+        tx.execute(
+            "INSERT INTO fleet_messages(created_at) VALUES(?)",
+            &[t(&old)],
+        )
+        .unwrap();
+    }
+    for parent in 1..=10 {
+        tx.execute(
+            "INSERT INTO fleet_messages(created_at,reply_to) VALUES(?,?)",
+            &[t(&fresh), Value::Integer(parent)],
+        )
+        .unwrap();
+    }
+    let count = |sql: &str| -> i64 { tx.0.query_row(sql, [], |r| r.get(0)).unwrap() };
+    retain(&tx, now, &policy, PURGE_BATCH, 4).unwrap();
+    assert_eq!(count("SELECT COUNT(*) FROM fleet_messages WHERE id<=10"), 6);
+    // Only the children of the deleted parents lost their link.
+    assert_eq!(
+        count("SELECT COUNT(*) FROM fleet_messages WHERE reply_to IS NULL AND id>10"),
+        4
+    );
+    assert_eq!(
+        count(
+            "SELECT COUNT(*) FROM fleet_messages AS c WHERE c.reply_to IS NOT NULL \
+               AND NOT EXISTS (SELECT 1 FROM fleet_messages AS p WHERE p.id=c.reply_to)"
+        ),
+        0
+    );
+    retain(&tx, now, &policy, PURGE_BATCH, 4).unwrap();
+    retain(&tx, now, &policy, PURGE_BATCH, 4).unwrap();
+    // Once the backlog clears the rows match Python's single unbounded pass.
+    assert_eq!(count("SELECT COUNT(*) FROM fleet_messages"), 10);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM fleet_messages WHERE reply_to IS NULL"),
+        10
+    );
+}
+
+#[test]
+fn an_expired_row_without_a_tombstone_never_returns_its_ciphertext() {
+    let mut row: Vec<Value> = vec![
+        Value::Integer(7),
+        t("node-a"),
+        t("node-b"),
+        t(""),
+        t(""),
+        Value::Null,
+        t("normal"),
+        t("c1"),
+        Value::Null,
+        Value::Null,
+        t("2026-03-02T00:00:00+00:00"),
+        t("2026-03-02T00:00:01+00:00"),
+        t("node-b"),
+        Value::Null,
+        Value::Null,
+        t("message"),
+        t("not an envelope"),
+        Value::Integer(15),
+        t("sealed"),
+        Value::Integer(1),
+    ];
+    let (_, shown) = message(&row, "2026-03-09T00:00:01+00:00");
+    assert!(
+        shown.ends_with(r#""kind": "message", "content_state": "content_expired"}"#),
+        "{shown}"
+    );
+    assert!(!shown.contains("not an envelope"), "{shown}");
+    // Before its lifetime ends the stored bytes are returned as they are.
+    row[11] = t("2026-03-09T00:00:02+00:00");
+    let (_, shown) = message(&row, "2026-03-09T00:00:01+00:00");
+    assert!(shown.contains(r#""content_state": "sealed""#), "{shown}");
+}

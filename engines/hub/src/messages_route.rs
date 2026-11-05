@@ -4,7 +4,7 @@
 //! the client's key order, which serde_json does not keep.
 use crate::registration::{Reply, digest, parse_body, quote};
 use axum::{
-    body::Body,
+    body::{Body, Bytes},
     http::{Response, request::Parts},
 };
 use brigade_hub::{
@@ -18,13 +18,15 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use tokio::sync::{Semaphore, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, mpsc, oneshot};
 
 /// A re-read's mark and its page (with whether it had rows), or a refusal.
 type RereadAnswer = (u64, Result<(bool, messages::Reply), messages::Reply>);
 /// One woken waiter's re-read, answered with the mark taken before the query.
 struct Reread {
     recipient: String,
+    /// The poll's bearer digest, re-checked against the principal's credential.
+    key: String,
     after: i64,
     unacked: bool,
     answer: oneshot::Sender<Option<RereadAnswer>>,
@@ -42,10 +44,6 @@ pub struct Messages {
     pub events: bool,
     pub policy: Policy,
     pub wake: Arc<Wake>,
-    /// Open connections, and how many stay kept for requests that do not wait.
-    pub connections: Arc<Semaphore>,
-    pub max_connections: usize,
-    pub kept_connections: usize,
     rereads: mpsc::Sender<Reread>,
 }
 fn reply((status, body): messages::Reply) -> Response<Body> {
@@ -86,9 +84,6 @@ impl Messages {
         allow_admin_writes: bool,
         policy: Policy,
         wake: Arc<Wake>,
-        connections: Arc<Semaphore>,
-        max_connections: usize,
-        kept_connections: usize,
     ) -> Self {
         let (rereads, receiver) = mpsc::channel(16 * 1024);
         let route = Self {
@@ -100,9 +95,6 @@ impl Messages {
             allow_admin_writes,
             policy,
             wake,
-            connections,
-            max_connections,
-            kept_connections,
             rereads,
         };
         tokio::spawn(route.clone().regroup(receiver));
@@ -128,24 +120,28 @@ impl Messages {
             Err(_) => Err(Box::new(crate::busy("credential-lookup"))),
         }
     }
-    /// `None` leaves the request to the Python upstream. `source` is `None`
-    /// for the front, which per-source waiter caps exempt.
+    /// `Err` hands the body back to leave the request to the Python upstream.
+    /// `source` is `None` for the front, which per-source waiter caps exempt.
+    /// `budget` holds the body's byte reservation: a `list` releases it and
+    /// the body once parsed, so an idle waiter costs only its future and its
+    /// `Waiter`.
     pub async fn handle(
         &self,
         parts: &Parts,
         caller: Option<String>,
-        body: &[u8],
+        body: Bytes,
+        budget: &mut Vec<OwnedSemaphorePermit>,
         source: Option<String>,
-    ) -> Option<Response<Body>> {
+    ) -> Result<Response<Body>, Bytes> {
         if !parts.headers.contains_key("content-length") {
-            return Some(Reply::error(400, "bad Content-Length or Transfer-Encoding").response());
+            return Ok(Reply::error(400, "bad Content-Length or Transfer-Encoding").response());
         }
-        let raw = match parse_body(body) {
+        let raw = match parse_body(&body) {
             Ok(raw) => raw,
-            Err(message) => return Some(Reply::error(400, &message).response()),
+            Err(message) => return Ok(Reply::error(400, &message).response()),
         };
         if messages::python_only(&raw) {
-            return None;
+            return Err(body);
         }
         let action = raw
             .get("action")
@@ -153,16 +149,16 @@ impl Messages {
             .unwrap_or_default()
             .to_string();
         if proxied(&action) {
-            return None;
+            return Err(body);
         }
         let Some(caller) = caller else {
-            return Some(reply(messages::error_reply(
+            return Ok(reply(messages::error_reply(
                 403,
                 "a node principal is required",
             )));
         };
         let Json::Object(raw) = raw else {
-            return Some(reply(
+            return Ok(reply(
                 Fail::error("message request must be an object")
                     .reply()
                     .unwrap(),
@@ -173,21 +169,33 @@ impl Messages {
             && (matches!(action.as_str(), "question_create" | "question_desktop")
                 || (matches!(action.as_str(), "send" | "reply") && plaintext))
         {
-            return Some(reply(
+            return Ok(reply(
                 Fail::code("hub requires sealed messages", "message_sealing_required")
                     .reply()
                     .unwrap(),
             ));
         }
         let key = key(parts).expect("authorized before the body was read");
+        let left = |answer: Option<Response<Body>>, body: Bytes| answer.ok_or(body);
         match action.as_str() {
-            "list" => self.list(caller, key, raw, source).await,
+            "list" => {
+                // `list` never leaves the request to Python after this point.
+                drop(body);
+                budget.clear();
+                Ok(self
+                    .list(caller, key, raw, source)
+                    .await
+                    .unwrap_or_else(|| crate::busy("messages-unavailable")))
+            }
             "count" | "sent" | "sent_lookup" | "identity" | "keys_get" | "manifests_get" => {
-                self.read(caller, key, raw).await
+                left(self.read(caller, key, raw).await, body)
             }
             "send" | "reply" | "ack" | "question_create" | "question_status"
-            | "question_desktop" => self.write(caller, key, raw, body.len()).await,
-            _ => Some(reply(
+            | "question_desktop" => {
+                let size = body.len();
+                left(self.write(caller, key, raw, size).await, body)
+            }
+            _ => Ok(reply(
                 Fail::error(
                     "action must be send, list, sent, count, ack, reply, who, claims, or identity",
                 )
@@ -295,6 +303,15 @@ impl Messages {
     ) -> Option<Response<Body>> {
         let (policy, now) = (self.policy.clone(), self.now());
         let recipient = caller.clone();
+        let digest = key.clone();
+        // Plan step 1: a poll that may wait is watched before its first mark,
+        // so the external-commit watcher cannot absorb a row that another
+        // process commits between this snapshot and the registration below.
+        let first_read = raw
+            .get("wait_ms")
+            .and_then(Json::as_u64)
+            .is_some_and(|w| w > 0)
+            .then(|| self.wake.first_read());
         // The reader opens its snapshot before the closure runs, so the mark
         // comes first: a send committed after it either is visible or moves
         // the epoch past it.
@@ -326,24 +343,23 @@ impl Messages {
             Ok(Err(r)) => return r.map(reply),
             Err(_) => return Some(crate::busy("reader-timeout")),
         };
-        let open = self.max_connections - self.connections.available_permits();
-        let room = open < self.max_connections - self.kept_connections;
-        let Some(_waiter) = room
-            .then(|| self.wake.register(&recipient, source.as_deref()))
-            .flatten()
-        else {
+        // Only waiters count against the waiter caps; `Limits::total` is the
+        // ceiling. Open connections that do not wait never refuse a wait.
+        let Some(_waiter) = self.wake.register(&recipient, source.as_deref()) else {
             return Some(reply(
                 Fail::quota("message wait capacity reached", "message_wait_capped", None)
                     .reply()
                     .unwrap(),
             ));
         };
+        drop(first_read);
         let deadline = tokio::time::Instant::now() + Duration::from_millis(wait_ms);
         loop {
             self.wake.wait(&recipient, mark, deadline).await;
             let (answer, receive) = oneshot::channel();
             let request = Reread {
                 recipient: recipient.clone(),
+                key: digest.clone(),
                 after,
                 unacked,
                 answer,
@@ -381,18 +397,18 @@ impl Messages {
                 .iter()
                 .map(|r| self.wake.epoch(&r.recipient))
                 .collect();
-            let jobs: Vec<(String, i64, bool)> = group
+            let jobs: Vec<(String, String, i64, bool)> = group
                 .iter()
-                .map(|r| (r.recipient.clone(), r.after, r.unacked))
+                .map(|r| (r.recipient.clone(), r.key.clone(), r.after, r.unacked))
                 .collect();
             let answers = self
                 .readers
                 .submit(move |c| {
                     let tx = ReadConnection(c);
                     let mut answers = Vec::with_capacity(jobs.len());
-                    for ((recipient, after, unacked), mark) in jobs.iter().zip(marks) {
+                    for ((recipient, key, after, unacked), mark) in jobs.iter().zip(marks) {
                         let result = match messages::reread(
-                            &tx, recipient, *after, *unacked, now, &policy,
+                            &tx, recipient, key, *after, *unacked, now, &policy,
                         ) {
                             Ok(read) => Ok(read),
                             Err(Fail::Sql(e)) => return Err(e),

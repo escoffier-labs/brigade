@@ -751,7 +751,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
-    let _budget = if headers_only {
+    let mut budget = if headers_only {
         vec![]
     } else {
         match credential.reserve(length as u32).await {
@@ -763,7 +763,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     // from headers. Dropping the incoming stream closes the client connection.
     let body = if headers_only { Body::empty() } else { body };
     let collected = http_body_util::Limited::new(body, BODY_LIMIT).collect();
-    let body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
+    let mut body = match tokio::time::timeout(Duration::from_secs(30), collected).await {
         Ok(Ok(collected)) => collected.to_bytes(),
         Ok(Err(e)) if memory.is_some() => {
             return memory_route::body_refusal(e.is::<http_body_util::LengthLimitError>());
@@ -812,8 +812,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         // The same serde_json gap as registration: Python answers those bodies.
         if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
             let source = (source != "front").then(|| source.clone());
-            if let Some(response) = route.handle(&parts, caller, &body, source).await {
-                return response;
+            // A native `list` releases the body and its reservation once parsed.
+            match route
+                .handle(&parts, caller, body, &mut budget, source)
+                .await
+            {
+                Ok(response) => return response,
+                Err(returned) => body = returned,
             }
         }
     }
@@ -911,7 +916,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     }
     match result {
         Ok(Ok(response)) => {
-            drop(_budget);
+            drop(budget);
             let response = response::prepare(
                 response,
                 browser,
@@ -1268,7 +1273,7 @@ async fn run(mut config: Config) -> Result<(), String> {
             |name| std::env::var(name).ok(),
             config.require_sealed,
         )?;
-        let (limits, kept) =
+        let limits =
             brigade_hub::messages::wake::Limits::for_connections(config.max_connections as usize);
         let wake = Arc::new(brigade_hub::messages::wake::Wake::new(limits));
         brigade_hub::messages::wake::watch_external(&path, wake.clone())?;
@@ -1291,9 +1296,6 @@ async fn run(mut config: Config) -> Result<(), String> {
             config.allow_admin_writes,
             policy,
             wake,
-            connections.clone(),
-            config.max_connections as usize,
-            kept,
         ));
     }
     if native("claims") {

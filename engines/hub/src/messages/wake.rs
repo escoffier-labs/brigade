@@ -4,7 +4,12 @@
 //! while the epoch still equals that mark, so a send that commits between an
 //! empty read and the wait ends the wait at once. Native commits bump the
 //! epoch in `post_commit`. Commits by other processes are found by a watch
-//! connection that samples `PRAGMA data_version` while anyone waits.
+//! thread on its own read-only connection, which samples `PRAGMA
+//! data_version` while anyone waits or is about to. That connection is not the
+//! writer's, so a native commit made while anyone waits also moves its
+//! `data_version`: the watcher then runs its `GROUP BY recipient` query and
+//! notifies those recipients a second time. The extra notify is harmless, as a
+//! waiter re-reads and waits again when it finds nothing new.
 use std::{
     collections::HashMap,
     path::Path,
@@ -26,16 +31,15 @@ pub struct Limits {
 impl Limits {
     /// 3,072 waiters with 1,024 connections kept for other requests at the
     /// default 4,096 connections, scaled down for smaller connection caps.
-    pub fn for_connections(max_connections: usize) -> (Self, usize) {
+    /// `total` is the whole waiter ceiling: open connections that do not wait,
+    /// such as idle keep-alives, never count against it.
+    pub fn for_connections(max_connections: usize) -> Self {
         let kept = (max_connections / 4).min(1024);
-        (
-            Self {
-                total: (max_connections - kept).min(3072),
-                per_principal: 2,
-                per_source: 64,
-            },
-            kept,
-        )
+        Self {
+            total: (max_connections - kept).min(3072),
+            per_principal: 2,
+            per_source: 64,
+        }
     }
 }
 #[derive(Default)]
@@ -52,6 +56,10 @@ struct State {
 pub struct Wake {
     state: Mutex<State>,
     waiting: AtomicUsize,
+    /// Polls between their first mark and their waiter registration.
+    reading: AtomicUsize,
+    /// Watch-thread iterations, for tests that order a commit against a tick.
+    ticks: AtomicUsize,
     limits: Limits,
 }
 impl Wake {
@@ -59,8 +67,25 @@ impl Wake {
         Self {
             state: Mutex::default(),
             waiting: AtomicUsize::new(0),
+            reading: AtomicUsize::new(0),
+            ticks: AtomicUsize::new(0),
             limits,
         }
+    }
+    /// Count a poll that may wait as watched before it takes its first mark,
+    /// so the watcher cannot absorb a commit that lands between that poll's
+    /// first snapshot and its registration (plan step 1). Hold the guard
+    /// until the poll has registered its waiter or returned.
+    pub fn first_read(self: &Arc<Self>) -> FirstRead {
+        self.reading.fetch_add(1, Ordering::SeqCst);
+        FirstRead(self.clone())
+    }
+    /// Waiters plus polls still in their first read.
+    fn watched(&self) -> usize {
+        self.waiting.load(Ordering::SeqCst) + self.reading.load(Ordering::SeqCst)
+    }
+    pub fn ticks(&self) -> usize {
+        self.ticks.load(Ordering::SeqCst)
     }
     pub fn epoch(&self, recipient: &str) -> u64 {
         self.state
@@ -78,7 +103,7 @@ impl Wake {
         slot.notify.notify_waiters();
     }
     pub fn waiting(&self) -> usize {
-        self.waiting.load(Ordering::Relaxed)
+        self.waiting.load(Ordering::SeqCst)
     }
     /// Take a waiter slot, or `None` at any cap. `source` is `None` for the
     /// front, which per-source caps exempt (D29).
@@ -100,7 +125,7 @@ impl Wake {
         if let Some(source) = source {
             *state.sources.entry(source.to_string()).or_default() += 1;
         }
-        self.waiting.fetch_add(1, Ordering::Relaxed);
+        self.waiting.fetch_add(1, Ordering::SeqCst);
         Some(Waiter {
             wake: self.clone(),
             recipient: recipient.to_string(),
@@ -146,12 +171,23 @@ impl Drop for Waiter {
                 }
             }
         }
-        self.wake.waiting.fetch_sub(1, Ordering::Relaxed);
+        self.wake.waiting.fetch_sub(1, Ordering::SeqCst);
     }
 }
-/// The safety net for messages another process commits: while anyone waits,
-/// sample `data_version` every 250 ms and bump the recipients of new rows.
+/// A poll in its first read, counted until dropped.
+pub struct FirstRead(Arc<Wake>);
+impl Drop for FirstRead {
+    fn drop(&mut self) {
+        self.0.reading.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+/// The safety net for messages another process commits: while anyone waits
+/// or is in a first read, sample `data_version` every 250 ms and bump the
+/// recipients of new rows.
 pub fn watch_external(path: &Path, wake: Arc<Wake>) -> Result<(), String> {
+    watch_every(path, wake, Duration::from_millis(250))
+}
+fn watch_every(path: &Path, wake: Arc<Wake>, interval: Duration) -> Result<(), String> {
     let db = crate::schema::audit::open(
         path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -174,14 +210,18 @@ pub fn watch_external(path: &Path, wake: Arc<Wake>) -> Result<(), String> {
             let mut last = max_id(&db);
             let mut seen = version(&db);
             loop {
-                std::thread::sleep(Duration::from_millis(250));
-                if wake.waiting() == 0 {
-                    // Nobody waits: rows committed now are found by their first read.
-                    last = max_id(&db);
-                    seen = version(&db);
+                std::thread::sleep(interval);
+                wake.ticks.fetch_add(1, Ordering::SeqCst);
+                // Sample first, then check for watchers. A poll that starts its
+                // first read after the check reads after these samples, so every
+                // row absorbed here is visible to that read. A poll that started
+                // before the check keeps this tick on the busy path below.
+                let (now, top) = (version(&db), max_id(&db));
+                if wake.watched() == 0 {
+                    last = top;
+                    seen = now;
                     continue;
                 }
-                let now = version(&db);
                 if now == seen {
                     continue;
                 }
@@ -210,7 +250,7 @@ mod tests {
     use super::*;
     #[tokio::test]
     async fn a_send_before_the_wait_ends_it_at_once() {
-        let wake = Arc::new(Wake::new(Limits::for_connections(4096).0));
+        let wake = Arc::new(Wake::new(Limits::for_connections(4096)));
         let mark = wake.epoch("node-b");
         let _waiter = wake.register("node-b", None).unwrap();
         wake.notify("node-b");
@@ -222,6 +262,57 @@ mod tests {
         )
         .await;
         assert!(started.elapsed() < Duration::from_millis(100));
+    }
+    #[tokio::test]
+    async fn a_commit_between_the_first_read_and_registration_still_wakes() {
+        // The exact interleaving from review: an empty first snapshot, then a
+        // commit by another process, then a watcher tick, then registration.
+        let dir = std::env::temp_dir().join(format!("hub-wake-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fleet-hub.db");
+        let _ = std::fs::remove_file(&path);
+        let other = rusqlite::Connection::open(&path).unwrap();
+        other
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 CREATE TABLE fleet_messages(id INTEGER PRIMARY KEY AUTOINCREMENT, recipient TEXT)",
+            )
+            .unwrap();
+        let wake = Arc::new(Wake::new(Limits::for_connections(16)));
+        watch_every(&path, wake.clone(), Duration::from_millis(20)).unwrap();
+        let ticks = |n: usize| {
+            let start = wake.ticks();
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while wake.ticks() < start + n {
+                assert!(std::time::Instant::now() < deadline, "watcher stalled");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        ticks(2);
+        // `list`: watched, then the mark, then a snapshot that finds no rows.
+        let first_read = wake.first_read();
+        let mark = wake.epoch("node-b");
+        // Another process commits a row for the recipient.
+        other
+            .execute("INSERT INTO fleet_messages(recipient) VALUES('node-b')", [])
+            .unwrap();
+        // A full watcher tick runs before the poll registers.
+        ticks(2);
+        let _waiter = wake.register("node-b", None).unwrap();
+        drop(first_read);
+        let started = std::time::Instant::now();
+        wake.wait(
+            "node-b",
+            mark,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            started.elapsed() < Duration::from_millis(250),
+            "woke after {:?}",
+            started.elapsed()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
     #[tokio::test]
     async fn caps_hold_per_principal_and_per_source_but_not_for_the_front() {
@@ -245,7 +336,7 @@ mod tests {
     }
     #[tokio::test]
     async fn a_wait_times_out_without_a_wake() {
-        let wake = Arc::new(Wake::new(Limits::for_connections(16).0));
+        let wake = Arc::new(Wake::new(Limits::for_connections(16)));
         let _waiter = wake.register("x", None).unwrap();
         let started = std::time::Instant::now();
         wake.wait(

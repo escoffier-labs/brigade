@@ -60,7 +60,7 @@ def send(hub, method, path, token=None, body=None, raw=None, timeout=30):
         connection.close()
 
 
-def launch(state, clock, native):
+def launch(state, clock, native, extra=""):
     state.mkdir()
     template = (
         f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} "
@@ -68,6 +68,8 @@ def launch(state, clock, native):
     )
     if native:
         template += " --route-mode messages=native"
+    if extra:
+        template += " " + extra
     original = hc.hub_env
 
     def hub_env(*args):
@@ -529,6 +531,115 @@ class Messages(unittest.TestCase):
             finally:
                 hc.stop_hub(hub)
 
+
+    def test_waits_count_only_waiters_and_hold_no_body_budget(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            clock = work / "clock"
+            clock.write_text(str(START), encoding="utf-8")
+            # 16 connections: 12 waiters at most, 4 kept for other requests.
+            hub = launch(work / "native", clock, True, "--max-connections 16")
+            try:
+                enroll(hub, nodes=("node-a", "node-b"))
+                a, b = hub.tokens["node-a"], hub.tokens["node-b"]
+                results = {}
+
+                def poll(name, token, body, timeout=40):
+                    started = time.monotonic()
+                    response = send(hub, "POST", "/messages", token, raw=json.dumps(body).encode(), timeout=timeout)
+                    results[name] = (response, time.monotonic() - started)
+
+                # Idle keep-alive connections are not waiters: with 13 of 16 open
+                # and nobody waiting, a wait is accepted and runs its course.
+                origin = urlsplit(hub.url)
+                idle = []
+                try:
+                    for _ in range(13):
+                        connection = http.client.HTTPConnection(origin.hostname, origin.port, timeout=10)
+                        connection.connect()
+                        idle.append(connection)
+                    time.sleep(0.2)
+                    poll("idle", b, {"action": "list", "wait_ms": 300})
+                    response, waited = results["idle"]
+                    self.assertEqual(response.status, 200, response.body)
+                    self.assertEqual(response.body, b'{"messages": [], "next_cursor": 0}')
+                    self.assertGreaterEqual(waited, 0.25)
+                finally:
+                    for connection in idle:
+                        connection.close()
+                time.sleep(0.2)
+                # Each credential may buffer 16 MiB of bodies at once. Two waiters
+                # with 7 MiB bodies release theirs once parsed, so a third 7 MiB
+                # body from the same credential is read, not refused 503.
+                pad = "x" * (7 * 1024 * 1024)
+                threads = [
+                    threading.Thread(
+                        target=poll, args=(name, b, {"action": "list", "wait_ms": 8000, "pad": pad})
+                    )
+                    for name in ("p1", "p2")
+                ]
+                for thread in threads:
+                    thread.start()
+                deadline = time.monotonic() + 10
+                parked = False
+                while time.monotonic() < deadline and not parked:
+                    probe = send(hub, "POST", "/messages", b, {"action": "list", "wait_ms": 1})
+                    parked = probe.status == 429
+                    time.sleep(0.05)
+                self.assertTrue(parked, "both padded waiters should be waiting")
+                third = send(hub, "POST", "/messages", b, {"action": "count", "pad": pad})
+                self.assertEqual(
+                    (third.status, third.body), (400, b'{"error": "count accepts no arguments"}')
+                )
+                body = {"action": "send", "to": "node-b", "subject": "s", "body": "b", "client_id": "pad"}
+                self.assertEqual(send(hub, "POST", "/messages", a, body).status, 201)
+                for thread in threads:
+                    thread.join()
+                for name in ("p1", "p2"):
+                    response, waited = results[name]
+                    self.assertEqual([m["client_id"] for m in json.loads(response.body)["messages"]], ["pad"], name)
+                    self.assertLess(waited, 7, name)
+            finally:
+                hc.stop_hub(hub)
+
+    def test_a_rotated_token_ends_its_wait_with_the_auth_error(self):
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            clock = work / "clock"
+            clock.write_text(str(START), encoding="utf-8")
+            hub = launch(work / "native", clock, True)
+            try:
+                enroll(hub, nodes=("node-a", "node-b"))
+                old = hub.tokens["node-b"]
+                results = {}
+
+                def poll():
+                    started = time.monotonic()
+                    response = send(hub, "POST", "/messages", old, {"action": "list", "wait_ms": 10_000}, timeout=40)
+                    results["rotated"] = (response, time.monotonic() - started)
+
+                thread = threading.Thread(target=poll)
+                thread.start()
+                time.sleep(0.3)
+                # Rotate: revoke, then re-add under a fresh token. The row is
+                # active again, but its credential generation changed.
+                revoked = send(hub, "POST", "/nodes", hub.admin_token, {"action": "revoke", "node_id": "node-b"})
+                self.assertEqual(revoked.status, 200, revoked.body)
+                added = send(hub, "POST", "/nodes", hub.admin_token, {"action": "add", "node_id": "node-b"})
+                self.assertEqual(added.status, 200, added.body)
+                self.assertNotEqual(json.loads(added.body)["token"], old)
+                body = {"action": "send", "to": "node-b", "subject": "s", "body": "b", "client_id": "r1"}
+                self.assertEqual(send(hub, "POST", "/messages", hub.tokens["node-a"], body).status, 201)
+                thread.join()
+                response, waited = results["rotated"]
+                self.assertEqual(response.status, 403, response.body)
+                self.assertEqual(
+                    response.body,
+                    b'{"error": "sender is not an active hub principal", "code": "message_sender_inactive"}',
+                )
+                self.assertLess(waited, 5)
+            finally:
+                hc.stop_hub(hub)
 
 if __name__ == "__main__":
     unittest.main()

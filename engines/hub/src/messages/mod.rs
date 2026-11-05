@@ -32,6 +32,12 @@ pub const MAX_WAIT_MS: i64 = 20_000;
 pub const PURGE_BATCH: i64 = 32;
 /// The maintenance sweep's bound per command.
 pub const SWEEP_BATCH: i64 = 256;
+/// Expired rows one writer command deletes, with their children's `reply_to`
+/// cleared. Python deletes every expired row at once. Reads already hide
+/// expired rows, so a backlog drains over later commands with the same visible
+/// results, and no single command runs a delete long enough to hit the writer
+/// deadline (for example after the retention window is shortened).
+pub const RETENTION_BATCH: i64 = 1024;
 const SECOND_US: i64 = 1_000_000;
 const DAY_US: i64 = 86_400 * SECOND_US;
 const SENT_COLUMNS: &str = "m.id,m.sender,m.recipient,m.subject,m.body,m.reference,m.priority,m.client_id,m.sealed_reply_to,m.reply_to,m.created_at,m.acked_at,m.acked_by,m.sender_label,m.thread,m.kind,m.envelope,m.envelope_bytes,m.content_state,(SELECT p.created_at<?1 FROM fleet_messages AS p WHERE p.id=m.reply_to)";
@@ -434,12 +440,15 @@ fn message(row: &[Value], purge_cutoff: &str) -> (i64, String) {
     if let Some(envelope) = text_of(&row[16]) {
         let expired = text_of(&row[18]) == Some("sealed")
             && text_of(&row[11]).is_some_and(|acked| acked <= purge_cutoff);
-        match expired.then(|| sealed::tombstone(envelope)).flatten() {
-            Some(tombstone) => {
+        match expired.then(|| sealed::tombstone(envelope)) {
+            Some(Some(tombstone)) => {
                 fields.push(("envelope", quote(&tombstone)));
                 fields.push(("envelope_bytes", tombstone.len().to_string()));
                 fields.push(("content_state", quote("content_expired")));
             }
+            // A corrupt stored envelope past its lifetime has no tombstone. Fail
+            // closed: report the content as expired and never return its bytes.
+            Some(None) => fields.push(("content_state", quote("content_expired"))),
             None => {
                 fields.push(("envelope", json_value(&row[16])));
                 fields.push(("envelope_bytes", json_value(&row[17])));
@@ -755,16 +764,24 @@ pub fn list<T: ReadTx + ?Sized>(tx: &T, r: &Request) -> Result<Listed, Fail> {
         wait_ms: wait_ms as u64,
     })
 }
-/// One re-read after a wake: the principal re-check, then the inbox.
+/// One re-read after a wake: the principal re-check, then the inbox. A
+/// principal revoked or given a new credential while it waited gets the v1
+/// auth error and no rows (plan step 4). `key` is the poll's bearer digest.
+/// Python's `list` checks only that the principal is active, so a poll whose
+/// token was rotated mid-wait is stricter here than on v1.
 pub fn reread<T: ReadTx + ?Sized>(
     tx: &T,
     recipient: &str,
+    key: &str,
     after: i64,
     unacked: bool,
     now: i64,
     policy: &Policy,
 ) -> Result<(bool, Reply), Fail> {
     require_active(tx, recipient)?;
+    if !same_generation(tx, recipient, key)? {
+        return Err(Fail::inactive());
+    }
     let rows = inbox(tx, recipient, after, unacked, now, policy)?;
     Ok((
         !rows.is_empty(),
@@ -1695,18 +1712,33 @@ fn purge(tx: &dyn WriteTx, now: i64, limit: i64) -> rusqlite::Result<usize> {
     }
     Ok(rows.len())
 }
-/// `_prune_expired` with a purge bound: Python's 32, or the sweep's 256.
+/// `_prune_expired` with a purge bound (Python's 32, or the sweep's 256) and
+/// at most `RETENTION_BATCH` expired rows deleted per command.
 fn prune(tx: &dyn WriteTx, now: i64, policy: &Policy, limit: i64) -> rusqlite::Result<()> {
+    retain(tx, now, policy, limit, RETENTION_BATCH)
+}
+fn retain(
+    tx: &dyn WriteTx,
+    now: i64,
+    policy: &Policy,
+    limit: i64,
+    batch: i64,
+) -> rusqlite::Result<()> {
     purge(tx, now, limit)?;
     let cutoff = policy.cutoff(now);
+    // Both statements name the same oldest `batch` expired rows: the UPDATE
+    // does not change `created_at`, so the subquery reads the same set twice
+    // in this transaction, through the `created_at` index.
+    let expired = "SELECT id FROM fleet_messages WHERE created_at < ?1 \
+                   ORDER BY created_at,id LIMIT ?2";
+    let params = [t(&cutoff), Value::Integer(batch)];
     tx.execute(
-        "UPDATE fleet_messages SET reply_to=NULL WHERE reply_to IN \
-         (SELECT id FROM fleet_messages WHERE created_at < ?)",
-        &[t(&cutoff)],
+        &format!("UPDATE fleet_messages SET reply_to=NULL WHERE reply_to IN ({expired})"),
+        &params,
     )?;
     tx.execute(
-        "DELETE FROM fleet_messages WHERE created_at < ?",
-        &[t(&cutoff)],
+        &format!("DELETE FROM fleet_messages WHERE id IN ({expired})"),
+        &params,
     )?;
     tx.execute(
         "DELETE FROM fleet_message_sends WHERE received_at < ?",
