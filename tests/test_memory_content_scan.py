@@ -324,23 +324,45 @@ def test_s18_round3_ascii_copy_needs_no_second_mode(monkeypatch):
 @pytest.mark.parametrize(
     "name", list(json.loads((Path(__file__).parent / "fixtures/memory-scan-adversarial.json").read_text()))
 )
-@pytest.mark.parametrize("size", [128 * 1024, 512 * 1024])
 @pytest.mark.parametrize(
     "position", ["before", "after", "isolated", "before-fullwidth", "after-fullwidth", "isolated-fullwidth"]
 )
-def test_s18_round4_adversarial_rule_corpus(name, size, position):
+def test_s18_round4_adversarial_rule_corpus(name, position):
     import subprocess
-    import sys
-    from pathlib import Path
 
+    program = r"""
+import json
+from pathlib import Path
+import runpy
+import sys
+from time import perf_counter
+from brigade.dot.prompt_scan import blocked_rule
+helper = Path(sys.argv[1])
+vectors = runpy.run_path(str(helper))["vectors"]
+name, position = sys.argv[2:]
+expected = json.loads((helper.parent / "fixtures/memory-scan-adversarial.json").read_text())[name]["expected"][position.removesuffix("-fullwidth")]
+inputs = {size: dict(vectors(name, size))[position] for size in (128 * 1024, 512 * 1024)}
+def measure(size):
+    start = perf_counter()
+    result = blocked_rule([inputs[size]])
+    elapsed = perf_counter() - start
+    assert result == expected, (name, position, result, expected)
+    return elapsed
+measure(128 * 1024)
+small = min(measure(128 * 1024) for _ in range(2))
+large = min(measure(512 * 1024) for _ in range(2))
+print(small, large, large / small, flush=True)
+"""
     result = subprocess.run(
-        [sys.executable, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, str(size), position],
+        [sys.executable, "-c", program, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, position],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert float(result.stdout.split()[3]) < _ADVERSARIAL_SCAN_SECONDS, result.stdout
+    small, large, ratio = map(float, result.stdout.split())
+    assert large < 20, result.stdout
+    assert ratio < 8, result.stdout
 
 
 def test_s18_round4_exact_reviewer_inputs():

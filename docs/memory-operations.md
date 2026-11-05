@@ -171,8 +171,15 @@ A PEM private-key header alone blocks, independent of body size or an END line.
 The shared guard policy engine extends detected token spans through the full
 token run and PEM spans through the END line. Without END, the mask stops at
 the contiguous base64 body, including consistent indentation or quote prefixes,
-escaped newlines, and space-separated runs on the header line. A blank after the
-body ends the mask. Header-only mentions preserve the following paragraph.
+literal `\n` or `\r\n` escapes, and space-separated runs on the header line.
+Encrypted `Proc-Type:` and `DEK-Info:` metadata uses the same validated indent
+or single `> ` quote prefix as body lines. On the header line, escaped newline
+separators may surround metadata before the base64 run. Inline base64 tokens
+must end at whitespace, an escaped newline, a quote or the line end.
+A blank after the body ends the mask. Header-only mentions preserve the following
+paragraph. Same-line words after a header can be masked as base64.
+Without END, unsupported layouts such as nested `> > ` quotes, `>` without a
+space, or double-escaped newlines still mask only the header.
 END searches share a per-scan cache, including exhausted suffixes.
 Later rules compare raw spans and retain their findings inside expanded secrets.
 Only masking secret edits supersede contained edits, so allowing or warning on a

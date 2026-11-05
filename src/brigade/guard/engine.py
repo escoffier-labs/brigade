@@ -334,28 +334,43 @@ def _pem_body_end(text: str, end: int) -> int:
         # Physical continuation lines must retain their first body prefix.
         body_end = line_end - (text[line_end - 1 : line_end] == "\r")
         if header_line:
-            body = line.lstrip(" \t")
-            if body.startswith(r"\n"):
-                body = body[2:]
-            inline = re.match(r"[A-Za-z0-9+/]+={0,2}(?:(?:[ \t]+|\\n)[A-Za-z0-9+/]+={0,2})*(?:\\n)?", body)
+            # Consume escaped separators and metadata before scanning base64.
+            # Anchored matches advance monotonically through this physical line.
+            offset = 0
+            separator = re.compile(r"(?:[ \t]+|(?:\\r)?\\n)+")
+            metadata = re.compile(r"(?:Proc-Type:|DEK-Info:)[^\\\r\n]*(?:(?:\\r)?\\n|$)")
+            while True:
+                gap = separator.match(line, offset)
+                if gap is not None:
+                    offset = gap.end()
+                field = metadata.match(line, offset)
+                if field is None:
+                    break
+                offset = field.end()
+                end = cursor + offset
+            body = line[offset:]
+            token = r"[A-Za-z0-9+/]+={0,2}(?=[ \t]|(?:\\r)?\\n|[\"']|$)"
+            inline = re.match(token + r"(?:(?:[ \t]+|(?:\\r)?\\n)" + token + r")*(?:(?:\\r)?\\n)?", body)
             is_body = inline is not None
             if inline is not None:
-                body_end = cursor + len(line) - len(body) + inline.end()
+                body_end = cursor + offset + inline.end()
         else:
             leading = re.match(r"[ \t]*(?:> )?", line)
             assert leading is not None
             current_prefix = leading.group()
             body = line[len(current_prefix) :]
-            is_body = (prefix is None or prefix == current_prefix) and bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", body))
-            if is_body and prefix is None:
+            if prefix is not None and prefix != current_prefix and line.strip():
+                break
+            is_body = bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", body))
+            if prefix is None and (is_body or body.startswith(("Proc-Type:", "DEK-Info:"))):
                 prefix = current_prefix
-        if not line.strip():
+        if not body.strip():
             if body_seen:
                 break
         elif is_body:
             body_seen = True
             end = body_end
-        elif not body_seen and line.startswith(("Proc-Type:", "DEK-Info:")):
+        elif not body_seen and body.startswith(("Proc-Type:", "DEK-Info:")):
             end = line_end - (text[line_end - 1 : line_end] == "\r")
         else:
             break

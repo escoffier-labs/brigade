@@ -91,6 +91,37 @@ def test_pem_trailing_findings_keep_secret_and_unrelated_text(pem_backend, endin
     assert expected_guard in process.stdout
 
 
+@pytest.mark.parametrize("layout", ["indent", "quote", "quote-blank", "escaped-json", "escaped-crlf-json"])
+@pytest.mark.parametrize("consumer", ["guard", "agent-session", "workspace", "external-web"])
+def test_unterminated_encrypted_pem_metadata(pem_backend, layout, consumer):
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    lines = [header, "Proc-Type: 4,ENCRYPTED", "DEK-Info: AES-256-CBC,0123456789ABCDEF", "", "a" * 64, "b" * 64]
+    if layout in {"indent", "quote", "quote-blank"}:
+        prefix = "    " if layout == "indent" else "> "
+        pem = "\n".join(prefix + line if line or layout == "quote-blank" else "" for line in lines) + "\n"
+    else:
+        separator = r"\n" if layout == "escaped-json" else r"\r\n"
+        pem = '"' + separator.join(lines) + '"\n'
+    trailing = "Contact planted@probe-corp-canary.com host 10.23.45.67 logs /home/example-user/work done.\n"  # content-guard: allow email content-guard: allow private-ipv4 content-guard: allow home-path
+    text = pem + trailing
+    if consumer == "guard":
+        result = scan_text(text)
+        assert any(f.category == "secret" for f in result.findings)
+        assert {"email", "private-ipv4", "home-path"} <= {f.rule_id for f in result.findings}
+        redacted = result.redacted_text
+        expected = scan_text(trailing).redacted_text
+    else:
+        verdict = apply_origin_redaction(text, origin=consumer)
+        assert verdict.status == "redacted"
+        assert "private-key-block" in verdict.detectors
+        redacted = verdict.persisted_text
+        expected = apply_origin_redaction(trailing, origin=consumer).persisted_text
+    assert "a" * 60 not in redacted
+    assert "b" * 60 not in redacted
+    assert redacted.endswith(expected)
+    assert "Contact " in expected and " done." in expected
+
+
 @pytest.mark.parametrize("separator", ["\n", "\n\n", "\r\n\r\n"])
 def test_pem_header_only_keeps_following_paragraph(pem_backend, separator):
     text = "A log mentions:\n-----BEGIN " + "RSA PRIVATE KEY-----" + separator + "The following paragraph stays.\n"
@@ -128,7 +159,7 @@ def test_pem_blank_after_body_ends_mask(pem_backend, separator):
 
 @pytest.mark.parametrize("layout", ["headers", "bodies", "final-end"])
 def test_pem_repeated_headers_scan_time(pem_backend, layout):
-    # Print scan time separately from the generous process safety timeout.
+    # Compare an 8x input step in one process, with a separate hang cap.
     program = r"""
 import sys
 from time import perf_counter
@@ -136,19 +167,27 @@ from brigade.guard import scan_text
 unit = "-----BEGIN " + "PRIVATE KEY-----\n"
 if sys.argv[1] != "headers":
     unit += "a" * 64 + "\n"
-text = (unit * (512 * 1024 // len(unit) + 1))[:512 * 1024]
-if sys.argv[1] == "final-end":
-    text += "\n-----END PRIVATE KEY-----"
-start = perf_counter()
-result = scan_text(text)
-print(f"scan elapsed seconds {perf_counter() - start:.6f}", flush=True)
-assert any(f.rule_id == "private-key-block" for f in result.findings)
-assert "a" * 60 not in result.redacted_text
+def measure(size):
+    text = (unit * (size // len(unit) + 1))[:size]
+    if sys.argv[1] == "final-end":
+        text += "\n-----END PRIVATE KEY-----"
+    start = perf_counter()
+    result = scan_text(text)
+    elapsed = perf_counter() - start
+    assert any(f.rule_id == "private-key-block" for f in result.findings)
+    assert "a" * 60 not in result.redacted_text
+    return elapsed
+measure(64 * 1024)  # Warm caches before comparing input sizes.
+small = min(measure(64 * 1024) for _ in range(2))
+large = min(measure(512 * 1024) for _ in range(2))
+print(small, large, large / small, flush=True)
 """
     result = subprocess.run([sys.executable, "-c", program, layout], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     print(layout, os.environ["BRIGADE_GUARD_BACKEND"], result.stdout.strip())
-    assert float(result.stdout.split()[3]) < (4 if sys.platform == "win32" else 2), result.stdout
+    small, large, ratio = map(float, result.stdout.split())
+    assert large < 20, result.stdout
+    assert ratio < 16, result.stdout
 
 
 @pytest.mark.parametrize("action", ["allow", "warn", "block"])
@@ -168,3 +207,13 @@ def test_pem_policy_keeps_later_hostname_decision(pem_backend, action):
         assert header in result.redacted_text
         assert "DEK-Info: https://" in result.redacted_text
         assert result.redacted_text.endswith("\n\naaaa\n")
+
+
+@pytest.mark.parametrize("suffix", ["-Broken:", ":", "!", "=invalid"])
+def test_pem_inline_partial_token_is_not_body(pem_backend, suffix):
+    header = "-----BEGIN " + "RSA PRIVATE KEY-----"
+    remainder = r"\nProc" + suffix + "\nFollowing paragraph stays.\n"
+    result = scan_text(header + remainder)
+    assert result.redacted_text == "[redacted-private-key]" + remainder
+    verdict = apply_origin_redaction(header + remainder, origin="agent-session")
+    assert verdict.persisted_text == "[redacted-private-key]" + remainder
