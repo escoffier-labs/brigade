@@ -217,16 +217,32 @@ def run(
     except KeyboardInterrupt:
         pass
     finally:
+        held = _hold_stop_signals()
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
         stats_thread.join(timeout=5)
         events_thread.join(timeout=5)
         server.server_close()
+        for signum, handler in held.items():
+            signal.signal(signum, handler)
         if previous is not None:
             signal.signal(signal.SIGTERM, previous)
     # Container recipes check for this line after `docker stop` and a host shutdown.
     print("brigade fleet hub stopped cleanly", flush=True)
     return 0
+
+
+def _hold_stop_signals() -> dict[int, object]:
+    """Ignore SIGTERM and SIGINT while the shutdown runs; return the handlers to restore.
+
+    One stop can arrive twice, for example a terminal's Ctrl-C to the whole
+    process group followed by a supervisor's SIGTERM. A second
+    ``KeyboardInterrupt`` inside the joins would skip ``server_close()`` and
+    end the process by the signal. Only the main thread may set handlers.
+    """
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    return {signum: signal.signal(signum, signal.SIG_IGN) for signum in (signal.SIGTERM, signal.SIGINT)}
 
 
 def _stop_on_sigterm():
