@@ -28,6 +28,35 @@ brigade memory recall --target <hub-or-mirror> --cwd <session-cwd> --query "toke
 
 Bounded recall searches with the user's prompt when there is one (Claude `UserPromptSubmit`) and falls back to folder terms, labeled `query_source: "cwd"`, at session start. It returns index-level matches only: title, tags, path. Card bodies never appear. Fail-open: missing or unreadable targets do not block the harness. Repo-depth installs need an explicit `memory_recall_target` in `.brigade/config.json`. Details: [memory care](memory-care.md#session-start-and-prompt-recall-466-slice-1-2196).
 
+## Hub memory client
+
+A workspace can read hub memory on a Rust hub that serves `POST /memory`. The mode lives in a `[hub]` table in `.brigade/memory-care.toml`:
+
+```toml
+[hub]
+mode = "read"          # off (the default), read or sync
+scope = "repo:me/app"  # sync publishes here: fleet, repo:<identity> or principal:<id>
+replica_max_mb = 50
+```
+
+The hub URL and credential come from the fleet settings that `brigade fleet` reads: `[fleet] hub_url`, then the node token, then the admin token. The token is sent as a bearer header and is never printed or stored.
+
+```bash
+brigade memory hub status --target . --json
+brigade memory hub pull --target . && brigade memory hub push --target . --yes
+```
+
+`memory hub import --scope <scope> <card.md>...` sends one `import` call per card and needs the hub's import grant. `memory hub card <card_id>` prints one hub card's text. Every hub refusal is reported with its `code`, for example `memory_grant_missing`.
+
+- `off`: `memory search` behaves exactly as before and never contacts the hub.
+- `read`: `memory search` asks the hub within 800 ms and fuses its matches with local ones by reciprocal rank fusion. A match found in both places appears once. Each match says where it came from (`source`: `hub`, `local` or `replica`). If the hub is unreachable, times out, or answers 404 or 503, the answer comes from local cards and the replica and carries a warning with the reason.
+- `sync`: as `read`, and `memory hub push` publishes changed local cards into the configured scope. The first push into a scope prints how many cards it would publish and needs `--yes`. Cards marked `visibility: private` are never published or imported.
+- `pull` follows the hub log into `.brigade/memory/hub-replica/`. When the hub's `log_epoch` changes (a restore), the old replica is deleted first and rebuilt from empty, so search never answers from it.
+- Writes the hub cannot take right now wait in `.brigade/memory/hub-spool/` and are resent with the same `client_event_id`, so a replay never appends twice. A 404 from a hub this workspace has pulled from spools too. The spool holds at most 10,000 entries.
+- A spooled write that conflicts with a newer hub revision, was read under an older `log_epoch`, is older than 28 days, or that the hub refuses, becomes a local proposal in `.brigade/memory/hub-proposals/`. `memory hub status` lists them. They are never resent on their own.
+
+All of this state is per host, 0700 directories and 0600 files, and ignored by Git. Dot and Duet `memory_search` and `memory_card` follow the same mode.
+
 ## Evidence projection and identity audit
 
 ```bash
@@ -36,7 +65,7 @@ brigade evidence crawl memory . --dry-run --json
 brigade evidence crawl memory . --json
 ```
 
-The identity audit is read-only. It reports explicit card ids versus path fallbacks and duplicate coverage without calling the evidence engine or rewriting frontmatter. New cards mint `card-<uuid4>` IDs; consumers dual-read those IDs and legacy path/stem/topic aliases. `brigade memory care backfill` emits a dry-run old-to-new mapping receipt before any reviewed rewrite.
+The identity audit is read-only. It reports explicit card ids versus path fallbacks and duplicate coverage without calling the evidence engine or rewriting frontmatter. New cards mint `card-<uuid4>` IDs, and consumers dual-read those IDs and legacy path/stem/topic aliases. `brigade memory care backfill` emits a dry-run old-to-new mapping receipt before any reviewed rewrite.
 
 The crawl command projects memory into the evidence log only when the installed engine advertises `memory-projection.v1`. It accepts `--dry-run`, `--json`, `--rebuild`, and a positive `--limit`. It rejects the broader `--full` scan. Completed scans may tombstone missing projection rows. Failed or interrupted scans preserve the last completed projection and mark it stale instead of deleting it. Evidence projection status also appears inside Memory Operations inventory rows when evidence artifacts are present or missing.
 
@@ -54,7 +83,7 @@ brigade memory vault-doctor --target . --json
 
 One-way projection of canonical memory into a `Brigade Memory/` subfolder of an operator-supplied vault: one note per store item with care-state frontmatter and tags, category and harness maps, and a topology canvas. Writes go through the projection transaction kernel, so a failed run restores the vault. A manual edit inside the projection is untrusted data: Brigade preserves it, writes a conflict copy, and reports drift instead of merging.
 
-The read path is a separate surface. Configure it once in `.brigade/vault.toml` with the vault path, allowlisted `[[roots]]` (`scope`, vault-relative `path`, optional), and `schema_version = 1`. `--scope` names a configured root; an unknown scope is an error. `vault-index` writes a derived, owner-readable index under `.brigade/vault-index/` and never writes into the vault. `vault-search` returns bounded, redacted hits with a per-result `trust` of `untrusted_vault_content`. Projected notes key on `canonical_id` from the #934 contract; operator-authored notes fall back to the vault-relative path.
+The read path is a separate surface. Configure it once in `.brigade/vault.toml` with the vault path, allowlisted `[[roots]]` (`scope`, vault-relative `path`, optional), and `schema_version = 1`. `--scope` names a configured root, and an unknown scope is an error. `vault-index` writes a derived, owner-readable index under `.brigade/vault-index/` and never writes into the vault. `vault-search` returns bounded, redacted hits with a per-result `trust` of `untrusted_vault_content`. Projected notes key on `canonical_id` from the #934 contract. Operator-authored notes fall back to the vault-relative path.
 
 Note titles come from a card's leading heading when its frontmatter has no `title`, falling back to the inventory title. Related links are ranked (explicit refs, then shared tags, then shared category) and capped per note, so a large shared category does not turn into a complete graph. A map that would cover every note is omitted. The vault path stays out of topology and vault-search output as `redacted:operator-vault`.
 

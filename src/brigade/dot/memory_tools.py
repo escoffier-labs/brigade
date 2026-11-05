@@ -54,7 +54,10 @@ class MemoryTools:
         )
         if error or not isinstance(value, dict) or not isinstance(value.get("matches"), list):
             return {"error": error or "memory_unavailable"}
-        keys = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        keys: tuple[str, ...] = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        if "retrieval" in value:
+            # Hub memory is on for this workspace (S14): keep where each match came from.
+            keys += ("source", "scope", "revision", "trust")
         matches = []
         for match in value["matches"][:limit]:
             if not isinstance(match, dict):
@@ -67,12 +70,53 @@ class MemoryTools:
                     continue
             item["content_trust"] = "untrusted"
             matches.append(item)
-        return dict(
+        payload = dict(
             query=query,
             match_count=value.get("match_count"),
             matches=matches,
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
+        )
+        if isinstance(value.get("retrieval"), dict):
+            payload["retrieval"] = value["retrieval"]
+            if isinstance(value.get("warning"), str):
+                payload["warning"] = value["warning"]
+        return payload
+
+    def _hub_card(self, name: str, offset: int) -> dict[str, Any] | None:
+        """A card only hub memory holds, read through `brigade memory hub card` (S14)."""
+        from ..memory_hub_client import HubConfigError, hub_mode
+
+        try:
+            if hub_mode(self.workspace) == "off":
+                return None
+        except HubConfigError:
+            return None
+        value, error = self._brigade_json(
+            ["memory", "hub", "card", "--target", str(self.workspace), "--all", "--json", "--", name], timeout=30
+        )
+        card = value.get("card") if isinstance(value, dict) and value.get("ok") is True else None
+        if error or not isinstance(card, dict) or not isinstance(card.get("text"), str):
+            return None
+        text = card["text"]
+        if self.profile.prompt_load_scan:
+            # The whole card is scanned, as for a local card.
+            rule = blocked_rule([text])
+            if rule:
+                return {"card_id": name, "blocked": rule}
+        chunk = text[offset : offset + CARD_CHUNK_CHARS]
+        following = offset + len(chunk)
+        return dict(
+            name=name,
+            source="hub",
+            scope=card.get("scope"),
+            revision=card.get("revision"),
+            sha256=card.get("content_hash"),
+            chars=len(text),
+            offset=offset,
+            next_offset=following if following < len(text) else None,
+            content=chunk,
+            content_trust="untrusted",
         )
 
     def memory_card(self, name: str, offset: int = 0) -> dict[str, Any]:
@@ -84,7 +128,7 @@ class MemoryTools:
                     name + ".md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
                 )
             except FileNotFoundError:
-                return {"error": "card_not_found", "name": name}
+                return self._hub_card(name, offset) or {"error": "card_not_found", "name": name}
             except OSError:
                 return {"error": "card_unavailable", "name": name}
             info = os.fstat(descriptor)

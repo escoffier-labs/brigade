@@ -2,9 +2,9 @@ name: Hub
 on:
   push:
     branches: [main]
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
   pull_request:
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
+    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
 permissions:
   contents: read
 jobs:
@@ -52,6 +52,8 @@ jobs:
         run: python tests/registration.py
       - name: Memory route availability and restart
         run: python tests/memory.py
+      - name: Python hub memory client against native memory
+        run: python tests/memory_client.py
       - name: Native claims wire parity, fencing and contention
         run: python tests/claims_native.py
       - name: Frozen wire contract through managed front
