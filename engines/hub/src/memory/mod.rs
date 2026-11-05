@@ -8,6 +8,7 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
 pub mod auth;
+pub mod embedder;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -18,6 +19,8 @@ pub mod search;
 pub mod text;
 pub mod writer;
 
+#[cfg(test)]
+mod embedder_tests;
 #[cfg(test)]
 mod lexical_tests;
 #[cfg(test)]
@@ -95,6 +98,7 @@ pub struct Store {
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
+    retrieval: Option<Arc<embedder::Runtime>>,
 }
 
 impl Drop for Store {
@@ -174,7 +178,38 @@ impl Store {
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
+            retrieval: None,
         })
+    }
+    /// Lexical mode ignores an unused embedder table, including credentials.
+    pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        match config["retrieval"].as_str().unwrap_or("lexical") {
+            "lexical" => {
+                self.retrieval = None;
+                if config.get("embedder").is_some() {
+                    eprintln!("INFO memory.embedder unused in lexical mode");
+                }
+            }
+            "hybrid" => {
+                self.retrieval = Some(embedder::Runtime::new(
+                    embedder::Config::parse(&config["embedder"])?,
+                    self.scanner.clone(),
+                )?)
+            }
+            _ => return Err("memory.retrieval must be lexical or hybrid".into()),
+        }
+        Ok(())
+    }
+    pub fn retrieval_status(&self) -> Json {
+        match &self.retrieval {
+            None => json!({"mode": "lexical", "effective": "lexical", "state": "ok"}),
+            Some(runtime) => match runtime.reason() {
+                Some(reason) => {
+                    json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
+                }
+                None => json!({"mode": "hybrid", "effective": "lexical", "state": "switching"}),
+            },
+        }
     }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
@@ -549,6 +584,8 @@ impl Store {
         };
         let credential = credential.clone();
         let scanner = self.scanner.clone();
+        let query = request.query.clone();
+        let lexical = map.get("mode").and_then(Json::as_str) == Some("lexical");
         match self
             .readers
             .submit(move |c| {
@@ -556,7 +593,19 @@ impl Store {
             })
             .await
         {
-            Ok(reply) => reply,
+            Ok(mut reply) => {
+                if reply.status == 200 && !lexical {
+                    if let Some(runtime) = &self.retrieval {
+                        if let Err(error) = runtime.query(&query).await {
+                            reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                            reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                            reply.body["retrieval"]["degraded"] = json!(true);
+                            reply.body["retrieval"]["reason"] = json!(error.reason);
+                        }
+                    }
+                }
+                reply
+            }
             Err(_) => Reply::new(
                 503,
                 json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
@@ -571,6 +620,8 @@ impl Store {
         let now_ms = self.clock.now_ms();
         let scan = self.scanner.describe();
         let indexed_seq = self.index.current().indexed_seq;
+        let retrieval = self.retrieval_status();
+        let is_status = action == "status";
         match self
             .readers
             .submit(move |c| {
@@ -586,7 +637,13 @@ impl Store {
             })
             .await
         {
-            Ok(reply) => reply,
+            Ok(mut reply) => {
+                if is_status && reply.status == 200 {
+                    reply.body["default_mode"] = retrieval["mode"].clone();
+                    reply.body["retrieval"] = retrieval;
+                }
+                reply
+            }
             Err(_) => Reply::new(
                 503,
                 json!({"error": "hub busy", "reason": "memory-reader-timeout"}),

@@ -173,6 +173,9 @@ struct Config {
     /// Repeatable route override. Unimplemented handlers are refused.
     #[arg(long)]
     route_mode: Vec<String>,
+    /// hub.toml containing [memory]. Defaults beside the hub database.
+    #[arg(long)]
+    memory_config: Option<String>,
     #[arg(long)]
     host: String,
     /// Acceptance-only clock, shared with the Python upstream.
@@ -714,6 +717,13 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             text += "brigade_hub_checkpoint_stall_frames NaN\n";
         }
         if let Some(memory_route::MemoryRoute::Store(store)) = &app.memory {
+            let retrieval = store.retrieval_status();
+            text.push_str(&format!(
+                "brigade_hub_memory_retrieval{{mode=\"{}\",effective=\"{}\",state=\"{}\"}} 1\n",
+                retrieval["mode"].as_str().unwrap_or(""),
+                retrieval["effective"].as_str().unwrap_or(""),
+                retrieval["state"].as_str().unwrap_or("")
+            ));
             let m = store.metrics();
             text += &format!(
                 "brigade_hub_memory_batches_total {}\nbrigade_hub_memory_hub_lock_residence_seconds_last {}\nbrigade_hub_memory_hub_lock_residence_seconds_max {}\nbrigade_hub_memory_hub_lock_residence_seconds_sum {}\nbrigade_hub_memory_hub_lock_wait_seconds_max {}\nbrigade_hub_memory_authority_timeouts_total {}\nbrigade_hub_memory_commit_failures_total {}\nbrigade_hub_memory_residence_bucket_seconds {}\n",
@@ -1389,6 +1399,27 @@ async fn start_and_serve(
         std::sync::OnceLock<Box<dyn brigade_hub::maintenance::WriterCommands>>,
     > = Arc::default();
     let connections = Arc::new(Semaphore::new(config.max_connections as usize));
+    let memory_config_path = config.memory_config.clone().unwrap_or_else(|| {
+        path.with_file_name("hub.toml")
+            .to_string_lossy()
+            .into_owned()
+    });
+    let output =
+        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+            .args([
+                "-c",
+                include_str!("../resolve_memory.py"),
+                &memory_config_path,
+            ])
+            .kill_on_drop(true)
+            .output()
+            .await
+            .map_err(|_| "memory configuration read failed")?;
+    if !output.status.success() {
+        return Err("memory configuration read failed".into());
+    }
+    let memory_config: serde_json::Value =
+        serde_json::from_slice(&output.stdout).map_err(|_| "invalid memory configuration")?;
     let memory =
         match modes.configured("memory") {
             None => None,
@@ -1406,7 +1437,10 @@ async fn start_and_serve(
                 },
                 readers.clone(),
             ) {
-                Ok(store) => memory_route::MemoryRoute::Store(Arc::new(store)),
+                Ok(mut store) => {
+                    store.configure_retrieval(&memory_config)?;
+                    memory_route::MemoryRoute::Store(Arc::new(store))
+                }
                 Err(e) => {
                     eprintln!("memory unavailable: {e}");
                     memory_route::MemoryRoute::Unavailable
