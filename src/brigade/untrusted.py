@@ -107,12 +107,15 @@ _LINE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "ignore-instructions",
         re.compile(r"(?i)ignore (all |any )?(previous|prior|above) (instructions|directives)"),
     ),
-    ("fake-system-block", re.compile(r"(?i)(<\s*/?\s*system\b|\[INST\]|\[/INST\]|<<\s*SYS\s*>>)")),
+    (
+        "fake-system-block",
+        re.compile(r"(?i)(<\s{0,256}/?\s{0,256}system\b|\[INST\]|\[/INST\]|<<\s{0,256}SYS\s{0,256}>>)"),
+    ),
     ("role-override", re.compile(r"(?i)\byou are now\b")),
     (
         "assistant-directive",
         re.compile(
-            r"(?i)(?:^(?:assistant|agent|ai)\s*[,:-]\s*(?:you )?(?:must|should|need to)\b"
+            r"(?i)(?:^(?:assistant|agent|ai)\s{0,256}[,:-]\s{0,256}(?:you )?(?:must|should|need to)\b"
             r"|(?:dear|hey) (?:assistant|agent|ai)\b.{0,256}\b(?:ignore|disregard|override)\b)"
         ),
     ),

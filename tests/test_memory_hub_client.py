@@ -2253,8 +2253,7 @@ def test_s18_round2_scan_failure_is_not_spooled_or_retried(hub, tmp_path, spoole
     assert len(hub.puts()) == calls
 
 
-def test_s18_round3_handoff_scan_failure_is_not_spooled_or_retried(tmp_path):
-    target = workspace(tmp_path, mode="sync")
+def test_s18_round3_handoff_call_refuses_scan_failure_once():
     calls = []
     reply = {
         "code": "memory_scan_failed",
@@ -2271,4 +2270,3 @@ def test_s18_round3_handoff_scan_failure_is_not_spooled_or_retried(tmp_path):
         c.call("handoff", kind="note", text="release notes", client_event_id=hubc.event_id())
     assert error.value.body == reply
     assert [body["action"] for body in calls] == ["handoff"]
-    assert store.spool_count(target) == 0

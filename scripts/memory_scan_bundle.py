@@ -27,12 +27,12 @@ def bundle() -> str:
         {"id": "role-override", "pattern": r"(?i)\bnew system prompt\b", "flags": 0, "action": "warn"},
         {
             "id": "base64-decode-chain",
-            "pattern": r"^(?=[^\n]*[A-Za-z0-9+/]{80,}={0,2})(?=[^\n]*(?:\n[^\n]*){0,3}\b(?i:base64|atob|decode|decrypt)\b)[^\n]+",
+            "pattern": r"^(?=[^\n]{0,256}[A-Za-z0-9+/]{80,4096}={0,2})(?=[^\n]{0,4096}(?:\n[^\n]{0,4096}){0,3}\b(?i:base64|atob|decode|decrypt)\b)[^\n]{1,4096}",
             "flags": 8,
             "action": "warn",
         },
     ]
-    return json.dumps({"version": "brigade-memory-scan.v3", "injections": injections, "rules": rules}, indent=2) + "\n"
+    return json.dumps({"version": "brigade-memory-scan.v4", "injections": injections, "rules": rules}, indent=2) + "\n"
 
 
 def main() -> int:

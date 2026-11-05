@@ -95,6 +95,9 @@ The response includes `retryable: false` and the message
 submitting it again. The Python client records a proposal and removes any
 spooled copy. It does not automatically retry this refusal. Generic status-based
 retry policies should not retry `memory_scan_failed`, even though its status is 503.
+The in-tree client treats every coded 503 as a refusal, including
+`memory_scan_unavailable`. The `retryable` field is a hint for other clients.
+It does not make the in-tree client spool or retry that refusal.
 Each native regex has an explicit 8,388,608 match limit, 16 times the
 512 KiB text limit. Each compiled regex also has an explicit 32 MiB JIT stack
 ceiling, allocated on demand. The former implicit 32 KiB ceiling returned PCRE2
@@ -148,6 +151,28 @@ dependency. This release performs only the explicit full-width ASCII fold.
 - `push` and proposal changes hold a lock on the workspace's hub state for their whole run. `pull` holds a separate pull lock for its whole run and takes the state lock only while it changes the replica, so a push never waits on a long pull's network calls. A run that waits more than 30 seconds for a lock exits 75 with `another memory hub push or pull is running`.
 
 All of this state is per host, in `.brigade/memory/hub/`: a 0700 directory with 0600 files and a `*` ignore marker, so Git skips all of it. The shared `.brigade/memory/` keeps its own mode.
+
+The v4 bundle bounds retryable address spans at 256 characters for the local
+part and the domain span before the final dot, with a 63-character TLD. Reserved domains allow 127 labels
+of at most 63 characters. Longer uninterrupted local parts or domains no
+longer match that address rule. Dotted local parts can still match a suffix
+that starts within 256 characters of `@`.
+
+Whitespace and cue gaps allow 256 characters per span. The optional slash
+in a system tag permits two adjacent spans, so its combined gap can reach
+512 characters. Directive scan copies collapse whitespace before matching.
+Bearer and assigned token bodies allow 4096 characters. Provider token
+suffixes allow 8192 characters. JWT segment bodies allow 4096 after their
+fixed prefixes.
+PEM bodies allow 8192 characters, and
+PEM type labels allow 64. Candidates beyond these bounds no longer match
+that complete rule, though another rule or a shorter suffix can still flag
+them. SSH suffixes stop at 4096 characters and local port strings at 256 digits.
+The base64 heuristic searches for a blob starting within the first 256
+characters of a line, reads up to 4096 blob characters, and searches for a
+decode cue within 4096 characters per line across the existing four-line
+window. Blobs or cues outside that window no longer trigger this heuristic.
+The shared untrusted-context directive rules use the same gap bounds.
 
 ## Evidence projection and identity audit
 

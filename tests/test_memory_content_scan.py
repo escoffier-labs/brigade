@@ -1,6 +1,7 @@
 """S18 reuses Dot's prompt-load boundary for local and hub memory."""
 
 import json
+from pathlib import Path
 
 import pytest
 from importlib.resources import files
@@ -312,3 +313,137 @@ def test_s18_round3_ascii_copy_needs_no_second_mode(monkeypatch):
     )
     monkeypatch.setattr(scan, "_INJECTIONS", [])
     assert scan.blocked_rule(["plain text"]) is None
+
+
+@pytest.mark.parametrize(
+    "name", list(json.loads((Path(__file__).parent / "fixtures/memory-scan-adversarial.json").read_text()))
+)
+@pytest.mark.parametrize("size", [128 * 1024, 512 * 1024])
+@pytest.mark.parametrize(
+    "position", ["before", "after", "isolated", "before-fullwidth", "after-fullwidth", "isolated-fullwidth"]
+)
+def test_s18_round4_adversarial_rule_corpus(name, size, position):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    result = subprocess.run(
+        [sys.executable, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, str(size), position],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_s18_round4_exact_reviewer_inputs():
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    for name in ("codex-exact", "claude-exact"):
+        result = subprocess.run(
+            [sys.executable, str(Path(__file__).parent / "memory_scan_adversarial.py"), name, "0"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_s18_round4_ascii_skip_requires_reviewed_patterns():
+    import re
+    from brigade import memory_content_scan as scan
+
+    allowed = {
+        ("email", r"(?!:\S)"): "Negative assertion broadens Unicode matches, so Unicode remains a superset.",
+        (
+            "ssh-private-target",
+            r"(?::\S{1,4096})?",
+        ): "Optional suffix cannot determine whether the required address matches.",
+        ("private-key-block", r"[\s\S]{0,8192}?"): "The union matches every character in both modes.",
+    }
+    for item in scan._BUNDLE["injections"] + scan._BUNDLE["rules"]:
+        pattern = item["pattern"]
+        for (name, reviewed), reason in allowed.items():
+            if name == item["id"]:
+                assert reason
+                assert pattern.count(reviewed) == 1
+                pattern = pattern.replace(reviewed, "")
+        assert not re.search(r"\\[SWD]|\[\^\\s", pattern), (item["id"], pattern)
+
+
+@pytest.mark.parametrize("text,rule", [("a@b.co:\x1fx", "email"), ("Bearer " + "a" * 10 + "\x1f" + "a" * 10, None)])
+def test_s18_round4_ascii_control_parity(text, rule):
+    assert blocked_rule([text]) == _legacy_blocked_rule([text]) == rule
+
+
+@pytest.mark.parametrize(
+    "rule,text",
+    [
+        ("fake-system-block", "<" + " " * 513 + "system"),
+        ("assistant-directive", "assistant" + " " * 257 + ": must"),
+        ("base64-decode-chain", "!" * 257 + "a" * 80 + " decode"),
+        ("example-phone-555", "(555)" + " " * 257 + "123-4567"),
+        ("example-email-reserved", "a" * 257 + "@example.com"),
+        ("ssh-private-target", "a" * 257 + "@" + ".".join(("10", "0", "0", "1"))),
+        ("localhost-port", "localhost:" + "9" * 257),
+        ("port-reference", "port" + " " * 257 + "9999"),
+        ("email", "a" * 257 + "@domain.example"),
+        ("us-phone", "phone" + ":" * 257 + "555" + "-123-4567"),
+        ("jwt-token", "eyJ" + "a" * 4097 + "." + "a" * 8 + "." + "a" * 8),
+        ("bearer-token", "Bearer " + "a" * 4097),
+        ("api-key-assignment", 'token="' + "a" * 4097 + '"'),
+        ("bare-token-prefix", "sk-live-" + "a" * 8193),
+        ("private-key-block", "-----BEGIN " + "PRIVATE KEY-----" + "a" * 8193 + "-----END " + "PRIVATE KEY-----"),
+        ("example-email-reserved", "a@" + "b" * 64 + ".test"),
+        ("example-email-reserved", "a@" + "b." * 128 + "test"),
+        ("example-email-reserved", "a@" + "b" * 64 + ".example.com"),
+        ("example-email-reserved", "a@" + "b." * 128 + "example.com"),
+        ("email", "a@" + "b" * 257 + ".co"),
+        ("email", "a@b." + "c" * 64),
+        ("ssh-private-target", "a@" + ".".join(("10", "0", "0", "1")) + ":" + "x" * 4097),
+        ("us-phone", "(123)" + " " * 257 + "456-7890"),
+        ("jwt-token", "eyJ" + "a" * 8 + "." + "a" * 4097 + "." + "a" * 8),
+        ("jwt-token", "eyJ" + "a" * 8 + "." + "a" * 8 + "." + "a" * 4097),
+        ("bearer-token", "Bearer" + " " * 257 + "a" * 20),
+        ("api-key-assignment", "token" + " " * 257 + '= "' + "a" * 20 + '"'),
+        ("api-key-assignment", "token=" + " " * 257 + '"' + "a" * 20 + '"'),
+        ("api-key-assignment", "token=1" + "a" * 4096),
+        ("bare-token-prefix", "github_pat_" + "a" * 8193),
+        ("bare-token-prefix", "ghp_" + "a" * 8193),
+        ("bare-token-prefix", "xoxb-" + "a" * 8193),
+        ("bare-token-prefix", "AIza" + "a" * 8193),
+        ("bare-token-prefix", "glpat-" + "a" * 8193),
+        ("private-key-block", "-----BEGIN " + "X" * 65 + "PRIVATE KEY-----a-----END PRIVATE KEY-----"),
+        ("private-key-block", "-----BEGIN PRIVATE KEY-----a-----END " + "X" * 65 + "PRIVATE KEY-----"),
+        ("fake-system-block", "<" + " " * 257 + "/system"),
+        ("fake-system-block", "</" + " " * 257 + "system"),
+        ("fake-system-block", "<<" + " " * 257 + "SYS>>"),
+        ("fake-system-block", "<<SYS" + " " * 257 + ">>"),
+        ("assistant-directive", "assistant:" + " " * 257 + "must"),
+        ("base64-decode-chain", "a" * 80 + "!" * 4096 + " decode"),
+    ],
+    ids=lambda value: value if len(value) < 40 else "over-bound",
+)
+def test_s18_round4_detection_bounds(rule, text):
+    import re
+    from brigade import memory_content_scan as scan
+
+    item = next(item for item in scan._BUNDLE["injections"] + scan._BUNDLE["rules"] if item["id"] == rule)
+    assert re.fullmatch(item["pattern"], text, item["flags"]) is None
+
+
+def test_s18_round4_bundle_version():
+    from brigade import memory_content_scan as scan
+
+    assert scan._BUNDLE["version"] == "brigade-memory-scan.v4"
+
+
+def test_s18_round4_base64_decode_window_is_bounded():
+    import re
+    from brigade import memory_content_scan as scan
+
+    item = next(item for item in scan._BUNDLE["injections"] if item["id"] == "base64-decode-chain")
+    text = "a" * 80 + "\n" + "!" * 4097 + " decode"
+    assert re.search(item["pattern"], text, item["flags"]) is None

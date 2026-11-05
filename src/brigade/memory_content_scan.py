@@ -113,7 +113,8 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
         joiner = "\u200c" in text or "\u200d" in text
         lines, injection_lines, normalized = _scan_copies(text)
         # Bundle patterns are ASCII. On an ASCII copy the earlier Unicode
-        # pass is identical, so only non-ASCII copies need the ASCII pass.
+        # pass finds a superset for these patterns, so only non-ASCII copies
+        # need the ASCII pass. Bundle tests require review of inverse classes.
         copies = tuple(dict.fromkeys((text, lines)))
         extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
         # These rules require a literal @. Without it, dotted near-matches

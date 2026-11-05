@@ -169,6 +169,8 @@ jobs:
               - 'tests/test_memory_content_scan.py'
               - 'tests/fixtures/memory-scan-corpus.json'
               - 'tests/fixtures/memory-scan-groups.json'
+              - 'tests/fixtures/memory-scan-adversarial.json'
+              - 'tests/memory_scan_adversarial.py'
               - 'src/brigade/fleet_hub_server.py'
               - 'tests/test_fleet_hub_server.py'
               - 'src/brigade/fleet_hub*.py'

@@ -1,5 +1,5 @@
 {
-  "version": "brigade-memory-scan.v3",
+  "version": "brigade-memory-scan.v4",
   "injections": [
     {
       "id": "classic-injection",
@@ -21,7 +21,7 @@
     },
     {
       "id": "fake-system-block",
-      "pattern": "(?i)(<\\s*/?\\s*system\\b|\\[INST\\]|\\[/INST\\]|<<\\s*SYS\\s*>>)",
+      "pattern": "(?i)(<\\s{0,256}/?\\s{0,256}system\\b|\\[INST\\]|\\[/INST\\]|<<\\s{0,256}SYS\\s{0,256}>>)",
       "flags": 42,
       "action": "warn"
     },
@@ -33,7 +33,7 @@
     },
     {
       "id": "assistant-directive",
-      "pattern": "(?i)(?:^(?:assistant|agent|ai)\\s*[,:-]\\s*(?:you )?(?:must|should|need to)\\b|(?:dear|hey) (?:assistant|agent|ai)\\b.{0,256}\\b(?:ignore|disregard|override)\\b)",
+      "pattern": "(?i)(?:^(?:assistant|agent|ai)\\s{0,256}[,:-]\\s{0,256}(?:you )?(?:must|should|need to)\\b|(?:dear|hey) (?:assistant|agent|ai)\\b.{0,256}\\b(?:ignore|disregard|override)\\b)",
       "flags": 42,
       "action": "warn"
     },
@@ -45,7 +45,7 @@
     },
     {
       "id": "base64-decode-chain",
-      "pattern": "^(?=[^\\n]*[A-Za-z0-9+/]{80,}={0,2})(?=[^\\n]*(?:\\n[^\\n]*){0,3}\\b(?i:base64|atob|decode|decrypt)\\b)[^\\n]+",
+      "pattern": "^(?=[^\\n]{0,256}[A-Za-z0-9+/]{80,4096}={0,2})(?=[^\\n]{0,4096}(?:\\n[^\\n]{0,4096}){0,3}\\b(?i:base64|atob|decode|decrypt)\\b)[^\\n]{1,4096}",
       "flags": 8,
       "action": "warn"
     }
@@ -59,19 +59,19 @@
     },
     {
       "id": "example-phone-555",
-      "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?555\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(555\\)\\s*\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)555[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w))",
+      "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?555\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(555\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)555[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w))",
       "flags": 2,
       "action": "warn"
     },
     {
       "id": "example-email-reserved",
-      "pattern": "\\b[A-Z0-9._%+-]+@(?:(?:[A-Z0-9-]+\\.)*example\\.(?:com|org|net)|(?:[A-Z0-9-]+\\.)*(?:test|invalid|localhost|local))\\b",
+      "pattern": "\\b[A-Z0-9._%+-]{1,256}@(?:(?:[A-Z0-9-]{1,63}\\.){0,127}example\\.(?:com|org|net)|(?:[A-Z0-9-]{1,63}\\.){0,127}(?:test|invalid|localhost|local))\\b",
       "flags": 2,
       "action": "warn"
     },
     {
       "id": "ssh-private-target",
-      "pattern": "\\b[\\w.-]+@(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?::\\S+)?",
+      "pattern": "\\b[\\w.-]{1,256}@(?:10\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}|172\\.(?:1[6-9]|2\\d|3[01])\\.\\d{1,3}\\.\\d{1,3}|192\\.168\\.\\d{1,3}\\.\\d{1,3}|127\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})(?::\\S{1,4096})?",
       "flags": 0,
       "action": "block"
     },
@@ -89,7 +89,7 @@
     },
     {
       "id": "localhost-port",
-      "pattern": "\\blocalhost:\\d+\\b",
+      "pattern": "\\blocalhost:\\d{1,256}\\b",
       "flags": 2,
       "action": "block"
     },
@@ -101,7 +101,7 @@
     },
     {
       "id": "port-reference",
-      "pattern": "\\bport\\s+\\d{4,5}\\b",
+      "pattern": "\\bport\\s{1,256}\\d{4,5}\\b",
       "flags": 2,
       "action": "block"
     },
@@ -125,43 +125,43 @@
     },
     {
       "id": "email",
-      "pattern": "\\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}\\b(?!:\\S)",
+      "pattern": "\\b[A-Z0-9._%+-]{1,256}@[A-Z0-9.-]{1,256}\\.[A-Z]{2,63}\\b(?!:\\S)",
       "flags": 2,
       "action": "warn"
     },
     {
       "id": "us-phone",
-      "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(\\d{3}\\)\\s*\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\d{3}[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w)|\\b(?:phone|tel|call)[\\s:]+\\+?1?[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w))",
+      "pattern": "(?:(?<!\\w)\\+1[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\(\\d{3}\\)\\s{0,256}\\d{3}[\\s.-]?\\d{4}(?!\\w)|(?<!\\w)\\d{3}[\\s.-]\\d{3}[\\s.-]\\d{4}(?!\\w)|\\b(?:phone|tel|call)[\\s:]{1,256}\\+?1?[\\s.-]?\\(?\\d{3}\\)?[\\s.-]?\\d{3}[\\s.-]?\\d{4}(?!\\w))",
       "flags": 2,
       "action": "warn"
     },
     {
       "id": "jwt-token",
-      "pattern": "\\beyJ[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\.[A-Za-z0-9_-]{8,}\\b",
+      "pattern": "\\beyJ[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}\\.[A-Za-z0-9_-]{8,4096}\\b",
       "flags": 0,
       "action": "block"
     },
     {
       "id": "bearer-token",
-      "pattern": "\\bBearer\\s+[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
+      "pattern": "\\bBearer\\s{1,256}[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "api-key-assignment",
-      "pattern": "\\b(?:api[_-]?key|token|secret)\\s*[:=]\\s*(?!(?:process\\.env|os\\.environ|os\\.getenv|config\\.|cfg\\.|settings\\.|env\\.|\\$\\{|\\$\\(|null\\b|None\\b|undefined\\b|''|\\\"\\\"))(?:['\\\"][A-Za-z0-9._~+/=-]{20,}['\\\"]|(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))(?=[A-Za-z._~+/=-]*[0-9])[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-]))",
+      "pattern": "\\b(?:api[_-]?key|token|secret)\\s{0,256}[:=]\\s{0,256}(?!(?:process\\.env|os\\.environ|os\\.getenv|config\\.|cfg\\.|settings\\.|env\\.|\\$\\{|\\$\\(|null\\b|None\\b|undefined\\b|''|\\\"\\\"))(?:['\\\"][A-Za-z0-9._~+/=-]{20,4096}['\\\"]|(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))(?=[A-Za-z._~+/=-]{0,4095}[0-9])[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-]))",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "bare-token-prefix",
-      "pattern": "\\b(?:(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,}|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\\b|(?-i:(?:AIza[A-Za-z0-9_-]{30,}|glpat-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])))",
+      "pattern": "\\b(?:(?:github_pat_[A-Za-z0-9_]{20,8192}|gh[pousr]_[A-Za-z0-9]{20,8192}|xox[baprs]-[A-Za-z0-9-]{8,8192}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,8192}|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\\b|(?-i:(?:AIza[A-Za-z0-9_-]{30,8192}|glpat-[A-Za-z0-9_-]{16,8192})(?![A-Za-z0-9_-])))",
       "flags": 2,
       "action": "block"
     },
     {
       "id": "private-key-block",
-      "pattern": "-----BEGIN [A-Z ]*PRIVATE KEY-----[\\s\\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+      "pattern": "-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[\\s\\S]{0,8192}?-----END [A-Z ]{0,64}PRIVATE KEY-----",
       "flags": 0,
       "action": "block"
     },

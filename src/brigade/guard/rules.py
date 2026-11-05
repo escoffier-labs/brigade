@@ -4,6 +4,9 @@ import re
 
 from .types import Rule
 
+# Bound retryable spans shared by the memory scanners. Address local parts
+# permit 256 characters, token bodies 4096, provider suffixes 8192 and PEM bodies 8192. Longer uninterrupted
+# candidates need another rule or human review. Delimited paths stay streaming.
 DEFAULT_RULES: tuple[Rule, ...] = (
     # Example-pattern rules placed BEFORE general patterns so they claim
     # their spans first (engine uses first-match-wins via _overlaps).
@@ -18,7 +21,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         pattern=(
             r"(?:"
             r"(?<!\w)\+1[\s.-]?\(?555\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)"
-            r"|(?<!\w)\(555\)\s*\d{3}[\s.-]?\d{4}(?!\w)"
+            r"|(?<!\w)\(555\)\s{0,256}\d{3}[\s.-]?\d{4}(?!\w)"
             r"|(?<!\w)555[\s.-]\d{3}[\s.-]\d{4}(?!\w)"
             r")"
         ),
@@ -37,9 +40,9 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         #   *.local                       — mDNS / RFC 6762 (link-local, not real internet domains)
         # Also matches *@<host>.example for completeness.
         pattern=(
-            r"\b[A-Z0-9._%+-]+@(?:"
-            r"(?:[A-Z0-9-]+\.)*example\.(?:com|org|net)"
-            r"|(?:[A-Z0-9-]+\.)*(?:test|invalid|localhost|local)"
+            r"\b[A-Z0-9._%+-]{1,256}@(?:"
+            r"(?:[A-Z0-9-]{1,63}\.){0,127}example\.(?:com|org|net)"
+            r"|(?:[A-Z0-9-]{1,63}\.){0,127}(?:test|invalid|localhost|local)"
             r")\b"
         ),
         replacement="<EXAMPLE_EMAIL>",
@@ -49,7 +52,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="ssh-private-target",
         category="infrastructure",
-        pattern=r"\b[\w.-]+@(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\S+)?",
+        pattern=r"\b[\w.-]{1,256}@(?:10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|127\.\d{1,3}\.\d{1,3}\.\d{1,3})(?::\S{1,4096})?",
         replacement="[redacted-target]",
         description="SSH or SCP target on a private IP address.",
     ),
@@ -70,7 +73,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="localhost-port",
         category="infrastructure",
-        pattern=r"\blocalhost:\d+\b",
+        pattern=r"\blocalhost:\d{1,256}\b",
         replacement="[redacted-service]",
         description="Local service endpoint.",
         flags=re.IGNORECASE,
@@ -86,7 +89,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="port-reference",
         category="infrastructure",
-        pattern=r"\bport\s+\d{4,5}\b",
+        pattern=r"\bport\s{1,256}\d{4,5}\b",
         replacement="port [redacted]",
         description="Likely internal service port reference.",
         flags=re.IGNORECASE,
@@ -159,7 +162,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         category="pii",
         # (?!:\S) keeps SSH/scp remotes like git@github.com:owner/repo.git from
         # matching while emails followed by ": " in prose still do.
-        pattern=r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b(?!:\S)",
+        pattern=r"\b[A-Z0-9._%+-]{1,256}@[A-Z0-9.-]{1,256}\.[A-Z]{2,63}\b(?!:\S)",
         replacement="<PRIVATE_EMAIL>",
         description="Email address.",
         flags=re.IGNORECASE,
@@ -170,9 +173,9 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         pattern=(
             r"(?:"
             r"(?<!\w)\+1[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)"
-            r"|(?<!\w)\(\d{3}\)\s*\d{3}[\s.-]?\d{4}(?!\w)"
+            r"|(?<!\w)\(\d{3}\)\s{0,256}\d{3}[\s.-]?\d{4}(?!\w)"
             r"|(?<!\w)\d{3}[\s.-]\d{3}[\s.-]\d{4}(?!\w)"
-            r"|\b(?:phone|tel|call)[\s:]+\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)"
+            r"|\b(?:phone|tel|call)[\s:]{1,256}\+?1?[\s.-]?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\w)"
             r")"
         ),
         replacement="<PRIVATE_PHONE>",
@@ -186,14 +189,14 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # eyJ. A dedicated rule keeps recall when api-key-assignment skips
         # dotted identifier chains (JWT segments would otherwise look like a
         # three-segment chain).
-        pattern=r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b",
+        pattern=r"\beyJ[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\.[A-Za-z0-9_-]{8,4096}\b",
         replacement="[redacted-jwt]",
         description="JSON Web Token.",
     ),
     Rule(
         id="bearer-token",
         category="secret",
-        pattern=r"\bBearer\s+[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
+        pattern=r"\bBearer\s{1,256}[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])(?![A-Za-z0-9_~+/=-])",
         replacement="Bearer [redacted-secret]",
         description="Bearer token.",
         flags=re.IGNORECASE,
@@ -211,17 +214,17 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # Unquoted values must contain a digit and must not be a dotted
         # identifier chain (apiKeys.anthropicApiKey) or a bare camelCase
         # identifier (daemonConfigPrimaryToken): those are code passing a
-        # variable, not a hardcoded secret. Quoted 20+ char literals always
+        # variable, not a hardcoded secret. Quoted 20 through 4096 character literals always
         # match.
         pattern=(
-            r"\b(?:api[_-]?key|token|secret)\s*[:=]\s*"
+            r"\b(?:api[_-]?key|token|secret)\s{0,256}[:=]\s{0,256}"
             r"(?!(?:process\.env|os\.environ|os\.getenv|config\.|cfg\.|settings\.|env\.|\$\{|\$\(|null\b|None\b|undefined\b|''|\"\"))"
             r"(?:"
-            r"['\"][A-Za-z0-9._~+/=-]{20,}['\"]"
+            r"['\"][A-Za-z0-9._~+/=-]{20,4096}['\"]"
             r"|"
             r"(?!(?:[A-Za-z_$][A-Za-z0-9_$]*\.)+[A-Za-z_$][A-Za-z0-9_$]*(?![A-Za-z0-9._~+/=-]))"
-            r"(?=[A-Za-z._~+/=-]*[0-9])"
-            r"[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,}[A-Za-z0-9_~+/=-])"
+            r"(?=[A-Za-z._~+/=-]{0,4095}[0-9])"
+            r"[A-Za-z0-9_~+/=-](?:[A-Za-z0-9._~+/=-]{18,4094}[A-Za-z0-9_~+/=-])"
             r")"
         ),
         replacement="[redacted-secret]",
@@ -235,10 +238,10 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # Google and GitLab bodies can end in a hyphen; a trailing word
         # boundary would truncate that character or miss a minimum-length key.
         pattern=(
-            r"\b(?:(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
-            r"|xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,}"
+            r"\b(?:(?:github_pat_[A-Za-z0-9_]{20,8192}|gh[pousr]_[A-Za-z0-9]{20,8192}"
+            r"|xox[baprs]-[A-Za-z0-9-]{8,8192}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,8192}"
             r"|AKIA[A-Z0-9]{16}|(?-i:ASIA[A-Z0-9]{16}))\b"
-            r"|(?-i:(?:AIza[A-Za-z0-9_-]{30,}|glpat-[A-Za-z0-9_-]{16,})(?![A-Za-z0-9_-])))"
+            r"|(?-i:(?:AIza[A-Za-z0-9_-]{30,8192}|glpat-[A-Za-z0-9_-]{16,8192})(?![A-Za-z0-9_-])))"
         ),
         replacement="[redacted-secret]",
         description="Credential with a well-known provider token prefix.",
@@ -247,7 +250,7 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="private-key-block",
         category="secret",
-        pattern=r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
+        pattern=r"-----BEGIN [A-Z ]{0,64}PRIVATE KEY-----[\s\S]{0,8192}?-----END [A-Z ]{0,64}PRIVATE KEY-----",
         replacement="[redacted-private-key]",
         description="PEM private key block.",
     ),

@@ -149,3 +149,103 @@ fn s18_round3_repeated_groups() {
         }
     }
 }
+
+fn round4_vectors(case: &serde_json::Value, size: usize) -> Vec<(String, String, Option<String>)> {
+    let prefix: String = case["prefix_parts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p.as_str().unwrap())
+        .collect();
+    let literal = case["literal"].as_str().unwrap();
+    let unit = case["unit"].as_str().unwrap();
+    let mut vectors = Vec::new();
+    for folded in [false, true] {
+        let length = size / if folded { 3 } else { 1 };
+        let run = unit.repeat(length / unit.len() + 1);
+        let run = &run[..length - prefix.len() - literal.len() - 3];
+        for (position, mut text) in [
+            ("before", format!("{literal}! {prefix}{run}!")),
+            ("after", format!("{prefix}{run}{literal}!!!")),
+            ("isolated", format!("{prefix}{run}! {literal}!")),
+        ] {
+            if folded {
+                text = text
+                    .chars()
+                    .map(|c| match c {
+                        '!'..='~' => char::from_u32(c as u32 + 0xFEE0).unwrap(),
+                        ' ' => '\u{3000}',
+                        _ => c,
+                    })
+                    .collect();
+                text.push_str(&"!".repeat(size - text.len()));
+            }
+            let expected = case["expected"][position].as_str().map(String::from);
+            vectors.push((
+                format!("{position}{}", if folded { "-fullwidth" } else { "" }),
+                text,
+                expected,
+            ));
+        }
+    }
+    vectors
+}
+
+#[test]
+fn s18_round4_adversarial_rule_corpus() {
+    let scanner = scan::bundled();
+    assert!(scanner.describe().0);
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-scan-adversarial.json"
+    ))
+    .unwrap();
+    let mut vectors = Vec::new();
+    for size in [128 * 1024, 512 * 1024] {
+        for (name, case) in corpus.as_object().unwrap() {
+            for (position, text, expected) in round4_vectors(case, size) {
+                assert_eq!(text.len(), size);
+                vectors.push((format!("{name}/{position}"), text, expected));
+            }
+        }
+    }
+    vectors.push((
+        "codex-exact".into(),
+        format!("{} @", "ｌａｂｅｌ．".repeat(8000)),
+        None,
+    ));
+    vectors.push((
+        "claude-exact".into(),
+        format!("{}@", "label.".repeat(87_000)),
+        None,
+    ));
+    // PCRE2 UCP does not classify U+001F as whitespace. Unlike Python,
+    // its negative colon assertion excludes this address in both modes.
+    vectors.push(("ascii-email-control".into(), "a@b.co:\u{1f}x".into(), None));
+    vectors.push((
+        "ascii-bearer-control".into(),
+        format!("Bearer {}\u{1f}{}", "a".repeat(10), "a".repeat(10)),
+        None,
+    ));
+    for (name, text, expected) in vectors {
+        for run in 1..=2 {
+            let start = Instant::now();
+            let result = scanner.scan(&text);
+            let elapsed = start.elapsed().as_secs_f64();
+            println!(
+                "round4 {name} run={run} bytes={} seconds={elapsed:.6} state={}",
+                text.len(),
+                result.state()
+            );
+            assert!(elapsed < 5.0, "{name} exceeded five seconds");
+            if let Some(rule) = &expected {
+                assert!(
+                    matches!(result.state(), "flagged" | "blocked"),
+                    "{name}: {result:?}"
+                );
+                assert!(result.rules().contains(rule), "{name}: {result:?}");
+            } else {
+                assert_eq!(result.state(), "clean", "{name}: {result:?}");
+            }
+        }
+    }
+}

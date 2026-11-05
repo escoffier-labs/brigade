@@ -2792,6 +2792,8 @@ def test_windows_verifier_is_resolved_before_path_is_replaced():
         "scripts/memory_scan_bundle.py",
         "tests/fixtures/memory-scan-corpus.json",
         "tests/fixtures/memory-scan-groups.json",
+        "tests/fixtures/memory-scan-adversarial.json",
+        "tests/memory_scan_adversarial.py",
     ],
 )
 def test_s18_round2_hub_filter_tracks_scan_inputs(path):
