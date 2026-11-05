@@ -206,11 +206,12 @@ bytes as sent (a guard on normalization's work, with its own message) or
 over 256 characters after normalization. A query with no word characters is
 matched literally, as the local scorer does, and every match scores 0.0. The
 hub reads the visible cards in answer order (`cards/<card_id>.md`, then
-scope) and stops at `limit` matches, 1,000 cards or 4 MiB of card text,
-whichever comes first. Its `matches` are the same as a full scan's first
-`limit`. A scan that stops before the last visible card answers
-`retrieval.truncated: true`, and then `match_count` counts only the matches
-it read, so it is a lower bound.
+scope), up to 1,000 cards or 4 MiB of card text. When more cards are visible
+than that budget, it also stops at `limit` matches. Its `matches` are the same
+as a full scan's first `limit`. When every visible card fits the budget,
+`match_count` is exact, as in the local scorer. A scan that stops before the
+last visible card answers `retrieval.truncated: true`, and then `match_count`
+counts only the matches it read, so it is a lower bound.
 
 The Unicode tables in `src/memory/pytables.rs` and the goldens in
 `tests/lexical-golden.json` come from Python 3.12, the version the Hub

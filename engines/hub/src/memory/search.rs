@@ -175,9 +175,13 @@ pub fn literal(
         return Ok(out);
     }
     let (order, visible) = snap.in_answer_order(allowed, LITERAL_DOCS);
+    // The card and byte budgets bound the cost. Stopping at `limit` hits only pays off when the
+    // budget would cut the scan anyway; below it, read every visible card so `match_count` stays
+    // exact (as Python's) and `truncated` means only that the budget stopped the scan.
+    let early = visible > LITERAL_DOCS;
     let (mut docs, mut bytes) = (0, 0);
     for n in order {
-        if out.hits.len() >= limit || bytes >= LITERAL_BYTES {
+        if (early && out.hits.len() >= limit) || bytes >= LITERAL_BYTES {
             break;
         }
         docs += 1;

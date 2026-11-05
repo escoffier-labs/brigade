@@ -809,6 +809,29 @@ fn a_truncated_literal_scan_returns_the_full_scans_first_cards() {
 }
 
 #[tokio::test]
+async fn a_literal_scan_under_the_budget_counts_every_match_like_python() {
+    // Python's search_cards_payload reports every match. Under the card and byte budget the hub
+    // must too, and a page cut by `limit` is not a truncated scan.
+    let h = Hub::new();
+    let mut last = 0;
+    for n in 0..25 {
+        let r = h
+            .put(NODE_TOKEN, "fleet", &format!("c{n:02}"), None, "a -> b")
+            .await;
+        last = r.body["event"]["seq"].as_i64().unwrap();
+    }
+    let r = search(
+        &h,
+        NODE_TOKEN,
+        json!({"query":"->","min_seq":last,"limit":20}),
+    )
+    .await;
+    assert_eq!(r.body["match_count"].as_u64(), Some(25));
+    assert_eq!(ids(&r).len(), 20);
+    assert!(r.body["retrieval"].get("truncated").is_none(), "{}", r.body);
+}
+
+#[tokio::test]
 async fn a_truncated_literal_scan_is_reported() {
     let mut h = Hub::new();
     for n in 0..search::LITERAL_DOCS + 5 {
