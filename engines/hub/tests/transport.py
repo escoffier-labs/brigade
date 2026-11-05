@@ -46,6 +46,33 @@ def free_port():
         return sock.getsockname()[1]
 
 
+def children(pid):
+    """Live children of `pid`, from procfs."""
+    found = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        with contextlib.suppress(OSError):
+            fields = (entry / "stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()
+            if int(fields[1]) == pid and fields[0] != "Z":
+                found.append(int(entry.name))
+    return found
+
+
+def signal_mask(pid):
+    with open(f"/proc/{pid}/status", encoding="utf-8") as status:
+        return int(next(line.split()[1] for line in status if line.startswith("SigBlk:")), 16)
+
+
+def alive(pid):
+    """Running, neither gone nor a zombie waiting for its reaper."""
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0]
+    except OSError:
+        return False
+    return state != "Z"
+
+
 @contextlib.contextmanager
 def front(upstream=None, extra=(), relative_db=False, env_overrides=None, default_db=False):
     with tempfile.TemporaryDirectory() as work:
@@ -538,6 +565,83 @@ class Transport(unittest.TestCase):
             output = log.read().decode()
             self.assertEqual(code, 0, output)
             self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
+
+    def managed(self, log, work, port, **popen):
+        """Start a managed front and wait until it answers /health."""
+        env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+        command = [str(BINARY), "--host", HOST, "--port", str(port), "--db", f"{work}/hub.db"]
+        child = subprocess.Popen(command, env=env, stdout=log, stderr=log, **popen)
+        for _ in range(300):
+            with contextlib.suppress(OSError):
+                if request(port, "/health")[0] == 200:
+                    return child
+            time.sleep(0.05)
+        child.kill()
+        child.wait()
+        self.fail("front never answered /health")
+
+    @unittest.skipUnless(Path("/proc").exists(), "reads process groups and masks from procfs")
+    def test_group_signal_stops_the_upstream_once_and_exits_zero(self):
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            with self.subTest(signal=signum.name), tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+                # Its own session, so the group signal stays inside this test.
+                child = self.managed(log, work, free_port(), start_new_session=True)
+                try:
+                    (upstream,) = children(child.pid)
+                    # Only brigade-hub shares the group, so it alone gets the
+                    # group signal and stops the upstream with one SIGTERM.
+                    self.assertEqual(os.getpgid(upstream), upstream)
+                    self.assertEqual(os.getpgid(child.pid), child.pid)
+                    self.assertEqual(signal_mask(upstream), 0)
+                    os.killpg(child.pid, signum)
+                    code = child.wait(DRAIN_SECONDS + 15)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait()
+                log.seek(0)
+                output = log.read().decode()
+                self.assertEqual(code, 0, output)
+                self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
+
+    @unittest.skipUnless(Path("/proc").exists(), "reads the process table from procfs")
+    def test_bind_conflict_after_upstream_start_stops_it_with_sigterm(self):
+        with socket.socket() as taken, tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+            taken.bind((HOST, 0))
+            taken.listen()
+            env = dict(os.environ, BRIGADE_FLEET_TOKEN="fake-admin-token")
+            port = str(taken.getsockname()[1])
+            command = [str(BINARY), "--host", HOST, "--port", port, "--db", f"{work}/hub.db"]
+            child = subprocess.Popen(command, env=env, stdout=log, stderr=log)
+            try:
+                code = child.wait(60)
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+            log.seek(0)
+            output = log.read().decode()
+            self.assertEqual(code, 2, output)
+            self.assertIn("Address already in use", output)
+            # The ready upstream ran its own shutdown and exited 0, not SIGKILL.
+            self.assertIn("managed upstream stopped cleanly after SIGTERM", output)
+            self.assertNotIn("listening on", output.replace("brigade fleet hub listening on", ""))
+
+    @unittest.skipUnless(Path("/proc").exists(), "reads the process table from procfs")
+    def test_upstream_stops_when_the_front_is_killed(self):
+        with tempfile.TemporaryDirectory() as work, tempfile.TemporaryFile() as log:
+            child = self.managed(log, work, free_port())
+            (upstream,) = children(child.pid)
+            child.kill()
+            child.wait()
+            # Its own process group, so the death signal is what ends it.
+            for _ in range(200):
+                if not alive(upstream):
+                    break
+                time.sleep(0.05)
+            else:
+                os.kill(upstream, signal.SIGKILL)
+                self.fail("upstream outlived a killed front")
 
     def test_low_descriptor_limit_refuses_startup(self):
         def low_limit():

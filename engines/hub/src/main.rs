@@ -48,7 +48,9 @@ const STOPPED_DURING_STARTUP: &str = "stop signal during startup; the hub never 
 /// them first, the descriptor-limit re-exec keeps them blocked (the mask and
 /// any pending signal survive exec), and `Stop::install` unblocks them once
 /// its handlers exist, so a stop during startup waits instead of taking the
-/// default action. Children start with an empty mask (std resets it).
+/// default action. Since Rust 1.66 a spawned child inherits the spawning
+/// thread's mask, and the runtime's worker threads keep these two blocked for
+/// good, so the managed upstream clears its mask itself (`upstream_child`).
 fn stop_signals(how: libc::c_int) -> std::io::Result<()> {
     // SAFETY: the set is a local initialised by sigemptyset, and
     // pthread_sigmask is async-signal-safe, so this is sound in pre_exec too.
@@ -64,6 +66,33 @@ fn stop_signals(how: libc::c_int) -> std::io::Result<()> {
     } else {
         Err(std::io::Error::from_raw_os_error(code))
     }
+}
+
+/// Runs in the managed upstream between fork and exec. It gets an empty signal
+/// mask whatever thread spawned it, its own process group so a signal to this
+/// process's group (Ctrl-C on a terminal, `kill -TERM -<pgid>`) reaches only
+/// `brigade-hub`, which then stops it once with SIGTERM, and SIGTERM if
+/// `parent` dies first, since a group signal no longer reaches it.
+fn upstream_child(parent: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: every call here is async-signal-safe and touches only locals.
+    unsafe {
+        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(set.as_mut_ptr());
+        let code = libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut());
+        if code != 0 {
+            return Err(std::io::Error::from_raw_os_error(code));
+        }
+        if libc::setpgid(0, 0) != 0
+            || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // The parent died before the death signal was armed.
+        if libc::getppid() != parent {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    Ok(())
 }
 
 /// SIGTERM and SIGINT streams, created at the top of `run`.
@@ -1105,12 +1134,19 @@ async fn upstream(
     } else {
         config.python_args(0)
     };
+    let mut command =
+        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()));
+    let parent = libc::pid_t::try_from(std::process::id()).map_err(|e| e.to_string())?;
+    // SAFETY: the hook makes only async-signal-safe calls.
+    unsafe { command.pre_exec(move || upstream_child(parent)) };
     let child = slot.insert(
-        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+        command
             .args(upstream_args)
             .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
             .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
+            // Outside the terminal's foreground group a read would stop it.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
@@ -1211,18 +1247,48 @@ async fn run(mut config: Config) -> Result<(), String> {
     };
     let parsed_key = parse_upstream_key(&key, config.upstream.is_none())?;
     let mut child = None;
-    let upstream = match signals
-        .before(upstream(&config, &client, &key, &mut child))
-        .await
-    {
-        Ok(url) => url,
+    let served = start_and_serve(
+        &mut signals,
+        &config,
+        client,
+        &key,
+        parsed_key,
+        database,
+        &mut child,
+    )
+    .await;
+    let Some(child) = child.as_mut() else {
+        return served;
+    };
+    match served {
+        Ok(()) => stop_upstream(child).await,
         Err(e) => {
-            if let Some(child) = child.as_mut() {
+            // Any startup or serving error stops a running upstream with
+            // SIGTERM too; dropping it would SIGKILL it. One that already
+            // exited has nothing left to stop.
+            if matches!(child.try_wait(), Ok(None)) {
                 let _ = stop_upstream(child).await;
             }
-            return Err(e);
+            Err(e)
         }
-    };
+    }
+}
+
+/// Start the upstream into `child`, bind, open the stores and serve until a
+/// stop signal and the drain end. `run` stops the upstream on every return.
+#[allow(clippy::too_many_arguments)]
+async fn start_and_serve(
+    signals: &mut Stop,
+    config: &Config,
+    client: HttpClient,
+    key: &str,
+    parsed_key: axum::http::HeaderValue,
+    database: String,
+    child: &mut Option<Child>,
+) -> Result<(), String> {
+    let upstream = signals
+        .before(upstream(config, &client, key, child))
+        .await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
         .await
@@ -1385,9 +1451,6 @@ async fn run(mut config: Config) -> Result<(), String> {
     // The bind and the store opens above do not yield; a stop that came
     // during them still ends startup, without serving.
     if signals.arrived().await {
-        if let Some(child) = child.as_mut() {
-            let _ = stop_upstream(child).await;
-        }
         return Err(STOPPED_DURING_STARTUP.into());
     }
     loop {
@@ -1427,10 +1490,7 @@ async fn run(mut config: Config) -> Result<(), String> {
         tasks.abort_all();
     }
 
-    match child.as_mut() {
-        Some(child) => stop_upstream(child).await,
-        None => Ok(()),
-    }
+    Ok(())
 }
 /// Maintenance asks for retention every second; only memory retention is native.
 struct MemorySweeps(Arc<brigade_hub::memory::Store>);
@@ -1481,8 +1541,9 @@ fn main() {
         let mut command = std::process::Command::new(
             std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
         );
-        // SAFETY: the hook only calls pthread_sigmask, which is async-signal-safe.
-        // std clears the mask before exec; this keeps the stop signals blocked.
+        // The child inherits this thread's mask, so the stop signals stay
+        // blocked through limits.py and its exec; the hook only makes that
+        // explicit. SAFETY: pthread_sigmask is async-signal-safe.
         unsafe { command.pre_exec(|| stop_signals(libc::SIG_BLOCK)) };
         let error = command
             .arg("-c")
