@@ -447,17 +447,19 @@ pub fn require_current_keys<T: ReadTx + ?Sized>(
     }
     Ok(())
 }
-/// `admit`: sender and fleet sealed storage quotas.
+/// `admit`: sender and fleet sealed storage quotas. `cutoff` leaves out rows
+/// a bounded prune has not deleted yet, which Python's full prune would have.
 pub fn admit<T: ReadTx + ?Sized>(
     tx: &T,
     sender: &str,
     size: i64,
     policy: &Policy,
+    cutoff: &str,
 ) -> Result<(), Fail> {
     let used = super::count(
         tx,
-        "SELECT COALESCE(SUM(envelope_bytes),0) FROM fleet_messages WHERE sender=?",
-        &[Value::Text(sender.into())],
+        "SELECT COALESCE(SUM(envelope_bytes),0) FROM fleet_messages WHERE sender=? AND created_at>=?",
+        &[Value::Text(sender.into()), Value::Text(cutoff.into())],
     )?;
     if used + size > policy.sender_storage_bytes {
         return Err(Fail::quota(
@@ -469,8 +471,8 @@ pub fn admit<T: ReadTx + ?Sized>(
     if let Some(limit) = policy.fleet_storage_bytes {
         let total = super::count(
             tx,
-            "SELECT COALESCE(SUM(envelope_bytes),0) FROM fleet_messages",
-            &[],
+            "SELECT COALESCE(SUM(envelope_bytes),0) FROM fleet_messages WHERE created_at>=?",
+            &[Value::Text(cutoff.into())],
         )?;
         if total + size > limit {
             return Err(Fail::quota(

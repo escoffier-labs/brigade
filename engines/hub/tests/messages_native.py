@@ -60,7 +60,7 @@ def send(hub, method, path, token=None, body=None, raw=None, timeout=30):
         connection.close()
 
 
-def launch(state, clock, native, extra=""):
+def launch(state, clock, native, extra="", env=None):
     state.mkdir()
     template = (
         f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} "
@@ -71,12 +71,14 @@ def launch(state, clock, native, extra=""):
     if extra:
         template += " " + extra
     original = hc.hub_env
+    extra_env = env or {}
 
     def hub_env(*args):
         # The drive drops every BRIGADE_* variable; opt this hub into events and questions.
         env = original(*args)
         env["BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS"] = "events.example.test"
         env["BRIGADE_FLEET_OPERATOR_RECIPIENT"] = OPERATOR
+        env.update(extra_env)
         return env
 
     hc.hub_env = hub_env
@@ -640,6 +642,154 @@ class Messages(unittest.TestCase):
                 self.assertLess(waited, 5)
             finally:
                 hc.stop_hub(hub)
+
+    def test_an_expired_backlog_changes_no_send_decision(self):
+        """More expired rows than one bounded prune deletes still decide nothing.
+
+        Python deletes every expired row before a send checks quotas, caps and
+        `client_id` reuse. The native hub deletes RETENTION_BATCH (1,024) rows
+        per command, oldest first, so 8,000 older filler rows keep each
+        scenario's own expired rows in place for every send below.
+        """
+        from brigade.fleet_hub_messages import _payload_digest
+
+        self.maxDiff = None
+        now = START + 91 * DAY
+        cutoff = iso(now - 90 * DAY)
+        storage = {
+            "BRIGADE_FLEET_MESSAGES_SENDER_STORAGE_BYTES": "50000",
+            "BRIGADE_FLEET_MESSAGES_FLEET_STORAGE_BYTES": "80000",
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            clock = work / "clock"
+            clock.write_text(str(now), encoding="utf-8")
+            hubs = []
+            try:
+                for native in (False, True):
+                    hubs.append(launch(work / ("native" if native else "proxy"), clock, native, env=storage))
+                stamp = iso(now).replace("+00:00", "Z")
+                kids = {}
+                for hub in hubs:
+                    enroll(hub, nodes=("node-a", "node-b", "node-c"), agents=(("agent:bot", ["node:*"]),))
+                    # Keys go through the Python upstream, whose prune would
+                    # clear the backlog, so they are published before seeding.
+                    for node in ("node-a", "node-b"):
+                        record = sp.key_record(node, stamp)
+                        kids[node] = record["kid"]
+                        published = send(
+                            hub, "POST", "/messages", hub.tokens[node], {"action": "keys_publish", "record": record}
+                        )
+                        self.assertEqual(published.status, 201, published.body)
+                same = {"to": "node-b", "subject": "s", "body": "same", "client_id": "reuse-same"}
+                same_hash = _payload_digest("node-b", "s", "same", None, "normal")
+                filler, scenario = iso(START - 200 * DAY), iso(START - 100 * DAY)
+
+                def row(sender, recipient, client_id, created, **fields):
+                    values = {
+                        "sender": sender,
+                        "recipient": recipient,
+                        "subject": "s",
+                        "body": "b",
+                        "priority": "normal",
+                        "client_id": client_id,
+                        "payload_hash": "stale-" + client_id,
+                        "created_at": created,
+                        "received_at": created,
+                        "kind": "message",
+                        **fields,
+                    }
+                    return tuple(values.items())
+
+                rows = [row("node-c", "node-c", f"f{i}", filler, acked_at=filler) for i in range(8000)]
+                rows += [row("node-c", "node-b", f"q{i}", scenario) for i in range(1000)]
+                rows += [row("agent:bot", "node-a", f"p{i}", scenario) for i in range(200)]
+                # Expired sealed bytes: node-a alone is over its 50,000-byte
+                # sender quota, and all three are over the 80,000-byte hub total
+                # while node-b stays under its own.
+                rows += [
+                    row(sender, "node-c", f"sealed-{sender}", scenario, acked_at=scenario, envelope_bytes=size)
+                    for sender, size in (("node-a", 60000), ("node-b", 20000), ("node-c", 50000))
+                ]
+                rows += [row("node-a", "node-b", "reuse-diff", scenario)]
+                rows += [row("node-a", "node-b", "reuse-same", scenario, payload_hash=same_hash)]
+                for hub in hubs:
+                    db = sqlite3.connect(hub.db)
+                    for values in rows:
+                        names = ",".join(name for name, _ in values)
+                        db.execute(
+                            f"INSERT INTO fleet_messages({names}) VALUES({','.join('?' * len(values))})",
+                            [value for _, value in values],
+                        )
+                    parent = db.execute("SELECT id FROM fleet_messages WHERE client_id='reuse-same'").fetchone()[0]
+                    # A live reply to the expired row: Python's prune clears its link.
+                    db.execute(
+                        "INSERT INTO fleet_messages(sender,recipient,subject,body,priority,client_id,payload_hash,"
+                        "reply_to,created_at,received_at,kind) VALUES('node-b','node-a','s','b','normal','child','h',?,?,?,'message')",
+                        (parent, iso(now), iso(now)),
+                    )
+                    db.commit()
+                    db.close()
+
+                def compare(who, body):
+                    responses = [send(hub, "POST", "/messages", hub.tokens[who], body) for hub in hubs]
+                    self.assertEqual(
+                        (responses[0].status, responses[0].body), (responses[1].status, responses[1].body), body
+                    )
+                    self.assertEqual(responses[1].status, 201, responses[1].body)
+                    return json.loads(responses[1].body)["message"]
+
+                def sealed(sender, recipient, client_id):
+                    return {
+                        "action": "send",
+                        "envelope": hc.canonical(
+                            sp.envelope(
+                                sender=sender,
+                                sender_kid=kids[sender],
+                                recipient=recipient,
+                                recipient_kid=kids[recipient],
+                                client_id=client_id,
+                                created_at=datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"),
+                            )
+                        ),
+                    }
+
+                plain = {"action": "send", "subject": "s", "body": "fresh"}
+                for case, who, body in (
+                    ("recipient unacked quota", "node-c", {**plain, "to": "node-b", "client_id": "q-live"}),
+                    ("sender and recipient cap", "agent:bot", {**plain, "to": "node-a", "client_id": "p-live"}),
+                    ("sender sealed storage quota", "node-a", sealed("node-a", "node-b", "sealed-sender")),
+                    ("hub sealed storage quota", "node-b", sealed("node-b", "node-a", "sealed-hub")),
+                    ("client_id reuse, other body", "node-a", {**plain, "to": "node-b", "client_id": "reuse-diff"}),
+                    ("client_id reuse, same body", "node-a", {"action": "send", **same}),
+                ):
+                    with self.subTest(case):
+                        message = compare(who, body)
+                        # A fresh row, never the expired one replayed.
+                        self.assertEqual(message.get("created_at"), iso(now), message)
+                live = []
+                for hub in hubs:
+                    db = sqlite3.connect(hub.db)
+                    live.append(
+                        {
+                            "messages": db.execute(
+                                STORAGE["fleet_messages"].replace(
+                                    "FROM fleet_messages", "FROM fleet_messages WHERE created_at>=?"
+                                ),
+                                (cutoff,),
+                            ).fetchall(),
+                            "sequence": db.execute(STORAGE["sqlite_sequence"]).fetchall(),
+                        }
+                    )
+                    db.close()
+                self.assertEqual(live[0], live[1])
+                self.assertEqual(len(live[1]["messages"]), 7)
+                child = [m for m in live[1]["messages"] if m[7] == "child"]
+                self.assertEqual(child[0][9], None, "the expired parent's reply link was cleared")
+            finally:
+                for hub in hubs:
+                    hc.stop_hub(hub)
+
 
 if __name__ == "__main__":
     unittest.main()

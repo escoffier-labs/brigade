@@ -33,10 +33,14 @@ pub const PURGE_BATCH: i64 = 32;
 /// The maintenance sweep's bound per command.
 pub const SWEEP_BATCH: i64 = 256;
 /// Expired rows one writer command deletes, with their children's `reply_to`
-/// cleared. Python deletes every expired row at once. Reads already hide
-/// expired rows, so a backlog drains over later commands with the same visible
-/// results, and no single command runs a delete long enough to hit the writer
-/// deadline (for example after the retention window is shortened).
+/// cleared. Python deletes every expired row at once. Reads, quota and cap
+/// counts and the storage sums all filter on the retention cutoff, and `send`
+/// deletes an expired `(sender, client_id)` row before its dedup check, so a
+/// backlog drains over later commands with the same results. No single command
+/// runs a delete long enough to hit the writer deadline (for example after the
+/// retention window is shortened). A refused command rolls its batch back,
+/// as Python's `conn.rollback()` undoes its prune; the backlog then changes
+/// no answer, only how many commands it takes to drain.
 pub const RETENTION_BATCH: i64 = 1024;
 const SECOND_US: i64 = 1_000_000;
 const DAY_US: i64 = 86_400 * SECOND_US;
@@ -665,18 +669,22 @@ fn require_granted<T: ReadTx + ?Sized>(tx: &T, sender: &str, recipient: &str) ->
     }
     Ok(())
 }
+/// `cutoff` keeps rows a bounded prune has not deleted yet out of the count,
+/// as Python's full `_prune_expired` would have.
 fn require_recipient_cap<T: ReadTx + ?Sized>(
     tx: &T,
     sender: &str,
     recipient: &str,
+    cutoff: &str,
 ) -> Result<(), Fail> {
     if classify(tx, sender)? == Some("node") {
         return Ok(());
     }
     if count(
         tx,
-        "SELECT COUNT(*) FROM fleet_messages WHERE sender=? AND recipient=? AND acked_at IS NULL",
-        &[t(sender), t(recipient)],
+        "SELECT COUNT(*) FROM fleet_messages WHERE sender=? AND recipient=? AND acked_at IS NULL \
+         AND created_at>=?",
+        &[t(sender), t(recipient), t(cutoff)],
     )? >= AGENT_RECIPIENT_UNACKED_CAP
     {
         return Err(Fail::quota(
@@ -1444,10 +1452,24 @@ impl Op<'_> {
                 ));
             }
         }
-        let existing = self.tx.query(
-            "SELECT id,payload_hash FROM fleet_messages WHERE sender=? AND client_id=?",
-            &[t(&sender), t(&client_id)],
+        let cutoff = self.cutoff();
+        let mut existing = self.tx.query(
+            "SELECT id,payload_hash,created_at<? FROM fleet_messages WHERE sender=? AND client_id=?",
+            &[t(&cutoff), t(&sender), t(&client_id)],
         )?;
+        // A bounded prune can leave this row expired but present. Python's
+        // full prune would have removed it, so remove it the same way here
+        // and let the send insert fresh, as it would after that prune.
+        if let Some(row) = existing.first().filter(|row| row[2] == Value::Integer(1)) {
+            let id = row[0].clone();
+            self.tx.execute(
+                "UPDATE fleet_messages SET reply_to=NULL WHERE reply_to=?",
+                std::slice::from_ref(&id),
+            )?;
+            self.tx
+                .execute("DELETE FROM fleet_messages WHERE id=?", &[id])?;
+            existing.clear();
+        }
         if let Some(row) = existing.first() {
             let id = match row[0] {
                 Value::Integer(i) => i,
@@ -1511,7 +1533,7 @@ impl Op<'_> {
             }
             return Err(Fail::error("recipient is not an active hub principal"));
         }
-        require_recipient_cap(self.tx, &sender, &recipient)?;
+        require_recipient_cap(self.tx, &sender, &recipient, &cutoff)?;
         if let Some(value) = &envelope {
             // An installed hub identity needs `_installed`'s signed-metadata
             // checks, which stay with the Python upstream.
@@ -1524,12 +1546,12 @@ impl Op<'_> {
             }
             sealed::require_current_keys(self.tx, value)?;
             let size = raw["envelope"].as_str().unwrap().len() as i64;
-            sealed::admit(self.tx, &sender, size, policy)?;
+            sealed::admit(self.tx, &sender, size, policy, &cutoff)?;
         }
         if count(
             self.tx,
-            "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL",
-            &[t(&recipient)],
+            "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL AND created_at>=?",
+            &[t(&recipient), t(&cutoff)],
         )? >= UNACKED_QUOTA
         {
             return Err(Fail::quota(
