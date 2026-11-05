@@ -101,7 +101,10 @@ def _atomic(path: Path, text: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _readable_heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> list[dict[str, Any]]:
+def _readable_heads(
+    target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
+) -> tuple[list[dict[str, Any]], str]:
+    """The replica's readable heads and the principal it was pulled as. Takes `store.locked` and nothing else."""
     with store.locked(target):
         replica = store.replica(target)
         if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
@@ -110,10 +113,10 @@ def _readable_heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.H
             raise hubc.HubConfigError("replica heads are missing or inconsistent, mirror unchanged")
         if replica.missing:
             raise hubc.HubConfigError("replica is incomplete. Increase [hub] replica_max_mb and pull, mirror unchanged")
-        return list(replica.readable_heads(settings.read_scopes).values())
+        return list(replica.readable_heads(settings.read_scopes).values()), str(replica.meta["principal"])
 
 
-def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> tuple[list[dict], list[str]]:
+def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> tuple[list[dict], str, list[str]]:
     warnings: list[str] = []
     offline = False
     try:
@@ -124,7 +127,7 @@ def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSetting
     except hubc.HubUnavailable as exc:
         offline = True
         warnings.append(f"hub unavailable ({exc.reason}), using this host's replica")
-    heads = _readable_heads(target, client, settings)
+    heads, principal = _readable_heads(target, client, settings)
     if any("scan_state" not in head for head in heads):
         # A head without scan_state cannot be judged clean, and skipping it would
         # delete its note. Refetch only those heads in place, never discard the
@@ -135,10 +138,14 @@ def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSetting
             sync.refresh_scan_metadata(target, client, settings)
         except hubc.HubUnavailable as exc:
             raise hubc.HubConfigError(f"{PREDATES} (hub unavailable: {exc.reason})") from exc
-        heads = _readable_heads(target, client, settings)
-        if any("scan_state" not in head for head in heads):
-            raise hubc.HubConfigError(PREDATES)
-    return heads, warnings
+        heads, principal = _readable_heads(target, client, settings)
+        _require_scan_state(heads)
+    return heads, principal, warnings
+
+
+def _require_scan_state(heads: list[dict]) -> None:
+    if any("scan_state" not in head for head in heads):
+        raise hubc.HubConfigError(PREDATES)
 
 
 def _split(text: str) -> tuple[dict[str, Any], str]:
@@ -228,8 +235,9 @@ def _check_destination(out: Path) -> None:
         raise hubc.HubConfigError(f"mirror destination is not a directory: {out}")
 
 
-def _marker_value(files: dict[str, Any], notes: dict[str, str]) -> bytes:
-    return (json.dumps({"kind": KIND, "files": files, "notes": notes}, sort_keys=True) + "\n").encode("utf-8")
+def _marker_value(files: dict[str, Any], notes: dict[str, str], hub: str, principal: str) -> bytes:
+    body = {"kind": KIND, "hub": hub, "principal": principal, "files": files, "notes": notes}
+    return (json.dumps(body, sort_keys=True) + "\n").encode("utf-8")
 
 
 def _foreign_entries(out: Path) -> bool:
@@ -264,22 +272,35 @@ def mirror(
         raise hubc.HubConfigError(
             "non-empty mirror destination lacks ownership marker. Use --init to preserve foreign files"
         )
-    heads, warnings = _heads(target, client, settings)
-    selected, skipped = _select(heads)
+    # The pull stays outside the destination lock: it can wait on the network.
+    heads, principal, warnings = _heads(target, client, settings)
     if dry_run:
-        return _transact(out, heads, selected, skipped, warnings, init=init, dry_run=True)
+        selected, skipped = _select(heads)
+        return _transact(out, client.identity, principal, heads, selected, skipped, warnings, init=init, dry_run=True)
     try:
         out.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise hubc.HubConfigError(f"cannot create mirror destination {out}: {exc.strerror or exc}") from exc
     _check_destination(out)
     # The lock helper refuses a symlinked path component, which a destination may legitimately have.
-    with held_file_lock(out.resolve() / LOCK, deadline_seconds=LOCK_DEADLINE_SECONDS):
-        return _transact(out, heads, selected, skipped, warnings, init=init, dry_run=False)
+    # Lock and writes use this one path, so a later swap of `out` cannot split them.
+    resolved = out.resolve()
+    # Lock order: the destination lock, then `store.locked` inside `_readable_heads`. Nothing takes them reversed.
+    with held_file_lock(resolved / LOCK, deadline_seconds=LOCK_DEADLINE_SECONDS):
+        # A run that pulled earlier may reach the lock after a newer run finished. Plan
+        # from the replica as it is now, so the last run to write always writes the newest state.
+        heads, principal = _readable_heads(target, client, settings)
+        _require_scan_state(heads)
+        selected, skipped = _select(heads)
+        return _transact(
+            resolved, client.identity, principal, heads, selected, skipped, warnings, init=init, dry_run=False
+        )
 
 
 def _transact(
     out: Path,
+    hub: str,
+    principal: str,
     heads: list[dict],
     selected: list[tuple[dict, dict]],
     skipped: dict[str, int],
@@ -305,6 +326,11 @@ def _transact(
     if raw is None and not init and _foreign_entries(out):
         raise hubc.HubConfigError(
             "non-empty mirror destination lacks ownership marker. Use --init to preserve foreign files"
+        )
+    # One folder per workspace identity. A marker from before these fields is adopted by this run.
+    if not init and (marker.get("hub") not in (None, hub) or marker.get("principal") not in (None, principal)):
+        raise hubc.HubConfigError(
+            "mirror folder belongs to another hub or principal. Use one folder per workspace, or --init to adopt it"
         )
     if not dry_run:
         _drop_stale_temps(out)
@@ -345,14 +371,14 @@ def _transact(
         if written or deleted:
             # Own everything about to be written or removed before touching it, so a
             # run killed midway leaves nothing foreign and nothing unowned.
-            current = _marker_value({**marker["files"], **dict.fromkeys(desired, True)}, notes)
+            current = _marker_value({**marker["files"], **dict.fromkeys(desired, True)}, notes, hub, principal)
             if current != raw:
                 _atomic(out / MARKER, current.decode("utf-8"))
         for name in written:
             _atomic(out / name, desired[name])
         for name in deleted:
             (out / name).unlink(missing_ok=True)
-        value = _marker_value(dict.fromkeys(desired, True), notes)
+        value = _marker_value(dict.fromkeys(desired, True), notes, hub, principal)
         if current != value:
             _atomic(out / MARKER, value.decode("utf-8"))
     return {

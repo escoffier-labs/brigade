@@ -216,7 +216,7 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
                     "card", scope=head["scope"], card_id=head["card_id"], revision=head["revision"], offset=0
                 )
             except hubc.HubRefusal as exc:
-                if exc.code == "memory_grant_missing":
+                if exc.status == 403 and exc.code == "memory_grant_missing":
                     _drop_revoked_scope(target, hub, principal, epoch, head["scope"])
                 if exc.code in ("memory_card_not_found", "memory_grant_missing"):
                     raise hubc.HubConfigError(

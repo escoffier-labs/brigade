@@ -818,3 +818,176 @@ def test_owned_name_that_is_a_directory_is_refused_before_open(setup, monkeypatc
     monkeypatch.setattr(os, "open", deny_directories)
     with pytest.raises(hubc.HubConfigError, match="not a regular file"):
         run(setup)
+
+
+def test_plan_is_rebuilt_from_the_replica_under_the_lock(setup, monkeypatch):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    run(setup)
+    note = next(out.glob("alpha-*.md"))
+    real_lock = mirror.held_file_lock
+    state = {"racing": False}
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock_after_a_newer_run(*args, **kwargs):
+        if not state["racing"]:
+            state["racing"] = True
+            # Run A has pulled and planned. Before it takes the lock the hub flags the
+            # card and run B pulls that state and finishes.
+            flagged = store.replica(target)
+            flagged.heads[store.Replica.key("fleet", "alpha")]["trust"] = "flagged"
+            flagged.save()
+            assert mirror.mirror(target, client, settings, out)["deleted"] == [note.name]
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(mirror, "held_file_lock", lock_after_a_newer_run)
+    # A planned from the clean card. Its stale view must not put the flagged note back.
+    report = mirror.mirror(target, client, settings, out)
+    assert report["written"] == []
+    assert report["skipped"] == {"flagged": 1}
+    assert not note.exists()
+    assert not list(out.glob("alpha-*.md"))
+
+
+def test_scan_state_is_rechecked_under_the_lock(setup, monkeypatch):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    run(setup)
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+    real_lock = mirror.held_file_lock
+    from contextlib import contextmanager
+
+    @contextmanager
+    def lock_after_a_legacy_replica(*args, **kwargs):
+        legacy(store.replica(target))
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(mirror, "held_file_lock", lock_after_a_legacy_replica)
+    with pytest.raises(hubc.HubConfigError, match=PREDATES):
+        run(setup)
+    assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+
+
+def test_writes_use_the_directory_the_lock_was_taken_on(setup, tmp_path, monkeypatch):
+    *_, replica = setup
+    card(replica)
+    real_parent = tmp_path / "real"
+    evil_parent = tmp_path / "evil"
+    (real_parent / "hub").mkdir(parents=True)
+    (evil_parent / "hub").mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(real_parent)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    real_lock = mirror.held_file_lock
+    from contextlib import contextmanager
+
+    @contextmanager
+    def swap_after_the_lock(*args, **kwargs):
+        with real_lock(*args, **kwargs):
+            # The spelling `out` used now points somewhere else.
+            alias.unlink()
+            alias.symlink_to(evil_parent)
+            yield
+
+    monkeypatch.setattr(mirror, "held_file_lock", swap_after_the_lock)
+    target, settings, client, _, _ = setup
+    mirror.mirror(target, client, settings, alias / "hub")
+    assert (real_parent / "hub" / mirror.MARKER).is_file()
+    assert len(list((real_parent / "hub").glob("alpha-*.md"))) == 1
+    assert [p.name for p in (evil_parent / "hub").iterdir()] == []
+
+
+def test_marker_records_hub_and_principal(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
+    assert marker["hub"] == "http://127.0.0.1:3774"
+    assert marker["principal"] == "node-test"
+
+
+def _other_identity(setup, **meta):
+    """The same workspace after its replica was pulled as another principal."""
+    target, *_ = setup
+    other = store.replica(target)
+    other.meta.update(meta)
+    other.save()
+
+
+def test_folder_of_another_principal_is_refused_until_init(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+    _other_identity(setup, principal="node-other")
+    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+        run(setup)
+    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+        run(setup, dry_run=True)
+    assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+    run(setup, init=True)
+    assert json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))["principal"] == "node-other"
+    assert run(setup)["written"] == []
+
+
+def test_folder_of_another_hub_is_refused_until_init(setup):
+    target, settings, client, out, replica = setup
+    card(replica)
+    run(setup)
+    marker_path = out / mirror.MARKER
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    marker["hub"] = "http://other-hub.example:3774"
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+        run(setup)
+    run(setup, init=True)
+    assert json.loads(marker_path.read_text(encoding="utf-8"))["hub"] == client.identity
+
+
+def test_marker_without_identity_is_adopted_on_the_next_run(setup):
+    *_, out, replica = setup
+    card(replica)
+    run(setup)
+    marker_path = out / mirror.MARKER
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    del marker["hub"], marker["principal"]
+    marker_path.write_text(json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
+    assert run(setup)["written"] == []
+    adopted = json.loads(marker_path.read_text(encoding="utf-8"))
+    assert (adopted["hub"], adopted["principal"]) == ("http://127.0.0.1:3774", "node-test")
+
+
+def test_second_workspace_with_another_principal_does_not_take_over_the_folder(setup, tmp_path):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    run(setup)
+    other, other_replica = _second_workspace(setup, tmp_path)
+    other_replica.meta["principal"] = "node-other"
+    other_replica.save()
+    card(other_replica, "beta")
+    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+        mirror.mirror(other, client, settings, out)
+    assert len(list(out.glob("alpha-*.md"))) == 1
+    assert not list(out.glob("beta-*.md"))
+
+
+def test_non_403_grant_code_during_metadata_refresh_keeps_the_replica(setup):
+    target, settings, _, out, replica = setup
+    card(replica, "gamma")
+    legacy(replica)
+
+    def odd_status(url, token, body, timeout):
+        return 409, {"error": "conflict", "code": "memory_grant_missing"}
+
+    client = hubc.client_for(settings, transport=odd_status)
+    with pytest.raises(hubc.HubConfigError):
+        mirror.mirror(target, client, settings, out)
+    saved = store.replica(target)
+    assert len(saved.heads) == 2
+    assert saved.meta["read_scopes"] == ["fleet"]

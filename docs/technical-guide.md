@@ -2604,9 +2604,14 @@ nothing unowned. A file the marker does not own but whose bytes equal the
 generated note is adopted rather than refused. The destination itself must not
 be a symlink, but a symlinked parent such as a symlinked home is fine.
 A real run holds an exclusive lock on the output folder from the marker read to
-the final marker write, so two runs on one folder, even from different
-workspaces, take turns. The lock is the dotfile `.brigade-memory-mirror.lock`
-inside the folder. The mirror never deletes it or counts it as a foreign file.
+the final marker write, so two runs on one folder never interleave. Each run
+plans from the replica as it stands once it holds the lock, so the run that
+writes last writes the newest state. Use one folder per workspace identity. The
+marker records the hub and principal that wrote it, and a run under another hub
+or principal refuses the folder unless `--init` is given, which adopts it. A
+marker from before these fields is adopted by the next run. The lock is the
+dotfile `.brigade-memory-mirror.lock` inside the folder. The mirror never
+deletes it or counts it as a foreign file.
 A run that cannot get the lock exits busy with code 75. A real run also removes
 `.mirror-*.tmp` files older than 10 minutes, which a killed run leaves behind.
 
