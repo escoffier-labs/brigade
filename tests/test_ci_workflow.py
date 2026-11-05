@@ -180,7 +180,7 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
     assert "jobs:\n  changes:" in text
     assert "runs-on: ubuntu-latest" in changes
     assert "uses: dorny/paths-filter@v4" in changes
-    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container", "hub"):
         assert (
             f"{flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}"
             in changes
@@ -755,6 +755,7 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "coverage",
         "cosign-integration",
         "fleet-hub-container",
+        "hub-rust",
         "mesh-compatibility",
         "mesh-cross-version",
         "mesh-without-extra",
@@ -1743,6 +1744,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "ci-gate",
         "windows-affected-tests",
         "pr-tier-shadow",
+        "hub-rust",
         "mesh-compatibility",
         "mesh-cross-version",
         "mesh-without-extra",
@@ -1804,7 +1806,7 @@ def test_ci_merge_groups_request_all_component_checks_without_path_filter():
     changes = _workflow_job_section(text, "changes")
     filter_step = changes[changes.index("      - uses: dorny/paths-filter@v4") :]
     assert "        if: ${{ github.event_name != 'merge_group' }}\n" in filter_step
-    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container", "hub"):
         assert (
             f"      {flag}: ${{{{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}\n"
             in changes
@@ -2097,6 +2099,63 @@ def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
         text=True,
     )
     assert result.returncode == (0 if event == "pull_request" and flag == "false" else 1), result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("result", ["success", "skipped", "failure", "cancelled"])
+def test_ci_gate_allows_hub_rust_skip_only_when_unchanged_outside_the_merge_queue(event, flag, result):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    needs = {name: {"result": "success"} for name in names}
+    needs["changes"]["outputs"] = {"hub": flag, "docs_only": "false"}
+    needs["hub-rust"] = {"result": result}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    completed = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    expected = result == "success" or (result == "skipped" and flag == "false" and event != "merge_group")
+    assert completed.returncode == (0 if expected else 1), completed.stdout + completed.stderr
+    if not expected:
+        assert "hub-rust: required success, got" in completed.stderr, completed.stdout + completed.stderr
+
+
+def test_ci_runs_the_rust_hub_suite_through_the_gate_via_the_reusable_workflow():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+    hub = _workflow_job_section(text, "hub-rust")
+    assert (
+        "hub: ${{ steps.docs.outputs.uncertain != 'false' && 'true' || github.event_name == 'merge_group' && 'true' || "
+        "steps.filter.outputs.hub }}" in changes
+    )
+    assert "needs: changes" in hub
+    assert "needs.changes.outputs.hub == 'true'" in hub
+    assert "needs.changes.outputs.docs_only != 'true'" in hub
+    assert "uses: ./.github/workflows/hub.yml" in hub
+    paths = changes.split("            hub:\n", 1)[1]
+    for path in (
+        "engines/hub/**",
+        "src/brigade/fleet_hub*.py",
+        "src/brigade/memory_hub_*.py",
+        "registry/skills/verify-brigade/hub_contract*",
+        ".github/workflows/hub.yml",
+        ".github/workflows/ci.yml",
+    ):
+        assert f"- '{path}'" in paths
+    # hub.yml is callable only. A push or pull_request trigger there would run
+    # the suite a second time, outside ci-gate, on every matching event.
+    reusable = (ROOT / ".github/workflows/hub.yml").read_text()
+    header = reusable.split("jobs:\n", 1)[0]
+    assert "  workflow_call:\n" in header
+    assert "push:" not in header
+    assert "pull_request:" not in header
+    assert re.findall(r"^  ([a-z0-9-]+):$", reusable.split("jobs:\n", 1)[1], re.MULTILINE) == ["hub"]
+    assert "toolchain: [stable, '1.85.0']" in reusable
 
 
 def test_mesh_actions_are_pinned_to_full_commits():
