@@ -1174,8 +1174,12 @@ def test_an_unreadable_config_keeps_todays_error(hub, tmp_path, capsys):
     expected = memory_cmd.search(target=target, query="words")
     today = capsys.readouterr()
     code, out, err = run(["memory", "search", "--target", str(target), "words"], capsys)
-    assert (code, out, err) == (expected, today.out, today.err) and code == 2
-    assert err.startswith("error: invalid memory-care config:")
+    assert (code, out, err) == (expected, today.out, today.err)
+    if expected == 2:
+        # memory_cmd reads the config with the locale encoding, so where that
+        # decodes the byte (Windows cp1252) today's search succeeds, and the
+        # hub path must succeed with it.
+        assert err.startswith("error: invalid memory-care config:")
     code, _, err = run(["memory", "hub", "status", "--target", str(target)], capsys)
     assert code == 2 and err.startswith("error: invalid memory-care config:")
     if os.name != "posix":
