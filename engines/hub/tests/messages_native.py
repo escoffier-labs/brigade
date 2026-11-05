@@ -790,6 +790,84 @@ class Messages(unittest.TestCase):
                 for hub in hubs:
                     hc.stop_hub(hub)
 
+    def test_a_reply_retry_finds_its_reply_behind_an_expired_backlog(self):
+        """A retried reply finds the accepted reply while its expired parent waits.
+
+        Python's prune clears `reply_to` on every child of an expired parent
+        before `reply` looks up the accepted row by `reply_to IS NULL`. The
+        native prune deletes RETENTION_BATCH (1,024) rows per command, oldest
+        first, so 2,000 older filler rows keep the parent, and the child's
+        link to it, in place for the retry.
+        """
+        self.maxDiff = None
+        sent_at, replied_at, now = START + DAY, START + 2 * DAY, START + 91 * DAY + DAY // 2
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            clock = work / "clock"
+            clock.write_text(str(sent_at), encoding="utf-8")
+            hubs = []
+            try:
+                for native in (False, True):
+                    hubs.append(launch(work / ("native" if native else "proxy"), clock, native))
+                for hub in hubs:
+                    enroll(hub, nodes=("node-a", "node-b", "node-c"))
+                parents = []
+                for hub in hubs:
+                    sent = send(
+                        hub,
+                        "POST",
+                        "/messages",
+                        hub.tokens["node-a"],
+                        {"action": "send", "to": "node-b", "subject": "s", "body": "question", "client_id": "p1"},
+                    )
+                    self.assertEqual(sent.status, 201, sent.body)
+                    parents.append(json.loads(sent.body)["message"]["id"])
+                self.assertEqual(parents[0], parents[1])
+                retry = {"action": "reply", "id": parents[0], "body": "ok", "client_id": "r1"}
+                clock.write_text(str(replied_at), encoding="utf-8")
+                first = [send(hub, "POST", "/messages", hub.tokens["node-b"], retry) for hub in hubs]
+                self.assertEqual((first[0].status, first[0].body), (first[1].status, first[1].body))
+                self.assertEqual(first[1].status, 201, first[1].body)
+                accepted = json.loads(first[1].body)["message"]
+                # Filler older than the parent, seeded after the reply so no
+                # earlier prune removes it.
+                filler = iso(START - 200 * DAY)
+                for hub in hubs:
+                    db = sqlite3.connect(hub.db)
+                    db.executemany(
+                        "INSERT INTO fleet_messages(sender,recipient,subject,body,priority,client_id,payload_hash,"
+                        "created_at,received_at,acked_at,kind) VALUES('node-c','node-c','s','b','normal',?,?,?,?,?,'message')",
+                        [(f"f{i}", f"stale-f{i}", filler, filler, filler) for i in range(2000)],
+                    )
+                    db.commit()
+                    db.close()
+                # The parent is past the 90-day cutoff, the reply is not.
+                clock.write_text(str(now), encoding="utf-8")
+                again = [send(hub, "POST", "/messages", hub.tokens["node-b"], retry) for hub in hubs]
+                self.assertEqual((again[0].status, again[0].body), (again[1].status, again[1].body), retry)
+                self.assertEqual(again[1].status, 201, again[1].body)
+                replayed = json.loads(again[1].body)["message"]
+                self.assertEqual(replayed["id"], accepted["id"])
+                self.assertEqual(replayed["reply_to"], None, replayed)
+                cutoff = iso(now - 90 * DAY)
+                live = []
+                for hub in hubs:
+                    db = sqlite3.connect(hub.db)
+                    live.append(
+                        db.execute(
+                            STORAGE["fleet_messages"].replace(
+                                "FROM fleet_messages", "FROM fleet_messages WHERE created_at>=?"
+                            ),
+                            (cutoff,),
+                        ).fetchall()
+                    )
+                    db.close()
+                self.assertEqual(live[0], live[1])
+                self.assertEqual([row[0] for row in live[1]], [accepted["id"]])
+            finally:
+                for hub in hubs:
+                    hc.stop_hub(hub)
+
 
 if __name__ == "__main__":
     unittest.main()

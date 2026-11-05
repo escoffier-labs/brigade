@@ -732,8 +732,6 @@ fn inbox<T: ReadTx + ?Sized>(
         &[t(&policy.cutoff(now)), t(recipient), Value::Integer(after)],
     )
 }
-/// `list_messages` up to its first wait. The caller marks the wake epoch
-/// before this snapshot begins, as Python's `_wake_epoch` call precedes its read.
 /// The part of a `list` body that `list` reads: `after`, `unacked` and
 /// `wait_ms`. Any other key, and any value that is not a number or a boolean
 /// (each fails its check either way), is dropped, so a padded body is freed
@@ -757,6 +755,8 @@ impl ListFields {
         &self.0
     }
 }
+/// `list_messages` up to its first wait. The caller marks the wake epoch
+/// before this snapshot begins, as Python's `_wake_epoch` call precedes its read.
 pub fn list<T: ReadTx + ?Sized>(tx: &T, r: &Request) -> Result<Listed, Fail> {
     require_active(tx, r.caller)?;
     let Some(after) = r
@@ -1268,9 +1268,13 @@ impl Op<'_> {
                 else {
                     return Ok(None);
                 };
+                // Python's full prune has cleared `reply_to` on every child of
+                // an expired parent. A bounded prune can leave that parent in
+                // place, so a link to an expired row counts as cleared here.
                 let rows = self.tx.query(
                     "SELECT recipient,subject,reference,priority,thread FROM fleet_messages \
-                     WHERE sender=? AND client_id=? AND reply_to IS NULL AND created_at>=?",
+                     WHERE sender=?1 AND client_id=?2 AND (reply_to IS NULL OR reply_to IN \
+                     (SELECT id FROM fleet_messages WHERE created_at<?3)) AND created_at>=?3",
                     &[t(sender), t(&client_id), t(&self.cutoff())],
                 )?;
                 let Some(accepted) = rows.first() else {
