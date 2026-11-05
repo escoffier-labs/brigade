@@ -65,7 +65,7 @@ baselines and allow comments do not apply. `status.scan.ruleset_version` and
 | Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
 | `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
 | Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` |
-| Input-specific engine failure | `503 memory_scan_failed`. No bytes are stored |
+| Input-specific engine failure | `503 memory_scan_failed` with `retryable: false`. No bytes are stored |
 | Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
 
 The `memory-scan` Cargo feature is enabled by default. A build with
@@ -90,7 +90,13 @@ Input-specific PCRE2 failures return `503 memory_scan_failed` for puts,
 imports and handoffs. No blobs, events, scan receipts or idempotency rows are
 stored. An earlier or later blocking finding still returns
 `422 memory_content_blocked`. Missing engines retain the pending-write policy.
-Each native regex has an explicit 100,000 match limit.
+The response includes `retryable: false` and the message
+`input cannot be scanned, retrying will not help`. Edit the input before
+submitting it again. The Python client records a proposal and removes any
+spooled copy. It does not automatically retry this refusal.
+Each native regex has an explicit 8,388,608 match limit, 16 times the
+512 KiB text limit. Supported-size prose, source, logs, Markdown, long letter
+runs and repeated salutations have clean-scan corpus coverage in both engines.
 
 The bundle uses conservative guard matches in both PCRE2 UTF and byte modes.
 Python prompt loads also run Unicode and ASCII-class passes. The scanned
@@ -98,7 +104,9 @@ copies preserve every Python `str.splitlines()` boundary as LF, remove
 Unicode 16 default-ignorable characters, and fold full-width ASCII
 U+FF01-U+FF5E plus U+3000 to ASCII. Every injection rule also runs on a copy
 with an explicit shared whitespace set collapsed to single spaces. These
-copies never replace stored bytes. Publication-guard context exceptions do
+copies never replace stored bytes. Bundle v3 bounds the salutation-to-override
+gap to 256 characters in both engines, including the flattened cross-line copy.
+Cross-line detection remains enabled. Publication-guard context exceptions do
 not apply.
 
 Bidi marks U+061C, U+200E and U+200F block alongside overrides and isolates.

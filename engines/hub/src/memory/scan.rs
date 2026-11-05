@@ -140,11 +140,15 @@ mod native {
         injections: Vec<Rule>,
         rules: Vec<Rule>,
     }
+    // Leave room for linear scans of a supported card, including bounded
+    // salutation near-matches. Keep a deterministic ceiling on backtracking.
+    const MATCH_LIMIT: usize = 16 * super::super::ids::MAX_TEXT_BYTES;
+
     fn rules(values: &[Value]) -> Option<Vec<Rule>> {
         values
             .iter()
             .map(|v| {
-                let pattern = format!("(*LIMIT_MATCH=100000){}", v["pattern"].as_str()?);
+                let pattern = format!("(*LIMIT_MATCH={MATCH_LIMIT}){}", v["pattern"].as_str()?);
                 let flags = v["flags"].as_u64()? as u32;
                 Some(Rule {
                     id: v["id"].as_str()?.into(),
@@ -324,6 +328,18 @@ mod native {
         }
 
         #[test]
+        fn s18_round2_production_limit_still_fails_closed() {
+            let mut guard = Guard::new().unwrap();
+            guard.injections.clear();
+            guard.rules = rules(&[serde_json::json!({
+                "id": "pathological", "action": "warn", "flags": 0,
+                "pattern": "(*NO_START_OPT)(*NO_AUTO_POSSESS)(a+)+$"
+            })])
+            .unwrap();
+            assert_eq!(guard.scan(&format!("{}!", "a".repeat(100))), Scan::Failed);
+        }
+
+        #[test]
         fn s18_review_match_error_preserves_blocks() {
             let (guard, text) = error_guard();
             assert!(matches!(
@@ -360,6 +376,13 @@ mod native {
                     (503, Some("memory_scan_failed")),
                     "{action}: {:?}",
                     r.body
+                );
+                assert_eq!(r.body["retryable"], false, "{action}: {:?}", r.body);
+                assert!(
+                    r.body["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("retrying will not help")
                 );
             }
             let c = rusqlite::Connection::open(h.memory()).unwrap();

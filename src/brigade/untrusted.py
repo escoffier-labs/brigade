@@ -113,7 +113,7 @@ _LINE_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
         "assistant-directive",
         re.compile(
             r"(?i)(?:^(?:assistant|agent|ai)\s*[,:-]\s*(?:you )?(?:must|should|need to)\b"
-            r"|(?:dear|hey) (?:assistant|agent|ai)\b.*\b(?:ignore|disregard|override)\b)"
+            r"|(?:dear|hey) (?:assistant|agent|ai)\b.{0,256}\b(?:ignore|disregard|override)\b)"
         ),
     ),
 )

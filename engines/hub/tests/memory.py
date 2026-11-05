@@ -127,7 +127,7 @@ class Memory(unittest.TestCase):
     def test_s18_per_input_match_limit_refuses_without_storage(self):
         hub = self.run_hub("scan-failed", "--route-mode memory=native")
         for action in ("put", "import", "handoff"):
-            body = {"action": action, "text": "a" * (512 * 1024 - 1), "client_event_id": hm.event_id()}
+            body = {"action": action, "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!", "client_event_id": hm.event_id()}
             if action == "handoff":
                 body["kind"] = "note"
             else:
@@ -135,6 +135,8 @@ class Memory(unittest.TestCase):
             response = hc.request(hub.url, "POST", "/memory", token=hub.admin_token, body=body)
             self.assertEqual((response.status, response.json["code"]), (503, "memory_scan_failed"))
             self.assertNotIn("rules", response.json)
+            self.assertIs(response.json["retryable"], False)
+            self.assertIn("retrying will not help", response.json["error"])
         with sqlite3.connect(self.work / "scan-failed/fleet-hub-memory.db") as db:
             for table in ("memory_blobs", "memory_scans", "memory_events", "memory_idempotency"):
                 self.assertEqual(db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)

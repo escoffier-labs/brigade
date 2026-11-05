@@ -2223,3 +2223,31 @@ def test_import_names_a_replica_base_only_under_the_hubs_current_epoch(hub, tmp_
     hub.restore(hub.snapshot())
     sync.import_cards(target, client(hub), scope="repo:test/app", paths=[path])
     assert last_import()["base_revision"] is None and "base_epoch" not in last_import()
+
+
+@pytest.mark.parametrize("spooled", [False, True])
+def test_s18_round2_scan_failure_is_not_spooled_or_retried(hub, tmp_path, spooled):
+    target = workspace(tmp_path, mode="sync", one="# One\n")
+    if spooled:
+        hub.mode = "down"
+        sync.push(target, client(hub), settings(target), yes=True)
+        assert store.spool_count(target) == 1
+        hub.mode = "up"
+    reply = {
+        "code": "memory_scan_failed",
+        "retryable": False,
+        "error": "input cannot be scanned, retrying will not help",
+    }
+    hub.put_reply = (503, reply)
+    with pytest.raises(hubc.HubRefusal) as error:
+        client(hub).call("put", text="# One\n")
+    assert error.value.body == reply
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert report["spooled"] == []
+    assert report["refused"] == [{"card_id": "one", "status": 503, "code": "memory_scan_failed"}]
+    assert [p["reason"] for p in report["proposals"]] == ["memory_scan_failed"]
+    assert store.spool_count(target) == 0
+    calls = len(hub.puts())
+    again = sync.push(target, client(hub), settings(target), yes=True)
+    assert again["spooled"] == []
+    assert len(hub.puts()) == calls

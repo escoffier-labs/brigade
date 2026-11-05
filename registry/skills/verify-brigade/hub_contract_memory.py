@@ -310,11 +310,15 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
                 **imported,
                 "action": "put",
                 "card_id": card("scan-failed"),
-                "text": "a" * (512 * 1024 - 1),
+                "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!",
                 "client_event_id": event_id(),
             },
             status=503,
-            shape=err("memory_scan_failed"),
+            shape={
+                **err("memory_scan_failed"),
+                "retryable": hc.Eq(False),
+                "error": hc.Eq("input cannot be scanned, retrying will not help"),
+            },
         )
         for index, text in enumerate(
             [

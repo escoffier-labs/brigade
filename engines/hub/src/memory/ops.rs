@@ -434,7 +434,14 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             import,
         } => {
             if matches!(scan, Scan::Failed) {
-                return Ok(error(503, "memory_scan_failed", "input scan failed"));
+                return Ok(with(
+                    error(
+                        503,
+                        "memory_scan_failed",
+                        "input cannot be scanned, retrying will not help",
+                    ),
+                    json!({"retryable": false}),
+                ));
             }
             // Only import raises trust here, and only on a clean scan (D24).
             if *import && !scan.permits_raise() {
@@ -565,7 +572,14 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             scan,
         } => {
             if matches!(scan, Scan::Failed) {
-                return Ok(error(503, "memory_scan_failed", "input scan failed"));
+                return Ok(with(
+                    error(
+                        503,
+                        "memory_scan_failed",
+                        "input cannot be scanned, retrying will not help",
+                    ),
+                    json!({"retryable": false}),
+                ));
             }
             if let Scan::Blocked { rules, .. } = scan {
                 return Ok(blocked(rules));

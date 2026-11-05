@@ -32,7 +32,7 @@ def bundle() -> str:
             "action": "warn",
         },
     ]
-    return json.dumps({"version": "brigade-memory-scan.v2", "injections": injections, "rules": rules}, indent=2) + "\n"
+    return json.dumps({"version": "brigade-memory-scan.v3", "injections": injections, "rules": rules}, indent=2) + "\n"
 
 
 def main() -> int:
