@@ -123,18 +123,20 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
     the network calls of a long pull.
     """
     with store.pulling(target):
-        return _pull(target, client, settings)
+        try:
+            return _pull(target, client, settings)
+        except hubc.HubRefusal as exc:
+            if exc.status == 403 and exc.code == "memory_grant_missing":
+                # A `status` or `log` refusal at any point of the pull means this
+                # credential can read no scope on this hub now: nothing pulled
+                # from it may be served by fallback search later. (A `card`
+                # refusal is scope-wide only and is handled inside the pull.)
+                forget_hub_replica(target, client.identity)
+            raise
 
 
 def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
-    try:
-        status = read_status(client, settings)
-    except hubc.HubRefusal as exc:
-        if exc.status == 403 and exc.code == "memory_grant_missing":
-            # This credential can read no scope on this hub now: nothing
-            # pulled from it may be served by fallback search later.
-            forget_hub_replica(target, client.identity)
-        raise
+    status = read_status(client, settings)
     epoch = str(status.get("log_epoch") or "")
     principal = str(status["principal"])
     readable = set(status["readable_scopes"]) & set(settings.read_scopes)

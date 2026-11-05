@@ -2147,6 +2147,33 @@ def test_a_pull_refused_every_read_grant_discards_the_replica(hub, tmp_path):
     assert matches == []
 
 
+@pytest.mark.parametrize("where", ["log", "final-status"])
+def test_a_pull_losing_every_grant_mid_pull_discards_the_replica(hub, tmp_path, where):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "a1", "a confidential app card")
+    sync.pull(target, client(hub), settings(target))
+    assert _card_ids(store.replica(target)) == {"a1"}
+    denied = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    if where == "log":
+        hub.do_log = lambda body: denied
+    else:
+        statuses = []
+
+        def second_status_denied():
+            statuses.append(1)
+            if len(statuses) == 2:
+                hub.status_reply = denied
+
+        hub.on_status = second_status_denied
+    with pytest.raises(hubc.HubRefusal):
+        sync.pull(target, client(hub), settings(target))
+    assert not store.replica(target).exists
+    hub.status_reply = None
+    hub.mode = "down"
+    matches, _ = hub_search._replica_matches(target, "confidential", client(hub).identity, settings(target))
+    assert matches == []
+
+
 def test_push_resends_a_card_published_under_an_old_epoch(hub, tmp_path):
     target = workspace(tmp_path, mode="sync", one="# One\npublished before the restore\n")
     before = hub.snapshot()
