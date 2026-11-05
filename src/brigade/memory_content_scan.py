@@ -105,7 +105,13 @@ def _scan_copies(text: str) -> tuple[str, str, str]:
 # at every dotted word in a 512 KiB source card. IGNORECASE includes Python's
 # extra Unicode case folds, so the filter is also a superset of ASCII mode.
 _EMAIL_DOMAIN = re.compile(r"@[A-Z0-9.-]{1,256}\.[A-Z]{2,63}", re.IGNORECASE)
-_RESERVED_DOMAIN = re.compile(r"(?:example\.(?:com|org|net)|test|invalid|localhost|local)", re.IGNORECASE)
+# Anchor the necessary domain suffix to its @ and bounded label sequence.
+# A reserved word elsewhere cannot make an overlong near-miss viable.
+# Omit the suffix boundary so this also admits ASCII matches before Unicode.
+_RESERVED_DOMAIN = re.compile(
+    r"@(?:[A-Z0-9-]{1,63}\.){0,127}(?:example\.(?:com|org|net)|test|invalid|localhost|local)",
+    re.IGNORECASE,
+)
 _SSH_HOST = re.compile(r"@(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|127\.)")
 _ASSIGNMENT_START = re.compile(r"\b(?:api[_-]?key|token|secret)\s{0,256}[:=]\s{0,256}", re.IGNORECASE)
 _ASSIGNMENT_START_ASCII = re.compile(_ASSIGNMENT_START.pattern, re.IGNORECASE | re.ASCII)

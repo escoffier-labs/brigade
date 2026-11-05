@@ -79,7 +79,7 @@ def test_security_scan_avoids_source_false_positives(tmp_path):
             [
                 "def covered_warning_summary_ids(found: list[str], known_ids: set[str]) -> set[str]:",
                 "    return set(found) & known_ids",
-                'REDACTED = "-----BEGIN REDACTED PRIVATE KEY-----"',
+                'REDACTED = "-----BEGIN REDACTED PRIVATE KEY-----"',  # content-guard: allow private-key-block
                 "",
             ]
         )
@@ -304,7 +304,9 @@ def test_security_scan_secret_title_rank_order_is_pinned(tmp_path):
     assert [security_cmd._secrets_title_rank(title) for title in titles_low_to_high] == [10, 20, 30, 40]
     assert security_cmd._secrets_title_rank("Unknown secret finding") == 0
 
-    (tmp_path / "co_firing.txt").write_text('password = "-----BEGIN RSA PRIVATE KEY-----MIIabcdefgh1234"\n')
+    (tmp_path / "co_firing.txt").write_text(
+        'password = "-----BEGIN RSA PRIVATE KEY-----MIIabcdefgh1234"\n'  # content-guard: allow private-key-block
+    )
     co_firing = [
         finding
         for finding in security_cmd.scan_target(tmp_path)["findings"]
@@ -337,7 +339,9 @@ def test_security_scan_secret_fingerprints_are_pinned(tmp_path):
     session_dir.mkdir(parents=True)
     (session_dir / "session.jsonl").write_text("service_api_key=abcd1234abcd1234abcd1234\n")
     # Plaintext-password fires first, then private-key material promotes session-chat title.
-    (session_dir / "co_fire.jsonl").write_text('password = "-----BEGIN RSA PRIVATE KEY-----MIIabcdefgh1234"\n')
+    (session_dir / "co_fire.jsonl").write_text(
+        'password = "-----BEGIN RSA PRIVATE KEY-----MIIabcdefgh1234"\n'  # content-guard: allow private-key-block
+    )
 
     report = security_cmd.scan_target(tmp_path)
     secrets = [finding for finding in report["findings"] if finding["category"] == "secrets"]
