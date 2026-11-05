@@ -22,12 +22,12 @@ with the same subcommands. Profiles select components. See the
 
 Public names for the built-in engines:
 
-| Public surface | Commands | Historical name |
+| Public surface | Commands | Binary |
 |---|---|---|
-| Code map | `brigade code …` | GraphTrail |
-| Evidence log | `brigade evidence …` | MiseLedger |
+| Code map | `brigade code …` | brigade-code-graph |
+| Evidence log | `brigade evidence …` | brigade-evidence |
 
-Standalone GraphTrail or MiseLedger product installs are replaced by `brigade setup`. Some binary and path names still use the historical labels.
+Standalone brigade-code-graph or brigade-evidence product installs are replaced by `brigade setup`. Canonical binaries are used for new installs. Legacy entry points are deprecated and removed in v0.33.0.
 
 ## Start here
 
@@ -58,7 +58,7 @@ Brigade Stack coordinates autonomous agent work across machines and cloud seats 
 
 ## Installing for a user (you run this)
 
-Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.10 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
+Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.11 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
 
 Work in the **target** directory (the repo or operator workspace the user named), not the Brigade Stack source tree unless they asked to develop Brigade Stack.
 
@@ -105,7 +105,7 @@ brigade harness install cursor --scope user --write
 brigade harness doctor cursor --scope user
 ```
 
-This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade Stack plus the code-map and evidence engines (often still labeled `graphtrail` / `miseledger` in native Cursor config). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
+This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade Stack plus the code-map and evidence engines (with canonical labels `brigade-code-graph` / `brigade-evidence` for new entries). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
 
 Uninstall is ownership-aware:
 

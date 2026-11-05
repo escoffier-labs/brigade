@@ -140,7 +140,7 @@ def test_session_start_merges_recall_with_brief_once(tmp_path: Path, monkeypatch
             version=cfg.version,
             selection=cfg.selection,
             memory_recall_target=str(hub),
-            graphtrail_delta_timeout_seconds=cfg.graphtrail_delta_timeout_seconds,
+            code_graph_delta_timeout_seconds=cfg.code_graph_delta_timeout_seconds,
             capture_before_retry=cfg.capture_before_retry,
             verify_runs_keep=cfg.verify_runs_keep,
             verify_archive_enabled=cfg.verify_archive_enabled,
@@ -179,7 +179,7 @@ def test_session_start_recall_fail_open_keeps_brief(tmp_path: Path, monkeypatch)
             version=cfg.version,
             selection=cfg.selection,
             memory_recall_target=str(tmp_path / "missing-hub"),
-            graphtrail_delta_timeout_seconds=cfg.graphtrail_delta_timeout_seconds,
+            code_graph_delta_timeout_seconds=cfg.code_graph_delta_timeout_seconds,
             capture_before_retry=cfg.capture_before_retry,
             verify_runs_keep=cfg.verify_runs_keep,
             verify_archive_enabled=cfg.verify_archive_enabled,
@@ -2419,35 +2419,47 @@ def test_hook_run_process_exits_within_timeout_when_operation_hangs(tmp_path: Pa
     env = os.environ.copy()
     repo_root = Path(__file__).resolve().parents[1]
     env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(repo_root / "src"), env.get("PYTHONPATH"))))
-    env[runtime._HOOK_TEST_HANG_ENV] = "30"
-    env[runtime._HOOK_TIMEOUT_ENV] = "0.25"
-    started = time.monotonic()
-    completed = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "brigade",
-            "work",
-            "hook-run",
-            "--event",
-            "PreToolUse",
-            "--package",
-            PACKAGE_REF,
-        ],
-        input=json.dumps(payload),
-        capture_output=True,
-        text=True,
-        cwd=target,
-        env=env,
-        timeout=5,
-        check=False,
-    )
-    elapsed = time.monotonic() - started
+
+    def run_hook(hang_seconds: str, hook_timeout: str = "0.25") -> tuple[subprocess.CompletedProcess[str], float]:
+        started = time.monotonic()
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "work",
+                "hook-run",
+                "--event",
+                "PreToolUse",
+                "--package",
+                PACKAGE_REF,
+            ],
+            input=json.dumps(payload),
+            capture_output=True,
+            text=True,
+            cwd=target,
+            env={**env, runtime._HOOK_TEST_HANG_ENV: hang_seconds, runtime._HOOK_TIMEOUT_ENV: hook_timeout},
+            timeout=15,
+            check=False,
+        )
+        return completed, time.monotonic() - started
+
+    # Interpreter startup and teardown vary with runner load; a no-hang run of
+    # the same command measures them so the bound covers only the timeout path.
+    # The baseline gets a long budget: on a loaded runner the hook's own work
+    # can pass 0.25 s, and a second timeout would latch the hook off
+    # (HOOK_TIMEOUT_LATCH_AFTER) and change the envelope under test.
+    baseline, baseline_elapsed = run_hook("0", hook_timeout="10")
+    assert baseline.returncode == 0
+    log = envelope.log_path(target)
+    logged_before = log.read_text(encoding="utf-8") if log.exists() else ""
+    assert "timed out" not in logged_before
+    completed, elapsed = run_hook("30")
 
     assert completed.returncode == 0
-    assert elapsed < 2.0
+    assert elapsed - baseline_elapsed < 1.0
     assert json.loads(completed.stdout) == envelope.degraded_envelope("PreToolUse")
-    assert "timed out" in envelope.log_path(target).read_text(encoding="utf-8")
+    assert "timed out" in log.read_text(encoding="utf-8")[len(logged_before) :]
     assert "resource_tracker" not in completed.stderr
 
 

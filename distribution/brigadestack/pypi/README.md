@@ -5,7 +5,7 @@
 This bridge contains package metadata and points directly to the dependency's CLI
 entry point. Python imports remain under `brigade`.
 
-Requires Python 3.10 or newer. Install in a virtual environment:
+Requires Python 3.11 or newer. Install in a virtual environment:
 
 ```sh
 python -m venv .venv

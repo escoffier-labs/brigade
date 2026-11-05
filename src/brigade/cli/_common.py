@@ -62,7 +62,6 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "pantry",
             "roster",
             "run",
-            "run-cloud",
             "route",
             "runs",
             "node",
@@ -96,8 +95,6 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "reconfigure",
             "completions",
             "extras",
-            "openclaw-fragments",
-            "hermes-fragments",
         ],
     ),
 ]

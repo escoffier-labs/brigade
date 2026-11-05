@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import graphtrail_delta
+from brigade import code_graph_delta
 from brigade.claude_hooks import dependencies, package, runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -39,6 +39,13 @@ def target(tmp_path: Path, monkeypatch, inherited_cache) -> Path:
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
     monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
     monkeypatch.setattr(runtime, "_run_brief", lambda *args: "work brief")
+    # The content check hashes the indexed files on a bounded thread (0.5 s in
+    # production). On a loaded CI shard that thread can miss the budget, the
+    # check records unseen_dependents=None, and every test that is not about the
+    # budget fails. Give them a budget that load cannot exhaust; the stalled-read
+    # test sets its own tiny one after this fixture runs.
+    monkeypatch.setattr(dependencies, "CONTENT_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(dependencies, "GRAPH_TIMEOUT_SECONDS", 60.0)
     return target
 
 
@@ -59,7 +66,7 @@ def graph(target: Path, monkeypatch, **overrides):
                 if path.suffix in {".py", ".astro"}
             ],
         )
-    monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", lambda: "graphtrail")
+    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "graphtrail")
     report = {
         "changed_files": ["api.py"],
         "missing_files": [],
@@ -78,7 +85,7 @@ def graph(target: Path, monkeypatch, **overrides):
             "stdout": json.dumps(report) if command == "affected" else "synced",
         }
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     return calls
 
 
@@ -203,11 +210,11 @@ def test_unusable_graph_records_null_and_reason_without_denying(target, monkeypa
         truncated=failure == "truncated",
         missing_files=["api.py"] if failure == "missing_file" else [],
     )
-    original = graphtrail_delta._run_graphtrail
+    original = code_graph_delta._run_graphtrail
     if failure == "no_index":
         (target / ".graphtrail" / "graphtrail.db").unlink()
     elif failure == "no_binary":
-        monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", lambda: None)
+        monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: None)
     elif failure in {"sync_failed", "sync_timeout", "query_timeout", "malformed"}:
 
         def run(binary, db_path, command, *extra, **kwargs):
@@ -219,7 +226,7 @@ def test_unusable_graph_records_null_and_reason_without_denying(target, monkeypa
                 return {"returncode": 0, "stdout": "broken JSON"}
             return original(binary, db_path, command, *extra, **kwargs)
 
-        monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+        monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     assert result is None or "permissionDecision" not in result.get("hookSpecificOutput", {})
     check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
@@ -285,7 +292,7 @@ def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(t
     before = caller.stat()
     caller.write_text(caller.read_text().replace("other()", "serve()"))
     os.utime(caller, ns=(before.st_atime_ns, before.st_mtime_ns))
-    original = graphtrail_delta._run_graphtrail
+    original = code_graph_delta._run_graphtrail
     forced = False
 
     def run(binary, db_path, command, *extra, **kwargs):
@@ -306,7 +313,7 @@ def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(t
             result["stdout"] = json.dumps(report)
         return result
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == [
         "caller.py",
@@ -376,7 +383,7 @@ def test_late_brief_cannot_mark_files_seen_in_new_task(target, monkeypatch, sour
 def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target, monkeypatch, interleaving):
     graph(target, monkeypatch)
     event(target, "SessionStart", source="startup")
-    original = graphtrail_delta._run_graphtrail
+    original = code_graph_delta._run_graphtrail
     interleaved = False
 
     def run(binary, db_path, command, *extra, **kwargs):
@@ -391,7 +398,7 @@ def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target
                 event(target, "SessionStart", source="clear")
         return original(binary, db_path, command, *extra, **kwargs)
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     state = runtime.read_session_state(target, "session-one")
     if interleaving == "read":
@@ -405,14 +412,14 @@ def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target
 
 def test_read_completed_during_graph_query_is_excluded_from_record_and_warning(target, monkeypatch):
     graph(target, monkeypatch)
-    original = graphtrail_delta._run_graphtrail
+    original = code_graph_delta._run_graphtrail
 
     def run(binary, db_path, command, *extra, **kwargs):
         if command == "affected":
             event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
         return original(binary, db_path, command, *extra, **kwargs)
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
     assert check["unseen_dependents"] == ["tests/test_api.py"]
@@ -577,20 +584,21 @@ def test_seen_file_cap_retains_recent_reads_for_dependency_checks(target, monkey
     expected = {"z.py", {"reread": "a.py", "parallel_read": "zz.py"}.get(interleaving, "m.py")}
     assert set(runtime.read_session_state(target, "session-one")["read_files"]) == expected
     result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
-    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
+    check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
+    assert check["unseen_dependents"] == [], check["reason"]
     assert result is None
 
 
 def test_fresh_incremental_graph_does_not_require_full_rebuild(target, monkeypatch):
     graph(target, monkeypatch)
-    original = graphtrail_delta._run_graphtrail
+    original = code_graph_delta._run_graphtrail
 
     def run(binary, db_path, command, *extra, **kwargs):
         if command == "sync" and "--force" in extra:
             return {"returncode": 124, "timed_out": True}
         return original(binary, db_path, command, *extra, **kwargs)
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
     event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == [
         "caller.py",

@@ -23,7 +23,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Sequence
 
-from .. import component_bins
+from .. import component_bins, engine_paths
 from . import footprint as footprint_mod
 
 MODE_FILE_OVERLAP = "file_overlap"
@@ -299,10 +299,13 @@ def _files_only(footprint: dict[str, Any] | None) -> frozenset[str]:
 
 
 def _graphtrail_availability(target: Path) -> tuple[bool, str | None, str | None, Path | None]:
-    binary = component_bins.resolve("graphtrail")
-    db_path = target / ".graphtrail" / "graphtrail.db"
+    binary = component_bins.resolve("brigade-code-graph")
     if binary is None:
         return False, "graphtrail binary not found", None, None
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError as exc:
+        return False, str(exc), None, None
     if not db_path.is_file():
         return False, "graphtrail index not found", None, None
     return True, None, binary, db_path

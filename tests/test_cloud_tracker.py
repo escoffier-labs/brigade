@@ -11,7 +11,7 @@ from typing import Any
 
 import pytest
 
-from brigade import cli, claude_cloud, cloud_tracker, codex_cloud, cursor_cloud, fleet_client, grokbot_jobs
+from brigade import cli, cloud_tracker, codex_cloud, cursor_cloud, fleet_client, grokbot_jobs
 from brigade.cli import run_cloud
 
 
@@ -1044,7 +1044,6 @@ def test_observe_providers_does_not_call_claude_local_inventory(monkeypatch, tmp
         raise RuntimeError("claude local inventory must not be observed as cloud authority")
 
     _isolate_hosted_providers(monkeypatch)
-    monkeypatch.setattr(claude_cloud, "list_agents", fail_if_called)
     tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
     assert tasks == {}
     assert called == []
@@ -1160,13 +1159,6 @@ def test_local_claude_session_cannot_make_claude_cloud_registry_row_active(monke
         dispatched_at=_iso(NOW),
     )
     _isolate_hosted_providers(monkeypatch)
-    monkeypatch.setattr(
-        claude_cloud,
-        "list_agents",
-        lambda *a, **k: [
-            {"id": "sess-claude-1", "name": "worker", "state": "active", "workspace": "/home/user/secret"},
-        ],
-    )
     provider_tasks, _github, _cursor_wired = cloud_tracker.observe_providers(tmp_path)
     assert provider_tasks == {}
     payload = cloud_tracker.status_payload(

@@ -6,6 +6,7 @@ Optional generations fence callers that deliberately reuse a holder identity.
 
 from __future__ import annotations
 
+import json
 import math
 import sqlite3
 from typing import Any
@@ -24,6 +25,8 @@ RETIRED_HOLDER_EVICTION_BATCH = 256
 EXPIRED_CLAIM_PRUNE_BATCH = 32
 MAX_CLAIM_TARGET_BYTES = 1024
 MAX_GENERATION = 2**63 - 1
+# hub_meta key holding the claim recovery floor a restore wrote (schema v50).
+RECOVERY_META_KEY = "recovery"
 CLAIM_COLUMNS = (
     "target, owner_node, owner_conductor, harness, role, job, session, acquired_at, renewed_at, ttl_seconds, expires_at"
 )
@@ -253,19 +256,49 @@ def generation(conn: sqlite3.Connection, target: str, *, has_claim: bool) -> int
     return _checked_generation(row[0])
 
 
-def _advance(conn: sqlite3.Connection, target: str, current: int) -> int:
-    if current == MAX_GENERATION:
+def recovery_floor(conn: sqlite3.Connection) -> int:
+    """The claim recovery floor a restore wrote, or 0 when no restore ever ran.
+
+    A restore from a backup copy writes the floor so that no target, including
+    one first claimed after the copy, can be handed a generation that a holder
+    from the lost window may still present.
+    """
+    try:
+        row = conn.execute("SELECT value FROM hub_meta WHERE key = ?", (RECOVERY_META_KEY,)).fetchone()
+    except sqlite3.OperationalError as exc:
+        _refuse_missing_schema(exc)
+        raise
+    if row is None:
+        return 0
+    try:
+        value = json.loads(row[0])["claim_floor"]
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ClaimFenceError("claim recovery floor is corrupt") from exc
+    if type(value) is not int or not 0 <= value < MAX_GENERATION:
+        raise ClaimFenceError("claim recovery floor is corrupt")
+    return value
+
+
+def next_generation(conn: sqlite3.Connection, current: int) -> int:
+    """Allocation rule: ``max(current, floor) + 1``, for targets with and without a fence row."""
+    base = max(current, recovery_floor(conn))
+    if base >= MAX_GENERATION:
         raise ClaimFenceError("claim generation fence exhausted")
+    return base + 1
+
+
+def _advance(conn: sqlite3.Connection, target: str, current: int) -> int:
+    started = next_generation(conn, current)
     if current == 0:
         if len(_target_bytes(target)) > MAX_CLAIM_TARGET_BYTES:
             raise ClaimTargetTooLongError("claim target exceeds UTF-8 byte limit", limit=MAX_CLAIM_TARGET_BYTES)
         count = conn.execute("SELECT COUNT(*) FROM claim_fences").fetchone()[0]
         if count >= MAX_CLAIM_TARGETS:
             raise ClaimFenceError("claim generation fence capacity exceeded")
-        conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", (target,))
+        conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, ?)", (target, started))
     else:
-        conn.execute("UPDATE claim_fences SET generation = ? WHERE target = ?", (current + 1, target))
-    return current + 1
+        conn.execute("UPDATE claim_fences SET generation = ? WHERE target = ?", (started, target))
+    return started
 
 
 def _checked_retired_at(value: Any) -> float:
@@ -393,6 +426,10 @@ def _stale(
         and row is not None
         and row[1] == request["node_id"]
         and row[11] == holder
+        # The exact predecessor only. Restore raises every existing fence to the
+        # recovery floor, so the first grant after it still has predecessor
+        # current - 1. Mapping every generation at or below the floor onto that
+        # grant would let a replayed acquire from the lost window pass as a retry.
         and expected == current - 1
         and expected >= retired
     )
@@ -455,12 +492,11 @@ def _prune(conn: sqlite3.Connection, now: float, budget: _RetirementBudget, requ
     ).fetchall()
     for target, node, holder, expires_at in targets:
         current = generation(conn, target, has_claim=True)
-        if current == MAX_GENERATION:
-            raise ClaimFenceError("claim generation fence exhausted")
+        ended = next_generation(conn, current)
         try:
             # A refused unrelated retirement must leave both its claim and
             # target fence untouched. Check and write the marker only once.
-            budget.retire(target, node, holder, current + 1)
+            budget.retire(target, node, holder, ended)
         except _RetirementCapacityError:
             if target == requested_target:
                 raise
@@ -720,3 +756,41 @@ def list_active_claims(conn: sqlite3.Connection, *, now_epoch: float, limit: int
         claim["expired"] = False
         result.append(claim)
     return result
+
+
+def end_all_for_restore(conn: sqlite3.Connection, now: float) -> int:
+    """End every claim through the force-release rule. Caller owns the transaction.
+
+    Each holder is recorded as retired at the target's next generation, so a
+    renewal from any holder at copy time is refused as stale.
+    """
+    budget = _RetirementBudget(conn, now)
+    rows = conn.execute("SELECT target, owner_node, holder_token FROM claims ORDER BY target").fetchall()
+    for target, node, holder in rows:
+        current = generation(conn, target, has_claim=True)
+        ended = _advance(conn, target, current)
+        budget.retire(target, node, holder, ended)
+        conn.execute("DELETE FROM claims WHERE target = ?", (target,))
+    return len(rows)
+
+
+def write_recovery_floor(
+    conn: sqlite3.Connection, ledger_floor: int, *, advance: int, restored_at: str, copy_sha256: str
+) -> int:
+    """Write F, ``advance`` above every generation, the copy's floor and the ledger's, and raise all fences to F.
+
+    Caller owns the transaction. Allocation is ``max(current, F) + 1`` from
+    then on, so a target the copy never saw cannot be handed generation 1.
+    """
+    _validate_fences(conn)
+    highest = conn.execute("SELECT COALESCE(MAX(generation), 0) FROM claim_fences").fetchone()[0]
+    floor = max(int(highest), recovery_floor(conn), int(ledger_floor)) + advance
+    if floor >= MAX_GENERATION:
+        raise ClaimFenceError("claim recovery floor would exhaust the generation range")
+    value = json.dumps({"claim_floor": floor, "restored_at": restored_at, "copy_sha256": copy_sha256}, sort_keys=True)
+    conn.execute(
+        "INSERT INTO hub_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (RECOVERY_META_KEY, value),
+    )
+    conn.execute("UPDATE claim_fences SET generation = ? WHERE generation < ?", (floor, floor))
+    return floor

@@ -14,6 +14,7 @@ from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
 from .profile import DOT, ConnectorProfile
+from .prompt_scan import blocked_rule
 from .runtime_config import Runtime
 from .safe_state import private_directory, trusted_directory, redact_credentials
 from .state import utc_now
@@ -54,12 +55,22 @@ class MemoryTools:
         if error or not isinstance(value, dict) or not isinstance(value.get("matches"), list):
             return {"error": error or "memory_unavailable"}
         keys = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        matches = []
+        for match in value["matches"][:limit]:
+            if not isinstance(match, dict):
+                continue
+            item = {key: match.get(key) for key in keys}
+            if self.profile.prompt_load_scan:
+                rule = blocked_rule(_card_texts(item))
+                if rule:
+                    matches.append({"card_id": _blocked_card_id(item), "blocked": rule})
+                    continue
+            item["content_trust"] = "untrusted"
+            matches.append(item)
         return dict(
             query=query,
             match_count=value.get("match_count"),
-            matches=[
-                {key: match.get(key) for key in keys} for match in value["matches"][:limit] if isinstance(match, dict)
-            ],
+            matches=matches,
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
@@ -94,6 +105,11 @@ class MemoryTools:
             text = data.decode("utf-8")
         except UnicodeError:
             return {"error": "card_unavailable", "name": name}
+        if self.profile.prompt_load_scan:
+            # The whole card is scanned, so no chunk boundary can split a hit.
+            rule = blocked_rule([text])
+            if rule:
+                return {"card_id": name, "blocked": rule}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
         return dict(
@@ -105,6 +121,7 @@ class MemoryTools:
             offset=offset,
             next_offset=following if following < len(text) else None,
             content=chunk,
+            content_trust="untrusted",
         )
 
     def handoff_write(self, slug: str, content: str) -> dict[str, Any]:
@@ -234,6 +251,33 @@ class MemoryTools:
             if _skill_names({"skill_dir": str(directory), "metadata": metadata}) & self.runtime.skills_deny:
                 return {"error": "skill_not_found"}
         return skill_get(self.workspace, name, resource, offset)
+
+
+_SAFE_CARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
+
+
+def _card_texts(item: dict[str, Any]) -> list[str]:
+    # Card-authored fields of a search match; path and score come from the search itself.
+    # A legacy card's id can come from its frontmatter, so it is card-authored too.
+    texts = [item.get("card_id"), item.get("title"), item.get("summary")]
+    for key in ("tags", "card_aliases"):
+        values = item.get(key)
+        if isinstance(values, list):
+            texts.extend(values)
+    return [text for text in texts if isinstance(text, str)]
+
+
+def _blocked_card_id(item: dict[str, Any]) -> str | None:
+    """An identifier for a blocked match that carries no card-authored free text.
+
+    Keep the card id only when it is a plain slug, else fall back to the file stem
+    memory_card reads by, and return None when neither is a plain slug.
+    """
+    path = item.get("path")
+    for value in (item.get("card_id"), PurePath(path).stem if isinstance(path, str) else None):
+        if isinstance(value, str) and _SAFE_CARD_ID.fullmatch(value):
+            return value
+    return None
 
 
 def _skill_names(item: dict[str, Any]) -> set[str]:

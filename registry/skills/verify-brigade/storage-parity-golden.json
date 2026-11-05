@@ -1,0 +1,7229 @@
+{
+ "parity_version": 1,
+ "profiles": {
+  "defaults": {
+   "digest": "9ca61b47a9ae76a6fbefab023249bb0949f287f2fc0c6f2c3a8aae7e662daba9",
+   "tables": {
+    "action_broker_grants": {
+     "columns": [
+      "node_id",
+      "revoked_at",
+      "subjects",
+      "targets"
+     ],
+     "rows": []
+    },
+    "action_events": {
+     "columns": [
+      "action_id",
+      "created_at",
+      "document",
+      "event_id",
+      "generation"
+     ],
+     "rows": []
+    },
+    "action_operator_grants": {
+     "columns": [
+      "grant_id",
+      "login",
+      "revoked_at",
+      "scopes"
+     ],
+     "rows": []
+    },
+    "action_sessions": {
+     "columns": [
+      "credential_digest",
+      "csrf_digest",
+      "expires_at",
+      "grant_id",
+      "login"
+     ],
+     "rows": []
+    },
+    "action_target_identities": {
+     "columns": [
+      "identity",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "action_targets": {
+     "columns": [
+      "document",
+      "expires_at",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "admin_stats_snapshots": {
+     "columns": [
+      "digest",
+      "payload_json",
+      "schema",
+      "snapshot_id",
+      "source_set",
+      "taken_at"
+     ],
+     "rows": []
+    },
+    "admin_stats_weeks": {
+     "columns": [
+      "partial",
+      "payload_json",
+      "taken_at",
+      "week"
+     ],
+     "rows": []
+    },
+    "agent_actions": {
+     "columns": [
+      "action_id",
+      "claim_until",
+      "client_id",
+      "created_at",
+      "delivery",
+      "destination_ref",
+      "destination_thread",
+      "document",
+      "expires_at",
+      "generation",
+      "grant_id",
+      "node_id",
+      "request_digest",
+      "started_at",
+      "status",
+      "target_id",
+      "verification"
+     ],
+     "rows": []
+    },
+    "ci_check_runs": {
+     "columns": [
+      "attempt",
+      "kind",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "ci_invalidations": {
+     "columns": [
+      "head",
+      "reason",
+      "received_at",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_relay_watermarks": {
+     "columns": [
+      "cursor",
+      "relay",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_repo_state": {
+     "columns": [
+      "last_event_received",
+      "last_reconciled",
+      "observed_at",
+      "refresh_requested",
+      "repo",
+      "snapshot",
+      "visibility"
+     ],
+     "rows": []
+    },
+    "ci_runs": {
+     "columns": [
+      "attempt",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "claim_fences": {
+     "columns": [
+      "generation",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:repo:example-org/parity-one"
+      ],
+      [
+       "i:3",
+       "t:repo:example-org/parity-two"
+      ]
+     ]
+    },
+    "claim_retired_holders": {
+     "columns": [
+      "generation",
+      "holder_token",
+      "owner_node",
+      "retired_at",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:holder-b-2",
+       "t:parity-b",
+       "r:<E+7862402.75>",
+       "t:repo:example-org/parity-one"
+      ]
+     ]
+    },
+    "claims": {
+     "columns": [
+      "acquired_at",
+      "expires_at",
+      "harness",
+      "holder_token",
+      "job",
+      "lock_acquired_at",
+      "lock_run_dir",
+      "lock_token",
+      "owner_conductor",
+      "owner_node",
+      "renewed_at",
+      "role",
+      "session",
+      "target",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "r:<E+7862702.75>",
+       null,
+       "t:holder-b2",
+       null,
+       null,
+       null,
+       null,
+       null,
+       "t:parity-b",
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "t:repo:example-org/parity-two",
+       "i:300"
+      ]
+     ]
+    },
+    "cloud_global_state": {
+     "columns": [
+      "limit_count",
+      "singleton"
+     ],
+     "rows": []
+    },
+    "cloud_leases": {
+     "columns": [
+      "admitted_at",
+      "artifact_ref",
+      "expires_at",
+      "holder_token",
+      "label",
+      "lease_id",
+      "owner_conductor",
+      "owner_node",
+      "prompt_hash",
+      "provider",
+      "provider_task_id",
+      "released_at",
+      "renewed_at",
+      "repo",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": []
+    },
+    "cloud_provider_state": {
+     "columns": [
+      "circuit_state",
+      "enabled",
+      "expires_at",
+      "hosted",
+      "limit_count",
+      "provider",
+      "reason",
+      "reset_at",
+      "subscription_pool",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "dashboard_enrollment_codes": {
+     "columns": [
+      "code_digest",
+      "expires_at",
+      "issued_at",
+      "label"
+     ],
+     "rows": []
+    },
+    "dashboard_sessions": {
+     "columns": [
+      "created_at",
+      "credential_digest",
+      "expires_at",
+      "label",
+      "revoked_at",
+      "scope",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "events": {
+     "columns": [
+      "capability_fingerprint",
+      "context",
+      "digest",
+      "exit_status",
+      "harness",
+      "node_id",
+      "received_at",
+      "repo",
+      "repo_identity",
+      "run_id",
+      "seat",
+      "sequence",
+      "state",
+      "ts"
+     ],
+     "rows": [
+      [
+       null,
+       null,
+       "t:parity-run-live-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-live",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-2",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:2",
+       "t:run.completed",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "fleet_audit_log": {
+     "columns": [
+      "action",
+      "actor",
+      "at",
+      "detail",
+      "id",
+      "subject"
+     ],
+     "rows": [
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:1",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:2",
+       "t:agent:parity-operator"
+      ],
+      [
+       "t:member.remove",
+       "t:admin",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"node_id\":\"parity-c\"}",
+       "i:3",
+       "t:parity-c"
+      ]
+     ]
+    },
+    "fleet_dispatch_intents": {
+     "columns": [
+      "created_at",
+      "decision_id",
+      "origin_node",
+      "reservation_id",
+      "session_id",
+      "state",
+      "target_node",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_event_attempts": {
+     "columns": [
+      "attempted_at",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_deliveries": {
+     "columns": [
+      "attempted_at",
+      "attempts",
+      "next_attempt",
+      "seq",
+      "state",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_subscriptions": {
+     "columns": [
+      "arguments",
+      "created_at",
+      "cursor_seq",
+      "expires_at",
+      "failures",
+      "filter_value",
+      "generation",
+      "id",
+      "name",
+      "previous_secret",
+      "principal_id",
+      "rotate_until",
+      "secret",
+      "url"
+     ],
+     "rows": []
+    },
+    "fleet_event_verifications": {
+     "columns": [
+      "attempted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_events": {
+     "columns": [
+      "created_at",
+      "data",
+      "event_id",
+      "name",
+      "producer",
+      "seq",
+      "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
+     ],
+     "rows": []
+    },
+    "fleet_machine_telemetry": {
+     "columns": [
+      "active_claims",
+      "credential_state",
+      "load",
+      "machine",
+      "node_id",
+      "observed_at",
+      "observed_id",
+      "running",
+      "status",
+      "ttl_seconds",
+      "updated_at",
+      "usable_seats"
+     ],
+     "rows": []
+    },
+    "fleet_mesh_statements": {
+     "columns": [
+      "kind",
+      "seq",
+      "statement",
+      "uploaded_at"
+     ],
+     "rows": []
+    },
+    "fleet_message_keys": {
+     "columns": [
+      "compromised_from",
+      "created_at",
+      "kid",
+      "principal_id",
+      "record",
+      "retired_at",
+      "revoked_at",
+      "state"
+     ],
+     "rows": [
+      [
+       null,
+       "t:<T+172800|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_aKmYFGEquPmwk2iIvXpcOA",
+       "t:parity-a",
+       "t~1ca0160f37e132f46757ba0f6d957228687ae2a44a835b978430d08688ac07e5:1965",
+       null,
+       null,
+       "t:active"
+      ],
+      [
+       null,
+       "t:<T+172801|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_u3WcgR8MIJS-J-w0skmHvQ",
+       "t:parity-b",
+       "t~12b226b74afcce022f90d8aa7b81078d7aa5bcfe098c643e376aa6861c98e030:1965",
+       null,
+       null,
+       "t:active"
+      ]
+     ]
+    },
+    "fleet_message_principals": {
+     "columns": [
+      "authorization_enrollment_epoch",
+      "created_at",
+      "enrollment_id",
+      "grant_epoch",
+      "label",
+      "name",
+      "person",
+      "principal_id",
+      "revoked_at",
+      "role",
+      "token_hash"
+     ],
+     "rows": [
+      [
+       "t:<principal-epoch#1>",
+       "t:<T+2.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#1>",
+       "t:<grant-epoch#1>",
+       "t:parity-agent",
+       "t:parity-agent",
+       null,
+       "t:agent:parity-agent",
+       null,
+       "t:agent",
+       "t:<token-digest#4>"
+      ],
+      [
+       "t:<principal-epoch#2>",
+       "t:<T+3.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#2>",
+       "t:<grant-epoch#2>",
+       "t:parity-operator",
+       "t:parity-operator",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:agent",
+       "t:<token-digest#5>"
+      ]
+     ]
+    },
+    "fleet_message_send_grants": {
+     "columns": [
+      "created_at",
+      "pattern",
+      "principal_id"
+     ],
+     "rows": [
+      [
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_message_sends": {
+     "columns": [
+      "client_id",
+      "id",
+      "received_at",
+      "sender"
+     ],
+     "rows": [
+      [
+       "t:p-agent-3",
+       "i:14",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b"
+      ],
+      [
+       "t:q3-answer",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_messages": {
+     "columns": [
+      "acked_at",
+      "acked_by",
+      "body",
+      "client_id",
+      "content_state",
+      "created_at",
+      "envelope",
+      "envelope_bytes",
+      "id",
+      "kind",
+      "payload_hash",
+      "priority",
+      "received_at",
+      "recipient",
+      "reference",
+      "reply_to",
+      "sealed_reply_to",
+      "sender",
+      "sender_label",
+      "subject",
+      "thread"
+     ],
+     "rows": [
+      [
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:",
+       "t:s1",
+       "t:content_expired",
+       "t:<T+172801.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~d7664d2aa6eeb638fc4b335ab14aaaa63bf80b27997cf60788ce78175f22f061:565",
+       "i:565",
+       "i:6",
+       "t:message",
+       "t:51041ad37790ffb851f859fe9e5defab589beea6593aa2ed63ef084800359d6f",
+       "t:normal",
+       "t:<T+172802.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:",
+       "t:s2",
+       "t:sealed",
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb:5267",
+       "i:5267",
+       "i:7",
+       "t:message",
+       "t:e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb",
+       "t:normal",
+       "t:<T+172804.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-a",
+       null,
+       "i:6",
+       "i:6",
+       "t:parity-b",
+       null,
+       "t:",
+       null
+      ],
+      [
+       "t:<T+172807.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:late reply",
+       "t:p-recent-1",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:8",
+       null,
+       "t:156713faac71428d6eb049e6156c36cc07a155ff1b8aac4f7063a8f855e91c9f",
+       "t:normal",
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Re: Re: parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:recent",
+       "t:p-recent-2",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:9",
+       null,
+       "t:db261541618965a274691801d60e8d92c2075590692a009f327b74f6c2c0fc64",
+       "t:normal",
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       "t:parity-thread"
+      ],
+      [
+       null,
+       null,
+       "t:second",
+       "t:p-agent-2",
+       null,
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:10",
+       null,
+       "t:06d36ac133d1e0b18b3c71246e4a20700993c4b04e2de12cb737ec50a81b5f21",
+       "t:normal",
+       "t:<T+172806.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered in time?",
+       "t:<client-id#1>",
+       null,
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:11",
+       "t:operator_question",
+       "t:3a2a86732c341e83de8630f29ccd00e9117f6872aae275b4749b29e27a14c6cd",
+       "t:normal",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:in time",
+       "t:q2-answer",
+       null,
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:12",
+       null,
+       "t:f04a148d59f2b803b32a585c763c1354a2956997c2fce2d143841ca41dec6625",
+       "t:normal",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:11",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered late?",
+       "t:<client-id#2>",
+       null,
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:13",
+       "t:operator_question",
+       "t:5acc323657ac49032da2c69d1f9c0c53b09bfbe650e4ee440c0ea6ab04d4dbe2",
+       "t:normal",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:third",
+       "t:p-agent-3",
+       null,
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:14",
+       null,
+       "t:b77d3a6d999e00f9a52f70a302b276b3ba9109740ac505e83fc8adef8b8a8ddd",
+       "t:normal",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-b",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:late",
+       "t:q3-answer",
+       null,
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:15",
+       null,
+       "t:0e43f40896b261d0e82fc0fca144da10bcd419a1ff99d766e4d39e1963961e60",
+       "t:normal",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:13",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ]
+     ]
+    },
+    "fleet_policy_acknowledged": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_acknowledged_history": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "history_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_delegations": {
+     "columns": [
+      "adapter",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "delegation_id",
+      "document",
+      "expires_at",
+      "origin_node",
+      "parent_metadata",
+      "parent_request_id",
+      "policy_digest",
+      "policy_version",
+      "repo_identity",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "source_revision",
+      "target_machine",
+      "target_node",
+      "workload"
+     ],
+     "rows": []
+    },
+    "fleet_policy_meta": {
+     "columns": [
+      "current_revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema"
+      ]
+     ]
+    },
+    "fleet_policy_pending": {
+     "columns": [
+      "consumer",
+      "context_hash",
+      "created_at",
+      "digest",
+      "effective",
+      "instructions",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "pending_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "session_id",
+      "source",
+      "sources",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_policy_revisions": {
+     "columns": [
+      "actor",
+      "created_at",
+      "digest",
+      "document",
+      "parent_revision",
+      "reason",
+      "revision",
+      "schema"
+     ],
+     "rows": [
+      [
+       "t:schema",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:sha256:4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb",
+       "t~4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb:290",
+       null,
+       "t:initial empty policy",
+       "i:1",
+       "t:brigade.fleet_policy.v1"
+      ]
+     ]
+    },
+    "fleet_policy_sessions": {
+     "columns": [
+      "consumer",
+      "digest",
+      "loaded_at",
+      "owner_node",
+      "refresh_detail",
+      "refresh_requested_at",
+      "refresh_state",
+      "refresh_updated_at",
+      "repo_identity",
+      "revision",
+      "session_id",
+      "source",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_questions": {
+     "columns": [
+      "answer",
+      "answer_id",
+      "answered_at",
+      "answered_by",
+      "caller",
+      "created_at",
+      "deadline",
+      "generation",
+      "late_answer_message_id",
+      "late_answered_at",
+      "message_id",
+      "operator",
+      "operator_reply_after_desktop_at",
+      "operator_reply_after_desktop_message_id",
+      "payload_hash",
+      "question",
+      "question_id",
+      "request_id",
+      "source",
+      "status"
+     ],
+     "rows": [
+      [
+       "t:in time",
+       "i:12",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       "t:parity-a",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<T+172929.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#1>",
+       null,
+       null,
+       "i:11",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:572701029d94700960d3f0e9cbe4fa74433db0b797767e5463330a26575894d1",
+       "t:Answered in time?",
+       "t:<question#1>",
+       "t:q2",
+       "t:operator_reply",
+       "t:answered"
+      ],
+      [
+       null,
+       null,
+       null,
+       null,
+       "t:parity-a",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<T+172931|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<token-digest#1>",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:13",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:c1cd2a36d19e3506d6dea196985a03f9049ceec0afeebdc32bcf3387d105e716",
+       "t:Answered late?",
+       "t:<question#2>",
+       "t:q3",
+       null,
+       "t:timeout"
+      ]
+     ]
+    },
+    "fleet_quota_meta": {
+     "columns": [
+      "singleton",
+      "updated_at",
+      "version"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:0"
+      ]
+     ]
+    },
+    "fleet_quota_observations": {
+     "columns": [
+      "account_id",
+      "collected_at",
+      "created_at",
+      "digest",
+      "document",
+      "expires_at",
+      "observation_id",
+      "overrides_observation_id",
+      "pool_id",
+      "provider",
+      "provider_time",
+      "raw",
+      "reason",
+      "source",
+      "source_ref",
+      "status"
+     ],
+     "rows": []
+    },
+    "fleet_read_snapshot_groups": {
+     "columns": [
+      "kind",
+      "row_count",
+      "snapshot_id",
+      "total"
+     ],
+     "rows": [
+      [
+       "t:claims",
+       "i:2",
+       "t:<snapshot#2>",
+       "i:2"
+      ],
+      [
+       "t:nodes",
+       "i:3",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:principals",
+       "i:2",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:sessions",
+       "i:1",
+       "t:<snapshot#1>",
+       "i:1"
+      ]
+     ]
+    },
+    "fleet_read_snapshot_rows": {
+     "columns": [
+      "caller",
+      "kind",
+      "ordinal",
+      "payload",
+      "recipient",
+      "snapshot_id",
+      "visible",
+      "wire_bytes"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:0",
+       "t~fcf2c121ff086bb1c602bf519b121e98b7a85c0817b551b093584a998b987a3e:354",
+       "t:parity-b",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7124"
+      ],
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:1",
+       "t~366518edaab82d5f935cb4698f7f961fee4ebaafd35c0fbb7662916959672b60:333",
+       "t:parity-a",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7103"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:0",
+       "t:{\"node_id\":\"parity-a\"}",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:1",
+       "t:{\"node_id\":\"parity-b\"}",
+       "t:parity-b",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:2",
+       "t:{\"node_id\":\"parity-c\"}",
+       "t:parity-c",
+       "t:<snapshot#1>",
+       "i:0",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:0",
+       "t:{\"principal_id\":\"agent:parity-agent\",\"label\":\"parity-agent\"}",
+       "t:agent:parity-agent",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2642"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:1",
+       "t:{\"principal_id\":\"agent:parity-operator\",\"label\":\"parity-operator\"}",
+       "t:agent:parity-operator",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2648"
+      ],
+      [
+       "t:parity-b",
+       "t:sessions",
+       "i:0",
+       "t~8c20d43ec7ab1e59c284a439ef8a057410fa46f2803ce7cc997fc23762992c90:238",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:9018"
+      ]
+     ]
+    },
+    "fleet_read_snapshots": {
+     "columns": [
+      "caller",
+      "expires_at",
+      "last_access",
+      "payload",
+      "payload_bytes",
+      "query_hash",
+      "snapshot_id"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "r:<E+614.75>",
+       "r:<E+14.75>",
+       "t:rows-v1",
+       "i:475",
+       "t:<query-binding#1>",
+       "t:<snapshot#1>"
+      ],
+      [
+       "t:parity-b",
+       "r:<E+615>",
+       "r:<E+15>",
+       "t:rows-v1",
+       "i:701",
+       "t:<query-binding#2>",
+       "t:<snapshot#2>"
+      ]
+     ]
+    },
+    "fleet_reservations": {
+     "columns": [
+      "accepted",
+      "created_at",
+      "decision_id",
+      "expires_at",
+      "machine",
+      "node_id",
+      "origin_node",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "state",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_route_decisions": {
+     "columns": [
+      "admission_generation",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "document",
+      "origin",
+      "origin_node",
+      "override_reason",
+      "policy_digest",
+      "policy_version",
+      "reason",
+      "repo_identity",
+      "request_digest",
+      "request_document",
+      "request_key",
+      "reservation_id",
+      "selected_machine",
+      "selected_seat",
+      "session_id",
+      "work_id",
+      "workload"
+     ],
+     "rows": []
+    },
+    "grokbot_actor_policy": {
+     "columns": [
+      "actor_kind",
+      "enabled",
+      "node_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "role"
+     ],
+     "rows": []
+    },
+    "grokbot_jobs": {
+     "columns": [
+      "artifact_digest",
+      "artifact_kind",
+      "artifact_ref",
+      "artifact_size",
+      "cancel_requested_at",
+      "claimant_node",
+      "claimant_worker",
+      "claimed_at",
+      "created_at",
+      "idempotency_key_hash",
+      "item_revision",
+      "job_id",
+      "label",
+      "lease_expires_at",
+      "lease_generation",
+      "lease_token_digest",
+      "owner_node",
+      "private_snapshot_id",
+      "queue_id",
+      "queue_ttl_seconds",
+      "queued_at",
+      "repository",
+      "role",
+      "sequence",
+      "state",
+      "task_digest",
+      "timeout_seconds",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "grokbot_operations": {
+     "columns": [
+      "action",
+      "actor_node_id",
+      "job_id",
+      "operation_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "request_digest",
+      "result_json",
+      "result_revision",
+      "result_state",
+      "timestamp"
+     ],
+     "rows": []
+    },
+    "hub_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": []
+    },
+    "interactive_sessions": {
+     "columns": [
+      "branch",
+      "checkout_path",
+      "cloud_context_json",
+      "dirty_paths_json",
+      "dirty_truncated",
+      "ended_at",
+      "expires_at",
+      "harness",
+      "heartbeat_at",
+      "identity_scope",
+      "node_id",
+      "provider_link_json",
+      "repo_identity",
+      "repo_label",
+      "session_id",
+      "started_at",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:parity-branch",
+       "t:/srv/example/checkout",
+       null,
+       "t:[\"src/example.py\", \"docs/caf\u00e9.md\"]",
+       "i:0",
+       null,
+       "r:<E+173707.5>",
+       "t:claude",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:fleet",
+       "t:parity-a",
+       null,
+       "t:github.com/example-org/example-repo",
+       "t:example-repo",
+       "t:parity-session-1",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:active",
+       "i:900"
+      ]
+     ]
+    },
+    "model_admission_audit": {
+     "columns": [
+      "consumer",
+      "consumer_binding",
+      "created_at",
+      "decision",
+      "expires_at",
+      "model",
+      "node_id",
+      "phase",
+      "provider",
+      "reasoning",
+      "request_digest",
+      "request_id",
+      "roster_digest",
+      "roster_revision",
+      "seat",
+      "source"
+     ],
+     "rows": []
+    },
+    "model_consumer_defaults": {
+     "columns": [
+      "consumer",
+      "seat",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "t:brigade-run",
+       "t:",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       "t:t3-fleet",
+       "t:",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "model_launch_proofs": {
+     "columns": [
+      "consumer",
+      "created_at",
+      "node_id",
+      "policy_session_id",
+      "proof_key",
+      "request_digest",
+      "request_id"
+     ],
+     "rows": []
+    },
+    "model_leases": {
+     "columns": [
+      "account_id",
+      "acquired_at",
+      "consumer",
+      "context_hash",
+      "decision_id",
+      "expires_at",
+      "holder_token",
+      "launch_model",
+      "lease_id",
+      "model",
+      "owner_node",
+      "policy_digest",
+      "policy_version",
+      "pool",
+      "provider",
+      "released_at",
+      "request_id",
+      "seat",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "model_policy": {
+     "columns": [
+      "brigade_cli",
+      "brigade_model",
+      "enabled",
+      "limit_count",
+      "model",
+      "notes",
+      "provider",
+      "reasoning",
+      "seat",
+      "t3_instance_id",
+      "t3_model",
+      "t3_service_tier",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "model_roster_meta": {
+     "columns": [
+      "revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema-v15"
+      ]
+     ]
+    },
+    "nodes": {
+     "columns": [
+      "created_at",
+      "label",
+      "node_id",
+      "revoked_at",
+      "token_sha256"
+     ],
+     "rows": [
+      [
+       "t:<T+1|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity node a",
+       "t:parity-a",
+       null,
+       "t:<token-digest#1>"
+      ],
+      [
+       "t:<T+1.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-b",
+       null,
+       "t:<token-digest#2>"
+      ],
+      [
+       "t:<T+2.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-c",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#3>"
+      ]
+     ]
+    },
+    "retired_models": {
+     "columns": [
+      "created_at",
+      "family",
+      "match_kind",
+      "permanent",
+      "provider",
+      "reason_code"
+     ],
+     "rows": [
+      [
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.4",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ],
+      [
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.5",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ]
+     ]
+    },
+    "run_preference": {
+     "columns": [
+      "id",
+      "impl",
+      "notes",
+      "orchestrator",
+      "research",
+      "review",
+      "scout",
+      "security",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": []
+    },
+    "sqlite_sequence": {
+     "columns": [
+      "name",
+      "seq"
+     ],
+     "rows": [
+      [
+       "t:fleet_message_sends",
+       "i:15"
+      ],
+      [
+       "t:fleet_audit_log",
+       "i:3"
+      ],
+      [
+       "t:fleet_messages",
+       "i:15"
+      ]
+     ]
+    },
+    "work_campaign_members": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "override",
+      "repo",
+      "spec_fingerprint",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_campaigns": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "created_by",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_create_keys": {
+     "columns": [
+      "actor_id",
+      "fingerprint",
+      "idempotency_key",
+      "received_at",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_events": {
+     "columns": [
+      "actor_id",
+      "actor_type",
+      "detail_json",
+      "event_id",
+      "event_type",
+      "from_status",
+      "node_id",
+      "occurred_at",
+      "received_at",
+      "run_id",
+      "seq",
+      "to_status",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_import_keys": {
+     "columns": [
+      "adapter_id",
+      "created",
+      "fingerprint",
+      "idempotency_key",
+      "owner_node",
+      "received_at",
+      "refused",
+      "unchanged",
+      "updated"
+     ],
+     "rows": []
+    },
+    "work_items": {
+     "columns": [
+      "acceptance_json",
+      "archived_at",
+      "attempt_count",
+      "blocker",
+      "burn_eligible",
+      "burn_rank",
+      "created_at",
+      "description",
+      "execution_mode",
+      "kind",
+      "priority",
+      "ready_at",
+      "review_after",
+      "scope",
+      "spend_by",
+      "status",
+      "title",
+      "token_appetite",
+      "updated_at",
+      "version",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_links": {
+     "columns": [
+      "adapter_id",
+      "display_ref",
+      "external_key",
+      "external_state",
+      "external_updated_at",
+      "link_id",
+      "link_type",
+      "owner_node",
+      "source_acceptance_json",
+      "source_policy",
+      "source_version",
+      "stale_at",
+      "synced_at",
+      "url",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "t:reconciled_version",
+       "t:2"
+      ]
+     ]
+    },
+    "work_sync_cursors": {
+     "columns": [
+      "adapter_id",
+      "cursor",
+      "last_error_code",
+      "last_success_at",
+      "owner_node",
+      "source_type",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "migrated-v22": {
+   "digest": "103e22333b79e6d7cdc3a8ce25a05654a0a18917d70d28412b5d2ac73a17b999",
+   "tables": {
+    "action_broker_grants": {
+     "columns": [
+      "node_id",
+      "revoked_at",
+      "subjects",
+      "targets"
+     ],
+     "rows": []
+    },
+    "action_events": {
+     "columns": [
+      "action_id",
+      "created_at",
+      "document",
+      "event_id",
+      "generation"
+     ],
+     "rows": []
+    },
+    "action_operator_grants": {
+     "columns": [
+      "grant_id",
+      "login",
+      "revoked_at",
+      "scopes"
+     ],
+     "rows": []
+    },
+    "action_sessions": {
+     "columns": [
+      "credential_digest",
+      "csrf_digest",
+      "expires_at",
+      "grant_id",
+      "login"
+     ],
+     "rows": []
+    },
+    "action_target_identities": {
+     "columns": [
+      "identity",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "action_targets": {
+     "columns": [
+      "document",
+      "expires_at",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "admin_stats_snapshots": {
+     "columns": [
+      "digest",
+      "payload_json",
+      "schema",
+      "snapshot_id",
+      "source_set",
+      "taken_at"
+     ],
+     "rows": []
+    },
+    "admin_stats_weeks": {
+     "columns": [
+      "partial",
+      "payload_json",
+      "taken_at",
+      "week"
+     ],
+     "rows": []
+    },
+    "agent_actions": {
+     "columns": [
+      "action_id",
+      "claim_until",
+      "client_id",
+      "created_at",
+      "delivery",
+      "destination_ref",
+      "destination_thread",
+      "document",
+      "expires_at",
+      "generation",
+      "grant_id",
+      "node_id",
+      "request_digest",
+      "started_at",
+      "status",
+      "target_id",
+      "verification"
+     ],
+     "rows": []
+    },
+    "ci_check_runs": {
+     "columns": [
+      "attempt",
+      "kind",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "ci_invalidations": {
+     "columns": [
+      "head",
+      "reason",
+      "received_at",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_relay_watermarks": {
+     "columns": [
+      "cursor",
+      "relay",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_repo_state": {
+     "columns": [
+      "last_event_received",
+      "last_reconciled",
+      "observed_at",
+      "refresh_requested",
+      "repo",
+      "snapshot",
+      "visibility"
+     ],
+     "rows": []
+    },
+    "ci_runs": {
+     "columns": [
+      "attempt",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "claim_fences": {
+     "columns": [
+      "generation",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:repo:example-org/parity-one"
+      ],
+      [
+       "i:3",
+       "t:repo:example-org/parity-two"
+      ]
+     ]
+    },
+    "claim_retired_holders": {
+     "columns": [
+      "generation",
+      "holder_token",
+      "owner_node",
+      "retired_at",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:holder-b-2",
+       "t:parity-b",
+       "r:<E+7862402.75>",
+       "t:repo:example-org/parity-one"
+      ]
+     ]
+    },
+    "claims": {
+     "columns": [
+      "acquired_at",
+      "expires_at",
+      "harness",
+      "holder_token",
+      "job",
+      "lock_acquired_at",
+      "lock_run_dir",
+      "lock_token",
+      "owner_conductor",
+      "owner_node",
+      "renewed_at",
+      "role",
+      "session",
+      "target",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "r:<E+7862702.75>",
+       null,
+       "t:holder-b2",
+       null,
+       null,
+       null,
+       null,
+       null,
+       "t:parity-b",
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "t:repo:example-org/parity-two",
+       "i:300"
+      ]
+     ]
+    },
+    "cloud_global_state": {
+     "columns": [
+      "limit_count",
+      "singleton"
+     ],
+     "rows": []
+    },
+    "cloud_leases": {
+     "columns": [
+      "admitted_at",
+      "artifact_ref",
+      "expires_at",
+      "holder_token",
+      "label",
+      "lease_id",
+      "owner_conductor",
+      "owner_node",
+      "prompt_hash",
+      "provider",
+      "provider_task_id",
+      "released_at",
+      "renewed_at",
+      "repo",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": []
+    },
+    "cloud_provider_state": {
+     "columns": [
+      "circuit_state",
+      "enabled",
+      "expires_at",
+      "hosted",
+      "limit_count",
+      "provider",
+      "reason",
+      "reset_at",
+      "subscription_pool",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "dashboard_enrollment_codes": {
+     "columns": [
+      "code_digest",
+      "expires_at",
+      "issued_at",
+      "label"
+     ],
+     "rows": []
+    },
+    "dashboard_sessions": {
+     "columns": [
+      "created_at",
+      "credential_digest",
+      "expires_at",
+      "label",
+      "revoked_at",
+      "scope",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "events": {
+     "columns": [
+      "capability_fingerprint",
+      "context",
+      "digest",
+      "exit_status",
+      "harness",
+      "node_id",
+      "received_at",
+      "repo",
+      "repo_identity",
+      "run_id",
+      "seat",
+      "sequence",
+      "state",
+      "ts"
+     ],
+     "rows": [
+      [
+       null,
+       null,
+       "t:parity-run-live-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-live",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-2",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:2",
+       "t:run.completed",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "fleet_audit_log": {
+     "columns": [
+      "action",
+      "actor",
+      "at",
+      "detail",
+      "id",
+      "subject"
+     ],
+     "rows": [
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:1",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:2",
+       "t:agent:parity-operator"
+      ],
+      [
+       "t:member.remove",
+       "t:admin",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"node_id\":\"parity-c\"}",
+       "i:3",
+       "t:parity-c"
+      ]
+     ]
+    },
+    "fleet_dispatch_intents": {
+     "columns": [
+      "created_at",
+      "decision_id",
+      "origin_node",
+      "reservation_id",
+      "session_id",
+      "state",
+      "target_node",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_event_attempts": {
+     "columns": [
+      "attempted_at",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_deliveries": {
+     "columns": [
+      "attempted_at",
+      "attempts",
+      "next_attempt",
+      "seq",
+      "state",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_subscriptions": {
+     "columns": [
+      "arguments",
+      "created_at",
+      "cursor_seq",
+      "expires_at",
+      "failures",
+      "filter_value",
+      "generation",
+      "id",
+      "name",
+      "previous_secret",
+      "principal_id",
+      "rotate_until",
+      "secret",
+      "url"
+     ],
+     "rows": []
+    },
+    "fleet_event_verifications": {
+     "columns": [
+      "attempted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_events": {
+     "columns": [
+      "created_at",
+      "data",
+      "event_id",
+      "name",
+      "producer",
+      "seq",
+      "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
+     ],
+     "rows": []
+    },
+    "fleet_machine_telemetry": {
+     "columns": [
+      "active_claims",
+      "credential_state",
+      "load",
+      "machine",
+      "node_id",
+      "observed_at",
+      "observed_id",
+      "running",
+      "status",
+      "ttl_seconds",
+      "updated_at",
+      "usable_seats"
+     ],
+     "rows": []
+    },
+    "fleet_mesh_statements": {
+     "columns": [
+      "kind",
+      "seq",
+      "statement",
+      "uploaded_at"
+     ],
+     "rows": []
+    },
+    "fleet_message_keys": {
+     "columns": [
+      "compromised_from",
+      "created_at",
+      "kid",
+      "principal_id",
+      "record",
+      "retired_at",
+      "revoked_at",
+      "state"
+     ],
+     "rows": [
+      [
+       null,
+       "t:<T+172800|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_aKmYFGEquPmwk2iIvXpcOA",
+       "t:parity-a",
+       "t~1ca0160f37e132f46757ba0f6d957228687ae2a44a835b978430d08688ac07e5:1965",
+       null,
+       null,
+       "t:active"
+      ],
+      [
+       null,
+       "t:<T+172801|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_u3WcgR8MIJS-J-w0skmHvQ",
+       "t:parity-b",
+       "t~12b226b74afcce022f90d8aa7b81078d7aa5bcfe098c643e376aa6861c98e030:1965",
+       null,
+       null,
+       "t:active"
+      ]
+     ]
+    },
+    "fleet_message_principals": {
+     "columns": [
+      "authorization_enrollment_epoch",
+      "created_at",
+      "enrollment_id",
+      "grant_epoch",
+      "label",
+      "name",
+      "person",
+      "principal_id",
+      "revoked_at",
+      "role",
+      "token_hash"
+     ],
+     "rows": [
+      [
+       "t:<principal-epoch#1>",
+       "t:<T+2.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#1>",
+       "t:<grant-epoch#1>",
+       "t:parity-agent",
+       "t:parity-agent",
+       null,
+       "t:agent:parity-agent",
+       null,
+       "t:agent",
+       "t:<token-digest#4>"
+      ],
+      [
+       "t:<principal-epoch#2>",
+       "t:<T+3.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#2>",
+       "t:<grant-epoch#2>",
+       "t:parity-operator",
+       "t:parity-operator",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:agent",
+       "t:<token-digest#5>"
+      ]
+     ]
+    },
+    "fleet_message_send_grants": {
+     "columns": [
+      "created_at",
+      "pattern",
+      "principal_id"
+     ],
+     "rows": [
+      [
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_message_sends": {
+     "columns": [
+      "client_id",
+      "id",
+      "received_at",
+      "sender"
+     ],
+     "rows": [
+      [
+       "t:p-agent-3",
+       "i:14",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b"
+      ],
+      [
+       "t:q3-answer",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_messages": {
+     "columns": [
+      "acked_at",
+      "acked_by",
+      "body",
+      "client_id",
+      "content_state",
+      "created_at",
+      "envelope",
+      "envelope_bytes",
+      "id",
+      "kind",
+      "payload_hash",
+      "priority",
+      "received_at",
+      "recipient",
+      "reference",
+      "reply_to",
+      "sealed_reply_to",
+      "sender",
+      "sender_label",
+      "subject",
+      "thread"
+     ],
+     "rows": [
+      [
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:",
+       "t:s1",
+       "t:content_expired",
+       "t:<T+172801.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~d7664d2aa6eeb638fc4b335ab14aaaa63bf80b27997cf60788ce78175f22f061:565",
+       "i:565",
+       "i:6",
+       "t:message",
+       "t:51041ad37790ffb851f859fe9e5defab589beea6593aa2ed63ef084800359d6f",
+       "t:normal",
+       "t:<T+172802.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:",
+       "t:s2",
+       "t:sealed",
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb:5267",
+       "i:5267",
+       "i:7",
+       "t:message",
+       "t:e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb",
+       "t:normal",
+       "t:<T+172804.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-a",
+       null,
+       "i:6",
+       "i:6",
+       "t:parity-b",
+       null,
+       "t:",
+       null
+      ],
+      [
+       "t:<T+172807.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:late reply",
+       "t:p-recent-1",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:8",
+       null,
+       "t:156713faac71428d6eb049e6156c36cc07a155ff1b8aac4f7063a8f855e91c9f",
+       "t:normal",
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Re: Re: parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:recent",
+       "t:p-recent-2",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:9",
+       null,
+       "t:db261541618965a274691801d60e8d92c2075590692a009f327b74f6c2c0fc64",
+       "t:normal",
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       "t:parity-thread"
+      ],
+      [
+       null,
+       null,
+       "t:second",
+       "t:p-agent-2",
+       null,
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:10",
+       null,
+       "t:06d36ac133d1e0b18b3c71246e4a20700993c4b04e2de12cb737ec50a81b5f21",
+       "t:normal",
+       "t:<T+172806.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered in time?",
+       "t:<client-id#1>",
+       null,
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:11",
+       "t:operator_question",
+       "t:3a2a86732c341e83de8630f29ccd00e9117f6872aae275b4749b29e27a14c6cd",
+       "t:normal",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:in time",
+       "t:q2-answer",
+       null,
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:12",
+       null,
+       "t:f04a148d59f2b803b32a585c763c1354a2956997c2fce2d143841ca41dec6625",
+       "t:normal",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:11",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered late?",
+       "t:<client-id#2>",
+       null,
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:13",
+       "t:operator_question",
+       "t:5acc323657ac49032da2c69d1f9c0c53b09bfbe650e4ee440c0ea6ab04d4dbe2",
+       "t:normal",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:third",
+       "t:p-agent-3",
+       null,
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:14",
+       null,
+       "t:b77d3a6d999e00f9a52f70a302b276b3ba9109740ac505e83fc8adef8b8a8ddd",
+       "t:normal",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-b",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:late",
+       "t:q3-answer",
+       null,
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:15",
+       null,
+       "t:0e43f40896b261d0e82fc0fca144da10bcd419a1ff99d766e4d39e1963961e60",
+       "t:normal",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:13",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ]
+     ]
+    },
+    "fleet_policy_acknowledged": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_acknowledged_history": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "history_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_delegations": {
+     "columns": [
+      "adapter",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "delegation_id",
+      "document",
+      "expires_at",
+      "origin_node",
+      "parent_metadata",
+      "parent_request_id",
+      "policy_digest",
+      "policy_version",
+      "repo_identity",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "source_revision",
+      "target_machine",
+      "target_node",
+      "workload"
+     ],
+     "rows": []
+    },
+    "fleet_policy_meta": {
+     "columns": [
+      "current_revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema"
+      ]
+     ]
+    },
+    "fleet_policy_pending": {
+     "columns": [
+      "consumer",
+      "context_hash",
+      "created_at",
+      "digest",
+      "effective",
+      "instructions",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "pending_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "session_id",
+      "source",
+      "sources",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_policy_revisions": {
+     "columns": [
+      "actor",
+      "created_at",
+      "digest",
+      "document",
+      "parent_revision",
+      "reason",
+      "revision",
+      "schema"
+     ],
+     "rows": [
+      [
+       "t:schema",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:sha256:4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb",
+       "t~4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb:290",
+       null,
+       "t:initial empty policy",
+       "i:1",
+       "t:brigade.fleet_policy.v1"
+      ]
+     ]
+    },
+    "fleet_policy_sessions": {
+     "columns": [
+      "consumer",
+      "digest",
+      "loaded_at",
+      "owner_node",
+      "refresh_detail",
+      "refresh_requested_at",
+      "refresh_state",
+      "refresh_updated_at",
+      "repo_identity",
+      "revision",
+      "session_id",
+      "source",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_questions": {
+     "columns": [
+      "answer",
+      "answer_id",
+      "answered_at",
+      "answered_by",
+      "caller",
+      "created_at",
+      "deadline",
+      "generation",
+      "late_answer_message_id",
+      "late_answered_at",
+      "message_id",
+      "operator",
+      "operator_reply_after_desktop_at",
+      "operator_reply_after_desktop_message_id",
+      "payload_hash",
+      "question",
+      "question_id",
+      "request_id",
+      "source",
+      "status"
+     ],
+     "rows": [
+      [
+       "t:in time",
+       "i:12",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       "t:parity-a",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<T+172929.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#1>",
+       null,
+       null,
+       "i:11",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:572701029d94700960d3f0e9cbe4fa74433db0b797767e5463330a26575894d1",
+       "t:Answered in time?",
+       "t:<question#1>",
+       "t:q2",
+       "t:operator_reply",
+       "t:answered"
+      ],
+      [
+       null,
+       null,
+       null,
+       null,
+       "t:parity-a",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<T+172931|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<token-digest#1>",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:13",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:c1cd2a36d19e3506d6dea196985a03f9049ceec0afeebdc32bcf3387d105e716",
+       "t:Answered late?",
+       "t:<question#2>",
+       "t:q3",
+       null,
+       "t:timeout"
+      ]
+     ]
+    },
+    "fleet_quota_meta": {
+     "columns": [
+      "singleton",
+      "updated_at",
+      "version"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:0"
+      ]
+     ]
+    },
+    "fleet_quota_observations": {
+     "columns": [
+      "account_id",
+      "collected_at",
+      "created_at",
+      "digest",
+      "document",
+      "expires_at",
+      "observation_id",
+      "overrides_observation_id",
+      "pool_id",
+      "provider",
+      "provider_time",
+      "raw",
+      "reason",
+      "source",
+      "source_ref",
+      "status"
+     ],
+     "rows": []
+    },
+    "fleet_read_snapshot_groups": {
+     "columns": [
+      "kind",
+      "row_count",
+      "snapshot_id",
+      "total"
+     ],
+     "rows": [
+      [
+       "t:claims",
+       "i:2",
+       "t:<snapshot#2>",
+       "i:2"
+      ],
+      [
+       "t:nodes",
+       "i:3",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:principals",
+       "i:2",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:sessions",
+       "i:1",
+       "t:<snapshot#1>",
+       "i:1"
+      ]
+     ]
+    },
+    "fleet_read_snapshot_rows": {
+     "columns": [
+      "caller",
+      "kind",
+      "ordinal",
+      "payload",
+      "recipient",
+      "snapshot_id",
+      "visible",
+      "wire_bytes"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:0",
+       "t~fcf2c121ff086bb1c602bf519b121e98b7a85c0817b551b093584a998b987a3e:354",
+       "t:parity-b",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7124"
+      ],
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:1",
+       "t~366518edaab82d5f935cb4698f7f961fee4ebaafd35c0fbb7662916959672b60:333",
+       "t:parity-a",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7103"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:0",
+       "t:{\"node_id\":\"parity-a\"}",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:1",
+       "t:{\"node_id\":\"parity-b\"}",
+       "t:parity-b",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:2",
+       "t:{\"node_id\":\"parity-c\"}",
+       "t:parity-c",
+       "t:<snapshot#1>",
+       "i:0",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:0",
+       "t:{\"principal_id\":\"agent:parity-agent\",\"label\":\"parity-agent\"}",
+       "t:agent:parity-agent",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2642"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:1",
+       "t:{\"principal_id\":\"agent:parity-operator\",\"label\":\"parity-operator\"}",
+       "t:agent:parity-operator",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2648"
+      ],
+      [
+       "t:parity-b",
+       "t:sessions",
+       "i:0",
+       "t~8c20d43ec7ab1e59c284a439ef8a057410fa46f2803ce7cc997fc23762992c90:238",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:9018"
+      ]
+     ]
+    },
+    "fleet_read_snapshots": {
+     "columns": [
+      "caller",
+      "expires_at",
+      "last_access",
+      "payload",
+      "payload_bytes",
+      "query_hash",
+      "snapshot_id"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "r:<E+614.75>",
+       "r:<E+14.75>",
+       "t:rows-v1",
+       "i:475",
+       "t:<query-binding#1>",
+       "t:<snapshot#1>"
+      ],
+      [
+       "t:parity-b",
+       "r:<E+615>",
+       "r:<E+15>",
+       "t:rows-v1",
+       "i:701",
+       "t:<query-binding#2>",
+       "t:<snapshot#2>"
+      ]
+     ]
+    },
+    "fleet_reservations": {
+     "columns": [
+      "accepted",
+      "created_at",
+      "decision_id",
+      "expires_at",
+      "machine",
+      "node_id",
+      "origin_node",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "state",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_route_decisions": {
+     "columns": [
+      "admission_generation",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "document",
+      "origin",
+      "origin_node",
+      "override_reason",
+      "policy_digest",
+      "policy_version",
+      "reason",
+      "repo_identity",
+      "request_digest",
+      "request_document",
+      "request_key",
+      "reservation_id",
+      "selected_machine",
+      "selected_seat",
+      "session_id",
+      "work_id",
+      "workload"
+     ],
+     "rows": []
+    },
+    "grokbot_actor_policy": {
+     "columns": [
+      "actor_kind",
+      "enabled",
+      "node_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "role"
+     ],
+     "rows": []
+    },
+    "grokbot_jobs": {
+     "columns": [
+      "artifact_digest",
+      "artifact_kind",
+      "artifact_ref",
+      "artifact_size",
+      "cancel_requested_at",
+      "claimant_node",
+      "claimant_worker",
+      "claimed_at",
+      "created_at",
+      "idempotency_key_hash",
+      "item_revision",
+      "job_id",
+      "label",
+      "lease_expires_at",
+      "lease_generation",
+      "lease_token_digest",
+      "owner_node",
+      "private_snapshot_id",
+      "queue_id",
+      "queue_ttl_seconds",
+      "queued_at",
+      "repository",
+      "role",
+      "sequence",
+      "state",
+      "task_digest",
+      "timeout_seconds",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "grokbot_operations": {
+     "columns": [
+      "action",
+      "actor_node_id",
+      "job_id",
+      "operation_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "request_digest",
+      "result_json",
+      "result_revision",
+      "result_state",
+      "timestamp"
+     ],
+     "rows": []
+    },
+    "hub_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": []
+    },
+    "interactive_sessions": {
+     "columns": [
+      "branch",
+      "checkout_path",
+      "cloud_context_json",
+      "dirty_paths_json",
+      "dirty_truncated",
+      "ended_at",
+      "expires_at",
+      "harness",
+      "heartbeat_at",
+      "identity_scope",
+      "node_id",
+      "provider_link_json",
+      "repo_identity",
+      "repo_label",
+      "session_id",
+      "started_at",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:parity-branch",
+       "t:/srv/example/checkout",
+       null,
+       "t:[\"src/example.py\", \"docs/caf\u00e9.md\"]",
+       "i:0",
+       null,
+       "r:<E+173707.5>",
+       "t:claude",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:fleet",
+       "t:parity-a",
+       null,
+       "t:github.com/example-org/example-repo",
+       "t:example-repo",
+       "t:parity-session-1",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:active",
+       "i:900"
+      ]
+     ]
+    },
+    "model_admission_audit": {
+     "columns": [
+      "consumer",
+      "consumer_binding",
+      "created_at",
+      "decision",
+      "expires_at",
+      "model",
+      "node_id",
+      "phase",
+      "provider",
+      "reasoning",
+      "request_digest",
+      "request_id",
+      "roster_digest",
+      "roster_revision",
+      "seat",
+      "source"
+     ],
+     "rows": []
+    },
+    "model_consumer_defaults": {
+     "columns": [
+      "consumer",
+      "seat",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "t:brigade-run",
+       "t:",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       "t:t3-fleet",
+       "t:",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "model_launch_proofs": {
+     "columns": [
+      "consumer",
+      "created_at",
+      "node_id",
+      "policy_session_id",
+      "proof_key",
+      "request_digest",
+      "request_id"
+     ],
+     "rows": []
+    },
+    "model_leases": {
+     "columns": [
+      "account_id",
+      "acquired_at",
+      "consumer",
+      "context_hash",
+      "decision_id",
+      "expires_at",
+      "holder_token",
+      "launch_model",
+      "lease_id",
+      "model",
+      "owner_node",
+      "policy_digest",
+      "policy_version",
+      "pool",
+      "provider",
+      "released_at",
+      "request_id",
+      "seat",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "model_policy": {
+     "columns": [
+      "brigade_cli",
+      "brigade_model",
+      "enabled",
+      "limit_count",
+      "model",
+      "notes",
+      "provider",
+      "reasoning",
+      "seat",
+      "t3_instance_id",
+      "t3_model",
+      "t3_service_tier",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "model_roster_meta": {
+     "columns": [
+      "revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema-v15"
+      ]
+     ]
+    },
+    "nodes": {
+     "columns": [
+      "created_at",
+      "label",
+      "node_id",
+      "revoked_at",
+      "token_sha256"
+     ],
+     "rows": [
+      [
+       "t:<T+1|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity node a",
+       "t:parity-a",
+       null,
+       "t:<token-digest#1>"
+      ],
+      [
+       "t:<T+1.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-b",
+       null,
+       "t:<token-digest#2>"
+      ],
+      [
+       "t:<T+2.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-c",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#3>"
+      ]
+     ]
+    },
+    "retired_models": {
+     "columns": [
+      "created_at",
+      "family",
+      "match_kind",
+      "permanent",
+      "provider",
+      "reason_code"
+     ],
+     "rows": [
+      [
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.4",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ],
+      [
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.5",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ]
+     ]
+    },
+    "run_preference": {
+     "columns": [
+      "id",
+      "impl",
+      "notes",
+      "orchestrator",
+      "research",
+      "review",
+      "scout",
+      "security",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": []
+    },
+    "sqlite_sequence": {
+     "columns": [
+      "name",
+      "seq"
+     ],
+     "rows": [
+      [
+       "t:fleet_message_sends",
+       "i:15"
+      ],
+      [
+       "t:fleet_audit_log",
+       "i:3"
+      ],
+      [
+       "t:fleet_messages",
+       "i:15"
+      ]
+     ]
+    },
+    "work_campaign_members": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "override",
+      "repo",
+      "spec_fingerprint",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_campaigns": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "created_by",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_create_keys": {
+     "columns": [
+      "actor_id",
+      "fingerprint",
+      "idempotency_key",
+      "received_at",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_events": {
+     "columns": [
+      "actor_id",
+      "actor_type",
+      "detail_json",
+      "event_id",
+      "event_type",
+      "from_status",
+      "node_id",
+      "occurred_at",
+      "received_at",
+      "run_id",
+      "seq",
+      "to_status",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_import_keys": {
+     "columns": [
+      "adapter_id",
+      "created",
+      "fingerprint",
+      "idempotency_key",
+      "owner_node",
+      "received_at",
+      "refused",
+      "unchanged",
+      "updated"
+     ],
+     "rows": []
+    },
+    "work_items": {
+     "columns": [
+      "acceptance_json",
+      "archived_at",
+      "attempt_count",
+      "blocker",
+      "burn_eligible",
+      "burn_rank",
+      "created_at",
+      "description",
+      "execution_mode",
+      "kind",
+      "priority",
+      "ready_at",
+      "review_after",
+      "scope",
+      "spend_by",
+      "status",
+      "title",
+      "token_appetite",
+      "updated_at",
+      "version",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_links": {
+     "columns": [
+      "adapter_id",
+      "display_ref",
+      "external_key",
+      "external_state",
+      "external_updated_at",
+      "link_id",
+      "link_type",
+      "owner_node",
+      "source_acceptance_json",
+      "source_policy",
+      "source_version",
+      "stale_at",
+      "synced_at",
+      "url",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "t:reconciled_version",
+       "t:2"
+      ]
+     ]
+    },
+    "work_sync_cursors": {
+     "columns": [
+      "adapter_id",
+      "cursor",
+      "last_error_code",
+      "last_success_at",
+      "owner_node",
+      "source_type",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "migrated-v34": {
+   "digest": "103e22333b79e6d7cdc3a8ce25a05654a0a18917d70d28412b5d2ac73a17b999",
+   "tables": {
+    "action_broker_grants": {
+     "columns": [
+      "node_id",
+      "revoked_at",
+      "subjects",
+      "targets"
+     ],
+     "rows": []
+    },
+    "action_events": {
+     "columns": [
+      "action_id",
+      "created_at",
+      "document",
+      "event_id",
+      "generation"
+     ],
+     "rows": []
+    },
+    "action_operator_grants": {
+     "columns": [
+      "grant_id",
+      "login",
+      "revoked_at",
+      "scopes"
+     ],
+     "rows": []
+    },
+    "action_sessions": {
+     "columns": [
+      "credential_digest",
+      "csrf_digest",
+      "expires_at",
+      "grant_id",
+      "login"
+     ],
+     "rows": []
+    },
+    "action_target_identities": {
+     "columns": [
+      "identity",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "action_targets": {
+     "columns": [
+      "document",
+      "expires_at",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "admin_stats_snapshots": {
+     "columns": [
+      "digest",
+      "payload_json",
+      "schema",
+      "snapshot_id",
+      "source_set",
+      "taken_at"
+     ],
+     "rows": []
+    },
+    "admin_stats_weeks": {
+     "columns": [
+      "partial",
+      "payload_json",
+      "taken_at",
+      "week"
+     ],
+     "rows": []
+    },
+    "agent_actions": {
+     "columns": [
+      "action_id",
+      "claim_until",
+      "client_id",
+      "created_at",
+      "delivery",
+      "destination_ref",
+      "destination_thread",
+      "document",
+      "expires_at",
+      "generation",
+      "grant_id",
+      "node_id",
+      "request_digest",
+      "started_at",
+      "status",
+      "target_id",
+      "verification"
+     ],
+     "rows": []
+    },
+    "ci_check_runs": {
+     "columns": [
+      "attempt",
+      "kind",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "ci_invalidations": {
+     "columns": [
+      "head",
+      "reason",
+      "received_at",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_relay_watermarks": {
+     "columns": [
+      "cursor",
+      "relay",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_repo_state": {
+     "columns": [
+      "last_event_received",
+      "last_reconciled",
+      "observed_at",
+      "refresh_requested",
+      "repo",
+      "snapshot",
+      "visibility"
+     ],
+     "rows": []
+    },
+    "ci_runs": {
+     "columns": [
+      "attempt",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "claim_fences": {
+     "columns": [
+      "generation",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:repo:example-org/parity-one"
+      ],
+      [
+       "i:3",
+       "t:repo:example-org/parity-two"
+      ]
+     ]
+    },
+    "claim_retired_holders": {
+     "columns": [
+      "generation",
+      "holder_token",
+      "owner_node",
+      "retired_at",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:holder-b-2",
+       "t:parity-b",
+       "r:<E+7862402.75>",
+       "t:repo:example-org/parity-one"
+      ]
+     ]
+    },
+    "claims": {
+     "columns": [
+      "acquired_at",
+      "expires_at",
+      "harness",
+      "holder_token",
+      "job",
+      "lock_acquired_at",
+      "lock_run_dir",
+      "lock_token",
+      "owner_conductor",
+      "owner_node",
+      "renewed_at",
+      "role",
+      "session",
+      "target",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "r:<E+7862702.75>",
+       null,
+       "t:holder-b2",
+       null,
+       null,
+       null,
+       null,
+       null,
+       "t:parity-b",
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "t:repo:example-org/parity-two",
+       "i:300"
+      ]
+     ]
+    },
+    "cloud_global_state": {
+     "columns": [
+      "limit_count",
+      "singleton"
+     ],
+     "rows": []
+    },
+    "cloud_leases": {
+     "columns": [
+      "admitted_at",
+      "artifact_ref",
+      "expires_at",
+      "holder_token",
+      "label",
+      "lease_id",
+      "owner_conductor",
+      "owner_node",
+      "prompt_hash",
+      "provider",
+      "provider_task_id",
+      "released_at",
+      "renewed_at",
+      "repo",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": []
+    },
+    "cloud_provider_state": {
+     "columns": [
+      "circuit_state",
+      "enabled",
+      "expires_at",
+      "hosted",
+      "limit_count",
+      "provider",
+      "reason",
+      "reset_at",
+      "subscription_pool",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "dashboard_enrollment_codes": {
+     "columns": [
+      "code_digest",
+      "expires_at",
+      "issued_at",
+      "label"
+     ],
+     "rows": []
+    },
+    "dashboard_sessions": {
+     "columns": [
+      "created_at",
+      "credential_digest",
+      "expires_at",
+      "label",
+      "revoked_at",
+      "scope",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "events": {
+     "columns": [
+      "capability_fingerprint",
+      "context",
+      "digest",
+      "exit_status",
+      "harness",
+      "node_id",
+      "received_at",
+      "repo",
+      "repo_identity",
+      "run_id",
+      "seat",
+      "sequence",
+      "state",
+      "ts"
+     ],
+     "rows": [
+      [
+       null,
+       null,
+       "t:parity-run-live-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-live",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-2",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:2",
+       "t:run.completed",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "fleet_audit_log": {
+     "columns": [
+      "action",
+      "actor",
+      "at",
+      "detail",
+      "id",
+      "subject"
+     ],
+     "rows": [
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:1",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:2",
+       "t:agent:parity-operator"
+      ],
+      [
+       "t:member.remove",
+       "t:admin",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"node_id\":\"parity-c\"}",
+       "i:3",
+       "t:parity-c"
+      ]
+     ]
+    },
+    "fleet_dispatch_intents": {
+     "columns": [
+      "created_at",
+      "decision_id",
+      "origin_node",
+      "reservation_id",
+      "session_id",
+      "state",
+      "target_node",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_event_attempts": {
+     "columns": [
+      "attempted_at",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_deliveries": {
+     "columns": [
+      "attempted_at",
+      "attempts",
+      "next_attempt",
+      "seq",
+      "state",
+      "subscription_id"
+     ],
+     "rows": []
+    },
+    "fleet_event_subscriptions": {
+     "columns": [
+      "arguments",
+      "created_at",
+      "cursor_seq",
+      "expires_at",
+      "failures",
+      "filter_value",
+      "generation",
+      "id",
+      "name",
+      "previous_secret",
+      "principal_id",
+      "rotate_until",
+      "secret",
+      "url"
+     ],
+     "rows": []
+    },
+    "fleet_event_verifications": {
+     "columns": [
+      "attempted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_events": {
+     "columns": [
+      "created_at",
+      "data",
+      "event_id",
+      "name",
+      "producer",
+      "seq",
+      "subject"
+     ],
+     "rows": []
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
+     ],
+     "rows": []
+    },
+    "fleet_machine_telemetry": {
+     "columns": [
+      "active_claims",
+      "credential_state",
+      "load",
+      "machine",
+      "node_id",
+      "observed_at",
+      "observed_id",
+      "running",
+      "status",
+      "ttl_seconds",
+      "updated_at",
+      "usable_seats"
+     ],
+     "rows": []
+    },
+    "fleet_mesh_statements": {
+     "columns": [
+      "kind",
+      "seq",
+      "statement",
+      "uploaded_at"
+     ],
+     "rows": []
+    },
+    "fleet_message_keys": {
+     "columns": [
+      "compromised_from",
+      "created_at",
+      "kid",
+      "principal_id",
+      "record",
+      "retired_at",
+      "revoked_at",
+      "state"
+     ],
+     "rows": [
+      [
+       null,
+       "t:<T+172800|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_aKmYFGEquPmwk2iIvXpcOA",
+       "t:parity-a",
+       "t~1ca0160f37e132f46757ba0f6d957228687ae2a44a835b978430d08688ac07e5:1965",
+       null,
+       null,
+       "t:active"
+      ],
+      [
+       null,
+       "t:<T+172801|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_u3WcgR8MIJS-J-w0skmHvQ",
+       "t:parity-b",
+       "t~12b226b74afcce022f90d8aa7b81078d7aa5bcfe098c643e376aa6861c98e030:1965",
+       null,
+       null,
+       "t:active"
+      ]
+     ]
+    },
+    "fleet_message_principals": {
+     "columns": [
+      "authorization_enrollment_epoch",
+      "created_at",
+      "enrollment_id",
+      "grant_epoch",
+      "label",
+      "name",
+      "person",
+      "principal_id",
+      "revoked_at",
+      "role",
+      "token_hash"
+     ],
+     "rows": [
+      [
+       "t:<principal-epoch#1>",
+       "t:<T+2.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#1>",
+       "t:<grant-epoch#1>",
+       "t:parity-agent",
+       "t:parity-agent",
+       null,
+       "t:agent:parity-agent",
+       null,
+       "t:agent",
+       "t:<token-digest#4>"
+      ],
+      [
+       "t:<principal-epoch#2>",
+       "t:<T+3.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#2>",
+       "t:<grant-epoch#2>",
+       "t:parity-operator",
+       "t:parity-operator",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:agent",
+       "t:<token-digest#5>"
+      ]
+     ]
+    },
+    "fleet_message_send_grants": {
+     "columns": [
+      "created_at",
+      "pattern",
+      "principal_id"
+     ],
+     "rows": [
+      [
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_message_sends": {
+     "columns": [
+      "client_id",
+      "id",
+      "received_at",
+      "sender"
+     ],
+     "rows": [
+      [
+       "t:p-agent-3",
+       "i:14",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b"
+      ],
+      [
+       "t:q3-answer",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_messages": {
+     "columns": [
+      "acked_at",
+      "acked_by",
+      "body",
+      "client_id",
+      "content_state",
+      "created_at",
+      "envelope",
+      "envelope_bytes",
+      "id",
+      "kind",
+      "payload_hash",
+      "priority",
+      "received_at",
+      "recipient",
+      "reference",
+      "reply_to",
+      "sealed_reply_to",
+      "sender",
+      "sender_label",
+      "subject",
+      "thread"
+     ],
+     "rows": [
+      [
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:",
+       "t:s1",
+       "t:content_expired",
+       "t:<T+172801.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~d7664d2aa6eeb638fc4b335ab14aaaa63bf80b27997cf60788ce78175f22f061:565",
+       "i:565",
+       "i:6",
+       "t:message",
+       "t:51041ad37790ffb851f859fe9e5defab589beea6593aa2ed63ef084800359d6f",
+       "t:normal",
+       "t:<T+172802.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:",
+       "t:s2",
+       "t:sealed",
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb:5267",
+       "i:5267",
+       "i:7",
+       "t:message",
+       "t:e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb",
+       "t:normal",
+       "t:<T+172804.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-a",
+       null,
+       "i:6",
+       "i:6",
+       "t:parity-b",
+       null,
+       "t:",
+       null
+      ],
+      [
+       "t:<T+172807.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:late reply",
+       "t:p-recent-1",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:8",
+       null,
+       "t:156713faac71428d6eb049e6156c36cc07a155ff1b8aac4f7063a8f855e91c9f",
+       "t:normal",
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Re: Re: parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:recent",
+       "t:p-recent-2",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:9",
+       null,
+       "t:db261541618965a274691801d60e8d92c2075590692a009f327b74f6c2c0fc64",
+       "t:normal",
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       "t:parity-thread"
+      ],
+      [
+       null,
+       null,
+       "t:second",
+       "t:p-agent-2",
+       null,
+       "t:<T+172806|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:10",
+       null,
+       "t:06d36ac133d1e0b18b3c71246e4a20700993c4b04e2de12cb737ec50a81b5f21",
+       "t:normal",
+       "t:<T+172806.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered in time?",
+       "t:<client-id#1>",
+       null,
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:11",
+       "t:operator_question",
+       "t:3a2a86732c341e83de8630f29ccd00e9117f6872aae275b4749b29e27a14c6cd",
+       "t:normal",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:in time",
+       "t:q2-answer",
+       null,
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:12",
+       null,
+       "t:f04a148d59f2b803b32a585c763c1354a2956997c2fce2d143841ca41dec6625",
+       "t:normal",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:11",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered late?",
+       "t:<client-id#2>",
+       null,
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:13",
+       "t:operator_question",
+       "t:5acc323657ac49032da2c69d1f9c0c53b09bfbe650e4ee440c0ea6ab04d4dbe2",
+       "t:normal",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:third",
+       "t:p-agent-3",
+       null,
+       "t:<T+7862402.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:14",
+       null,
+       "t:b77d3a6d999e00f9a52f70a302b276b3ba9109740ac505e83fc8adef8b8a8ddd",
+       "t:normal",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-b",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:late",
+       "t:q3-answer",
+       null,
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:15",
+       null,
+       "t:0e43f40896b261d0e82fc0fca144da10bcd419a1ff99d766e4d39e1963961e60",
+       "t:normal",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:13",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ]
+     ]
+    },
+    "fleet_policy_acknowledged": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_acknowledged_history": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "history_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_delegations": {
+     "columns": [
+      "adapter",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "delegation_id",
+      "document",
+      "expires_at",
+      "origin_node",
+      "parent_metadata",
+      "parent_request_id",
+      "policy_digest",
+      "policy_version",
+      "repo_identity",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "source_revision",
+      "target_machine",
+      "target_node",
+      "workload"
+     ],
+     "rows": []
+    },
+    "fleet_policy_meta": {
+     "columns": [
+      "current_revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema"
+      ]
+     ]
+    },
+    "fleet_policy_pending": {
+     "columns": [
+      "consumer",
+      "context_hash",
+      "created_at",
+      "digest",
+      "effective",
+      "instructions",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "pending_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "session_id",
+      "source",
+      "sources",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_policy_revisions": {
+     "columns": [
+      "actor",
+      "created_at",
+      "digest",
+      "document",
+      "parent_revision",
+      "reason",
+      "revision",
+      "schema"
+     ],
+     "rows": [
+      [
+       "t:schema",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:sha256:4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb",
+       "t~4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb:290",
+       null,
+       "t:initial empty policy",
+       "i:1",
+       "t:brigade.fleet_policy.v1"
+      ]
+     ]
+    },
+    "fleet_policy_sessions": {
+     "columns": [
+      "consumer",
+      "digest",
+      "loaded_at",
+      "owner_node",
+      "refresh_detail",
+      "refresh_requested_at",
+      "refresh_state",
+      "refresh_updated_at",
+      "repo_identity",
+      "revision",
+      "session_id",
+      "source",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_questions": {
+     "columns": [
+      "answer",
+      "answer_id",
+      "answered_at",
+      "answered_by",
+      "caller",
+      "created_at",
+      "deadline",
+      "generation",
+      "late_answer_message_id",
+      "late_answered_at",
+      "message_id",
+      "operator",
+      "operator_reply_after_desktop_at",
+      "operator_reply_after_desktop_message_id",
+      "payload_hash",
+      "question",
+      "question_id",
+      "request_id",
+      "source",
+      "status"
+     ],
+     "rows": [
+      [
+       "t:in time",
+       "i:12",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       "t:parity-a",
+       "t:<T+172809.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<T+172929.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#1>",
+       null,
+       null,
+       "i:11",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:572701029d94700960d3f0e9cbe4fa74433db0b797767e5463330a26575894d1",
+       "t:Answered in time?",
+       "t:<question#1>",
+       "t:q2",
+       "t:operator_reply",
+       "t:answered"
+      ],
+      [
+       null,
+       null,
+       null,
+       null,
+       "t:parity-a",
+       "t:<T+172811|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<T+172931|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<token-digest#1>",
+       "i:15",
+       "t:<T+7862405|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:13",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:c1cd2a36d19e3506d6dea196985a03f9049ceec0afeebdc32bcf3387d105e716",
+       "t:Answered late?",
+       "t:<question#2>",
+       "t:q3",
+       null,
+       "t:timeout"
+      ]
+     ]
+    },
+    "fleet_quota_meta": {
+     "columns": [
+      "singleton",
+      "updated_at",
+      "version"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:0"
+      ]
+     ]
+    },
+    "fleet_quota_observations": {
+     "columns": [
+      "account_id",
+      "collected_at",
+      "created_at",
+      "digest",
+      "document",
+      "expires_at",
+      "observation_id",
+      "overrides_observation_id",
+      "pool_id",
+      "provider",
+      "provider_time",
+      "raw",
+      "reason",
+      "source",
+      "source_ref",
+      "status"
+     ],
+     "rows": []
+    },
+    "fleet_read_snapshot_groups": {
+     "columns": [
+      "kind",
+      "row_count",
+      "snapshot_id",
+      "total"
+     ],
+     "rows": [
+      [
+       "t:claims",
+       "i:2",
+       "t:<snapshot#2>",
+       "i:2"
+      ],
+      [
+       "t:nodes",
+       "i:3",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:principals",
+       "i:2",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:sessions",
+       "i:1",
+       "t:<snapshot#1>",
+       "i:1"
+      ]
+     ]
+    },
+    "fleet_read_snapshot_rows": {
+     "columns": [
+      "caller",
+      "kind",
+      "ordinal",
+      "payload",
+      "recipient",
+      "snapshot_id",
+      "visible",
+      "wire_bytes"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:0",
+       "t~fcf2c121ff086bb1c602bf519b121e98b7a85c0817b551b093584a998b987a3e:354",
+       "t:parity-b",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7124"
+      ],
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:1",
+       "t~366518edaab82d5f935cb4698f7f961fee4ebaafd35c0fbb7662916959672b60:333",
+       "t:parity-a",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7103"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:0",
+       "t:{\"node_id\":\"parity-a\"}",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:1",
+       "t:{\"node_id\":\"parity-b\"}",
+       "t:parity-b",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:2",
+       "t:{\"node_id\":\"parity-c\"}",
+       "t:parity-c",
+       "t:<snapshot#1>",
+       "i:0",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:0",
+       "t:{\"principal_id\":\"agent:parity-agent\",\"label\":\"parity-agent\"}",
+       "t:agent:parity-agent",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2642"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:1",
+       "t:{\"principal_id\":\"agent:parity-operator\",\"label\":\"parity-operator\"}",
+       "t:agent:parity-operator",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2648"
+      ],
+      [
+       "t:parity-b",
+       "t:sessions",
+       "i:0",
+       "t~8c20d43ec7ab1e59c284a439ef8a057410fa46f2803ce7cc997fc23762992c90:238",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:9018"
+      ]
+     ]
+    },
+    "fleet_read_snapshots": {
+     "columns": [
+      "caller",
+      "expires_at",
+      "last_access",
+      "payload",
+      "payload_bytes",
+      "query_hash",
+      "snapshot_id"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "r:<E+614.75>",
+       "r:<E+14.75>",
+       "t:rows-v1",
+       "i:475",
+       "t:<query-binding#1>",
+       "t:<snapshot#1>"
+      ],
+      [
+       "t:parity-b",
+       "r:<E+615>",
+       "r:<E+15>",
+       "t:rows-v1",
+       "i:701",
+       "t:<query-binding#2>",
+       "t:<snapshot#2>"
+      ]
+     ]
+    },
+    "fleet_reservations": {
+     "columns": [
+      "accepted",
+      "created_at",
+      "decision_id",
+      "expires_at",
+      "machine",
+      "node_id",
+      "origin_node",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "state",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_route_decisions": {
+     "columns": [
+      "admission_generation",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "document",
+      "origin",
+      "origin_node",
+      "override_reason",
+      "policy_digest",
+      "policy_version",
+      "reason",
+      "repo_identity",
+      "request_digest",
+      "request_document",
+      "request_key",
+      "reservation_id",
+      "selected_machine",
+      "selected_seat",
+      "session_id",
+      "work_id",
+      "workload"
+     ],
+     "rows": []
+    },
+    "grokbot_actor_policy": {
+     "columns": [
+      "actor_kind",
+      "enabled",
+      "node_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "role"
+     ],
+     "rows": []
+    },
+    "grokbot_jobs": {
+     "columns": [
+      "artifact_digest",
+      "artifact_kind",
+      "artifact_ref",
+      "artifact_size",
+      "cancel_requested_at",
+      "claimant_node",
+      "claimant_worker",
+      "claimed_at",
+      "created_at",
+      "idempotency_key_hash",
+      "item_revision",
+      "job_id",
+      "label",
+      "lease_expires_at",
+      "lease_generation",
+      "lease_token_digest",
+      "owner_node",
+      "private_snapshot_id",
+      "queue_id",
+      "queue_ttl_seconds",
+      "queued_at",
+      "repository",
+      "role",
+      "sequence",
+      "state",
+      "task_digest",
+      "timeout_seconds",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "grokbot_operations": {
+     "columns": [
+      "action",
+      "actor_node_id",
+      "job_id",
+      "operation_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "request_digest",
+      "result_json",
+      "result_revision",
+      "result_state",
+      "timestamp"
+     ],
+     "rows": []
+    },
+    "hub_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": []
+    },
+    "interactive_sessions": {
+     "columns": [
+      "branch",
+      "checkout_path",
+      "cloud_context_json",
+      "dirty_paths_json",
+      "dirty_truncated",
+      "ended_at",
+      "expires_at",
+      "harness",
+      "heartbeat_at",
+      "identity_scope",
+      "node_id",
+      "provider_link_json",
+      "repo_identity",
+      "repo_label",
+      "session_id",
+      "started_at",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:parity-branch",
+       "t:/srv/example/checkout",
+       null,
+       "t:[\"src/example.py\", \"docs/caf\u00e9.md\"]",
+       "i:0",
+       null,
+       "r:<E+173707.5>",
+       "t:claude",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:fleet",
+       "t:parity-a",
+       null,
+       "t:github.com/example-org/example-repo",
+       "t:example-repo",
+       "t:parity-session-1",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:active",
+       "i:900"
+      ]
+     ]
+    },
+    "model_admission_audit": {
+     "columns": [
+      "consumer",
+      "consumer_binding",
+      "created_at",
+      "decision",
+      "expires_at",
+      "model",
+      "node_id",
+      "phase",
+      "provider",
+      "reasoning",
+      "request_digest",
+      "request_id",
+      "roster_digest",
+      "roster_revision",
+      "seat",
+      "source"
+     ],
+     "rows": []
+    },
+    "model_consumer_defaults": {
+     "columns": [
+      "consumer",
+      "seat",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "t:brigade-run",
+       "t:",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       "t:t3-fleet",
+       "t:",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "model_launch_proofs": {
+     "columns": [
+      "consumer",
+      "created_at",
+      "node_id",
+      "policy_session_id",
+      "proof_key",
+      "request_digest",
+      "request_id"
+     ],
+     "rows": []
+    },
+    "model_leases": {
+     "columns": [
+      "account_id",
+      "acquired_at",
+      "consumer",
+      "context_hash",
+      "decision_id",
+      "expires_at",
+      "holder_token",
+      "launch_model",
+      "lease_id",
+      "model",
+      "owner_node",
+      "policy_digest",
+      "policy_version",
+      "pool",
+      "provider",
+      "released_at",
+      "request_id",
+      "seat",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "model_policy": {
+     "columns": [
+      "brigade_cli",
+      "brigade_model",
+      "enabled",
+      "limit_count",
+      "model",
+      "notes",
+      "provider",
+      "reasoning",
+      "seat",
+      "t3_instance_id",
+      "t3_model",
+      "t3_service_tier",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "model_roster_meta": {
+     "columns": [
+      "revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema-v15"
+      ]
+     ]
+    },
+    "nodes": {
+     "columns": [
+      "created_at",
+      "label",
+      "node_id",
+      "revoked_at",
+      "token_sha256"
+     ],
+     "rows": [
+      [
+       "t:<T+1|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity node a",
+       "t:parity-a",
+       null,
+       "t:<token-digest#1>"
+      ],
+      [
+       "t:<T+1.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-b",
+       null,
+       "t:<token-digest#2>"
+      ],
+      [
+       "t:<T+2.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-c",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#3>"
+      ]
+     ]
+    },
+    "retired_models": {
+     "columns": [
+      "created_at",
+      "family",
+      "match_kind",
+      "permanent",
+      "provider",
+      "reason_code"
+     ],
+     "rows": [
+      [
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.4",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ],
+      [
+       "t:<T-2592000|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.5",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ]
+     ]
+    },
+    "run_preference": {
+     "columns": [
+      "id",
+      "impl",
+      "notes",
+      "orchestrator",
+      "research",
+      "review",
+      "scout",
+      "security",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": []
+    },
+    "sqlite_sequence": {
+     "columns": [
+      "name",
+      "seq"
+     ],
+     "rows": [
+      [
+       "t:fleet_message_sends",
+       "i:15"
+      ],
+      [
+       "t:fleet_audit_log",
+       "i:3"
+      ],
+      [
+       "t:fleet_messages",
+       "i:15"
+      ]
+     ]
+    },
+    "work_campaign_members": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "override",
+      "repo",
+      "spec_fingerprint",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_campaigns": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "created_by",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_create_keys": {
+     "columns": [
+      "actor_id",
+      "fingerprint",
+      "idempotency_key",
+      "received_at",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_events": {
+     "columns": [
+      "actor_id",
+      "actor_type",
+      "detail_json",
+      "event_id",
+      "event_type",
+      "from_status",
+      "node_id",
+      "occurred_at",
+      "received_at",
+      "run_id",
+      "seq",
+      "to_status",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_import_keys": {
+     "columns": [
+      "adapter_id",
+      "created",
+      "fingerprint",
+      "idempotency_key",
+      "owner_node",
+      "received_at",
+      "refused",
+      "unchanged",
+      "updated"
+     ],
+     "rows": []
+    },
+    "work_items": {
+     "columns": [
+      "acceptance_json",
+      "archived_at",
+      "attempt_count",
+      "blocker",
+      "burn_eligible",
+      "burn_rank",
+      "created_at",
+      "description",
+      "execution_mode",
+      "kind",
+      "priority",
+      "ready_at",
+      "review_after",
+      "scope",
+      "spend_by",
+      "status",
+      "title",
+      "token_appetite",
+      "updated_at",
+      "version",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_links": {
+     "columns": [
+      "adapter_id",
+      "display_ref",
+      "external_key",
+      "external_state",
+      "external_updated_at",
+      "link_id",
+      "link_type",
+      "owner_node",
+      "source_acceptance_json",
+      "source_policy",
+      "source_version",
+      "stale_at",
+      "synced_at",
+      "url",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "t:reconciled_version",
+       "t:2"
+      ]
+     ]
+    },
+    "work_sync_cursors": {
+     "columns": [
+      "adapter_id",
+      "cursor",
+      "last_error_code",
+      "last_success_at",
+      "owner_node",
+      "source_type",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  },
+  "outbox": {
+   "digest": "cf449b3b7873c797c2551328b9330599e48ab8e799223677e7317d7382414977",
+   "tables": {
+    "action_broker_grants": {
+     "columns": [
+      "node_id",
+      "revoked_at",
+      "subjects",
+      "targets"
+     ],
+     "rows": []
+    },
+    "action_events": {
+     "columns": [
+      "action_id",
+      "created_at",
+      "document",
+      "event_id",
+      "generation"
+     ],
+     "rows": []
+    },
+    "action_operator_grants": {
+     "columns": [
+      "grant_id",
+      "login",
+      "revoked_at",
+      "scopes"
+     ],
+     "rows": []
+    },
+    "action_sessions": {
+     "columns": [
+      "credential_digest",
+      "csrf_digest",
+      "expires_at",
+      "grant_id",
+      "login"
+     ],
+     "rows": []
+    },
+    "action_target_identities": {
+     "columns": [
+      "identity",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "action_targets": {
+     "columns": [
+      "document",
+      "expires_at",
+      "node_id",
+      "target_id"
+     ],
+     "rows": []
+    },
+    "admin_stats_snapshots": {
+     "columns": [
+      "digest",
+      "payload_json",
+      "schema",
+      "snapshot_id",
+      "source_set",
+      "taken_at"
+     ],
+     "rows": []
+    },
+    "admin_stats_weeks": {
+     "columns": [
+      "partial",
+      "payload_json",
+      "taken_at",
+      "week"
+     ],
+     "rows": []
+    },
+    "agent_actions": {
+     "columns": [
+      "action_id",
+      "claim_until",
+      "client_id",
+      "created_at",
+      "delivery",
+      "destination_ref",
+      "destination_thread",
+      "document",
+      "expires_at",
+      "generation",
+      "grant_id",
+      "node_id",
+      "request_digest",
+      "started_at",
+      "status",
+      "target_id",
+      "verification"
+     ],
+     "rows": []
+    },
+    "ci_check_runs": {
+     "columns": [
+      "attempt",
+      "kind",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "ci_invalidations": {
+     "columns": [
+      "head",
+      "reason",
+      "received_at",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_relay_watermarks": {
+     "columns": [
+      "cursor",
+      "relay",
+      "repo"
+     ],
+     "rows": []
+    },
+    "ci_repo_state": {
+     "columns": [
+      "last_event_received",
+      "last_reconciled",
+      "observed_at",
+      "refresh_requested",
+      "repo",
+      "snapshot",
+      "visibility"
+     ],
+     "rows": []
+    },
+    "ci_runs": {
+     "columns": [
+      "attempt",
+      "object_id",
+      "payload",
+      "repo",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "claim_fences": {
+     "columns": [
+      "generation",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:repo:example-org/parity-one"
+      ],
+      [
+       "i:3",
+       "t:repo:example-org/parity-two"
+      ]
+     ]
+    },
+    "claim_retired_holders": {
+     "columns": [
+      "generation",
+      "holder_token",
+      "owner_node",
+      "retired_at",
+      "target"
+     ],
+     "rows": [
+      [
+       "i:6",
+       "t:holder-b-2",
+       "t:parity-b",
+       "r:<E+7862403.75>",
+       "t:repo:example-org/parity-one"
+      ]
+     ]
+    },
+    "claims": {
+     "columns": [
+      "acquired_at",
+      "expires_at",
+      "harness",
+      "holder_token",
+      "job",
+      "lock_acquired_at",
+      "lock_run_dir",
+      "lock_token",
+      "owner_conductor",
+      "owner_node",
+      "renewed_at",
+      "role",
+      "session",
+      "target",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "r:<E+7862703.75>",
+       null,
+       "t:holder-b2",
+       null,
+       null,
+       null,
+       null,
+       null,
+       "t:parity-b",
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "t:repo:example-org/parity-two",
+       "i:300"
+      ]
+     ]
+    },
+    "cloud_global_state": {
+     "columns": [
+      "limit_count",
+      "singleton"
+     ],
+     "rows": []
+    },
+    "cloud_leases": {
+     "columns": [
+      "admitted_at",
+      "artifact_ref",
+      "expires_at",
+      "holder_token",
+      "label",
+      "lease_id",
+      "owner_conductor",
+      "owner_node",
+      "prompt_hash",
+      "provider",
+      "provider_task_id",
+      "released_at",
+      "renewed_at",
+      "repo",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": []
+    },
+    "cloud_provider_state": {
+     "columns": [
+      "circuit_state",
+      "enabled",
+      "expires_at",
+      "hosted",
+      "limit_count",
+      "provider",
+      "reason",
+      "reset_at",
+      "subscription_pool",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "dashboard_enrollment_codes": {
+     "columns": [
+      "code_digest",
+      "expires_at",
+      "issued_at",
+      "label"
+     ],
+     "rows": []
+    },
+    "dashboard_sessions": {
+     "columns": [
+      "created_at",
+      "credential_digest",
+      "expires_at",
+      "label",
+      "revoked_at",
+      "scope",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "events": {
+     "columns": [
+      "capability_fingerprint",
+      "context",
+      "digest",
+      "exit_status",
+      "harness",
+      "node_id",
+      "received_at",
+      "repo",
+      "repo_identity",
+      "run_id",
+      "seat",
+      "sequence",
+      "state",
+      "ts"
+     ],
+     "rows": [
+      [
+       null,
+       null,
+       "t:parity-run-live-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-live",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-1",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:1",
+       "t:run.started",
+       "t:<T+5|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       null,
+       null,
+       "t:parity-run-done-2",
+       null,
+       "t:claude",
+       "t:parity-a",
+       "t:<T+6.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:example-repo",
+       null,
+       "t:parity-run-done",
+       "t:coder",
+       "i:2",
+       "t:run.completed",
+       "t:<T+6|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "fleet_audit_log": {
+     "columns": [
+      "action",
+      "actor",
+      "at",
+      "detail",
+      "id",
+      "subject"
+     ],
+     "rows": [
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:1",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:grants.change",
+       "t:admin",
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"grants\":[\"node:*\"]}",
+       "i:2",
+       "t:agent:parity-operator"
+      ],
+      [
+       "t:member.remove",
+       "t:admin",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:{\"node_id\":\"parity-c\"}",
+       "i:3",
+       "t:parity-c"
+      ]
+     ]
+    },
+    "fleet_dispatch_intents": {
+     "columns": [
+      "created_at",
+      "decision_id",
+      "origin_node",
+      "reservation_id",
+      "session_id",
+      "state",
+      "target_node",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_event_attempts": {
+     "columns": [
+      "attempted_at",
+      "subscription_id"
+     ],
+     "rows": [
+      [
+       "r:<E+7862404.75>",
+       "t:<subscription#1>"
+      ]
+     ]
+    },
+    "fleet_event_deliveries": {
+     "columns": [
+      "attempted_at",
+      "attempts",
+      "next_attempt",
+      "seq",
+      "state",
+      "subscription_id"
+     ],
+     "rows": [
+      [
+       "r:<E+7862404.75>",
+       "i:1",
+       "r:0.0",
+       "i:14",
+       "t:delivered",
+       "t:<subscription#1>"
+      ]
+     ]
+    },
+    "fleet_event_subscriptions": {
+     "columns": [
+      "arguments",
+      "created_at",
+      "cursor_seq",
+      "expires_at",
+      "failures",
+      "filter_value",
+      "generation",
+      "id",
+      "name",
+      "previous_secret",
+      "principal_id",
+      "rotate_until",
+      "secret",
+      "url"
+     ],
+     "rows": [
+      [
+       "t:{\"recipient\":\"agent:parity-agent\"}",
+       "r:<E+7862401>",
+       "i:14",
+       "r:<E+8467201>",
+       "i:0",
+       "t:agent:parity-agent",
+       "t:<subscription-generation#1>",
+       "t:<subscription#1>",
+       "t:message.created",
+       null,
+       "t:agent:parity-agent",
+       null,
+       "t:whsec_ayN2kpveBqqadEntfFwN0Yb/+fwlDvGL9ZBRSkVgzGE=",
+       "t:<sink>/hook"
+      ]
+     ]
+    },
+    "fleet_event_verifications": {
+     "columns": [
+      "attempted_at",
+      "principal_id"
+     ],
+     "rows": [
+      [
+       "r:<E+7862401>",
+       "t:agent:parity-agent"
+      ]
+     ]
+    },
+    "fleet_events": {
+     "columns": [
+      "created_at",
+      "data",
+      "event_id",
+      "name",
+      "producer",
+      "seq",
+      "subject"
+     ],
+     "rows": [
+      [
+       "r:<E+7862404.75>",
+       "t:{\"message_id\":\"14\",\"recipient\":\"agent:parity-agent\",\"sender\":\"parity-b\",\"priority\":\"normal\",\"created_at\":\"2026-06-01T00:00:03.750000+00:00\",\"kind\":\"message\"}",
+       "t:<event#1>",
+       "t:message.created",
+       "t:parity-b",
+       "i:14",
+       "t:agent:parity-agent"
+      ],
+      [
+       "r:<E+7862406>",
+       "t:{\"message_id\":\"15\",\"recipient\":\"parity-a\",\"sender\":\"agent:parity-operator\",\"priority\":\"normal\",\"created_at\":\"2026-06-01T00:00:06+00:00\",\"kind\":\"message\"}",
+       "t:<event#2>",
+       "t:message.created",
+       "t:agent:parity-operator",
+       "i:15",
+       "t:parity-a"
+      ]
+     ]
+    },
+    "fleet_finding_grants": {
+     "columns": [
+      "enrollment_epoch",
+      "granted_at",
+      "principal_id"
+     ],
+     "rows": []
+    },
+    "fleet_findings": {
+     "columns": [
+      "expires_at",
+      "finding_id",
+      "fingerprint",
+      "first_seen",
+      "generation",
+      "holder",
+      "kind",
+      "report_ref",
+      "reservation_id",
+      "state"
+     ],
+     "rows": []
+    },
+    "fleet_machine_telemetry": {
+     "columns": [
+      "active_claims",
+      "credential_state",
+      "load",
+      "machine",
+      "node_id",
+      "observed_at",
+      "observed_id",
+      "running",
+      "status",
+      "ttl_seconds",
+      "updated_at",
+      "usable_seats"
+     ],
+     "rows": []
+    },
+    "fleet_mesh_statements": {
+     "columns": [
+      "kind",
+      "seq",
+      "statement",
+      "uploaded_at"
+     ],
+     "rows": []
+    },
+    "fleet_message_keys": {
+     "columns": [
+      "compromised_from",
+      "created_at",
+      "kid",
+      "principal_id",
+      "record",
+      "retired_at",
+      "revoked_at",
+      "state"
+     ],
+     "rows": [
+      [
+       null,
+       "t:<T+172800|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_aKmYFGEquPmwk2iIvXpcOA",
+       "t:parity-a",
+       "t~1ca0160f37e132f46757ba0f6d957228687ae2a44a835b978430d08688ac07e5:1965",
+       null,
+       null,
+       "t:active"
+      ],
+      [
+       null,
+       "t:<T+172800.25|YYYY-MM-DDTHH:MM:SS.ffffffZ>",
+       "t:k1_u3WcgR8MIJS-J-w0skmHvQ",
+       "t:parity-b",
+       "t~84c9c9c6e202e41c752f6145f3021725639d36ccff14b58d0558f2c330bd273f:1965",
+       null,
+       null,
+       "t:active"
+      ]
+     ]
+    },
+    "fleet_message_principals": {
+     "columns": [
+      "authorization_enrollment_epoch",
+      "created_at",
+      "enrollment_id",
+      "grant_epoch",
+      "label",
+      "name",
+      "person",
+      "principal_id",
+      "revoked_at",
+      "role",
+      "token_hash"
+     ],
+     "rows": [
+      [
+       "t:<principal-epoch#1>",
+       "t:<T+2.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#1>",
+       "t:<grant-epoch#1>",
+       "t:parity-agent",
+       "t:parity-agent",
+       null,
+       "t:agent:parity-agent",
+       null,
+       "t:agent",
+       "t:<token-digest#4>"
+      ],
+      [
+       "t:<principal-epoch#2>",
+       "t:<T+3.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<enrollment#2>",
+       "t:<grant-epoch#2>",
+       "t:parity-operator",
+       "t:parity-operator",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:agent",
+       "t:<token-digest#5>"
+      ]
+     ]
+    },
+    "fleet_message_send_grants": {
+     "columns": [
+      "created_at",
+      "pattern",
+      "principal_id"
+     ],
+     "rows": [
+      [
+       "t:<T+3.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-agent"
+      ],
+      [
+       "t:<T+4.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:node:*",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_message_sends": {
+     "columns": [
+      "client_id",
+      "id",
+      "received_at",
+      "sender"
+     ],
+     "rows": [
+      [
+       "t:p-agent-3",
+       "i:14",
+       "t:<T+7862404.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b"
+      ],
+      [
+       "t:q3-answer",
+       "i:15",
+       "t:<T+7862406|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator"
+      ]
+     ]
+    },
+    "fleet_messages": {
+     "columns": [
+      "acked_at",
+      "acked_by",
+      "body",
+      "client_id",
+      "content_state",
+      "created_at",
+      "envelope",
+      "envelope_bytes",
+      "id",
+      "kind",
+      "payload_hash",
+      "priority",
+      "received_at",
+      "recipient",
+      "reference",
+      "reply_to",
+      "sealed_reply_to",
+      "sender",
+      "sender_label",
+      "subject",
+      "thread"
+     ],
+     "rows": [
+      [
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:",
+       "t:s1",
+       "t:content_expired",
+       "t:<T+172801.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~d7664d2aa6eeb638fc4b335ab14aaaa63bf80b27997cf60788ce78175f22f061:565",
+       "i:565",
+       "i:6",
+       "t:message",
+       "t:51041ad37790ffb851f859fe9e5defab589beea6593aa2ed63ef084800359d6f",
+       "t:normal",
+       "t:<T+172801.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:",
+       "t:s2",
+       "t:sealed",
+       "t:<T+172803.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t~e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb:5267",
+       "i:5267",
+       "i:7",
+       "t:message",
+       "t:e6f4adf2cd1abc2a76aa258b1cdafcad301a4df563b2df5acdd1e793311af3eb",
+       "t:normal",
+       "t:<T+172804|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:6",
+       "i:6",
+       "t:parity-b",
+       null,
+       "t:",
+       null
+      ],
+      [
+       "t:<T+172806.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       "t:late reply",
+       "t:p-recent-1",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:8",
+       null,
+       "t:156713faac71428d6eb049e6156c36cc07a155ff1b8aac4f7063a8f855e91c9f",
+       "t:normal",
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Re: Re: parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:recent",
+       "t:p-recent-2",
+       null,
+       "t:<T+172805|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:9",
+       null,
+       "t:db261541618965a274691801d60e8d92c2075590692a009f327b74f6c2c0fc64",
+       "t:normal",
+       "t:<T+172805.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:parity-b",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       "t:parity-thread"
+      ],
+      [
+       null,
+       null,
+       "t:second",
+       "t:p-agent-2",
+       null,
+       "t:<T+172805.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:10",
+       null,
+       "t:06d36ac133d1e0b18b3c71246e4a20700993c4b04e2de12cb737ec50a81b5f21",
+       "t:normal",
+       "t:<T+172806.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered in time?",
+       "t:<client-id#1>",
+       null,
+       "t:<T+172809|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:11",
+       "t:operator_question",
+       "t:3a2a86732c341e83de8630f29ccd00e9117f6872aae275b4749b29e27a14c6cd",
+       "t:normal",
+       "t:<T+172809|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:in time",
+       "t:q2-answer",
+       null,
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:12",
+       null,
+       "t:f04a148d59f2b803b32a585c763c1354a2956997c2fce2d143841ca41dec6625",
+       "t:normal",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:11",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:Answered late?",
+       "t:<client-id#2>",
+       null,
+       "t:<T+172810.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:13",
+       "t:operator_question",
+       "t:5acc323657ac49032da2c69d1f9c0c53b09bfbe650e4ee440c0ea6ab04d4dbe2",
+       "t:normal",
+       "t:<T+172810.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-operator",
+       null,
+       null,
+       null,
+       "t:parity-a",
+       null,
+       "t:Operator question",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:third",
+       "t:p-agent-3",
+       null,
+       "t:<T+7862403.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       null,
+       "i:14",
+       null,
+       "t:b77d3a6d999e00f9a52f70a302b276b3ba9109740ac505e83fc8adef8b8a8ddd",
+       "t:normal",
+       "t:<T+7862404.75|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:agent:parity-agent",
+       null,
+       null,
+       null,
+       "t:parity-b",
+       null,
+       "t:parity",
+       null
+      ],
+      [
+       null,
+       null,
+       "t:late",
+       "t:q3-answer",
+       null,
+       "t:<T+7862406|YYYY-MM-DDTHH:MM:SS+00:00>",
+       null,
+       null,
+       "i:15",
+       null,
+       "t:0e43f40896b261d0e82fc0fca144da10bcd419a1ff99d766e4d39e1963961e60",
+       "t:normal",
+       "t:<T+7862406|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity-a",
+       null,
+       "i:13",
+       null,
+       "t:agent:parity-operator",
+       null,
+       "t:Re: Operator question",
+       null
+      ]
+     ]
+    },
+    "fleet_policy_acknowledged": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_acknowledged_history": {
+     "columns": [
+      "acknowledged_at",
+      "consumer",
+      "context_hash",
+      "digest",
+      "effective",
+      "external_session_id",
+      "history_id",
+      "loaded_at",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "receipt_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "source",
+      "sources"
+     ],
+     "rows": []
+    },
+    "fleet_policy_delegations": {
+     "columns": [
+      "adapter",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "delegation_id",
+      "document",
+      "expires_at",
+      "origin_node",
+      "parent_metadata",
+      "parent_request_id",
+      "policy_digest",
+      "policy_version",
+      "repo_identity",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "source_revision",
+      "target_machine",
+      "target_node",
+      "workload"
+     ],
+     "rows": []
+    },
+    "fleet_policy_meta": {
+     "columns": [
+      "current_revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema"
+      ]
+     ]
+    },
+    "fleet_policy_pending": {
+     "columns": [
+      "consumer",
+      "context_hash",
+      "created_at",
+      "digest",
+      "effective",
+      "instructions",
+      "origin",
+      "override_reason",
+      "overrides",
+      "owner_node",
+      "pending_key",
+      "repo_identity",
+      "revision",
+      "selected",
+      "session_id",
+      "source",
+      "sources",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_policy_revisions": {
+     "columns": [
+      "actor",
+      "created_at",
+      "digest",
+      "document",
+      "parent_revision",
+      "reason",
+      "revision",
+      "schema"
+     ],
+     "rows": [
+      [
+       "t:schema",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:sha256:4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb",
+       "t~4c315a59a18e2654d2db552e7cb91fb679f8eae4bd32f1585d303acc7b8c00fb:290",
+       null,
+       "t:initial empty policy",
+       "i:1",
+       "t:brigade.fleet_policy.v1"
+      ]
+     ]
+    },
+    "fleet_policy_sessions": {
+     "columns": [
+      "consumer",
+      "digest",
+      "loaded_at",
+      "owner_node",
+      "refresh_detail",
+      "refresh_requested_at",
+      "refresh_state",
+      "refresh_updated_at",
+      "repo_identity",
+      "revision",
+      "session_id",
+      "source",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_questions": {
+     "columns": [
+      "answer",
+      "answer_id",
+      "answered_at",
+      "answered_by",
+      "caller",
+      "created_at",
+      "deadline",
+      "generation",
+      "late_answer_message_id",
+      "late_answered_at",
+      "message_id",
+      "operator",
+      "operator_reply_after_desktop_at",
+      "operator_reply_after_desktop_message_id",
+      "payload_hash",
+      "question",
+      "question_id",
+      "request_id",
+      "source",
+      "status"
+     ],
+     "rows": [
+      [
+       "t:in time",
+       "i:12",
+       "t:<T+172810|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:agent:parity-operator",
+       "t:parity-a",
+       "t:<T+172809|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<T+172929|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:<token-digest#1>",
+       null,
+       null,
+       "i:11",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:572701029d94700960d3f0e9cbe4fa74433db0b797767e5463330a26575894d1",
+       "t:Answered in time?",
+       "t:<question#1>",
+       "t:q2",
+       "t:operator_reply",
+       "t:answered"
+      ],
+      [
+       null,
+       null,
+       null,
+       null,
+       "t:parity-a",
+       "t:<T+172810.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<T+172930.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#1>",
+       "i:15",
+       "t:<T+7862406|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:13",
+       "t:agent:parity-operator",
+       null,
+       null,
+       "t:c1cd2a36d19e3506d6dea196985a03f9049ceec0afeebdc32bcf3387d105e716",
+       "t:Answered late?",
+       "t:<question#2>",
+       "t:q3",
+       null,
+       "t:timeout"
+      ]
+     ]
+    },
+    "fleet_quota_meta": {
+     "columns": [
+      "singleton",
+      "updated_at",
+      "version"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "i:0"
+      ]
+     ]
+    },
+    "fleet_quota_observations": {
+     "columns": [
+      "account_id",
+      "collected_at",
+      "created_at",
+      "digest",
+      "document",
+      "expires_at",
+      "observation_id",
+      "overrides_observation_id",
+      "pool_id",
+      "provider",
+      "provider_time",
+      "raw",
+      "reason",
+      "source",
+      "source_ref",
+      "status"
+     ],
+     "rows": []
+    },
+    "fleet_read_snapshot_groups": {
+     "columns": [
+      "kind",
+      "row_count",
+      "snapshot_id",
+      "total"
+     ],
+     "rows": [
+      [
+       "t:claims",
+       "i:2",
+       "t:<snapshot#2>",
+       "i:2"
+      ],
+      [
+       "t:nodes",
+       "i:3",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:principals",
+       "i:2",
+       "t:<snapshot#1>",
+       "i:2"
+      ],
+      [
+       "t:sessions",
+       "i:1",
+       "t:<snapshot#1>",
+       "i:1"
+      ]
+     ]
+    },
+    "fleet_read_snapshot_rows": {
+     "columns": [
+      "caller",
+      "kind",
+      "ordinal",
+      "payload",
+      "recipient",
+      "snapshot_id",
+      "visible",
+      "wire_bytes"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:0",
+       "t~99bdd4dc0f6d4051dfea538f3f74e8029effa8dafcf5a22d37c0576448e46ee2:333",
+       "t:parity-b",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7103"
+      ],
+      [
+       "t:parity-b",
+       "t:claims",
+       "i:1",
+       "t~1ed9010eeceb84da1c9c1e8068c4143af2ddafcbf370e9309787d1ebc65e27de:333",
+       "t:parity-a",
+       "t:<snapshot#2>",
+       "i:1",
+       "i:7103"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:0",
+       "t:{\"node_id\":\"parity-a\"}",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:1",
+       "t:{\"node_id\":\"parity-b\"}",
+       "t:parity-b",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:nodes",
+       "i:2",
+       "t:{\"node_id\":\"parity-c\"}",
+       "t:parity-c",
+       "t:<snapshot#1>",
+       "i:0",
+       "i:1571"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:0",
+       "t:{\"principal_id\":\"agent:parity-agent\",\"label\":\"parity-agent\"}",
+       "t:agent:parity-agent",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2642"
+      ],
+      [
+       "t:parity-b",
+       "t:principals",
+       "i:1",
+       "t:{\"principal_id\":\"agent:parity-operator\",\"label\":\"parity-operator\"}",
+       "t:agent:parity-operator",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:2648"
+      ],
+      [
+       "t:parity-b",
+       "t:sessions",
+       "i:0",
+       "t~c009ad4b60cf7507debd3cf7cd5724d213f6938b53c36aa67d8fdbcc0f489279:238",
+       "t:parity-a",
+       "t:<snapshot#1>",
+       "i:1",
+       "i:9018"
+      ]
+     ]
+    },
+    "fleet_read_snapshots": {
+     "columns": [
+      "caller",
+      "expires_at",
+      "last_access",
+      "payload",
+      "payload_bytes",
+      "query_hash",
+      "snapshot_id"
+     ],
+     "rows": [
+      [
+       "t:parity-b",
+       "r:<E+615>",
+       "r:<E+15>",
+       "t:rows-v1",
+       "i:475",
+       "t:<query-binding#1>",
+       "t:<snapshot#1>"
+      ],
+      [
+       "t:parity-b",
+       "r:<E+616>",
+       "r:<E+16>",
+       "t:rows-v1",
+       "i:680",
+       "t:<query-binding#2>",
+       "t:<snapshot#2>"
+      ]
+     ]
+    },
+    "fleet_reservations": {
+     "columns": [
+      "accepted",
+      "created_at",
+      "decision_id",
+      "expires_at",
+      "machine",
+      "node_id",
+      "origin_node",
+      "reservation_id",
+      "seat",
+      "session_id",
+      "state",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "fleet_route_decisions": {
+     "columns": [
+      "admission_generation",
+      "consumer",
+      "created_at",
+      "decision_id",
+      "document",
+      "origin",
+      "origin_node",
+      "override_reason",
+      "policy_digest",
+      "policy_version",
+      "reason",
+      "repo_identity",
+      "request_digest",
+      "request_document",
+      "request_key",
+      "reservation_id",
+      "selected_machine",
+      "selected_seat",
+      "session_id",
+      "work_id",
+      "workload"
+     ],
+     "rows": []
+    },
+    "grokbot_actor_policy": {
+     "columns": [
+      "actor_kind",
+      "enabled",
+      "node_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "role"
+     ],
+     "rows": []
+    },
+    "grokbot_jobs": {
+     "columns": [
+      "artifact_digest",
+      "artifact_kind",
+      "artifact_ref",
+      "artifact_size",
+      "cancel_requested_at",
+      "claimant_node",
+      "claimant_worker",
+      "claimed_at",
+      "created_at",
+      "idempotency_key_hash",
+      "item_revision",
+      "job_id",
+      "label",
+      "lease_expires_at",
+      "lease_generation",
+      "lease_token_digest",
+      "owner_node",
+      "private_snapshot_id",
+      "queue_id",
+      "queue_ttl_seconds",
+      "queued_at",
+      "repository",
+      "role",
+      "sequence",
+      "state",
+      "task_digest",
+      "timeout_seconds",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "grokbot_operations": {
+     "columns": [
+      "action",
+      "actor_node_id",
+      "job_id",
+      "operation_id",
+      "queue_id",
+      "queue_owner_node_id",
+      "request_digest",
+      "result_json",
+      "result_revision",
+      "result_state",
+      "timestamp"
+     ],
+     "rows": []
+    },
+    "hub_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": []
+    },
+    "interactive_sessions": {
+     "columns": [
+      "branch",
+      "checkout_path",
+      "cloud_context_json",
+      "dirty_paths_json",
+      "dirty_truncated",
+      "ended_at",
+      "expires_at",
+      "harness",
+      "heartbeat_at",
+      "identity_scope",
+      "node_id",
+      "provider_link_json",
+      "repo_identity",
+      "repo_label",
+      "session_id",
+      "started_at",
+      "state",
+      "ttl_seconds"
+     ],
+     "rows": [
+      [
+       "t:parity-branch",
+       "t:/srv/example/checkout",
+       null,
+       "t:[\"src/example.py\", \"docs/caf\u00e9.md\"]",
+       "i:0",
+       null,
+       "r:<E+173707.5>",
+       "t:claude",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:fleet",
+       "t:parity-a",
+       null,
+       "t:github.com/example-org/example-repo",
+       "t:example-repo",
+       "t:parity-session-1",
+       "t:<T+172807.5|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:active",
+       "i:900"
+      ]
+     ]
+    },
+    "model_admission_audit": {
+     "columns": [
+      "consumer",
+      "consumer_binding",
+      "created_at",
+      "decision",
+      "expires_at",
+      "model",
+      "node_id",
+      "phase",
+      "provider",
+      "reasoning",
+      "request_digest",
+      "request_id",
+      "roster_digest",
+      "roster_revision",
+      "seat",
+      "source"
+     ],
+     "rows": []
+    },
+    "model_consumer_defaults": {
+     "columns": [
+      "consumer",
+      "seat",
+      "updated_at"
+     ],
+     "rows": [
+      [
+       "t:brigade-run",
+       "t:",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ],
+      [
+       "t:t3-fleet",
+       "t:",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>"
+      ]
+     ]
+    },
+    "model_launch_proofs": {
+     "columns": [
+      "consumer",
+      "created_at",
+      "node_id",
+      "policy_session_id",
+      "proof_key",
+      "request_digest",
+      "request_id"
+     ],
+     "rows": []
+    },
+    "model_leases": {
+     "columns": [
+      "account_id",
+      "acquired_at",
+      "consumer",
+      "context_hash",
+      "decision_id",
+      "expires_at",
+      "holder_token",
+      "launch_model",
+      "lease_id",
+      "model",
+      "owner_node",
+      "policy_digest",
+      "policy_version",
+      "pool",
+      "provider",
+      "released_at",
+      "request_id",
+      "seat",
+      "session_id"
+     ],
+     "rows": []
+    },
+    "model_policy": {
+     "columns": [
+      "brigade_cli",
+      "brigade_model",
+      "enabled",
+      "limit_count",
+      "model",
+      "notes",
+      "provider",
+      "reasoning",
+      "seat",
+      "t3_instance_id",
+      "t3_model",
+      "t3_service_tier",
+      "updated_at"
+     ],
+     "rows": []
+    },
+    "model_roster_meta": {
+     "columns": [
+      "revision",
+      "singleton",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": [
+      [
+       "i:1",
+       "i:1",
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:schema-v15"
+      ]
+     ]
+    },
+    "nodes": {
+     "columns": [
+      "created_at",
+      "label",
+      "node_id",
+      "revoked_at",
+      "token_sha256"
+     ],
+     "rows": [
+      [
+       "t:<T+1|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:parity node a",
+       "t:parity-a",
+       null,
+       "t:<token-digest#1>"
+      ],
+      [
+       "t:<T+1.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-b",
+       null,
+       "t:<token-digest#2>"
+      ],
+      [
+       "t:<T+2.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       null,
+       "t:parity-c",
+       "t:<T+172811.25|YYYY-MM-DDTHH:MM:SS.ffffff+00:00>",
+       "t:<token-digest#3>"
+      ]
+     ]
+    },
+    "retired_models": {
+     "columns": [
+      "created_at",
+      "family",
+      "match_kind",
+      "permanent",
+      "provider",
+      "reason_code"
+     ],
+     "rows": [
+      [
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.4",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ],
+      [
+       "t:<T+0|YYYY-MM-DDTHH:MM:SS+00:00>",
+       "t:gpt-5.5",
+       "t:family-prefix",
+       "i:1",
+       "t:openai",
+       "t:permanently-retired"
+      ]
+     ]
+    },
+    "run_preference": {
+     "columns": [
+      "id",
+      "impl",
+      "notes",
+      "orchestrator",
+      "research",
+      "review",
+      "scout",
+      "security",
+      "updated_at",
+      "updated_by"
+     ],
+     "rows": []
+    },
+    "sqlite_sequence": {
+     "columns": [
+      "name",
+      "seq"
+     ],
+     "rows": [
+      [
+       "t:fleet_message_sends",
+       "i:15"
+      ],
+      [
+       "t:fleet_audit_log",
+       "i:3"
+      ],
+      [
+       "t:fleet_messages",
+       "i:15"
+      ],
+      [
+       "t:fleet_events",
+       "i:15"
+      ]
+     ]
+    },
+    "work_campaign_members": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "override",
+      "repo",
+      "spec_fingerprint",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_campaigns": {
+     "columns": [
+      "campaign_key",
+      "created_at",
+      "created_by",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_create_keys": {
+     "columns": [
+      "actor_id",
+      "fingerprint",
+      "idempotency_key",
+      "received_at",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_events": {
+     "columns": [
+      "actor_id",
+      "actor_type",
+      "detail_json",
+      "event_id",
+      "event_type",
+      "from_status",
+      "node_id",
+      "occurred_at",
+      "received_at",
+      "run_id",
+      "seq",
+      "to_status",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_import_keys": {
+     "columns": [
+      "adapter_id",
+      "created",
+      "fingerprint",
+      "idempotency_key",
+      "owner_node",
+      "received_at",
+      "refused",
+      "unchanged",
+      "updated"
+     ],
+     "rows": []
+    },
+    "work_items": {
+     "columns": [
+      "acceptance_json",
+      "archived_at",
+      "attempt_count",
+      "blocker",
+      "burn_eligible",
+      "burn_rank",
+      "created_at",
+      "description",
+      "execution_mode",
+      "kind",
+      "priority",
+      "ready_at",
+      "review_after",
+      "scope",
+      "spend_by",
+      "status",
+      "title",
+      "token_appetite",
+      "updated_at",
+      "version",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_links": {
+     "columns": [
+      "adapter_id",
+      "display_ref",
+      "external_key",
+      "external_state",
+      "external_updated_at",
+      "link_id",
+      "link_type",
+      "owner_node",
+      "source_acceptance_json",
+      "source_policy",
+      "source_version",
+      "stale_at",
+      "synced_at",
+      "url",
+      "work_id"
+     ],
+     "rows": []
+    },
+    "work_schema_meta": {
+     "columns": [
+      "key",
+      "value"
+     ],
+     "rows": [
+      [
+       "t:reconciled_version",
+       "t:2"
+      ]
+     ]
+    },
+    "work_sync_cursors": {
+     "columns": [
+      "adapter_id",
+      "cursor",
+      "last_error_code",
+      "last_success_at",
+      "owner_node",
+      "source_type",
+      "updated_at"
+     ],
+     "rows": []
+    }
+   }
+  }
+ },
+ "t0": 1772409600
+}

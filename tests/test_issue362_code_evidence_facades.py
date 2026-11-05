@@ -234,8 +234,8 @@ def test_code_sync_uses_graphtrail_bin_override(monkeypatch, tmp_path):
     override.chmod(override.stat().st_mode | stat.S_IXUSR)
     calls: list[list[str]] = []
 
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(override))
-    monkeypatch.setattr(proc, "which", lambda _: pytest.fail("resolver should use GRAPHTRAIL_BIN first"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(override))
+    monkeypatch.setattr(proc, "which", lambda _: pytest.fail("resolver should use BRIGADE_CODE_GRAPH_BIN first"))
     monkeypatch.setattr(proc, "run", lambda args, **_: calls.append(args) or proc.Result(0, "", ""))
 
     assert cli.main(["code", "sync", str(tmp_path)]) == 0
@@ -380,7 +380,7 @@ def test_evidence_crawl_uses_miseledger_bin_override(monkeypatch, tmp_path):
     override.chmod(override.stat().st_mode | stat.S_IXUSR)
     calls: list[list[str]] = []
 
-    monkeypatch.setenv("MISELEDGER_BIN", str(override))
+    monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(override))
     monkeypatch.setattr(proc, "which", lambda _: pytest.fail("facade should use _miseledger_bin"))
     monkeypatch.setattr(proc, "run", lambda args, **_: calls.append(args) or proc.Result(0, "", ""))
 
@@ -478,11 +478,11 @@ def test_evidence_status_json_contract_unchanged(monkeypatch, tmp_path):
 def test_evidence_export_plan_json_contract_unchanged(tmp_path):
     payload = evidence_cmd.export_plan_payload(target=tmp_path)
     assert payload["kind"] == "export"
-    assert any("receipts export miseledger" in " ".join(cmd) for cmd in payload["commands"])
+    assert any("receipts export evidence" in " ".join(cmd) for cmd in payload["commands"])
 
 
 def test_component_shim_ids_remain_required():
-    assert set(component_manifest.KNOWN_COMPONENT_IDS) >= {
+    assert set(component_manifest.ACCEPTED_COMPONENT_IDS) >= {
         "graphtrail",
         "graphtrail-mcp",
         "miseledger",

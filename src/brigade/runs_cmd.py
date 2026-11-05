@@ -3381,7 +3381,14 @@ def watch(
                     return 2
                 except runguard.RunLockError as exc:
                     detail = str(exc)
-                    if "owner process is still active" not in detail and "recovery is still active" not in detail:
+                    if not any(
+                        marker in detail
+                        for marker in (
+                            "owner process is still active",
+                            "recovery is still active",
+                            "recovery in progress",
+                        )
+                    ):
                         print(f"error: artifact-collection recovery failed: {detail}", file=sys.stderr)
                         return 2
         approval_state = _approval_resume_state(run_meta)

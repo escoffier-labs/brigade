@@ -13,7 +13,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "generate_component_manifest.py"
-COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENTS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 
 
@@ -33,7 +33,7 @@ def _asset_name(component: str, platform: str) -> str:
 
 def _write_inventory(root: Path) -> set[str]:
     names: set[str] = set()
-    for component in COMPONENTS:
+    for component in (*COMPONENTS, "graphtrail", "graphtrail-mcp", "miseledger"):
         for platform in PLATFORMS:
             name = _asset_name(component, platform)
             (root / name).write_bytes(name.encode())
@@ -130,7 +130,7 @@ def test_generator_additive_inventory_preserves_primary_manifest_and_hashes_ever
     generator_module.generate_manifest(**kwargs)
 
     assert output.read_bytes() == legacy_manifest
-    assert generator_module.expected_asset_names() == legacy
+    assert generator_module.expected_asset_names() <= legacy
     entries = dict(line.split()[::-1] for line in checksums.read_text().splitlines())
     assert len(entries) == 41
     assert set(entries) == legacy | aliases | {output.name}
@@ -164,3 +164,39 @@ def test_generator_rejects_invalid_additive_inventory_before_writing(generator_m
         )
     assert not output.exists()
     assert not checksums.exists()
+
+
+def test_generated_manifest_passes_release_provenance(generator_module, tmp_path):
+    from tests.test_component_manifest_provenance import _fetcher, _module, _release
+
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    output = tmp_path / "component-manifest-v1.json"
+    manifest = generator_module.generate_manifest(
+        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
+    )
+    release, checksums, body = _release(manifest)
+    assert output.read_bytes() == body.encode()
+    assert _module().verify_manifest(output, fetch=_fetcher(release, checksums, body)) == []
+
+
+def test_generator_preserves_lf_bytes_with_windows_text_defaults(generator_module, tmp_path, monkeypatch):
+    original_open = Path.open
+
+    def windows_open(path, mode="r", buffering=-1, encoding=None, errors=None, newline=None):
+        if "w" in mode and "b" not in mode and newline is None:
+            newline = "\r\n"
+        return original_open(path, mode, buffering, encoding, errors, newline)
+
+    monkeypatch.setattr(Path, "open", windows_open)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    output = tmp_path / "manifest.json"
+    checksums = tmp_path / "checksums.txt"
+    manifest = generator_module.generate_manifest(
+        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+    )
+    assert output.read_bytes() == (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    assert b"\r" not in checksums.read_bytes()

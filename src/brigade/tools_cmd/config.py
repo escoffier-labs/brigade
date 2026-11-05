@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import tomllib
+
 import re
 from pathlib import Path
 from typing import Any
 
-from .. import toml_compat as tomllib
+
 from . import constants, paths
 
 
@@ -14,11 +16,9 @@ def _load_config(target: Path, *, text: str | None = None) -> tuple[list[dict[st
     path = paths.config_path(target)
     if text is None and not path.is_file():
         return [], [f"tool catalog config missing: {path}"]
-    if tomllib is None:
-        return [], ["tool catalog requires Python tomllib support"]
     try:
         payload = tomllib.loads(text if text is not None else path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid tool catalog config: {exc}"]
     values = payload.get("tool")
     if values is None:
@@ -141,11 +141,9 @@ def _load_runtime_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]
     path = paths.runtimes_config_path(target)
     if not path.is_file():
         return [], [f"tool runtime config missing: {path}"]
-    if tomllib is None:
-        return [], ["tool runtime config requires Python tomllib support"]
     try:
         payload = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return [], [f"invalid tool runtime config: {exc}"]
     values = payload.get("runtime")
     if not isinstance(values, list):
@@ -202,11 +200,9 @@ def _load_policy_config(target: Path) -> tuple[dict[str, Any] | None, list[str]]
     path = paths.policy_path(target)
     if not path.is_file():
         return None, [f"tool execution policy missing: {path}"]
-    if tomllib is None:
-        return None, ["tool execution policy requires Python tomllib support"]
     try:
         raw_policy = tomllib.loads(path.read_text())
-    except (OSError, tomllib.TOMLDecodeError) as exc:  # type: ignore[union-attr]
+    except (OSError, tomllib.TOMLDecodeError) as exc:
         return None, [f"invalid tool execution policy: {exc}"]
     errors: list[str] = []
     policy: dict[str, Any] = {"raw": raw_policy}

@@ -41,7 +41,7 @@
       "confirmed": false,
       "rule": "def-use",
       "snapshot_hash": null,
-      "notes": "Derived from GraphTrail impact intersection; requires confirmation before ledger filing."
+      "notes": "Derived from brigade-code-graph impact intersection; requires confirmation before ledger filing."
     },
     {
       "source": "example-a",
@@ -57,7 +57,7 @@
   "graphtrail": {
     "available": false,
     "snapshot_hash": null,
-    "degradation": "GraphTrail unavailable; no derived dependency edges proposed."
+    "degradation": "brigade-code-graph unavailable; no derived dependency edges proposed."
   },
   "confirmation": {
     "required_for_derived_edges": true,

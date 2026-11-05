@@ -18,7 +18,7 @@ from .budgets import (
     BOOTSTRAP_BUDGETS,
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import localio
+from . import config, engine_paths, localio
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -92,6 +92,10 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         check = _check_claude_work_loop(ctx.target)
         if check is not None:
             checks.append(check)
+    if ctx.selection is not None:
+        from .work_mode import doctor_checks
+
+        checks.extend(doctor_checks(ctx.target))
     if "openclaw" in ctx.harnesses:
         checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_openclaw())
     if "hermes" in ctx.harnesses:
@@ -117,7 +121,10 @@ _OUTCOME_LOOP_HALF_FED_NAME = "outcome loop: half-fed"
 
 def _check_outcome_loop(ctx: DoctorContext) -> List[CheckResult]:
     """First-class dormancy findings for the verify/outcome work loop (#734)."""
-    if ctx.selection is None:
+    from .work_mode import is_yolo
+
+    # Yolo mode opts out of receipts; an idle ledger there is the chosen state (#2233).
+    if ctx.selection is None or is_yolo(ctx.target):
         return []
     from . import outcome_cmd
 
@@ -810,7 +817,9 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     payload = classify(target)
     if payload is None:
         return None
-    status = FAIL if payload["state"] == "error" else OK if payload["state"] == "enforced" else WARN
+    state = payload["state"]
+    clean_yolo = state == "yolo" and not payload.get("issues")
+    status = FAIL if state == "error" else OK if state == "enforced" or clean_yolo else WARN
     detail = str(payload["detail"])
     hooks = payload.get("hooks") or {}
     hook_error = hooks.get("error")
@@ -1064,6 +1073,17 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
     checks: List[ScopedCheckResult] = []
     for status, name, detail in component_report.doctor_checks():
         checks.append(_operator_check(status, name, detail))
+    checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
+    checks.extend(
+        _scoped_check(
+            INFO,
+            "legacy config key",
+            f"{key} is ignored because {replacement} is also set; remove {key}"
+            if ignored
+            else f"{key} is read while {replacement} is absent, until v0.33.0; rewrite it as {replacement}",
+        )
+        for key, replacement, ignored in config.legacy_config_keys(ctx.target)
+    )
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
         if station.doctor is not None:

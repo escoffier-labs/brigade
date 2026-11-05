@@ -1,5 +1,6 @@
 """Cassette defaults, export staging, and run-identity regressions."""
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import time
@@ -70,9 +71,11 @@ def test_invalid_run_identity_cannot_displace_retention_or_latest(tmp_path, monk
     )
     root = tmp_path / ".brigade" / "runs"
     old, current = (root / name for name in ("old", "current"))
-    for day, run in enumerate((old, current), start=1):
+    # Started within KEEP_DAYS of now, so only the identity checks decide retention.
+    for days_ago, run in ((2, old), (1, current)):
         _record(run)
-        (run / "run.json").write_text(json.dumps({"run_id": run.name, "started_at": f"2026-10-{day:02d}T00:00:00Z"}))
+        started = datetime.now(timezone.utc) - timedelta(days=days_ago)
+        (run / "run.json").write_text(json.dumps({"run_id": run.name, "started_at": started.isoformat()}))
     debris = root / (".current.import-120000-1" if kind == "staging" else "copied")
     debris.mkdir()
     identity = {} if kind == "missing-identity" else {"run_id": debris.name if kind == "staging" else current.name}

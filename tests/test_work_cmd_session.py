@@ -865,7 +865,7 @@ def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path,
     graphtrail = tmp_path / "fake-graphtrail"
     graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' '### Entry points' '- brigade.work_cmd.session._brief_payload'\n")
     graphtrail.chmod(0o755)
-    monkeypatch.setenv("GRAPHTRAIL_BIN", str(graphtrail))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     assert work_cmd.task_add(target=tmp_path, text="Attach GraphTrail to work brief") == 0
     capsys.readouterr()
 
@@ -1537,13 +1537,6 @@ def test_work_run_records_task_snapshot_and_completion_metadata(tmp_path, monkey
     assert task["completed_session_path"] == str(session_dir)
     assert task["completed_run_path"] == str(run_dir)
     assert task["completed_acceptance"] == ["Session records the acceptance checklist."]
-
-    assert work_cmd.task_show(target=tmp_path, task_id="issue-task") == 0
-    out = capsys.readouterr().out
-    assert f"completed_session_path: {session_dir}" in out
-    assert f"completed_run_path: {run_dir}" in out
-    assert "completed_acceptance: 1" in out
-    assert "Session records the acceptance checklist." in out
 
 
 def test_work_run_passes_acceptance_criteria_for_pending_task(tmp_path, monkeypatch):

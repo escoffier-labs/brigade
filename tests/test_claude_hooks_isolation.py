@@ -1,12 +1,24 @@
 """Real child regressions for workspace-influenced hook imports."""
 
+import compileall
 import json
+import subprocess
+
 import pytest
 
 from brigade.claude_hooks import runtime
 from brigade.config import Config, write_config
 from brigade.selection import Selection
+from brigade.isolated_exec import module_argv, trusted_cwd
 from tests._home import set_home
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _warm_brigade_imports():
+    # Small Windows selections can reach this file before Brigade has bytecode.
+    # Pay compilation/import cost before the security probe's production budget.
+    assert compileall.compile_dir(str(trusted_cwd()), quiet=1)
+    subprocess.run(module_argv("brigade", "--help"), check=True, capture_output=True, timeout=60)
 
 
 @pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])

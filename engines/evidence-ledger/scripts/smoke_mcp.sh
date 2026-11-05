@@ -11,19 +11,22 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
-if [ ! -x "$MISELEDGER" ]; then
-  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
+# EVIDENCE_BIN selects the entry point; CI runs this script with both names.
+EVIDENCE_BIN="${EVIDENCE_BIN:-$ROOT/bin/brigade-evidence}"
+if [ ! -x "$EVIDENCE_BIN" ]; then
+  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" "./cmd/$(basename "$EVIDENCE_BIN")")
 fi
 
-"$MISELEDGER" init >/dev/null
-"$MISELEDGER" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
+"$EVIDENCE_BIN" init >/dev/null
+"$EVIDENCE_BIN" import adapter "$ROOT/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json >/dev/null
 
-python3 - "$MISELEDGER" >"$TMP_WORK/mcp.out" <<'PY'
-import json, subprocess, sys
+python3 - "$EVIDENCE_BIN" >"$TMP_WORK/mcp.out" <<'PY'
+import json, os, subprocess, sys
 
-miseledger = sys.argv[1]
-proc = subprocess.Popen([miseledger, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+evidence_bin = sys.argv[1]
+# serverInfo.name follows the entry point name (argv[0] identity).
+server_name = os.path.basename(evidence_bin).removesuffix(".exe")
+proc = subprocess.Popen([evidence_bin, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE)
 
 # Newline-delimited JSON-RPC: the MCP stdio spec, the framing Claude Desktop,
 # the MCP Inspector, and Glama use. (The server also accepts Content-Length.)
@@ -35,7 +38,7 @@ def recv():
     return json.loads(proc.stdout.readline())
 
 send({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
-assert recv()["result"]["serverInfo"]["name"] == "miseledger"
+assert recv()["result"]["serverInfo"]["name"] == server_name
 send({"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}})
 tools = recv()["result"]["tools"]
 assert any(t["name"] == "create_evidence_bundle" for t in tools), tools

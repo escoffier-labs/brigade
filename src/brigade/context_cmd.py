@@ -13,7 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import __version__
-from . import component_bins, proc, trust_gate, work_cmd
+from . import component_bins, engine_paths, proc, trust_gate, work_cmd
 from .localio import (
     read_json_dict as _read_json,
     stable_hash as _stable_hash,
@@ -182,23 +182,26 @@ def _freshness_snapshot(
 def _graphtrail_bin() -> str | None:
     """Resolve the graphtrail binary: $GRAPHTRAIL_BIN, then the managed install
     from ``brigade setup``, then PATH, then the legacy ~/.cargo/bin location."""
-    return component_bins.resolve("graphtrail")
+    return component_bins.resolve("brigade-code-graph")
 
 
 def _code_graph_summary(target: Path, selected_task: dict[str, Any] | None) -> dict[str, Any] | None:
     """Structural code context for the task from GraphTrail, or None when unavailable.
 
-    Reads the repo's ``.graphtrail/graphtrail.db`` (built by ``graphtrail sync``) via the
-    read-only ``graphtrail context`` command. Returns None and never raises when GraphTrail
-    is not installed, the db is absent, or there is no task to query, so pack building is
-    never blocked by this optional integration.
+    Reads the repo's code graph index (resolved by ``engine_paths.code_graph_db``) via the
+    read-only ``context`` command. Returns None and never raises when the engine is not
+    installed, the index is absent or ambiguous, or there is no task to query, so pack
+    building is never blocked by this optional integration.
     """
     if not isinstance(selected_task, dict):
         return None
     query = selected_task.get("text") or selected_task.get("id")
     if not isinstance(query, str) or not query.strip():
         return None
-    db_path = target / ".graphtrail" / "graphtrail.db"
+    try:
+        db_path = engine_paths.code_graph_db(target).path
+    except ValueError:
+        return None
     binary = _graphtrail_bin()
     if not db_path.is_file() or binary is None:
         return None

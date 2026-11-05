@@ -21,7 +21,8 @@ from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlparse
 
 
-COMPONENT_IDS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENT_IDS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
+LEGACY_IDS = ("graphtrail", "graphtrail-mcp", "miseledger")
 CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
@@ -273,7 +274,7 @@ def verify_release_assets(
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
     canonical_assets = {
         f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else ""): (component, platform)
-        for component in CANONICAL_IDS
+        for component in LEGACY_IDS
         for platform in SUPPORTED_PLATFORMS
     }
     if set(checksums) == expected_checksum_names | set(canonical_assets):
@@ -536,7 +537,7 @@ def smoke_import_and_search(
             managed_brigade,
             "receipts",
             "export",
-            "miseledger",
+            "evidence",
             "--target",
             str(work_repo),
             "--out",
@@ -550,7 +551,7 @@ def smoke_import_and_search(
         raise AcceptanceError(f"export file missing: {export_path}")
     if export_path.stat().st_size == 0:
         raise AcceptanceError(
-            f"receipts export miseledger --new-only wrote no receipts to {export_path}; "
+            f"receipts export evidence --new-only wrote no receipts to {export_path}; "
             "the export cursor already consumed every local receipt"
         )
     import_output = run_checked(
@@ -667,12 +668,12 @@ def validate_agent_notify_version_payload(payload: Any, version: str) -> None:
 def _smoke_graph_and_evidence(
     managed_paths: Mapping[str, Path], *, runner: Runner, env: Mapping[str, str] | None
 ) -> None:
-    graphtrail = run_checked([managed_paths["graphtrail"], "--version"], runner=runner, env=env)
+    graphtrail = run_checked([managed_paths["brigade-code-graph"], "--version"], runner=runner, env=env)
     if not graphtrail.stdout.strip():
         raise AcceptanceError("graphtrail smoke produced no version output")
 
     mcp = run_checked(
-        [managed_paths["graphtrail-mcp"]],
+        [managed_paths["brigade-code-graph-mcp"]],
         runner=runner,
         env=env,
         input_text='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
@@ -684,7 +685,7 @@ def _smoke_graph_and_evidence(
     if response.get("jsonrpc") != "2.0" or response.get("id") != 1 or "result" not in response:
         raise AcceptanceError("graphtrail-mcp smoke returned an invalid JSON-RPC response")
 
-    run_checked([managed_paths["miseledger"], "version"], runner=runner, env=env)
+    run_checked([managed_paths["brigade-evidence"], "version"], runner=runner, env=env)
 
 
 def smoke_canonical_components(
@@ -692,9 +693,9 @@ def smoke_canonical_components(
 ) -> None:
     _smoke_graph_and_evidence(
         {
-            "graphtrail": paths["brigade-code-graph"],
-            "graphtrail-mcp": paths["brigade-code-graph-mcp"],
-            "miseledger": paths["brigade-evidence"],
+            "brigade-code-graph": paths["brigade-code-graph"],
+            "brigade-code-graph-mcp": paths["brigade-code-graph-mcp"],
+            "brigade-evidence": paths["brigade-evidence"],
         },
         runner=runner,
         env=env,
@@ -726,11 +727,11 @@ def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *
     if sys.platform != "darwin":
         raise AcceptanceError("--rosetta-darwin-amd64 requires macOS")
     paths = {component: native_paths[component]["darwin-amd64"] for component in COMPONENT_IDS}
-    graphtrail = run_checked(["arch", "-x86_64", paths["graphtrail"], "--version"], runner=runner)
+    graphtrail = run_checked(["arch", "-x86_64", paths["brigade-code-graph"], "--version"], runner=runner)
     if not graphtrail.stdout.strip():
         raise AcceptanceError("Rosetta graphtrail smoke produced no version output")
     mcp = run_checked(
-        ["arch", "-x86_64", paths["graphtrail-mcp"]],
+        ["arch", "-x86_64", paths["brigade-code-graph-mcp"]],
         runner=runner,
         input_text='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}\n',
     )
@@ -740,7 +741,7 @@ def smoke_rosetta_darwin_amd64(native_paths: Mapping[str, Mapping[str, Path]], *
         raise AcceptanceError("Rosetta graphtrail-mcp smoke returned malformed JSON-RPC") from exc
     if response.get("jsonrpc") != "2.0" or response.get("id") != 1 or "result" not in response:
         raise AcceptanceError("Rosetta graphtrail-mcp smoke returned invalid JSON-RPC")
-    run_checked(["arch", "-x86_64", paths["miseledger"], "version"], runner=runner)
+    run_checked(["arch", "-x86_64", paths["brigade-evidence"], "version"], runner=runner)
     run_checked(["arch", "-x86_64", paths["sessionfind"], "--help"], runner=runner)
     agent_notify = run_checked(["arch", "-x86_64", paths["agent-notify"], "version", "--json"], runner=runner)
     try:
@@ -922,7 +923,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
             smoke_verified_canonical_release(root / "release-assets", version, runner=runner, env=env)
             smoke_import_and_search(
                 managed_brigade,
-                managed_paths["miseledger"],
+                managed_paths["brigade-evidence"],
                 root / "import-search",
                 runner=runner,
                 env=env,

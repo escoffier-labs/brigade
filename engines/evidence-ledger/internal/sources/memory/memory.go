@@ -12,9 +12,9 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/sources"
-	"github.com/escoffier-labs/miseledger/internal/textnorm"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/textnorm"
 )
 
 const (

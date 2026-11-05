@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from brigade import aboyeur, context_eval, graphtrail_delta
+from brigade import aboyeur, context_eval, code_graph_delta
 
 
 def _diff_node(file_path: str, name: str) -> dict:
@@ -20,7 +20,7 @@ def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict) -> dict
     """Run the real sidecar writer with graphtrail's diff output stubbed."""
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    snapshot = run_dir / graphtrail_delta.SNAPSHOT_NAME
+    snapshot = run_dir / code_graph_delta.SNAPSHOT_NAME
     snapshot.write_text("before")
     before = {
         "ok": True,
@@ -29,16 +29,16 @@ def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict) -> dict
         "before_snapshot_path": str(snapshot),
     }
 
-    def fake_run(binary, db_path, command, *extra, timeout, json_output=False, stage=None):
+    def fake_run(binary, db_path, command, *extra, timeout, json_output=False, stage=None, cwd=None):
         stdout = json.dumps(diff_payload) if command == "diff" else ""
         return {"argv": [command], "returncode": 0, "stdout": stdout, "stderr": "", "timed_out": False}
 
     def fake_backup(source, destination, *, timeout=None):
         Path(destination).write_text("after")
 
-    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", fake_run)
-    monkeypatch.setattr(graphtrail_delta, "_backup_sqlite", fake_backup)
-    delta = graphtrail_delta.capture_after_and_diff(tmp_path, run_dir, before)
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", fake_run)
+    monkeypatch.setattr(code_graph_delta, "_backup_sqlite", fake_backup)
+    delta = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before)
     assert delta["ok"] is True
     return delta
 
@@ -83,7 +83,7 @@ def test_context_eval_for_run_scores_real_sidecar(monkeypatch, tmp_path):
 
 
 def test_context_eval_for_run_flags_truncated_delta_and_withholds_rate(monkeypatch, tmp_path):
-    limit = graphtrail_delta.CODE_REFERENCE_NODE_LIMIT
+    limit = code_graph_delta.CODE_REFERENCE_NODE_LIMIT
     nodes = [_diff_node(f"src/pkg/mod_{index:03d}.py", f"fn_{index}") for index in range(limit + 5)]
     delta = _write_real_sidecar(monkeypatch, tmp_path, {"changed_nodes": nodes})
     sidecar = json.loads(Path(delta["sidecar_path"]).read_text())
@@ -160,7 +160,7 @@ def test_no_hits_scores_zero_f05():
 
 
 def test_truncated_delta_withholds_precision_and_f05_too(monkeypatch, tmp_path):
-    limit = graphtrail_delta.CODE_REFERENCE_NODE_LIMIT
+    limit = code_graph_delta.CODE_REFERENCE_NODE_LIMIT
     nodes = [_diff_node(f"src/pkg/mod_{index:03d}.py", f"fn_{index}") for index in range(limit + 5)]
     delta = _write_real_sidecar(monkeypatch, tmp_path, {"changed_nodes": nodes})
     brief = aboyeur.CodeGraphBrief(attached=True, text="- `src/pkg/mod_000.py:1`\n", bytes=30)

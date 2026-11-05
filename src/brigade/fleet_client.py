@@ -74,6 +74,8 @@ wait until the queued KeyboardInterrupt is delivered.
 
 from __future__ import annotations
 
+import tomllib
+
 import _thread as _thread
 import errno
 import json
@@ -114,7 +116,7 @@ from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
 from .fleet_client_spool_lock import _spool_lock as _spool_lock
 from .fleet_client_spool_lock import _validate_spool_lock_timeout as _validate_spool_lock_timeout
-from . import toml_compat as tomllib
+
 from .fleet_claim_lifecycle import (
     CLAIM_FENCE_REFUSALS,
     CLEANUP_RETRY_REASONS,

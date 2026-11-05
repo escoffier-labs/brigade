@@ -1,4 +1,4 @@
-//! Repository safety, git metadata, and `.graphtrail` ignore policy.
+//! Repository safety, git metadata, and index directory ignore policy.
 
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -8,12 +8,20 @@ use anyhow::{Context, Result};
 use ignore::gitignore::GitignoreBuilder;
 use rusqlite::Connection;
 
+use super::env::read_renamed;
+
+pub const ALLOW_UNSAFE_ROOT_ENV: &str = "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT";
+pub const LEGACY_ALLOW_UNSAFE_ROOT_ENV: &str = "GRAPHTRAIL_ALLOW_UNSAFE_ROOT";
+
 /// Refuse to sync roots that are never a real project: the filesystem root and the user's home
 /// directory. Outside a git repo the walker has no gitignore to lean on, so a sync there parses
 /// every cache, toolchain, and vendored source tree on the machine into one giant graph nobody
-/// asked for. Set `GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1` to bypass.
+/// asked for. Set `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT=1` to bypass (the legacy variable still
+/// works for the rename window, with a warning).
 pub(crate) fn guard_unsafe_root(root: &Path) -> Result<()> {
-    if std::env::var_os("GRAPHTRAIL_ALLOW_UNSAFE_ROOT").is_some_and(|value| value == "1") {
+    if read_renamed(ALLOW_UNSAFE_ROOT_ENV, LEGACY_ALLOW_UNSAFE_ROOT_ENV)?
+        .is_some_and(|value| value == "1")
+    {
         return Ok(());
     }
     let home = std::env::var_os("HOME").map(|home| {
@@ -23,7 +31,7 @@ pub(crate) fn guard_unsafe_root(root: &Path) -> Result<()> {
     if let Some(reason) = unsafe_root_reason(root, home.as_deref()) {
         anyhow::bail!(
             "refusing to sync {}: {reason}. Run sync from a project directory, or set \
-             GRAPHTRAIL_ALLOW_UNSAFE_ROOT=1 to override.",
+             {ALLOW_UNSAFE_ROOT_ENV}=1 to override.",
             root.display()
         );
     }
@@ -159,11 +167,20 @@ fn git_dir(root: &Path) -> Option<PathBuf> {
     })
 }
 
-pub(super) fn ensure_graphtrail_ignored(root: &Path) -> Result<()> {
+/// Append `index_dir` (a directory under `root`) to `root/.gitignore` unless it, or a parent of
+/// it, is already ignored.
+pub(super) fn ensure_index_ignored(root: &Path, index_dir: &Path) -> Result<()> {
     let gitignore = root.join(".gitignore");
-    if gitignore_covers_graphtrail(root, &gitignore)? {
+    if gitignore_covers(root, &gitignore, index_dir)? {
         return Ok(());
     }
+    let entry = index_dir
+        .strip_prefix(root)
+        .unwrap_or(index_dir)
+        .components()
+        .map(|part| part.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
 
     let mut needs_leading_newline = false;
     if gitignore.exists() {
@@ -180,12 +197,12 @@ pub(super) fn ensure_graphtrail_ignored(root: &Path) -> Result<()> {
     if needs_leading_newline {
         writeln!(file)?;
     }
-    writeln!(file, ".graphtrail/")?;
-    println!("updated {} to ignore .graphtrail/", gitignore.display());
+    writeln!(file, "{entry}/")?;
+    println!("updated {} to ignore {entry}/", gitignore.display());
     Ok(())
 }
 
-fn gitignore_covers_graphtrail(root: &Path, gitignore: &Path) -> Result<bool> {
+fn gitignore_covers(root: &Path, gitignore: &Path, index_dir: &Path) -> Result<bool> {
     if !gitignore.exists() {
         return Ok(false);
     }
@@ -197,7 +214,9 @@ fn gitignore_covers_graphtrail(root: &Path, gitignore: &Path) -> Result<bool> {
     let matcher = builder
         .build()
         .with_context(|| format!("failed to parse {}", gitignore.display()))?;
-    Ok(matcher.matched(root.join(".graphtrail"), true).is_ignore())
+    Ok(matcher
+        .matched_path_or_any_parents(index_dir, true)
+        .is_ignore())
 }
 
 #[cfg(test)]

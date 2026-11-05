@@ -210,7 +210,7 @@ def _policy_context(conn: sqlite3.Connection) -> PolicyContext:
     """Read the authoritative document. An unreadable authority stays unavailable."""
     try:
         current = fleet_hub_policy.current_policy(conn)
-        document = current["document"]
+        document = fleet_policy_page.fleet_policy.canonical_role_document(current["document"])
         consumers = document["consumers"]
         retired_rows = fleet_hub_model_roster._retired_rows(conn)
         retired_seats = fleet_hub_model_roster.retired_policy_seats(document, retired_rows)
@@ -362,7 +362,7 @@ def _authoritative_roles_panel(view: RosterView, policy_csrf: str) -> str:
         + f'<div class="roster-grid">{cells}</div>'
         '<p class="hint">These write <code>defaults.roles</code> in the fleet policy document, which is what '
         "dispatch resolves once the authority is active. The keys (impl, review, research, scout, security, "
-        "chef) are what consumers read; the names beside them are labels only. Seats come from the policy "
+        "orchestrator) are what consumers read; the names beside them are labels only. Seats come from the policy "
         'document; the full editor is on the <a href="/deck/policy">policy page</a>.</p>'
         + _policy_preview_actions("role change from the roster page")
         + "</form></section>"
@@ -612,7 +612,7 @@ def render(
             '<section class="panel" aria-labelledby="roles"><header><h2 id="roles">Roles</h2></header>'
             f'<div class="roster-grid">{role_cells}</div>'
             f'<p class="hint">These are the {role_source} roles a dispatch reads when it does not name a seat '
-            "explicitly. The keys (impl, review, research, scout, security, chef) are what consumers read; the "
+            "explicitly. The keys (impl, review, research, scout, security, orchestrator) are what consumers read; the "
             f"names beside them are labels only.</p>{unreadable}"
             f"{notes_control}</section>",
         )

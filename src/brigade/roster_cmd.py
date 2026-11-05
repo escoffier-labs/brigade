@@ -14,7 +14,8 @@ from . import model_inventory
 from . import roster as roster_mod
 from . import seat_health
 from . import templates
-from . import toml_compat
+
+from . import toml_format
 
 DEFAULT_ROSTER_REL = ".brigade/roster.toml"
 
@@ -154,12 +155,12 @@ def _stats_detail(
 
 
 def _format_inline_table(values: dict[str, str]) -> str:
-    inner = ", ".join(f"{key} = {toml_compat.format_toml_value(value)}" for key, value in values.items())
+    inner = ", ".join(f"{key} = {toml_format.format_toml_value(value)}" for key, value in values.items())
     return "{" + inner + "}"
 
 
 def _format_string_list(values: tuple[str, ...]) -> str:
-    return "[" + ", ".join(toml_compat.format_toml_value(item) for item in values) + "]"
+    return "[" + ", ".join(toml_format.format_toml_value(item) for item in values) + "]"
 
 
 def _render_agent_stats(
@@ -184,9 +185,9 @@ def _render_roster_toml(
     roster: roster_mod.Roster,
     local_stats: dict[str, roster_mod.SeatReceiptStats],
 ) -> str:
-    lines: list[str] = [f"orchestrator = {toml_compat.format_toml_value(roster.orchestrator)}"]
+    lines: list[str] = [f"orchestrator = {toml_format.format_toml_value(roster.orchestrator)}"]
     if roster.codex_transport != "exec":
-        lines.append(f"codex_transport = {toml_compat.format_toml_value(roster.codex_transport)}")
+        lines.append(f"codex_transport = {toml_format.format_toml_value(roster.codex_transport)}")
     lines.append("")
 
     agent_names = [roster.orchestrator] + sorted(name for name in roster.agents if name != roster.orchestrator)
@@ -194,16 +195,16 @@ def _render_roster_toml(
         agent = roster.agents[name]
         lines.append(f"[agents.{name}]")
         if agent.cli is not None:
-            lines.append(f"cli = {toml_compat.format_toml_value(agent.cli)}")
+            lines.append(f"cli = {toml_format.format_toml_value(agent.cli)}")
         if agent.endpoint is not None:
-            lines.append(f"endpoint = {toml_compat.format_toml_value(agent.endpoint)}")
+            lines.append(f"endpoint = {toml_format.format_toml_value(agent.endpoint)}")
         if agent.model is not None:
-            lines.append(f"model = {toml_compat.format_toml_value(agent.model)}")
+            lines.append(f"model = {toml_format.format_toml_value(agent.model)}")
         if agent.reasoning is not None:
-            lines.append(f"reasoning = {toml_compat.format_toml_value(agent.reasoning)}")
-        lines.append(f"role = {toml_compat.format_toml_value(agent.role)}")
+            lines.append(f"reasoning = {toml_format.format_toml_value(agent.reasoning)}")
+        lines.append(f"role = {toml_format.format_toml_value(agent.role)}")
         if agent.purpose is not None:
-            lines.append(f"purpose = {toml_compat.format_toml_value(agent.purpose)}")
+            lines.append(f"purpose = {toml_format.format_toml_value(agent.purpose)}")
         if agent.requires is not None:
             lines.append(f"requires = {_format_inline_table(agent.requires)}")
         if agent.fallback:
@@ -214,28 +215,28 @@ def _render_roster_toml(
         if agent.caveats:
             lines.append(f"caveats = {_format_string_list(agent.caveats)}")
         if agent.transport != "direct":
-            lines.append(f"transport = {toml_compat.format_toml_value(agent.transport)}")
+            lines.append(f"transport = {toml_format.format_toml_value(agent.transport)}")
         if agent.transport_version is not None:
-            lines.append(f"transport_version = {toml_compat.format_toml_value(agent.transport_version)}")
+            lines.append(f"transport_version = {toml_format.format_toml_value(agent.transport_version)}")
         if agent.timeout_seconds is not None:
-            lines.append(f"timeout_seconds = {toml_compat.format_toml_value(agent.timeout_seconds)}")
+            lines.append(f"timeout_seconds = {toml_format.format_toml_value(agent.timeout_seconds)}")
         if not agent.read_only_capable:
             lines.append("read_only_capable = false")
         if agent.cloud_safe_mode:
             lines.append("cloud_safe_mode = true")
         if agent.invalid_final_fallback is not None:
-            lines.append(f"invalid_final_fallback = {toml_compat.format_toml_value(agent.invalid_final_fallback)}")
+            lines.append(f"invalid_final_fallback = {toml_format.format_toml_value(agent.invalid_final_fallback)}")
         if agent.env is not None:
             lines.append(f"env = {_format_inline_table(agent.env)}")
         lines.append("")
 
     lines.append("[limits]")
-    lines.append(f"max_workers = {toml_compat.format_toml_value(roster.max_workers)}")
-    lines.append(f"timeout_seconds = {toml_compat.format_toml_value(roster.timeout_seconds)}")
+    lines.append(f"max_workers = {toml_format.format_toml_value(roster.max_workers)}")
+    lines.append(f"timeout_seconds = {toml_format.format_toml_value(roster.timeout_seconds)}")
     if roster.allow_models:
         lines.append(f"allow_models = {_format_string_list(roster.allow_models)}")
     if roster.sandbox is not None:
-        lines.append(f"sandbox = {toml_compat.format_toml_value(roster.sandbox)}")
+        lines.append(f"sandbox = {toml_format.format_toml_value(roster.sandbox)}")
     return "\n".join(lines) + "\n"
 
 

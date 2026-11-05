@@ -18,14 +18,26 @@ from .fleet_tools import FleetTools
 from .hub_inbox import HubInbox
 from .hub_tools import HubTools
 from .inbox_tools import InboxTools
+from .memory_push import MemoryPush, PushScan, digest_query, inbox_query
 from .memory_tools import MemoryTools
 from .process import CommandRunner, bound_result
-from .profile import DOT, DUET_EXCLUDED_TOOLS, INBOX_TRUST_NOTICE as INBOX_TRUST_NOTICE, ConnectorProfile
+from .profile import (
+    DOT,
+    DUET_EXCLUDED_TOOLS,
+    DUET_DISPATCH_TOOLS,
+    INBOX_TRUST_NOTICE as INBOX_TRUST_NOTICE,
+    ConnectorProfile,
+    runtime_profile,
+)
 from .runtime_config import Runtime
+from .duet_dispatch import DuetFleetTools
 from .safe_state import identity
 from .state import BridgeState, Clock, summarize_arguments, utc_now
 
 MAX_UNACKED = 1000
+# Responses that carry memory hits, and how each derives its query from its own content.
+PUSH_QUERIES = {"inbox_list": inbox_query, "fleet_digest": digest_query}
+PUSH_SCAN_LABEL = "memory_push_scan"
 SEND_WINDOW_SECONDS = 3600
 
 
@@ -46,6 +58,37 @@ def validate_arguments(name: str, arguments: dict[str, Any], *, tools: frozenset
     return result
 
 
+def argument_problem(name: object, arguments: object, *, tools: frozenset[str] = TOOLS) -> str:
+    """Why a tools/call fails validate_arguments, in schema-owned words only.
+
+    The text never repeats caller-supplied keys or values, so it is safe to return to the
+    client and cheap to act on: a client can fix an out-of-range limit instead of retrying.
+    """
+    if not isinstance(name, str) or name not in tools or name not in ALL_TOOL_SCHEMAS:
+        return "unknown tool"
+    if not isinstance(arguments, dict):
+        return "arguments must be an object"
+    fields = ALL_TOOL_SCHEMAS[name].fields
+    unknown = sum(1 for key in arguments if key not in fields)
+    if unknown:
+        accepted = ", ".join(sorted(fields)) or "none"
+        return f"{unknown} unsupported argument(s); accepted arguments: {accepted}"
+    for key, spec in fields.items():
+        value = arguments.get(key)
+        if value is None:
+            if spec.required:
+                return f"missing required argument {key}"
+            continue
+        try:
+            spec.validator(value)
+        except DotError:
+            describe = getattr(spec.validator, "describe", None)
+            if callable(describe):
+                return f"{key} must be {describe()}"
+            return f"invalid value for {key}"
+    return "invalid arguments"
+
+
 class DotTools:
     def __init__(
         self,
@@ -59,8 +102,14 @@ class DotTools:
         clock: Clock = utc_now,
         profile: ConnectorProfile = DOT,
     ) -> None:
-        self.runtime, self.state, self.clock, self.profile = runtime, state, clock, profile
+        self.runtime, self.state, self.clock, self.profile = (
+            runtime,
+            state,
+            clock,
+            runtime_profile(profile, runtime.dispatch_enabled),
+        )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
+        self.push = MemoryPush(runtime.paths.workspace, enabled=runtime.memory_push)
 
     def call(self, owner: str, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         started = time.monotonic()
@@ -99,6 +148,16 @@ class DotTools:
                         break
                 else:
                     raise DotError("bridge_unavailable")
+            if name in PUSH_QUERIES and isinstance(result, dict) and "error" not in result:
+                scan = PushScan()
+                pushed = self.push.hits(PUSH_QUERIES[name](result), scan)
+                if pushed is not None:
+                    result["memory_hits"] = pushed
+                if scan.dropped or scan.error:
+                    # Counts, rule ids and an error class only; the response shape does not change.
+                    self.record_call(
+                        PUSH_SCAN_LABEL, scan.error is None, 0, arg_summary=scan.summary(), error_code=scan.error
+                    )
             # Bound report data before adding the connector-owned trust metadata.
             if name == "fleet_sessions":
                 for entry in result.get("sessions", []):
@@ -258,10 +317,22 @@ class DotTools:
             operating_instructions=self.profile.operating_instructions,
             messaging_enabled=self.runtime.messaging_enabled is True,
             tools=sorted(self.profile.tools),
-            absent_tools=sorted(DUET_EXCLUDED_TOOLS),
-            dispatch=(
-                "None. Tools that start or steer work on operator machines are not part of this connector "
-                "and no runtime setting adds them. Do the work on your own compute."
+            absent_tools=sorted(DUET_EXCLUDED_TOOLS - self.profile.tools),
+            dispatch=dict(
+                enabled=self.runtime.dispatch_enabled,
+                tools=sorted(self.profile.tools & DUET_DISPATCH_TOOLS),
+                limits=(
+                    dict(
+                        repositories=sorted(self.runtime.dispatch_limits.repositories)
+                        if self.runtime.dispatch_limits.repositories is not None
+                        else None,
+                        max_open=self.runtime.dispatch_limits.max_open,
+                        daily_limit=self.runtime.dispatch_limits.daily_limit,
+                        prompt_max_bytes=self.runtime.dispatch_limits.prompt_max_bytes,
+                    )
+                    if self.runtime.dispatch_limits is not None
+                    else None
+                ),
             ),
             fleet_hub=dict(
                 read_only=True,
@@ -296,11 +367,14 @@ class DotTools:
 
 def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotTools, BridgeState, HubInbox]:
     require(runtime.schema == profile.runtime_schema, "invalid_config")
+    profile = runtime_profile(profile, runtime.dispatch_enabled)
     state = BridgeState(runtime.paths.state_dir)
     try:
         commands = CommandRunner()
         # Profiles without fleet dispatch never construct the T3 fleet client.
         fleet = FleetTools(runtime, state, commands=commands) if profile.fleet_dispatch else None
+        if profile.pack_id == "duet" and runtime.dispatch_enabled:
+            fleet = DuetFleetTools(runtime, state, commands=commands)
         hub_inbox = HubInbox(
             state,
             runtime.hub,

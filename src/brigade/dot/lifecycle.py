@@ -21,14 +21,14 @@ from brigade.isolated_exec import module_argv, trusted_cwd
 from . import contracts as c
 from . import access_auth
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
-from .adapter import DotTools, build_tools, validate_arguments
+from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
 from .profile import DOT, ConnectorProfile, profile_for
 from .runtime_config import Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
-from .state import BridgeState, call_label, client_label
+from .state import BridgeState, call_label, client_label, summarize_arguments
 
 MAX_HTTP_BYTES = 32768
 WATCH_SERVICE = DOT.watch_service
@@ -64,10 +64,18 @@ class _DotGate:
         self.profile = profile
 
     async def record(
-        self, label: str, ok: bool, started: float, error_code: str | None = None, client_name: str | None = None
+        self,
+        label: str,
+        ok: bool,
+        started: float,
+        error_code: str | None = None,
+        client_name: str | None = None,
+        arg_summary: str | None = None,
     ) -> None:
         if self.recorder is not None:
-            extra = {} if client_name is None else {"client_name": client_name}
+            extra: dict[str, str] = {} if client_name is None else {"client_name": client_name}
+            if arg_summary is not None:
+                extra["arg_summary"] = arg_summary
             try:
                 await asyncio.to_thread(
                     self.recorder, label, ok, (time.monotonic() - started) * 1000, error_code=error_code, **extra
@@ -97,6 +105,24 @@ class _DotGate:
             )
         await send({"type": "http.response.start", "status": status, "headers": headers})
         await send({"type": "http.response.body", "body": b'{"error":"request_denied"}'})
+
+    async def reject_arguments(self, send: Any, request_id: object, problem: str) -> None:
+        """Refuse a tools/call before the SDK with a JSON-RPC invalid-params error the client can act on."""
+        if isinstance(request_id, bool) or not (
+            (isinstance(request_id, int) and abs(request_id) < 2**53)
+            or (isinstance(request_id, str) and len(request_id) <= 128)
+        ):
+            request_id = None
+        body = json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "id": request_id,
+                "error": {"code": -32602, "message": "invalid arguments: " + problem},
+            }
+        ).encode()
+        headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store")]
+        await send({"type": "http.response.start", "status": 400, "headers": headers})
+        await send({"type": "http.response.body", "body": body})
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
         if scope["type"] == "lifespan":
@@ -158,6 +184,7 @@ class _DotGate:
             await self.reject(send, 408)
             return
         started, label, client_name = time.monotonic(), "unparsed", None
+        problem = arg_summary = request_id = None
         try:
             request = json.loads(body, object_pairs_hook=unique_object)
             c.require(isinstance(request, dict))
@@ -170,10 +197,21 @@ class _DotGate:
                 name = params.get("name")
                 tools = self.profile.tools
                 label = name if isinstance(name, str) and name in tools else "tools/call"
-                validate_arguments(name, params.get("arguments", {}), tools=tools)
+                arguments = params.get("arguments", {})
+                request_id = request.get("id")
+                try:
+                    validate_arguments(name, arguments, tools=tools)
+                except Exception:
+                    # Name the failing argument: a bare 400 left clients retrying the same call.
+                    problem = argument_problem(name, arguments, tools=tools)
+                    arg_summary = summarize_arguments(arguments)
+                    raise
         except Exception:
-            await self.record(label, False, started, "invalid_request", client_name)
-            await self.reject(send, 400)
+            await self.record(label, False, started, "invalid_request", client_name, arg_summary)
+            if problem is None:
+                await self.reject(send, 400)
+            else:
+                await self.reject_arguments(send, request_id, problem)
             return
         consumed = False
 
@@ -336,7 +374,11 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
         service = EventService(
             tools.state,
             fleet_status=fleet.fleet_status if fleet is not None else _no_fleet_status,
-            hub=tools.inbox.hub if runtime.events_enabled or not tools.profile.fleet_dispatch else None,
+            hub=(
+                tools.inbox.hub
+                if runtime.events_enabled or (not tools.profile.fleet_dispatch and tools.profile.hub_inbox)
+                else None
+            ),
             hub_poll_seconds=runtime.hub.poll_seconds,
             callback_hosts=frozenset(runtime.callback_hosts),
         )
@@ -462,6 +504,12 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
         and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
         and runtime.auth.audience != dot_runtime.auth.audience
         and runtime.auth.resource != dot_runtime.auth.resource
+        and (
+            not runtime.dispatch_enabled
+            or runtime.paths.fleet_config is None
+            or dot_runtime.paths.fleet_config is None
+            or not _same_location(runtime.paths.fleet_config, dot_runtime.paths.fleet_config)
+        )
     )
 
 
@@ -513,7 +561,7 @@ def canary(target: Path, *, pack_id: str = c.PACK_ID) -> dict[str, Any]:
             names = _registered_names(config, tools)
         finally:
             state.close()
-        if names != profile.tools:
+        if names != tools.profile.tools:
             return {**result, "reason": "inventory-mismatch"}
     except Exception:
         return {**result, "reason": "inventory-mismatch"}

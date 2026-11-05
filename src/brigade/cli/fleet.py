@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import fleet_admin_stats_collector, worklore_brigade_sync, worklore_github_sync
+from .. import fleet_admin_stats_collector
 from ..fleet_claim_release import _print_claim_failure, _release_claim, _workspace_from_run_dir  # noqa: F401
 
 DEFAULT_PORT = 3774
@@ -82,6 +82,21 @@ def _format_age(ts: object, *, now: datetime | None = None) -> str:
     return _format_duration(seconds)
 
 
+# The work-sync modules import the ``brigade.work_cmd`` facade, so they load
+# when a sync command runs, not on every ``brigade fleet`` invocation.
+_LAZY_MODULES = frozenset({"worklore_brigade_sync", "worklore_github_sync"})
+
+
+def __getattr__(name: str):
+    if name in _LAZY_MODULES:
+        import importlib
+
+        module = importlib.import_module(f"..{name}", __package__)
+        globals()[name] = module
+        return module
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def register(sub: argparse._SubParsersAction) -> None:
     p_fleet = sub.add_parser(
         "fleet",
@@ -95,12 +110,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_events import register as register_events
     from .fleet_campaign import register as register_campaign
     from .fleet_ci import register as register_ci
+    from .fleet_backup import register as register_backup
 
     register_dot(fleet_sub)
     register_actions(fleet_sub)
     register_events(fleet_sub)
     register_campaign(fleet_sub)
     register_ci(fleet_sub)
+    register_backup(fleet_sub)
 
     p_serve = fleet_sub.add_parser(
         "serve",
@@ -472,11 +489,29 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_pref_set.add_argument("--review", default=None, help="Default review seat name.")
     p_pref_set.add_argument(
         "--orchestrator",
-        "--chef",
-        dest="chef",
+        dest="orchestrator",
         default=None,
         metavar="SEAT",
         help="Default orchestrator seat name.",
+    )
+
+    class LegacyOrchestratorAction(argparse.Action):
+        def __call__(
+            self,
+            parser: argparse.ArgumentParser,
+            namespace: argparse.Namespace,
+            values: Any,
+            option_string: str | None = None,
+        ) -> None:
+            print("warning: --chef is deprecated; use --orchestrator", file=sys.stderr)
+            setattr(namespace, self.dest, values)
+
+    p_pref_set.add_argument(
+        "--chef",
+        dest="orchestrator",
+        action=LegacyOrchestratorAction,
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
     )
     p_pref_set.add_argument("--research", default=None, help="Default read-only research seat name.")
     p_pref_set.add_argument("--security", default=None, help="Default security review seat name.")
@@ -713,7 +748,7 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     preference_source = "hub"
     try:
         preference_payload = _preference_payload(fleet_client.fetch_run_preference())
-    except fleet_client.FleetClientError:
+    except (fleet_client.FleetClientError, run_preference.RunPreferenceError):
         preference_payload = _preference_payload(run_preference.load_cached())
         preference_source = "cached"
     if args.json:
@@ -758,7 +793,8 @@ def _preference_payload(preference: object) -> dict[str, str | None]:
     if isinstance(preference, run_preference.RunPreference):
         return {field: getattr(preference, field) for field in run_preference.ALLOWED_FIELDS}
     if isinstance(preference, dict):
-        return {field: preference.get(field) for field in run_preference.ALLOWED_FIELDS}
+        parsed = run_preference.parse_preference(preference)
+        return {field: getattr(parsed, field) for field in run_preference.ALLOWED_FIELDS}
     return {field: None for field in run_preference.ALLOWED_FIELDS}
 
 
@@ -1693,6 +1729,8 @@ def _dispatch_work_unlink(args: argparse.Namespace) -> int:
 def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
     import json as _json
 
+    from .. import worklore_github_sync
+
     try:
         config = worklore_github_sync.load_github_config()
         result = worklore_github_sync.sync_github(
@@ -1734,6 +1772,8 @@ def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
 
 def _dispatch_work_sync_brigade(args: argparse.Namespace) -> int:
     import json as _json
+
+    from .. import worklore_brigade_sync
 
     try:
         config = worklore_brigade_sync.load_brigade_config()

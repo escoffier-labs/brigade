@@ -28,21 +28,21 @@ def linux_env(root: Path) -> dict[str, str]:
 
 
 def smoke_stub_script(name: str) -> str:
-    if name == "graphtrail":
+    if name == "brigade-code-graph":
         return (
             '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n'
             '    print("graphtrail test 0.4.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'
         )
-    if name == "graphtrail-mcp":
+    if name == "brigade-code-graph-mcp":
         return (
             "#!/usr/bin/env python3\nimport json, sys\n"
             "req = json.load(sys.stdin)\n"
             'assert req.get("method") == "initialize"\n'
             'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": '
             '{"protocolVersion": "2024-11-05", "capabilities": {}, '
-            '"serverInfo": {"name": "graphtrail-mcp", "version": "0.4.0"}}}))\n'
+            '"serverInfo": {"name": "brigade-code-graph-mcp", "version": "0.4.0"}}}))\n'
         )
-    if name == "miseledger":
+    if name == "brigade-evidence":
         return (
             '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["version"]:\n'
             '    print("miseledger test 0.6.0")\n    raise SystemExit(0)\nraise SystemExit(1)\n'

@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .. import __version__, cursor_user_cmd, localio
+from .. import __version__, cursor_user_cmd, localio, work_mode
 from ..claude_hooks import classify as claude_classify
 from ..claude_hooks import runtime as claude_runtime
 from ..claude_hooks.anchored_io import SessionIntegrityError
@@ -26,6 +26,7 @@ ADOPTION_STATES = (
     "active",
     "bypassed",
     "stale",
+    "yolo",
 )
 ALERT_STATES = ("bypassed", "stale", "unwired")
 
@@ -236,6 +237,12 @@ def _claude_use(target: Path, *, window_start: datetime) -> dict[str, Any]:
     }
 
 
+def _yolo_use(use: dict[str, Any]) -> dict[str, Any]:
+    """Yolo sessions opted out of receipts: report them, never as bypassed (#2233)."""
+    sessions = [{**item, "status": "yolo", "missing": []} for item in use["sessions"]]
+    return {**use, "compliant_session_count": 0, "bypassed_session_count": 0, "sessions": sessions}
+
+
 def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[str, Any]:
     target = entry.path
     classification = claude_classify.classify(target)
@@ -267,10 +274,16 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
             issues.append(issue)
         use = _empty_use()
         classified_state = "error"
+    # Verification is off by choice in yolo mode, so sessions without receipts are
+    # never counted as bypassed, whatever the wiring state below reports.
+    if work_mode.is_yolo(target):
+        use = _yolo_use(use)
     if classified_state == "error":
         state = "partial"
     elif any(value == "stale" for value in wiring.values()):
         state = "stale"
+    elif classified_state == "yolo":
+        state = "yolo"
     elif classified_state == "advisory-only":
         state = "advisory-only"
     elif classified_state == "partial":
@@ -287,6 +300,7 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
         "harness": "claude",
         "row_key": f"{entry.repo_id}:claude",
         "state": state,
+        "work": work_mode.summary(target),
         "wiring": wiring,
         "use": use,
         "issues": issues,
@@ -349,13 +363,11 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
     mcp_current = (
         executable_error is None
         and isinstance(live_servers, dict)
-        and all(live_servers.get(name) == expected_servers[name] for name in cursor_user_cmd.MANAGED_MCP_NAMES)
+        and all(live_servers.get(name) == expected for name, expected in expected_servers.items())
     )
     if not mcp_current:
         missing_names = [
-            name
-            for name in cursor_user_cmd.MANAGED_MCP_NAMES
-            if not isinstance(live_servers, dict) or name not in live_servers
+            name for name in expected_servers if not isinstance(live_servers, dict) or name not in live_servers
         ]
         missing = missing or bool(missing_names)
         stale = stale or bool(isinstance(live_servers, dict) and any(name in live_servers for name in expected_servers))
@@ -406,6 +418,7 @@ def _cursor_row(entry: constants.RepoEntry) -> dict[str, Any]:
         "harness": "cursor",
         "row_key": f"{entry.repo_id}:cursor",
         "state": state,
+        "work": work_mode.summary(entry.path),
         "wiring": wiring,
         "use": _empty_use(),
         "issues": issues,
@@ -503,7 +516,8 @@ def adoption_report(
     for row in payload["rows"]:
         print(
             f"- {row['repo_id']} {row['harness']} state={row['state']} "
-            f"sessions={row['use']['active_session_count']} next={row['next_command']}"
+            + (f"mode={row['work']['mode']} rails={row['work']['rails']} " if "work" in row else "")
+            + f"sessions={row['use']['active_session_count']} next={row['next_command']}"
         )
     counts = payload["denominators"]
     print(

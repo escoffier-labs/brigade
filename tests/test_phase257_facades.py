@@ -774,7 +774,6 @@ EXPECTED_SYMBOLS = {
         "brief",
         "tasks",
         "task_add",
-        "task_show",
         "task_plan",
         "task_done",
         "next",

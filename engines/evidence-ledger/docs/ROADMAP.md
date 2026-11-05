@@ -1,18 +1,18 @@
 # Roadmap
 
-MiseLedger is usable now as a local archive, search, and evidence layer for normalized source records.
+brigade-evidence is usable now as a local archive, search, and evidence layer for normalized source records.
 
 ## Usable Now
 
 - Import `miseledger.adapter.v1` JSONL from source-specific exporters.
 - Import native Codex, OpenClaw, Claude, Pi, OpenCode, Hermes, Cursor, and Grok session fixtures and local logs.
-- Crawl local agent sessions with `miseledger crawl sessions`.
+- Crawl local agent sessions with `brigade-evidence crawl sessions`.
 - Crawl Markdown, files, HTML, JSON, JSONL, and git history through wrappers that require the external `sourceharvest` binary.
 - Search one SQLite archive across crawler records, local source exports, and agent-session logs.
 - Produce evidence bundles with `untrusted_context: true`, raw refs, snippets, actors, collections, artifacts, and warnings.
 - Cache evidence bundles with stable local `miseledger://evidence/<id>` references.
 - Serve local loopback HTTP and stdio MCP surfaces for agent consumption.
-- Track scan manifests so agents can see what source files MiseLedger has seen.
+- Track scan manifests so agents can see what source files brigade-evidence has seen.
 - Run archive doctor, stats, relation backfill, compact, and conservative metadata prune commands.
 - Clear one-line diagnostics when wrapper import tools are missing, with `doctor` reporting wrapper tool availability (v0.5.0).
 - Redacted fixtures for every supported harness, including current Cursor conversation search and Grok session layouts.
@@ -22,7 +22,7 @@ MiseLedger is usable now as a local archive, search, and evidence layer for norm
 
 The v0.5.0 hardening pass closed the previous items in this section (install
 smoke, per-harness fixtures, missing-tool diagnostics). Next candidates before
-recommending MiseLedger broadly:
+recommending brigade-evidence broadly:
 
 - Extend the docs-drift CI check beyond MCP tools to the command table and README counts.
 - Exercise provenance attestation end to end on the first post-v0.5.0 release and document the result.

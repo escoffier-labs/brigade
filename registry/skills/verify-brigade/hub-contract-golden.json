@@ -1,0 +1,704 @@
+{
+  "golden_version": 1,
+  "contract_version": 1,
+  "source": "control-brigade.py hub-contract --write-golden on the in-repo Python hub",
+  "refusals": {
+    "core": {
+      "claims acquire by a retired holder": {
+        "status": 409,
+        "error": "claim operation refused: stale-holder",
+        "reason": "stale-holder"
+      },
+      "claims acquire held": {
+        "status": 409,
+        "error": "target 'repo:example-org/example-repo-{tag}' is held by contract-a-{tag}"
+      },
+      "claims acquire with a stale generation": {
+        "status": 409,
+        "error": "claim operation refused: stale-generation",
+        "reason": "stale-generation"
+      },
+      "claims bad action": {
+        "status": 400,
+        "error": "claim field 'action' must be one of: acquire, renew, release, inspect"
+      },
+      "claims for another node": {
+        "status": 403,
+        "error": "claim node_id 'contract-b-{tag}' does not match the caller's node token (contract-a-{tag})"
+      },
+      "claims generation out of range": {
+        "status": 400,
+        "error": "claim field 'generation' must be an integer in [0, 9223372036854775807]"
+      },
+      "claims holder named unknown": {
+        "status": 400,
+        "error": "claim field 'holder' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+      },
+      "claims node scope acquire with another lease": {
+        "status": 409,
+        "error": "target 'repo:example-org/fenced-{tag}' is held by contract-a-{tag} under another lease than the reconciled dead run's (not superseded)"
+      },
+      "claims node scope acquire without a lease to supersede": {
+        "status": 400,
+        "error": "claim field 'supersede' (the reconciled dead lease) is required for a node-scoped acquire"
+      },
+      "claims node scope release by another node": {
+        "status": 409,
+        "error": "target 'repo:example-org/fenced-{tag}' is held by contract-a-{tag}, not contract-b-{tag}"
+      },
+      "claims node scope release with a stale acquired_at": {
+        "status": 409,
+        "error": "target 'repo:example-org/fenced-{tag}' was re-acquired since it was inspected (now acquired {timestamp})"
+      },
+      "claims node scope release without acquired_at": {
+        "status": 400,
+        "error": "claim field 'acquired_at' is required for a token-less node-scoped release"
+      },
+      "claims release with a stale generation": {
+        "status": 409,
+        "error": "claim operation refused: stale-generation",
+        "reason": "stale-generation"
+      },
+      "claims renew an expired lease": {
+        "status": 409,
+        "error": "claim on 'repo:example-org/short-lease-{tag}' is expired or missing"
+      },
+      "claims renew by the superseded holder": {
+        "status": 409,
+        "error": "claim operation refused: stale-holder",
+        "reason": "stale-holder"
+      },
+      "claims renew in node scope": {
+        "status": 400,
+        "error": "claim field 'scope' for renew must be one of: holder"
+      },
+      "claims renew with a stale generation": {
+        "status": 409,
+        "error": "claim operation refused: stale-generation",
+        "reason": "stale-generation"
+      },
+      "claims ttl out of range": {
+        "status": 400,
+        "error": "claim field 'ttl_seconds' must be an integer in [1, 86400]"
+      },
+      "claims without a token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "events for another node": {
+        "status": 403,
+        "error": "event node_id 'contract-b-{tag}' does not match the caller's node token (contract-a-{tag})"
+      },
+      "events missing a field": {
+        "status": 400,
+        "error": "event field 'run_id' must be a non-empty string"
+      },
+      "events with a message-principal token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "events with the admin token": {
+        "status": 403,
+        "error": "the admin token may not post events or claims: enroll this node with 'brigade fleet nodes add' and configure its node token, or start the hub with --allow-admin-writes"
+      },
+      "invalid JSON body": {
+        "status": 400,
+        "error": "body is not valid JSON"
+      },
+      "message principal add with a node token": {
+        "status": 403,
+        "error": "the admin token is required to enroll message principals"
+      },
+      "messages ack by a non-recipient": {
+        "status": 404,
+        "error": "message not found"
+      },
+      "messages ack unknown id": {
+        "status": 404,
+        "error": "message not found"
+      },
+      "messages bad action": {
+        "status": 400,
+        "error": "action must be send, list, sent, count, ack, reply, who, claims, or identity"
+      },
+      "messages body not an object": {
+        "status": 400,
+        "error": "message request must be an object"
+      },
+      "messages identity with bad peers": {
+        "status": 400,
+        "error": "invalid identity arguments",
+        "code": "invalid_argument"
+      },
+      "messages identity with peers for a node": {
+        "status": 403,
+        "error": "identity peers requires an agent principal",
+        "code": "message_identity_peers_unsupported"
+      },
+      "messages keys_get an unknown key": {
+        "status": 404,
+        "error": "key not found"
+      },
+      "messages keys_get for a principal without grants": {
+        "status": 404,
+        "error": "key not found"
+      },
+      "messages keys_get without a key id": {
+        "status": 400,
+        "error": "keys_get requires a key id"
+      },
+      "messages keys_publish a replacement without the previous key": {
+        "status": 409,
+        "error": "replacement requires the current previous key",
+        "code": "principal_key_exists"
+      },
+      "messages keys_publish an existing key id": {
+        "status": 409,
+        "error": "key id was already published",
+        "code": "principal_key_exists"
+      },
+      "messages keys_publish for another principal": {
+        "status": 403,
+        "error": "key principal must match caller",
+        "code": "principal_key_mismatch"
+      },
+      "messages keys_publish with a mismatched key id": {
+        "status": 400,
+        "error": "mesh key id does not match public keys"
+      },
+      "messages list bad cursor": {
+        "status": 400,
+        "error": "after must be a non-negative integer within SQLite's range"
+      },
+      "messages list over the waiter cap": {
+        "status": 429,
+        "error": "message wait capacity reached",
+        "code": "message_wait_capped"
+      },
+      "messages list wait_ms above the cap": {
+        "status": 400,
+        "error": "wait_ms must be an integer between 0 and 20000"
+      },
+      "messages list wait_ms that is not an integer": {
+        "status": 400,
+        "error": "wait_ms must be an integer between 0 and 20000"
+      },
+      "messages manifests_get with arguments": {
+        "status": 400,
+        "error": "manifests_get takes no arguments"
+      },
+      "messages plaintext reply to a sealed message": {
+        "status": 400,
+        "error": "a sealed parent requires a sealed reply",
+        "code": "message_sealing_required"
+      },
+      "messages reply to a message the caller did not receive": {
+        "status": 404,
+        "error": "message not found"
+      },
+      "messages reply with a bad id": {
+        "status": 400,
+        "error": "id must be a positive integer within SQLite's range"
+      },
+      "messages sealed envelope that is not a string": {
+        "status": 400,
+        "error": "envelope must be canonical ASCII JSON text",
+        "code": "envelope_malformed"
+      },
+      "messages sealed reply without in_reply_to": {
+        "status": 400,
+        "error": "reply_to and signed in_reply_to must both be present or absent"
+      },
+      "messages sealed send as another sender": {
+        "status": 403,
+        "error": "envelope sender must match caller",
+        "code": "message_sender_mismatch"
+      },
+      "messages sealed send not in canonical form": {
+        "status": 400,
+        "error": "invalid sealed envelope",
+        "code": "envelope_malformed"
+      },
+      "messages sealed send over the size limit": {
+        "status": 400,
+        "error": "sealed envelope exceeds storage limit",
+        "code": "message_too_large"
+      },
+      "messages sealed send that is not ASCII": {
+        "status": 400,
+        "error": "envelope must be canonical ASCII JSON text",
+        "code": "envelope_malformed"
+      },
+      "messages sealed send with a duplicate key": {
+        "status": 400,
+        "error": "invalid sealed envelope",
+        "code": "envelope_malformed"
+      },
+      "messages sealed send with a short digest": {
+        "status": 400,
+        "error": "invalid sealed envelope",
+        "code": "envelope_malformed"
+      },
+      "messages sealed send with a stale sender key": {
+        "status": 409,
+        "error": "sender key is no longer active",
+        "code": "sender_key_stale"
+      },
+      "messages sealed send with bad padding": {
+        "status": 400,
+        "error": "invalid sealed envelope",
+        "code": "envelope_malformed"
+      },
+      "messages sealed send with plaintext fields": {
+        "status": 400,
+        "error": "an envelope cannot accompany plaintext or routing fields"
+      },
+      "messages send client_id conflict": {
+        "status": 409,
+        "error": "client_id was already used for a different message",
+        "code": "message_client_id_conflict"
+      },
+      "messages send to an unknown recipient": {
+        "status": 400,
+        "error": "recipient is not an active hub principal"
+      },
+      "messages send with a reply_to the caller sent": {
+        "status": 400,
+        "error": "reply_to must identify an inbox message from the recipient"
+      },
+      "messages send without a grant": {
+        "status": 403,
+        "error": "recipient is not permitted by send grants",
+        "code": "message_recipient_not_permitted"
+      },
+      "messages sent with after and ids": {
+        "status": 400,
+        "error": "sent accepts either after or ids"
+      },
+      "messages sent_lookup unknown client_id": {
+        "status": 404,
+        "error": "message not found",
+        "code": "not_found"
+      },
+      "messages sent_lookup with extra fields": {
+        "status": 400,
+        "error": "sent_lookup requires only client_id"
+      },
+      "messages who with a bad limit": {
+        "status": 400,
+        "error": "who limit must be an integer from 1 to 500"
+      },
+      "messages who with an unknown argument": {
+        "status": 400,
+        "error": "invalid station read arguments"
+      },
+      "messages with a wrong token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "messages with the admin token": {
+        "status": 403,
+        "error": "the admin token may not post events or claims: enroll this node with 'brigade fleet nodes add' and configure its node token, or start the hub with --allow-admin-writes"
+      },
+      "messages without a token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "nodes add bad action": {
+        "status": 400,
+        "error": "node field 'action' must be one of: add, revoke"
+      },
+      "nodes add duplicate": {
+        "status": 409,
+        "error": "node 'contract-a-{tag}' is already enrolled; revoke it first to issue a new token"
+      },
+      "nodes add with a node token": {
+        "status": 403,
+        "error": "the admin token is required to manage nodes"
+      },
+      "nodes list with a node token": {
+        "status": 403,
+        "error": "the admin token is required to manage nodes"
+      },
+      "nodes revoke unknown": {
+        "status": 404,
+        "error": "node 'contract-z-{tag}' is not enrolled"
+      },
+      "owners without a token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "policy without a token": {
+        "status": 401,
+        "error": {
+          "code": "auth-failed",
+          "message": "unauthorized"
+        }
+      },
+      "questions create over the pending limit": {
+        "status": 429,
+        "error": "question station has two pending questions",
+        "code": "question_station_busy"
+      },
+      "questions create with a bad timeout": {
+        "status": 400,
+        "error": "timeout_secs must be an integer from 1 to 120"
+      },
+      "questions create with a reused request_id": {
+        "status": 409,
+        "error": "request_id was used for a different question",
+        "code": "question_request_conflict"
+      },
+      "questions create with an unsupported field": {
+        "status": 400,
+        "error": "unsupported question fields"
+      },
+      "questions status by another node": {
+        "status": 403,
+        "error": "question is not owned by this credential",
+        "code": "question_not_owned"
+      },
+      "questions status with a malformed id": {
+        "status": 400,
+        "error": "question_id is invalid"
+      },
+      "refusal ack with an id that is not a number": {
+        "status": 400,
+        "error": "id must be a positive integer within SQLite's range"
+      },
+      "refusal claims body not an object": {
+        "status": 400,
+        "error": "claim request must be a JSON object"
+      },
+      "refusal claims with a target over the byte limit": {
+        "status": 409,
+        "error": {
+          "code": "invalid-field",
+          "field": "target",
+          "message": "claim target exceeds UTF-8 byte limit",
+          "limit": 1024,
+          "unit": "utf8-bytes"
+        },
+        "reason": "claim-target-too-long"
+      },
+      "refusal claims without a target": {
+        "status": 400,
+        "error": "claim field 'target' must be a non-empty string"
+      },
+      "refusal count with an argument": {
+        "status": 400,
+        "error": "count accepts no arguments"
+      },
+      "refusal events entry not an object": {
+        "status": 400,
+        "error": "event must be a JSON object"
+      },
+      "refusal events object without a node_id": {
+        "status": 400,
+        "error": "event field 'node_id' must be a non-empty string"
+      },
+      "refusal keys_publish with a bad binary field": {
+        "status": 400,
+        "error": "invalid mesh binary format"
+      },
+      "refusal keys_publish with a bad hub id": {
+        "status": 400,
+        "error": "invalid mesh hub id"
+      },
+      "refusal keys_publish with a bad previous key id": {
+        "status": 400,
+        "error": "invalid previous key id"
+      },
+      "refusal keys_publish with a bad timestamp": {
+        "status": 400,
+        "error": "invalid mesh timestamp"
+      },
+      "refusal keys_publish with a bad transport": {
+        "status": 400,
+        "error": "invalid mesh transport"
+      },
+      "refusal keys_publish with a record that is not an object": {
+        "status": 400,
+        "error": "invalid mesh key record"
+      },
+      "refusal keys_publish with an unsupported suite": {
+        "status": 400,
+        "error": "unsupported mesh key record"
+      },
+      "refusal keys_publish without a record": {
+        "status": 400,
+        "error": "keys_publish requires a record"
+      },
+      "refusal list with a non-boolean unacked": {
+        "status": 400,
+        "error": "unacked must be a boolean"
+      },
+      "refusal nodes add with a bad node_id": {
+        "status": 400,
+        "error": "field 'node_id' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+      },
+      "refusal nodes add without a node_id": {
+        "status": 400,
+        "error": "field 'node_id' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+      },
+      "refusal nodes revoke without a node_id": {
+        "status": 400,
+        "error": "field 'node_id' must be a real identity ([A-Za-z0-9._-], max 128 chars, never the literal 'unknown')"
+      },
+      "refusal principal add an existing name": {
+        "status": 400,
+        "error": "message principal already exists"
+      },
+      "refusal principal add with a bad expected_enrollment_id": {
+        "status": 400,
+        "error": "expected_enrollment_id is invalid"
+      },
+      "refusal principal add with a bad name": {
+        "status": 400,
+        "error": "name must start with a lowercase letter and contain only lowercase letters, digits, dots, underscores, or hyphens"
+      },
+      "refusal principal add with a request_id and no token": {
+        "status": 400,
+        "error": "principal enrollment request_id and token must be provided together"
+      },
+      "refusal principal add with an unknown field": {
+        "status": 400,
+        "error": "principal enrollment requires only name and optional label"
+      },
+      "refusal principal bad action": {
+        "status": 400,
+        "error": "principal action must be add, get, grants, or revoke"
+      },
+      "refusal principal get without a name": {
+        "status": 400,
+        "error": "principal lookup requires action='get' and name"
+      },
+      "refusal principal revoke without a generation": {
+        "status": 400,
+        "error": "principal revocation requires action='revoke', name, and expected enrollment generation"
+      },
+      "refusal questions create with an empty question": {
+        "status": 400,
+        "error": "question must be a non-empty UTF-8 string of at most 4096 bytes"
+      },
+      "refusal questions create without a request_id": {
+        "status": 400,
+        "error": "request_id must be 1 to 64 ASCII identifier characters"
+      },
+      "refusal questions desktop with an empty answer": {
+        "status": 400,
+        "error": "answer must be a non-empty UTF-8 string of at most 65536 bytes"
+      },
+      "refusal questions status with an extra field": {
+        "status": 400,
+        "error": "unsupported question fields"
+      },
+      "refusal sealed reply with an id that is not a number": {
+        "status": 400,
+        "error": "id must be a positive integer within SQLite's range"
+      },
+      "refusal sealed send to a stale recipient key": {
+        "status": 409,
+        "error": "recipient key is no longer active",
+        "code": "recipient_key_stale"
+      },
+      "refusal sealed send without ct and recipients": {
+        "status": 400,
+        "error": "invalid sealed envelope",
+        "code": "envelope_malformed"
+      },
+      "refusal send with a bad kind": {
+        "status": 400,
+        "error": "kind must be message, question, or completion"
+      },
+      "refusal send with a bad priority": {
+        "status": 400,
+        "error": "priority must be low, normal, high, or urgent"
+      },
+      "refusal send with a bad sender_label": {
+        "status": 400,
+        "error": "sender_label is invalid"
+      },
+      "refusal send with a bad thread": {
+        "status": 400,
+        "error": "thread is invalid"
+      },
+      "refusal send with a long client_id": {
+        "status": 400,
+        "error": "client_id must be a non-empty UTF-8 string of at most 64 bytes"
+      },
+      "refusal send with a long ref": {
+        "status": 400,
+        "error": "ref must be a non-empty UTF-8 string of at most 256 bytes"
+      },
+      "refusal send with a long subject": {
+        "status": 400,
+        "error": "subject must be a non-empty UTF-8 string of at most 200 bytes"
+      },
+      "refusal send with a reply_to that is not an id": {
+        "status": 400,
+        "error": "reply_to must be a positive integer within SQLite's range"
+      },
+      "refusal send with a sender_label from a message principal": {
+        "status": 400,
+        "error": "sender_label is only available to node principals"
+      },
+      "refusal send with an empty body": {
+        "status": 400,
+        "error": "body must be a non-empty UTF-8 string of at most 65536 bytes"
+      },
+      "refusal send with enqueued_at outside the timestamp range": {
+        "status": 400,
+        "error": "enqueued_at is outside the supported timestamp range"
+      },
+      "refusal send with enqueued_at that is not a timestamp": {
+        "status": 400,
+        "error": "enqueued_at must be an ISO-8601 timestamp"
+      },
+      "refusal send with enqueued_at without an offset": {
+        "status": 400,
+        "error": "enqueued_at must include a UTC offset"
+      },
+      "refusal send with expired enqueued_at": {
+        "status": 400,
+        "error": "message expired before delivery"
+      },
+      "refusal send with future enqueued_at": {
+        "status": 400,
+        "error": "enqueued_at is too far in the future",
+        "code": "message_timestamp_future"
+      },
+      "refusal send with the reserved kind": {
+        "status": 400,
+        "error": "operator_question is reserved for hub-created operator questions"
+      },
+      "refusal send without a recipient": {
+        "status": 400,
+        "error": "to must be a non-empty UTF-8 string of at most 256 bytes"
+      },
+      "refusal sent with a negative cursor": {
+        "status": 400,
+        "error": "after must be a non-negative integer within SQLite's range"
+      },
+      "refusal sent with no ids": {
+        "status": 400,
+        "error": "ids must contain 1 to 100 positive integers within SQLite's range"
+      },
+      "refusal sent_lookup with an empty client_id": {
+        "status": 400,
+        "error": "client_id must be a non-empty UTF-8 string of at most 64 bytes"
+      },
+      "refusal sessions body not an object": {
+        "status": 400,
+        "error": "session request must be a JSON object"
+      },
+      "refusal sessions with a bad identity_scope": {
+        "status": 400,
+        "error": "session field 'identity_scope' must be 'fleet' or 'node'"
+      },
+      "refusal sessions with a non-boolean dirty_truncated": {
+        "status": 400,
+        "error": "session field 'dirty_truncated' must be a boolean"
+      },
+      "refusal sessions with an unknown field": {
+        "status": 400,
+        "error": "session request has unsupported field 'color'"
+      },
+      "refusal sessions with dirty_paths not a list": {
+        "status": 400,
+        "error": "session field 'dirty_paths' must be an array of strings"
+      },
+      "refusal sessions without a harness": {
+        "status": 400,
+        "error": "session field 'harness' must be a non-empty string"
+      },
+      "sessions bad action": {
+        "status": 400,
+        "error": "session field 'action' must be 'upsert' or 'end'"
+      },
+      "sessions with a node_id on a node write": {
+        "status": 400,
+        "error": "session field 'node_id' is not allowed on node writes"
+      },
+      "status with a message-principal token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "status with a non-bearer scheme": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "status with a revoked node token": {
+        "status": 401,
+        "error": "unauthorized: node token revoked"
+      },
+      "status with a wrong token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "status without a token": {
+        "status": 401,
+        "error": "unauthorized"
+      },
+      "token in the query string": {
+        "status": 401,
+        "body": "Dashboard request refused.\n"
+      },
+      "unknown route": {
+        "status": 404,
+        "error": "not found"
+      },
+      "unknown route POST": {
+        "status": 404,
+        "error": "not found"
+      },
+      "worklore off by default": {
+        "status": 404,
+        "error": "not found"
+      }
+    },
+    "lifecycle": {
+      "lifecycle ack after expiry": {
+        "status": 404,
+        "error": "message not found"
+      },
+      "lifecycle questions create over the pending limit": {
+        "status": 429,
+        "error": "question station has two pending questions",
+        "code": "question_station_busy"
+      },
+      "lifecycle questions status after retention": {
+        "status": 403,
+        "error": "question is not owned by this credential",
+        "code": "question_not_owned"
+      },
+      "lifecycle reply to an expired message": {
+        "status": 404,
+        "error": "message not found"
+      },
+      "lifecycle send conflict inside the client_id window": {
+        "status": 409,
+        "error": "client_id was already used for a different message",
+        "code": "message_client_id_conflict"
+      },
+      "lifecycle send enqueued past retention": {
+        "status": 400,
+        "error": "message expired before delivery"
+      },
+      "lifecycle send enqueued too far in the future": {
+        "status": 400,
+        "error": "enqueued_at is too far in the future",
+        "code": "message_timestamp_future"
+      },
+      "lifecycle sent_lookup after expiry": {
+        "status": 404,
+        "error": "message not found",
+        "code": "not_found"
+      }
+    }
+  },
+  "tombstones": {
+    "s-mid": "{\"client_id\":\"s-mid\",\"created_at\":\"2026-03-02T00:00:00.000000Z\",\"ct_sha256\":\"WCc2QIjlqh_CXriD4MUX_k-J2JXG4tAcG3I-JJ9H-tc\",\"from\":\"lifecycle-a\",\"from_kid\":\"k1_ZEcxNlcaBx7E0BLzwWjYIA\",\"hub\":\"h_qNDJpRE6XBpa_YNJIapXlw\",\"kind\":\"message\",\"pad\":1024,\"priority\":\"normal\",\"rc\":\"2w3az_VBiTpQF4KLquEjz9JAmqkq_rmt89IMWnKwjaY\",\"rcpt\":[\"k1_B3OR4V76gZhiSLNjvMNWQQ\",\"k1_ZEcxNlcaBx7E0BLzwWjYIA\"],\"sig\":\"Mx2Bb2P80chPkcX-qDCK5pVZjyfP5ulXdYtIQikB8eH5x7d__x3PEbcxhOr-T0AA0GMOtZz02Ag-mSCgXaO3Lw\",\"suite\":\"bm1\",\"to\":\"lifecycle-b\",\"v\":1,\"wraps_sha256\":\"E9zOHeE1VVG56q6hIUAC2ZoY4-iPZTUuUNt3oWqP9zo\"}",
+    "s-old": "{\"client_id\":\"s-old\",\"created_at\":\"2026-03-02T00:00:00.000000Z\",\"ct_sha256\":\"JTVF1Y5wjINfgXXMMvEklO33PujHjuLs2bnt3vqpMgo\",\"from\":\"lifecycle-a\",\"from_kid\":\"k1_ZEcxNlcaBx7E0BLzwWjYIA\",\"hub\":\"h_qNDJpRE6XBpa_YNJIapXlw\",\"kind\":\"message\",\"pad\":1024,\"priority\":\"normal\",\"rc\":\"fXmR8G9LM-SkLxMJ0dfNMDc8GyaqqbJBxv0uSMwSfDE\",\"rcpt\":[\"k1_B3OR4V76gZhiSLNjvMNWQQ\",\"k1_ZEcxNlcaBx7E0BLzwWjYIA\"],\"sig\":\"bO02LRs_Hrw2u8nqVYLDC3fo0m5qV6ONfveNYWxXf1MIwdX9J5E2xZXR_DIyQ63433V7COHyuGJWL1hxo5eWRg\",\"suite\":\"bm1\",\"to\":\"lifecycle-b\",\"v\":1,\"wraps_sha256\":\"_E8fajNX17dfMwjFvPMgpeQT3TnrcyVozTs4FEXQ7XE\"}"
+  }
+}

@@ -14,7 +14,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/escoffier-labs/miseledger/internal/security"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/security"
 )
 
 // Cached evidence bundles are re-opened by `evidence show` and regenerated
@@ -55,6 +55,7 @@ var evidenceMACKeyAfterMissProbe func()
 
 const (
 	evidenceBundleMACField   = "bundle_mac"
+	// frozen identifier: see docs/phase-engine-rename.md; persisted or signed contract.
 	evidenceBundleMACDomain  = "miseledger.evidence.bundle-mac.v1\x00"
 	evidenceBundleMACKeyFile = "evidence-bundle-mac.key"
 )

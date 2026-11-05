@@ -18,7 +18,7 @@ Brigade is designed so agents run the control plane (install, setup, verify, han
 
 Treat setup as local workspace wiring, not as a release, deploy, or remote mutation. Local-first means data on the operator-controlled machine first (laptop, workstation, or VPS) before any external service.
 
-Built-in engines use public names **code map** (`brigade code`) and **evidence log** (`brigade evidence`). Historical product names GraphTrail and MiseLedger may still appear in engine paths and MCP entry labels.
+Built-in engines use public names **code map** (`brigade code`) and **evidence log** (`brigade evidence`). The canonical binaries are `brigade-code-graph` and `brigade-evidence`. Existing legacy paths and owned MCP entry labels remain readable through v0.32.
 
 ## Agent entry point
 
@@ -118,6 +118,31 @@ brigade work hooks install --scope user
 ```
 
 Session start then injects the work brief. An unwired repo prints the exact `brigade init` command for the agent to run. The home directory is never a work target. Pin with `--target <wired-workspace>` when the session cwd is not the workspace you want. Uninstall with `brigade work hooks uninstall --scope user`. Only Brigade-owned hook entries are touched.
+
+## Yolo mode and safety rails
+
+Brigade's default is `enforced` mode. Hooks route tests, linters, and builds through `brigade work verify run`, and the Stop gate asks for a verification receipt before a session that wrote code can finish. Yolo mode keeps the shared context and drops that enforcement:
+
+```bash
+brigade init --target . --depth repo --harnesses claude --yolo
+brigade work mode set yolo --target .       # switch an existing repo or workspace
+brigade work mode set enforced --target .   # switch back
+```
+
+Yolo keeps the work brief, memory recall at session start and on prompts, memory search, Fleet Hub messages, and handoffs when you ask for one. Agents run checks raw and finish without a receipt or a handoff. `brigade work verify run` still works by hand. Both modes install the same Claude hook events. The hooks skip verification checks only for targets set to yolo, so a session started in a yolo workspace is still held to the receipt gate for an enforced child repository it writes into. `brigade status`, `brigade doctor`, and `brigade repos adoption` report the mode, and adoption shows a yolo repo as `yolo`, never `bypassed`.
+
+Without receipts you give up evidence. Nothing records which checks ran, on which tree, or with what exit code. Outcomes are not captured, so skill and card scores stop moving. Adoption and doctor no longer flag a session that edited code and never ran a test, which leaves a skipped check invisible.
+
+Safety rails are a separate switch, on by default in both modes. They are the content guard, secret and credential scanning, and the pre-push publication checks:
+
+```bash
+brigade work rails off --target .   # prints what stops being checked
+brigade work rails on --target .
+```
+
+Turning rails off makes Brigade's pre-push hook skip its scans. You lose the check that stops secrets, credentials, private hostnames, and private paths from leaving the machine, including the history scan of commits that a clean tip would hide. Guard policies and baselines stay untouched, so `rails on` restores the same checks.
+
+The rails-off choice is per user and per repository. `brigade work rails off` records it in your own Brigade config directory, outside every repository (`$XDG_CONFIG_HOME/brigade/work-rails.json` on Linux, `~/Library/Application Support/brigade/` on macOS, `%LOCALAPPDATA%\brigade\` on Windows). The record names the repository by its real path, with symlinks resolved and, on Windows and macOS, case folded. It turns rails off for that exact path only, never for a parent, a sibling, or another clone. Run it from the repository root, because the pre-push hook checks the root. Nothing inside a repository can turn the rails off, so a pushed commit cannot disable leak checks for anyone who clones it. A `work.rails` key in `.brigade/config.json`, which earlier builds wrote, is ignored. `brigade doctor` and `brigade work rails show` warn when one is present. Enforced mode with rails off is allowed, for a private repo that wants receipts and never publishes.
 
 ## Success Check
 

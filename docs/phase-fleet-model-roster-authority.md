@@ -548,7 +548,9 @@ The Hub consumes declared `writing` and `frontend` workloads through the
 existing effective policy roles of the same names. Declare their OS and
 capabilities with the existing `routing.workload_requirements` fields. Role
 resolution retains fleet, consumer, repository, and session policy precedence.
-These workloads consider only the selected role seat, with no seat fallback.
+These workloads follow the selected policy seat’s explicit `fallback` chain.
+Unset or unknown role seats return `unknown-role`. Unknown fallback seats are
+ignored. No implementation role is substituted implicitly.
 An explicit eligible seat retains precedence. `general` and `windows-native`
 retain their existing routing. Task-role evidence stays in the stored decision
 JSON. The public route response has no new keys.
@@ -560,13 +562,32 @@ configured Hub, standalone runs retain their existing ordinary routing and do
 not resolve central task roles. The local classification command still works
 without network access. A detached child already requiring a task role keeps
 that requirement if its Hub configuration disappears. It dispatches that seat directly under runtime
-admission, with both local seat fallback mechanisms removed (`fallback` and
-`invalid_final_fallback`). Missing policy, an unavailable
-role, a health failure, or admission refusal stops the run. It never substitutes
-an implementation seat or a planned run for matched work. Ambiguous tasks print
+admission. The client uses only that policy seat’s explicit fallback list and
+drops locally unusable entries. Local roster defaults and
+`invalid_final_fallback` are removed from every allowed seat. Missing policy or
+an unavailable role stops the run. Runtime failures can try only the allowed
+policy fallback seats. A planned run is never substituted for matched work. Ambiguous tasks print
 the evidence and retain ordinary routing until the caller splits or explicitly
 selects a worker. Task evidence uses the existing `seat_routing` payload and remains alongside
 health decisions on both successful routing and strict health refusal.
+
+Host-local roster configuration can prepend rules to every worker prompt in a
+matched role run, including fallback attempts:
+
+```toml
+[task_roles.writing]
+instructions_file = "~/rules/writing.md"
+
+[task_roles.frontend]
+instructions_file = "~/rules/frontend.md"
+```
+
+Both tables are optional. Files must be readable UTF-8 and at most 64 KiB.
+A configured missing, unreadable, or oversized file stops dispatch. Instructions
+are applied at the worker prompt layer, preserving the original task for detached
+child revalidation. Evidence records only the file basename and a 12-character
+SHA-256 prefix. Ordinary implementation runs and explicit worker overrides do
+not apply these role instructions.
 
 The existing T3 fleet consumer forwards a declared workload and launches the
 Hub-selected admitted seat. Legacy deployed controllers do not automatically

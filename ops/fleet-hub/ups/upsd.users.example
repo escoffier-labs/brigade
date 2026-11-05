@@ -1,0 +1,6 @@
+# /etc/nut/upsd.users, mode 0640 root:nut. Generate the password with
+# `python3 -c 'import secrets; print(secrets.token_urlsafe(24))'` and never
+# commit it.
+[upsmon]
+    password = <UPSMON_PASSWORD>
+    upsmon primary

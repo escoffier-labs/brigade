@@ -641,6 +641,11 @@ def _assert_retention_diagnostic_recovery(workspace, run_dir, original_receipt, 
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
 @pytest.mark.parametrize("diagnostic_write_fails", [False, True])
 def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler, diagnostic_write_fails):
+    # The sibling must be running before the budget denial reaches the
+    # scheduler. Its denial handler cancels pending futures, so a sibling whose
+    # pool thread has not dequeued it yet is cancelled and never runs. Then
+    # there is no retention error to replace the denial (#2206).
+    both_started = threading.Barrier(2)
     budget_raised = threading.Event()
     scheduler_saw_budget = threading.Event()
     retained = runguard.RetainRunLockError("sibling receipt unavailable")
@@ -664,6 +669,7 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
         monkeypatch.setattr(localio, "write_json", fail_diagnostic_write)
 
     def worker(cli_ref, *args, **kwargs):
+        both_started.wait(timeout=5)
         if cli_ref == "codex":
             budget_raised.set()
             raise run_budget.BudgetPolicyError(

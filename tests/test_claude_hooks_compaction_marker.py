@@ -172,6 +172,28 @@ def test_user_prompt_restores_brief_once_then_clears_marker(
     assert runtime.handle_payload("UserPromptSubmit", payload) is None
 
 
+def test_post_compaction_restore_skips_prompt_recall(tmp_path: Path, marker_env: dict[str, str], monkeypatch):
+    # The restore owns the prompt's hook budget, so optional recall must not run
+    # ahead of it; the next prompt, with no restore owed, recalls as usual.
+    target = _wired_claude(tmp_path)
+    compaction_marker.write_pending("session-1", target)
+    recalls: list[str | None] = []
+
+    def recall(_target: Path, _payload: dict, *, prompt: str | None = None) -> str:
+        recalls.append(prompt)
+        return ""
+
+    monkeypatch.setattr(runtime, "_run_recall", recall)
+    monkeypatch.setattr(runtime, "_run_brief", lambda repo: "rule-one")
+    payload = {**_payload(target, "UserPromptSubmit"), "prompt": "rotate the token"}
+    result = runtime.handle_payload("UserPromptSubmit", payload)
+    assert result is not None
+    assert "rule-one" in result["hookSpecificOutput"]["additionalContext"]
+    assert recalls == []
+    assert runtime.handle_payload("UserPromptSubmit", payload) is None
+    assert recalls == ["rotate the token"]
+
+
 def _inbox_probe(monkeypatch: pytest.MonkeyPatch, *, brief_seconds: float):
     """Fake clock where the brief takes ``brief_seconds``; records each inbox poll."""
     clock = [1000.0]

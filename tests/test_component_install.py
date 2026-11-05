@@ -357,8 +357,8 @@ def test_verify_cached_asset_accepts_valid_cache(tmp_path):
 
 
 def test_fetch_asset_to_cache_writes_verified_bytes(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     assert asset.byte_size == byte_size
     assert asset.sha256 == sha256
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
@@ -369,8 +369,8 @@ def test_fetch_asset_to_cache_writes_verified_bytes(tmp_path):
 
 
 def test_fetch_asset_to_cache_reuses_valid_cache_without_network(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     write_verified_cache(cache_path, payload=payload)
     opener = FakeOpener({})
@@ -380,14 +380,14 @@ def test_fetch_asset_to_cache_reuses_valid_cache_without_network(tmp_path):
 
 
 def test_fetch_asset_offline_fails_when_cache_missing(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     with pytest.raises(ComponentInstallError, match="offline"):
         fetch_asset_to_cache(asset, cache_path=cache_path, offline=True)
 
 
 def test_fetch_asset_offline_fails_when_cache_corrupt(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"bad")
@@ -396,8 +396,8 @@ def test_fetch_asset_offline_fails_when_cache_corrupt(tmp_path):
 
 
 def test_fetch_asset_online_replaces_bad_cache_only_after_verified_download(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     cache_path.parent.mkdir(parents=True)
     cache_path.write_bytes(b"stale")
@@ -407,7 +407,7 @@ def test_fetch_asset_online_replaces_bad_cache_only_after_verified_download(tmp_
 
 
 def test_fetch_asset_invalid_download_preserves_stale_cache(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     stale = b"stale"
     cache_path.parent.mkdir(parents=True)
@@ -420,7 +420,7 @@ def test_fetch_asset_invalid_download_preserves_stale_cache(tmp_path):
 
 
 def test_fetch_asset_cleans_up_temp_on_failure(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     bad_payload = b"wrong-bytes"
     opener = FakeOpener({asset.download_url: bad_payload})
@@ -433,8 +433,8 @@ def test_fetch_asset_cleans_up_temp_on_failure(tmp_path):
 def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path, monkeypatch):
     small_chunk = 16
     monkeypatch.setattr(component_install, "_READ_CHUNK", small_chunk)
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, _sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, _sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     oversized = payload + b"extra-bytes"
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     stale = b"stale-cache"
@@ -451,8 +451,8 @@ def test_fetch_asset_oversized_stream_aborts_with_bounded_reads(tmp_path, monkey
 
 
 def test_fetch_asset_rejects_https_to_http_redirect(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, _byte_size, _sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, _byte_size, _sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     opener = FakeOpener(
         {asset.download_url: payload},
@@ -464,8 +464,8 @@ def test_fetch_asset_rejects_https_to_http_redirect(tmp_path):
 
 
 def test_fetch_asset_accepts_https_to_https_redirect(tmp_path):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     final_url = asset.download_url.replace("/components/", "/components/redirect/", 1)
     opener = FakeOpener(
@@ -514,8 +514,8 @@ def test_urlopen_default_preserves_cert_failure_when_prime_fails(monkeypatch):
 
 
 def test_fetch_asset_default_opener_retries_cert_failure_on_windows(tmp_path, monkeypatch):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     calls: list[str] = []
     cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
@@ -536,7 +536,7 @@ def test_fetch_asset_default_opener_retries_cert_failure_on_windows(tmp_path, mo
 
 
 def test_fetch_asset_custom_opener_does_not_retry_cert_failure_on_windows(tmp_path, monkeypatch):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     cert_error = urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
 
@@ -554,7 +554,7 @@ def test_fetch_asset_custom_opener_does_not_retry_cert_failure_on_windows(tmp_pa
 
 
 def test_fetch_asset_default_opener_does_not_retry_non_cert_failure_on_windows(tmp_path, monkeypatch):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / asset.sha256 / asset.asset_name
     other_error = urllib.error.URLError("connection refused")
 
@@ -591,8 +591,8 @@ def test_windows_https_prime_passes_url_via_environment(monkeypatch):
 
 
 def test_fetch_asset_fsyncs_verified_download_before_replace(tmp_path, monkeypatch):
-    asset = manifest_asset_fixture("miseledger", platform="linux-amd64")
-    payload, byte_size, sha256 = fixture_payload("miseledger", platform="linux-amd64")
+    asset = manifest_asset_fixture("brigade-evidence", platform="linux-amd64")
+    payload, byte_size, sha256 = fixture_payload("brigade-evidence", platform="linux-amd64")
     cache_path = tmp_path / "cache" / sha256 / asset.asset_name
     opener = FakeOpener({asset.download_url: payload})
     events: list[str] = []
@@ -693,7 +693,7 @@ def test_setup_dry_run_writes_nothing(tmp_path, monkeypatch, capsys):
     rc = setup_native_components(dry_run=True, env=env)
     out = capsys.readouterr().out
     assert rc == 0
-    assert "miseledger-linux-amd64" in out
+    assert "brigade-evidence-linux-amd64" in out
     assert "download" in out
     assert not (Path(env["XDG_DATA_HOME"]) / "brigade" / "installed.json").exists()
 
@@ -1062,7 +1062,7 @@ def test_setup_auto_online_repairs_invalid_stable_manifest_cache(tmp_path, monke
     invalid_bundled = tmp_path / "templates-invalid" / "components" / "manifest-v1.json"
     invalid_bundled.parent.mkdir(parents=True)
     invalid_bytes = write_release_manifest(
-        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="miseledger"
+        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="brigade-evidence"
     )
     invalid_digest = hashlib.sha256(invalid_bytes).hexdigest()
 
@@ -1233,7 +1233,7 @@ def test_setup_auto_online_keeps_beta_invalid_cache_fail_closed(tmp_path, monkey
     invalid_bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
     invalid_bundled.parent.mkdir(parents=True, exist_ok=True)
     invalid_bytes = write_release_manifest(
-        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="miseledger"
+        invalid_bundled, brigade_version=stable_version, target_commit=target_commit, drop_component="brigade-evidence"
     )
     env, _digest = _persist_beta_state_real(
         tmp_path,
@@ -1250,7 +1250,7 @@ def test_setup_auto_online_keeps_beta_invalid_cache_fail_closed(tmp_path, monkey
     assert setup_native_components(env=env, opener=FakeOpener(all_release_payloads(tag=f"v{stable_version}"))) == 1
     err = capsys.readouterr().err
     assert "cached exact-release manifest is invalid" in err
-    assert "missing required components: miseledger" in err
+    assert "missing required components: brigade-evidence" in err
 
 
 def _persist_beta_state(
@@ -1346,7 +1346,7 @@ def test_setup_online_reuses_persisted_beta_stable_manifest_when_cli_advances(tm
         monkeypatch,
         stable_version="0.25.0",
         manifest_bytes=manifest_bytes,
-        target_commit=fixture_component_revision("graphtrail"),
+        target_commit=fixture_component_revision("brigade-code-graph"),
     )
 
     assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
@@ -1373,7 +1373,7 @@ def test_setup_offline_reuses_persisted_beta_stable_manifest_when_cli_advances(t
         monkeypatch,
         stable_version="0.25.0",
         manifest_bytes=manifest_bytes,
-        target_commit=fixture_component_revision("graphtrail"),
+        target_commit=fixture_component_revision("brigade-code-graph"),
     )
     roots = resolve_roots(env=env, system="linux")
     cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
@@ -1401,7 +1401,7 @@ def test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest(tm
         monkeypatch,
         stable_version="0.25.0",
         manifest_bytes=manifest_bytes,
-        target_commit=fixture_component_revision("graphtrail"),
+        target_commit=fixture_component_revision("brigade-code-graph"),
     )
     roots = resolve_roots(env=env, system="linux")
     cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
@@ -1411,7 +1411,7 @@ def test_setup_offline_reuses_persisted_beta_pre_agent_notify_stable_manifest(tm
 
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
     assert installed is not None
-    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    expected = {"brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"}
     assert set(installed.components) == expected
     assert "agent-notify" not in installed.components
 
@@ -1426,7 +1426,7 @@ def test_setup_rejects_persisted_beta_state_with_tampered_manifest_cache(tmp_pat
         monkeypatch,
         stable_version="0.25.0",
         manifest_bytes=manifest_bytes,
-        target_commit=fixture_component_revision("graphtrail"),
+        target_commit=fixture_component_revision("brigade-code-graph"),
     )
     roots = resolve_roots(env=env, system="linux")
     state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
@@ -1448,7 +1448,7 @@ def test_setup_rejects_persisted_beta_state_with_missing_manifest_cache(tmp_path
         monkeypatch,
         stable_version="0.25.0",
         manifest_bytes=manifest_bytes,
-        target_commit=fixture_component_revision("graphtrail"),
+        target_commit=fixture_component_revision("brigade-code-graph"),
     )
     roots = resolve_roots(env=env, system="linux")
     state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
@@ -1666,7 +1666,7 @@ def test_setup_rollback_rejects_unknown_component_state_without_mutation(tmp_pat
         platform=previous.platform,
         installed_at=previous.installed_at,
         components={
-            "not-a-component": previous.components["graphtrail"],
+            "not-a-component": previous.components["brigade-code-graph"],
         },
     )
     component_state.write_installed_state(previous_path, unknown)
@@ -2003,7 +2003,7 @@ def test_build_setup_plan_skips_unpublished_agent_notify(tmp_path, monkeypatch):
     # setup must skip it and emit the deterministic 4-action batch for each of
     # the four published native engines, in KNOWN_COMPONENT_IDS order.
     per_component = ("verify-cache", "download", "materialize", "smoke")
-    expected_published = ["graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"]
+    expected_published = ["brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"]
     expected_ids = [component_id for component_id in expected_published for _ in per_component]
     assert [action.component_id for action in plan] == expected_ids
     assert [action.action for action in plan] == list(per_component) * len(expected_published)
@@ -2024,7 +2024,7 @@ def test_setup_install_skips_unpublished_agent_notify_and_installs_four(tmp_path
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
     assert state is not None
-    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    expected = {"brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"}
     assert set(state.components) == expected
     assert "agent-notify" not in state.components
     notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
@@ -2096,7 +2096,7 @@ def test_setup_compatible_stable_manifest_skips_missing_unpublished_agent_notify
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     state = component_state.load_installed_state(state_path)
     assert state is not None
-    expected = {"graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"}
+    expected = {"brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind"}
     assert set(state.components) == expected
     assert "agent-notify" not in state.components
     notify_path = Path(component_paths.managed_executable_path(roots.data_root, "agent-notify"))
@@ -2128,7 +2128,7 @@ def test_setup_compatible_stable_manifest_rejects_missing_published_component(tm
     manifest_path = tmp_path / "manifest-v1.json"
     _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
     payload = json.loads(manifest_path.read_text())
-    del payload["components"]["miseledger"]
+    del payload["components"]["brigade-evidence"]
     manifest_path.write_text(json.dumps(payload))
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
@@ -2144,7 +2144,7 @@ def test_setup_compatible_stable_manifest_rejects_missing_published_component(tm
         )
         == 1
     )
-    assert "missing required components: miseledger" in capsys.readouterr().err
+    assert "missing required components: brigade-evidence" in capsys.readouterr().err
 
 
 def test_setup_state_is_absent_while_smoke_runs(tmp_path, monkeypatch):
@@ -2410,39 +2410,67 @@ def test_run_post_install_smoke_invokes_absolute_paths_only(tmp_path):
 
     assert {cmd[0] for cmd, _kwargs in calls} == set(managed.values())
     assert calls[0][0] == [managed["agent-notify"], "version", "--json"]
-    assert calls[1][0] == [managed["graphtrail"], "--version"]
-    assert calls[2][0] == [managed["graphtrail-mcp"]]
+    assert calls[1][0] == [managed["brigade-code-graph"], "--version"]
+    assert calls[2][0] == [managed["brigade-code-graph-mcp"]]
     assert "input" in calls[2][1]
-    assert calls[3][0] == [managed["miseledger"], "version"]
+    assert calls[3][0] == [managed["brigade-evidence"], "version"]
     assert calls[4][0] == [managed["sessionfind"], "--help"]
+
+
+@pytest.mark.parametrize(
+    ("banner", "server_name"),
+    [
+        ("brigade-code-graph 0.4.0", "brigade-code-graph"),
+        ("graphtrail 0.4.0", "brigade-code-graph"),
+    ],
+)
+def test_run_post_install_smoke_accepts_and_records_either_code_graph_identity(tmp_path, banner, server_name):
+    managed = _write_managed_smoke_stubs(tmp_path)
+    cli_script = (
+        '#!/usr/bin/env python3\nimport sys\nif sys.argv[1:] == ["--version"]:\n'
+        f"    print({banner!r})\n    raise SystemExit(0)\nraise SystemExit(1)\n"
+    )
+    mcp_script = (
+        "#!/usr/bin/env python3\nimport json, sys\nreq = json.load(sys.stdin)\n"
+        'print(json.dumps({"jsonrpc": "2.0", "id": req.get("id"), "result": '
+        f'{{"serverInfo": {{"name": {server_name!r}, "version": "0.4.0"}}}}}}))\n'
+    )
+    by_family = {component_manifest.family_id(cid): cid for cid in managed}
+    cli_id, mcp_id = by_family["brigade-code-graph"], by_family["brigade-code-graph-mcp"]
+    managed[cli_id] = _write_managed_stub(tmp_path, "cli-stub", script=cli_script)
+    managed[mcp_id] = _write_managed_stub(tmp_path, "mcp-stub", script=mcp_script)
+
+    observations = run_post_install_smoke(managed)
+
+    assert observations == {cli_id: {"banner": banner}, mcp_id: {"server_name": server_name}}
 
 
 def test_run_post_install_smoke_rejects_relative_paths(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    managed["graphtrail"] = "graphtrail"
-    with pytest.raises(ComponentInstallError, match="graphtrail.*absolute managed path"):
+    managed["brigade-code-graph"] = "brigade-code-graph"
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph.*absolute managed path"):
         run_post_install_smoke(managed)
 
 
 def test_run_post_install_smoke_rejects_wrong_component_set(tmp_path):
-    managed = {"graphtrail": _write_managed_stub(tmp_path, "graphtrail")}
+    managed = {"brigade-code-graph": _write_managed_stub(tmp_path, "brigade-code-graph")}
     with pytest.raises(ComponentInstallError, match="exactly 5 managed paths"):
         run_post_install_smoke(managed)
 
 
 def test_run_post_install_smoke_rejects_missing_executable(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    missing = tmp_path / "graphtrail"
+    missing = tmp_path / "brigade-code-graph"
     missing.unlink()
-    with pytest.raises(ComponentInstallError, match="graphtrail.*managed executable missing"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph.*managed executable missing"):
         run_post_install_smoke(managed)
 
 
 def test_run_post_install_smoke_rejects_graphtrail_nonzero_exit(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    script = smoke_stub_script("graphtrail").replace("raise SystemExit(0)", "raise SystemExit(1)")
-    managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*exited 1"):
+    script = smoke_stub_script("brigade-code-graph").replace("raise SystemExit(0)", "raise SystemExit(1)")
+    managed["brigade-code-graph"] = _write_managed_stub(tmp_path, "brigade-code-graph", script=script)
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph smoke failed.*exited 1"):
         run_post_install_smoke(managed)
 
 
@@ -2452,16 +2480,16 @@ def test_run_post_install_smoke_rejects_graphtrail_empty_stdout(tmp_path):
         "    raise SystemExit(0)\nraise SystemExit(1)\n"
     )
     managed = _write_managed_smoke_stubs(tmp_path)
-    managed["graphtrail"] = _write_managed_stub(tmp_path, "graphtrail", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail smoke failed.*empty stdout"):
+    managed["brigade-code-graph"] = _write_managed_stub(tmp_path, "brigade-code-graph", script=script)
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph smoke failed.*empty stdout"):
         run_post_install_smoke(managed)
 
 
 def test_run_post_install_smoke_rejects_graphtrail_mcp_malformed_json(tmp_path):
     script = '#!/usr/bin/env python3\nprint("not-json")\n'
     managed = _write_managed_smoke_stubs(tmp_path)
-    managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=script)
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*malformed JSON-RPC"):
+    managed["brigade-code-graph-mcp"] = _write_managed_stub(tmp_path, "brigade-code-graph-mcp", script=script)
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke failed.*malformed JSON-RPC"):
         run_post_install_smoke(managed)
 
 
@@ -2470,18 +2498,18 @@ def test_run_post_install_smoke_rejects_graphtrail_mcp_nonzero_exit(tmp_path):
 
     def nonzero_runner(argv, **kwargs):
         completed = subprocess.run(argv, **kwargs)
-        if argv[0] == managed["graphtrail-mcp"]:
+        if argv[0] == managed["brigade-code-graph-mcp"]:
             return subprocess.CompletedProcess(argv, 1, completed.stdout, completed.stderr)
         return completed
 
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke failed.*exited 1"):
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke failed.*exited 1"):
         run_post_install_smoke(managed, runner=nonzero_runner)
 
 
 def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
-    script = smoke_stub_script("miseledger").replace("raise SystemExit(0)", "raise SystemExit(1)")
-    managed["miseledger"] = _write_managed_stub(tmp_path, "miseledger", script=script)
+    script = smoke_stub_script("brigade-evidence").replace("raise SystemExit(0)", "raise SystemExit(1)")
+    managed["brigade-evidence"] = _write_managed_stub(tmp_path, "brigade-evidence", script=script)
     with pytest.raises(ComponentInstallError, match="miseledger smoke failed.*exited 1"):
         run_post_install_smoke(managed)
 
@@ -2534,12 +2562,12 @@ def test_run_post_install_smoke_rejects_timeout(tmp_path):
     sleep_script = "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n"
 
     def slow_runner(argv, **kwargs):
-        if argv[0] == managed["graphtrail-mcp"]:
+        if argv[0] == managed["brigade-code-graph-mcp"]:
             kwargs["timeout"] = 0.2
         return subprocess.run(argv, **kwargs)
 
-    managed["graphtrail-mcp"] = _write_managed_stub(tmp_path, "graphtrail-mcp", script=sleep_script)
-    with pytest.raises(ComponentInstallError, match="graphtrail-mcp smoke timed out"):
+    managed["brigade-code-graph-mcp"] = _write_managed_stub(tmp_path, "brigade-code-graph-mcp", script=sleep_script)
+    with pytest.raises(ComponentInstallError, match="brigade-code-graph-mcp smoke timed out"):
         run_post_install_smoke(managed, runner=slow_runner)
 
 
@@ -2555,7 +2583,14 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
         "graphtrail-mcp": "brigade-code-graph-mcp",
         "miseledger": "brigade-evidence",
     }
-    new_payload = json.loads(manifest_path.read_text())
+    for old, new in aliases.items():
+        record = old_payload["components"].pop(new)
+        record["executable"] = old
+        for asset in record["assets"].values():
+            asset["asset_name"] = asset["asset_name"].replace(new, old, 1)
+            asset["download_url"] = asset["download_url"].rsplit("/", 1)[0] + "/" + asset["asset_name"]
+        old_payload["components"][old] = record
+    new_payload = json.loads(json.dumps(old_payload))
     new_payload["manifest_revision"] = "canonical-fixture"
     downloads = all_fixture_payloads(platform=platform)
     for old, new in aliases.items():
@@ -2567,11 +2602,12 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
             asset["download_url"] = old_url.rsplit("/", 1)[0] + "/" + asset["asset_name"]
             if old_url in downloads:
                 downloads[asset["download_url"]] = downloads[old_url]
+            elif asset["download_url"] in downloads:
+                downloads[old_url] = downloads[asset["download_url"]]
         new_payload["components"][new] = record
     roots = resolve_roots(env=env)
     fixture_paths = {
-        Path(component_paths.managed_executable_path(roots.data_root, cid))
-        for cid in (*old_payload["components"], *new_payload["components"])
+        Path(component_paths.managed_executable_path(roots.data_root, cid)) for cid in new_payload["components"]
     }
     smoke_calls: list[list[str]] = []
 
@@ -2590,17 +2626,62 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
         manifest_path.write_text(json.dumps(payload))
         assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
     state_path = Path(component_paths.installed_state_path(roots.data_root))
-    assert set(component_state.load_installed_state(state_path).components) == set(second["components"])
+    assert set(component_state.load_installed_state(state_path).components) == {
+        component_manifest.family_id(cid) for cid in second["components"]
+    }
     assert (
         setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({}), runner=fixture_runner) == 0
     )
     restored = component_state.load_installed_state(state_path)
-    assert set(restored.components) == set(first["components"])
+    assert set(restored.components) == {component_manifest.family_id(cid) for cid in first["components"]}
     suffix = ".exe" if os.name == "nt" else ""
     for cid, record in restored.components.items():
         assert Path(record.executable).name == f"{cid}{suffix}"
         assert Path(record.executable).read_bytes() == downloads[record.download_url]
     assert len(smoke_calls) == 3 * len(first["components"])
     assert {Path(argv[0]) for argv in smoke_calls} == fixture_paths
-    for cid in set(second["components"]) - set(first["components"]):
-        assert not Path(component_paths.managed_executable_path(roots.data_root, cid)).exists()
+    for old, canonical in aliases.items():
+        shim = Path(component_paths.managed_executable_path(roots.data_root, old))
+        assert shim.read_bytes() == Path(restored.components[canonical].executable).read_bytes()
+
+
+def test_upgrade_repairs_a_corrupted_legacy_install(tmp_path, monkeypatch):
+    # A v0.30 install is legacy-keyed: state names graphtrail and friends, and the
+    # managed executables sit at the legacy paths. If one was corrupted in place,
+    # setup must still migrate it to the canonical executable and its shim.
+    from dataclasses import replace
+
+    env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
+    platform = "windows-amd64" if os.name == "nt" else "linux-amd64"
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: platform)
+    env["LOCALAPPDATA"] = str(tmp_path / "localappdata")
+    downloads = all_fixture_payloads(platform=platform)
+    roots = resolve_roots(env=env)
+
+    def fixture_runner(argv, **kwargs):
+        if os.name == "nt":
+            argv = [sys.executable, *argv]
+        return subprocess.run(argv, **kwargs)
+
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    components = dict(state.components)
+    for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items():
+        record = components.pop(canonical)
+        legacy_path = Path(component_paths.managed_executable_path(roots.data_root, legacy))
+        legacy_path.unlink()  # the shim R5 created
+        os.replace(record.executable, legacy_path)
+        components[legacy] = replace(record, executable=str(legacy_path))
+    component_state.write_installed_state(state_path, replace(state, components=components))
+    legacy = next(iter(component_manifest.COMPONENT_FAMILIES))
+    legacy_path = Path(component_paths.managed_executable_path(roots.data_root, legacy))
+    with legacy_path.open("r+b") as handle:
+        handle.write(b"CORRUPT")
+
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    repaired = component_state.load_installed_state(state_path)
+    assert legacy not in repaired.components
+    record = repaired.components[component_manifest.COMPONENT_FAMILIES[legacy]]
+    assert Path(record.executable).read_bytes() == downloads[record.download_url]
+    assert legacy_path.read_bytes() == Path(record.executable).read_bytes()

@@ -67,6 +67,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_sync.add_argument("--force", action="store_true", help="Overwrite servers edited outside Brigade.")
     p_sync.add_argument("--prune", action="store_true", help="Remove pristine orphans dropped from the catalog.")
     p_sync.add_argument("--adopt", action="store_true", help="Take ownership of same-named foreign servers.")
+    p_sync.add_argument(
+        "--rename-legacy-servers",
+        action="store_true",
+        help="Rename legacy engine server keys in the catalog and replace the projections Brigade owns.",
+    )
     p_sync.add_argument("--user-scope", action="store_true", help="Include user-scoped targets (e.g. antigravity).")
     p_sync.add_argument(
         "--allow-global-stdio",
@@ -211,6 +216,7 @@ def dispatch(args) -> int:
             verify_runtime=args.verify,
             verify_timeout=args.verify_timeout,
             json_output=args.json,
+            rename_legacy_servers=args.rename_legacy_servers,
         )
     if args.mcp_command == "verify":
         return mcp_cmd.verify(

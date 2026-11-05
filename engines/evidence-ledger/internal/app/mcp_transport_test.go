@@ -53,8 +53,8 @@ func TestMCPStdioFraming(t *testing.T) {
 			}
 			res0, _ := resps[0]["result"].(map[string]any)
 			server, _ := res0["serverInfo"].(map[string]any)
-			if name, _ := server["name"].(string); name != "miseledger" {
-				t.Fatalf("initialize serverInfo.name=%q, want miseledger; resp=%v", name, resps[0])
+			if name, _ := server["name"].(string); name != CanonicalProgram {
+				t.Fatalf("initialize serverInfo.name=%q, want %s; resp=%v", name, CanonicalProgram, resps[0])
 			}
 			res1, _ := resps[1]["result"].(map[string]any)
 			tools, _ := res1["tools"].([]any)

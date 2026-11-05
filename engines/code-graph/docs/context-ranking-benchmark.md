@@ -1,7 +1,7 @@
 # Personalized Context Ranking Benchmark
 
 The checked-in corpus at `benchmarks/context-ranking/corpus.json` measures the
-opt-in personalized context ranker against GraphTrail's deterministic baseline
+opt-in personalized context ranker against brigade-code-graph's deterministic baseline
 ordering. All paths, symbols, tasks, and graph edges are synthetic. The runner
 does not read a local repository, user history, environment variables, or the
 network.

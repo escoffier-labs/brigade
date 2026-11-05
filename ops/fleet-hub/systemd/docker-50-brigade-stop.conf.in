@@ -1,0 +1,5 @@
+# Install as /etc/systemd/system/docker.service.d/50-brigade-stop.conf. A host
+# shutdown must allow the hub's 40 s grace period. Pair it with
+# "shutdown-timeout": 45 in /etc/docker/daemon.json.
+[Service]
+TimeoutStopSec=120

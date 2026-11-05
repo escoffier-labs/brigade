@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import component_bins, proc
+from . import component_bins, component_manifest, proc
 
 
 @dataclass(frozen=True)
@@ -403,26 +403,32 @@ def register_memory_facade_extensions(evidence_sub: Any = None) -> None:
 def resolve_miseledger(env: dict[str, str] | None = None) -> str | None:
     """Resolve the configured MiseLedger engine binary, or None when missing."""
 
-    return component_bins.resolve("miseledger", env=env)
+    return component_bins.resolve("brigade-evidence", env=env)
 
 
-def _normalize_miseledger_version(raw: str | None) -> str | None:
+# Either entry point identity may print the banner (docs/phase-engine-rename.md,
+# "Entry point identity"): ``brigade-evidence 0.6.0`` or the legacy name.
+_EVIDENCE_BANNER_NAMES = frozenset(name.lower() for name in component_manifest.family_names("brigade-evidence"))
+
+
+def _normalize_evidence_version(raw: str | None) -> str | None:
     if not raw:
         return None
     text = raw.strip()
     if not text:
         return None
-    if text.lower().startswith("miseledger "):
-        text = text.split(None, 1)[1].strip()
+    name, *rest = text.split(None, 1)
+    if name.lower() in _EVIDENCE_BANNER_NAMES:
+        text = rest[0].strip() if rest else ""
     return text or None
 
 
-def _probe_miseledger_version(binary_path: str, env: dict[str, str]) -> str | None:
+def _probe_evidence_version(binary_path: str, env: dict[str, str]) -> str | None:
     result = proc.run([binary_path, "version"], env=env, timeout=_READ_ONLY_TIMEOUT)
     if result.code != 0:
         return None
     first = (result.stdout or "").strip().splitlines()
-    return _normalize_miseledger_version(first[0] if first else None)
+    return _normalize_evidence_version(first[0] if first else None)
 
 
 def _extract_memory_capability(payload: dict[str, Any]) -> tuple[str | None, str | None]:
@@ -519,7 +525,7 @@ def probe_memory_projection(
             error="missing binary",
         )
 
-    version = _probe_miseledger_version(binary_path, env)
+    version = _probe_evidence_version(binary_path, env)
     result = proc.run([binary_path, "doctor", "--json"], env=env, timeout=_READ_ONLY_TIMEOUT)
     data = result.json()
     if not isinstance(data, dict):

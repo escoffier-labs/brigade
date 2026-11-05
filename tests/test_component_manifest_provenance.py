@@ -18,7 +18,7 @@ BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
 REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
 TAG_API = f"https://api.github.com/repos/{REPOSITORY}/git/tags/"
-COMPONENTS = ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind")
+COMPONENTS = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 
 
@@ -71,6 +71,10 @@ def _release(manifest: dict) -> tuple[dict, str, str]:
         for component in manifest["components"].values()
         for asset in component["assets"].values()
     }
+    for component in ("graphtrail", "graphtrail-mcp", "miseledger"):
+        for platform in PLATFORMS:
+            name = _asset_name(component, platform)
+            native[name] = {"byte_size": len(name.encode()), "sha256": hashlib.sha256(name.encode()).hexdigest()}
     manifest_body = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
     manifest_digest = hashlib.sha256(manifest_body.encode()).hexdigest()
     checksum_map = {name: asset["sha256"] for name, asset in native.items()}
@@ -137,7 +141,7 @@ def test_verifier_accepts_exact_one_release_inventory_and_release_page_manifest(
 def test_verifier_rejects_component_release_coordinate_drift(tmp_path):
     module = _module()
     manifest = _manifest()
-    manifest["components"]["miseledger"]["source"]["repository"] = "escoffier-labs/miseledger"
+    manifest["components"]["brigade-evidence"]["source"]["repository"] = "escoffier-labs/miseledger"
     path = tmp_path / "manifest.json"
     path.write_text(json.dumps(manifest))
     release, checksums, manifest_body = _release(_manifest())
@@ -195,7 +199,7 @@ def test_verifier_rejects_fetched_checksums_bytes_that_do_not_match_release_asse
 def test_verifier_rejects_component_revision_mismatched_to_resolved_tag_commit(tmp_path):
     module = _module()
     manifest = _manifest()
-    manifest["components"]["miseledger"]["component_revision"] = "b" * 40
+    manifest["components"]["brigade-evidence"]["component_revision"] = "b" * 40
     release, checksums, manifest_body = _release(manifest)
     path = tmp_path / "manifest.json"
     path.write_text(manifest_body)
@@ -319,14 +323,6 @@ ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 
 def _additive_release():
     release, checksums, body = _release(_manifest())
-    for component in ALIASES:
-        for platform in PLATFORMS:
-            name = _asset_name(component, platform)
-            digest = hashlib.sha256(name.encode()).hexdigest()
-            release["assets"].append(
-                {"name": name, "size": len(name), "digest": "sha256:" + digest, "browser_download_url": BASE + name}
-            )
-            checksums += f"{digest}  {name}\n"
     _authenticate_checksums(release, checksums)
     return release, checksums, body
 

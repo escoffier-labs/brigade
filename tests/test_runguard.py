@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import contextlib
 import errno
 import json
 import math
 import os
 import shutil
+import sys
 import threading
 import time as stdlib_time
+import types
 from pathlib import Path
 
 import pytest
@@ -296,6 +299,569 @@ def test_run_lock_retries_when_concurrent_stale_claim_removes_visible_lock(tmp_p
         assert lock_path.is_dir()
 
     assert calls == 1
+
+
+def test_stale_verdict_never_takes_a_live_lock_published_during_the_check(tmp_path, monkeypatch):
+    """The holder releases and a new holder publishes while `_lock_is_stale` reads.
+
+    A lock with no readable owner counts as stale, so the verdict can describe a
+    lock that is already gone. Renaming `path` then takes the live replacement
+    out of sight: its holder cannot stat its own lock and a third acquirer can
+    publish beside it (a lost-update risk for the task ledger).
+    """
+    lock_path = tmp_path / "tasks.json.lock"
+    lock_path.mkdir()
+    (lock_path / "pid").write_text("99999999\n")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid == os.getpid())
+    original_is_stale = runguard._lock_is_stale
+    live = []
+
+    def replaced_during_check(path):
+        verdict = original_is_stale(path)
+        if not live:
+            shutil.rmtree(path)
+            live.append(runguard._publish_lock(path, run_dir=None))
+        return verdict
+
+    renamed = []
+    original_rename = Path.rename
+
+    def spy_rename(self, target):
+        renamed.append(self)
+        return original_rename(self, target)
+
+    monkeypatch.setattr(runguard, "_lock_is_stale", replaced_during_check)
+    monkeypatch.setattr(Path, "rename", spy_rename)
+
+    assert runguard._claim_stale_lock(lock_path) is None
+
+    assert lock_path not in renamed
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == live[0].owner_token
+
+
+def test_concurrent_acquirers_never_overlap_or_lose_their_lock(tmp_path):
+    lock_path = tmp_path / "tasks.json.lock"
+    holders = 0
+    overlaps = 0
+    errors: list[str] = []
+    guard = threading.Lock()
+
+    def worker():
+        nonlocal holders, overlaps
+        for _ in range(25):
+            try:
+                while True:
+                    try:
+                        ownership = runguard._acquire_lock(lock_path)
+                        break
+                    except runguard.RunLockError:
+                        stdlib_time.sleep(0.0005)
+                with guard:
+                    holders += 1
+                    overlaps += holders > 1
+                stdlib_time.sleep(0.0002)
+                with guard:
+                    holders -= 1
+                runguard._release_lock(lock_path, ownership)
+            except Exception as exc:  # noqa: BLE001 - any failure is the finding
+                errors.append(f"{type(exc).__name__}: {exc}")
+                return
+
+    threads = [threading.Thread(target=worker, daemon=True) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    give_up = stdlib_time.monotonic() + 120
+    for thread in threads:
+        thread.join(timeout=max(0.0, give_up - stdlib_time.monotonic()))
+
+    assert not any(thread.is_alive() for thread in threads), "an acquirer is stuck behind a lost lock"
+    assert errors == []
+    assert overlaps == 0
+    assert not lock_path.exists()
+
+
+_DEAD_PID = 99999999
+
+
+def _dead_holder_lock(lock_path, monkeypatch):
+    """Publish a lock whose owner pid is dead, and report only that pid as inactive."""
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    (lock_path / "pid").write_text(f"{_DEAD_PID}\n", encoding="utf-8")
+    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+    owner["pid"] = _DEAD_PID
+    (lock_path / "owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != _DEAD_PID)
+    return ownership
+
+
+def _run_between_stale_check_and_rename(monkeypatch, action):
+    """Run ``action`` once, after a recoverer judged the lock stale and before it renames it.
+
+    ``_recovery_claim_path`` names the claim right before the rename, so hooking it
+    lands the interleaving exactly in the window the review describes.
+    """
+    original = runguard._recovery_claim_path
+    state = {"fired": False, "done": False}
+
+    def hooked(path):
+        if not state["fired"]:
+            state["fired"] = True
+            action()
+            state["done"] = True
+        return original(path)
+
+    monkeypatch.setattr(runguard, "_recovery_claim_path", hooked)
+    return state
+
+
+def _lock_tokens_moved_off_path(monkeypatch, lock_path):
+    moved = []
+    original_rename = Path.rename
+
+    def spy(self, target):
+        if self == lock_path:
+            owner = runguard._read_lock_owner(self)
+            moved.append(owner.get("owner_token") if owner is not None else None)
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", spy)
+    return moved
+
+
+def _assert_every_holder_still_owns_path(lock_path, holders):
+    for ownership in holders:
+        info = lock_path.stat()
+        assert (info.st_dev, info.st_ino) == (ownership.device, ownership.inode), (
+            f"holder {ownership.owner_token} lost {lock_path} while it still believed it held it"
+        )
+
+
+def test_losing_recoverer_never_moves_the_winners_live_lock(tmp_path, monkeypatch):
+    """B and C both judge dead holder D stale; B recovers and publishes before C renames.
+
+    Without serialized recovery C renames B's live lock to C's claim name: B then fails
+    `stat` on its own lock (the #2260 crash) or its lock is stranded under a claim name.
+    """
+    lock_path = tmp_path / "tasks.json.lock"
+    dead = _dead_holder_lock(lock_path, monkeypatch)
+    winners = []
+
+    def winner_recovers_and_publishes():
+        try:
+            winners.append(runguard._acquire_lock(lock_path))
+        except runguard.RunLockError:
+            pass
+
+    _run_between_stale_check_and_rename(monkeypatch, winner_recovers_and_publishes)
+    moved = _lock_tokens_moved_off_path(monkeypatch, lock_path)
+
+    claimed = runguard._claim_stale_lock(lock_path)
+
+    assert not {ownership.owner_token for ownership in winners} & set(moved)
+    _assert_every_holder_still_owns_path(lock_path, winners)
+    assert claimed is not None
+    assert claimed[1]["owner_token"] == dead.owner_token
+    assert moved == [dead.owner_token]
+
+
+def test_claim_mode_reaper_never_becomes_a_second_holder(tmp_path, monkeypatch):
+    """A claim-mode reaper publishes into any gap a late recoverer opens.
+
+    If the late recoverer could move a live lock, the reaper would return ownership
+    while the first holder's lock sat stranded under a claim name: two holders.
+    """
+    lock_path = tmp_path / "run.lock"
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    _dead_holder_lock(lock_path, monkeypatch)
+    holders = []
+
+    def winner_recovers_and_publishes():
+        try:
+            holders.append(runguard._acquire_lock(lock_path))
+        except runguard.RunLockError:
+            pass
+
+    window = _run_between_stale_check_and_rename(monkeypatch, winner_recovers_and_publishes)
+    original_fingerprint = runguard._lock_fingerprint
+    reaped = []
+
+    def reaper_publishes_after_the_late_rename(path):
+        if window["done"] and not reaped and ".recovering-" in path.name:
+            reaped.append(True)
+            try:
+                holders.append(runguard._acquire_lock(lock_path, run_dir=run_dir, stale_action="claim"))
+            except runguard.RunLockError:
+                pass
+        return original_fingerprint(path)
+
+    monkeypatch.setattr(runguard, "_lock_fingerprint", reaper_publishes_after_the_late_rename)
+
+    runguard._claim_stale_lock(lock_path)
+
+    assert reaped
+    assert len(holders) == 1
+    _assert_every_holder_still_owns_path(lock_path, holders)
+
+
+def test_restore_after_owner_change_tolerates_a_publisher_in_the_gap(tmp_path, monkeypatch):
+    """The post-rename check fails (the dead pid was reused) and a writer publishes
+    between the restore's `exists()` and its `rename()`."""
+    lock_path = tmp_path / "tasks.json.lock"
+    _dead_holder_lock(lock_path, monkeypatch)
+    original_rename = Path.rename
+
+    def rename_then_reuse_pid(self, target):
+        result = original_rename(self, target)
+        if self == lock_path:
+            monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+        return result
+
+    original_exists = Path.exists
+    published = []
+
+    def exists_then_publish(self, *args, **kwargs):
+        present = original_exists(self, *args, **kwargs)
+        if self == lock_path and not present and not published:
+            published.append(runguard._publish_lock(lock_path, run_dir=None))
+        return present
+
+    monkeypatch.setattr(Path, "rename", rename_then_reuse_pid)
+    monkeypatch.setattr(Path, "exists", exists_then_publish)
+
+    assert runguard._claim_stale_lock(lock_path) is None
+
+    assert published
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == published[0].owner_token
+
+
+@pytest.mark.parametrize("winerror", [5, 32])
+def test_stale_claim_backs_off_when_windows_denies_the_rename(tmp_path, monkeypatch, winerror):
+    """Windows refuses to rename a directory while another process has a file in it open."""
+    lock_path = tmp_path / "tasks.json.lock"
+    dead = _dead_holder_lock(lock_path, monkeypatch)
+    original_rename = Path.rename
+
+    def denied(self, target):
+        if self == lock_path:
+            error = PermissionError(13, "sharing violation")
+            error.winerror = winerror
+            raise error
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", denied)
+
+    assert runguard._claim_stale_lock(lock_path) is None
+    with pytest.raises(runguard.RunLockError, match="appears active"):
+        runguard._acquire_lock(lock_path)
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == dead.owner_token
+    assert runguard._stale_claims(lock_path) == []
+
+
+def test_stale_claim_still_raises_other_rename_permission_errors(tmp_path, monkeypatch):
+    lock_path = tmp_path / "tasks.json.lock"
+    _dead_holder_lock(lock_path, monkeypatch)
+    original_rename = Path.rename
+
+    def denied(self, target):
+        if self == lock_path:
+            raise PermissionError(13, "permission denied")
+        return original_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", denied)
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        runguard._claim_stale_lock(lock_path)
+
+
+def test_recovery_gate_is_exclusive_and_released(tmp_path):
+    lock_path = tmp_path / "tasks.json.lock"
+    with runguard._stale_recovery_gate(lock_path) as first:
+        assert first
+        with runguard._stale_recovery_gate(lock_path) as second:
+            assert not second
+    with runguard._stale_recovery_gate(lock_path) as again:
+        assert again
+    assert runguard._stale_claims(lock_path) == []
+
+
+def _dead_run_lock(tmp_path, monkeypatch):
+    """A repo whose run lock belongs to an abandoned run with a dead owner pid."""
+    repo, run_dir = _abandoned_run(tmp_path)
+    lock_path = runguard.lock_path(repo)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    runguard._publish_lock(lock_path, run_dir=run_dir)
+    owner = json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))
+    owner["pid"] = _DEAD_PID
+    (lock_path / "owner.json").write_text(json.dumps(owner), encoding="utf-8")
+    (lock_path / "pid").write_text(f"{_DEAD_PID}\n", encoding="utf-8")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != _DEAD_PID)
+    return repo, run_dir, lock_path, owner["owner_token"]
+
+
+def test_busy_recovery_gate_reports_recovery_in_progress_not_a_live_owner(tmp_path, monkeypatch):
+    """Another recoverer holds the gate over a dead lock: say so, never "still active"."""
+    repo, run_dir, lock_path, dead_token = _dead_run_lock(tmp_path, monkeypatch)
+    monkeypatch.setattr(runguard, "_RECOVERY_GATE_BUSY_RETRY_SECONDS", 0.05)
+
+    with runguard._stale_recovery_gate(lock_path) as held:
+        assert held
+        assert runguard._claim_stale_lock(lock_path) is runguard._RecoveryGate.BUSY
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as recovering:
+            runguard.recover_stale_run(repo, run_dir)
+        assert "still active" not in str(recovering.value)
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as acquiring:
+            runguard._acquire_lock(lock_path)
+        assert "appears active" not in str(acquiring.value)
+
+    message = str(recovering.value)
+    assert f"recovery gate {runguard._recovery_gate_path(lock_path)}" in message
+    assert "filesystem is slow" in message
+    # POSIX names an unlockable gate with its own error, so only Windows lists that cause here.
+    assert ("share without byte-range locks" in message) == (sys.platform == "win32")
+    assert json.loads((lock_path / "owner.json").read_text(encoding="utf-8"))["owner_token"] == dead_token
+    assert runguard._stale_claims(lock_path) == []
+
+
+def test_recovery_does_not_blame_another_runs_live_lock_after_the_wait(tmp_path, monkeypatch):
+    """A gate holder recovers the dead lock and publishes its own run's lock while recover waits."""
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    other_run = run_dir.parent / "20260823-130000-other123"
+    other_run.mkdir()
+    other_recoverer = contextlib.ExitStack()
+    assert other_recoverer.enter_context(runguard._stale_recovery_gate(lock_path))
+
+    def other_recoverer_takes_over(seconds):
+        lock_path.rename(runguard._recovery_claim_path(lock_path))
+        other_recoverer.close()
+        runguard._publish_lock(lock_path, run_dir=other_run)
+
+    monkeypatch.setattr(runguard.time, "sleep", other_recoverer_takes_over)
+
+    with pytest.raises(runguard.RunLockError, match="stale run lock recovery is still active") as raised:
+        runguard.recover_stale_run(repo, run_dir)
+
+    assert "run owner process is still active" not in str(raised.value)
+    assert runguard._owner_matches_run(runguard._read_lock_owner(lock_path), other_run.resolve())
+
+
+def test_an_unreadable_owner_after_the_wait_still_counts_as_active(tmp_path, monkeypatch):
+    """A published lock always has its owner file, so one failed re-read must not drop a live run."""
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    real_read = runguard._read_lock_owner
+    reads = []
+
+    def read_once(path):
+        reads.append(path)
+        return real_read(path) if len(reads) == 1 else None
+
+    monkeypatch.setattr(runguard, "_read_lock_owner", read_once)
+    monkeypatch.setattr(runguard, "_claim_stale_lock_patiently", lambda *args, **kwargs: None)
+
+    with pytest.raises(runguard.RunLockError, match="run owner process is still active"):
+        runguard.recover_stale_run(repo, run_dir)
+    assert len(reads) == 2
+
+
+def test_recovery_waits_out_a_briefly_busy_gate(tmp_path, monkeypatch):
+    repo, run_dir, lock_path, _ = _dead_run_lock(tmp_path, monkeypatch)
+    other_recoverer = contextlib.ExitStack()
+    assert other_recoverer.enter_context(runguard._stale_recovery_gate(lock_path))
+    waits = []
+
+    def other_recoverer_finishes(seconds):
+        waits.append(seconds)
+        other_recoverer.close()
+
+    monkeypatch.setattr(runguard.time, "sleep", other_recoverer_finishes)
+
+    assert runguard.recover_stale_run(repo, run_dir) is True
+    assert len(waits) == 1
+    assert not lock_path.exists()
+    assert json.loads((run_dir / "run.json").read_text(encoding="utf-8"))["status"] == "failed"
+
+
+def test_unopenable_recovery_gate_names_the_gate_and_the_dead_lock(tmp_path, monkeypatch):
+    """A gate that cannot be opened (here a directory: EISDIR) fails with a way out."""
+    lock_path = tmp_path / "tasks.json.lock"
+    dead = _dead_holder_lock(lock_path, monkeypatch)
+    gate = runguard._recovery_gate_path(lock_path)
+    gate.mkdir()
+
+    with pytest.raises(runguard.RunLockError) as raised:
+        runguard._acquire_lock(lock_path)
+
+    message = str(raised.value)
+    assert f"recovery gate {gate}" in message
+    assert f"remove {gate} or fix its permissions" in message
+    assert f"the dead lock is {lock_path}" in message
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == dead.owner_token
+
+
+def _failing_msvcrt(error):
+    def locking(descriptor, mode, nbytes):
+        raise OSError(error, os.strerror(error))
+
+    return types.SimpleNamespace(LK_NBLCK=2, LK_UNLCK=0, locking=locking)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [(errno.EACCES, False), (errno.EBADF, "raises"), (errno.EINVAL, "raises")],
+)
+def test_windows_gate_treats_only_the_crt_lock_failure_errno_as_busy(tmp_path, monkeypatch, error, expected):
+    """The CRT maps every failed non-blocking LockFile to EACCES; only its argument checks raise."""
+
+    gate = tmp_path / "gate"
+    descriptor = os.open(gate, os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        with monkeypatch.context() as patched:
+            patched.setitem(sys.modules, "msvcrt", _failing_msvcrt(error))
+            patched.setattr(sys, "platform", "win32")
+            if expected == "raises":
+                with pytest.raises(OSError) as raised:
+                    runguard._try_lock_descriptor(descriptor)
+                assert raised.value.errno == error
+            else:
+                assert runguard._try_lock_descriptor(descriptor) is expected
+    finally:
+        os.close(descriptor)
+
+
+def test_windows_gate_that_never_locks_times_out_naming_the_gate(tmp_path, monkeypatch):
+    """A share without byte-range locks gives EACCES forever; the timeout must point at the gate file."""
+    lock_path = tmp_path / "tasks.json.lock"
+    _dead_holder_lock(lock_path, monkeypatch)
+    monkeypatch.setattr(runguard, "_RECOVERY_GATE_BUSY_RETRY_SECONDS", 0.05)
+    gate = runguard._recovery_gate_path(lock_path)
+
+    with monkeypatch.context() as patched:
+        patched.setitem(sys.modules, "msvcrt", _failing_msvcrt(errno.EACCES))
+        patched.setattr(sys, "platform", "win32")
+        with pytest.raises(runguard.RunLockError, match="recovery in progress") as raised:
+            runguard._claim_stale_lock_patiently(lock_path)
+
+    message = str(raised.value)
+    assert f"recovery gate {gate}" in message
+    assert f"{gate} can never be locked" in message
+    assert "share without byte-range locks" in message
+    assert lock_path.is_dir()
+
+
+_DEAD_HOLDER_CHILD = r"""
+import json, os, sys, time
+from pathlib import Path
+from brigade import runguard
+
+lock_path = Path(sys.argv[1])
+runguard._publish_lock(lock_path, run_dir=None)
+Path(sys.argv[2]).write_text("published", encoding="utf-8")
+time.sleep(600)
+"""
+
+_RECOVERER_CHILD = r"""
+import json, os, sys, time
+from pathlib import Path
+from brigade import runguard
+
+lock_path, go, inside, rounds = Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), int(sys.argv[4])
+report = {"pid": os.getpid(), "acquired": 0, "errors": []}
+Path(sys.argv[5], f"{os.getpid()}.ready").write_text("ready", encoding="utf-8")
+while not go.exists():
+    time.sleep(0.0005)
+try:
+    for _ in range(rounds):
+        deadline = time.monotonic() + 60
+        while True:
+            try:
+                ownership = runguard._acquire_lock(lock_path)
+                break
+            except runguard.RunLockError:
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.0005)
+        try:
+            os.close(os.open(inside, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            report["errors"].append("overlap: another holder was inside")
+        info = lock_path.stat()
+        if (info.st_dev, info.st_ino) != (ownership.device, ownership.inode):
+            report["errors"].append("lost: lock at path is not this holder's")
+        time.sleep(0.0002)
+        try:
+            os.unlink(inside)
+        except FileNotFoundError:
+            report["errors"].append("overlap: marker removed by another holder")
+        report["acquired"] += 1
+        runguard._release_lock(lock_path, ownership)
+except Exception as exc:  # any failure is the finding
+    report["errors"].append(f"{type(exc).__name__}: {exc}")
+print(json.dumps(report))
+"""
+
+
+@pytest.mark.skipif(os.name == "nt", reason="pid probing with os.kill(pid, 0) terminates processes on Windows")
+def test_genuinely_dead_holder_is_recovered_by_one_of_several_racing_processes(tmp_path):
+    """A SIGKILLed holder leaves its lock; separate recoverer processes race to take it."""
+    import subprocess
+    import sys
+
+    recoverer_count, rounds = 4, 20
+    lock_path = tmp_path / "tasks.json.lock"
+    published = tmp_path / "published"
+    go = tmp_path / "go"
+    inside = tmp_path / "inside"
+    ready = tmp_path / "ready"
+    ready.mkdir()
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join([str(Path(runguard.__file__).resolve().parents[1]), env.get("PYTHONPATH", "")])
+
+    holder = subprocess.Popen(
+        [sys.executable, "-c", _DEAD_HOLDER_CHILD, str(lock_path), str(published)],
+        env=env,
+    )
+    try:
+        give_up = stdlib_time.monotonic() + 60
+        while not published.exists():
+            assert holder.poll() is None, "holder exited before publishing"
+            assert stdlib_time.monotonic() < give_up, "holder never published"
+            stdlib_time.sleep(0.01)
+    finally:
+        holder.kill()
+        holder.wait(timeout=60)
+    assert lock_path.is_dir()
+    assert runguard._lock_is_stale(lock_path)
+
+    recoverers = [
+        subprocess.Popen(
+            [sys.executable, "-c", _RECOVERER_CHILD, str(lock_path), str(go), str(inside), str(rounds), str(ready)],
+            env=env,
+            stdout=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+        )
+        for _ in range(recoverer_count)
+    ]
+    # Release every recoverer at once, after all of them have imported brigade,
+    # so several judge the dead lock stale together.
+    give_up = stdlib_time.monotonic() + 120
+    while len(list(ready.glob("*.ready"))) < recoverer_count:
+        assert all(recoverer.poll() is None for recoverer in recoverers), "a recoverer exited before the start"
+        assert stdlib_time.monotonic() < give_up, "recoverers never became ready"
+        stdlib_time.sleep(0.005)
+    go.write_text("go", encoding="utf-8")
+    reports = []
+    for recoverer in recoverers:
+        stdout, _ = recoverer.communicate(timeout=180)
+        assert recoverer.returncode == 0
+        reports.append(json.loads(stdout.strip().splitlines()[-1]))
+
+    assert [report["errors"] for report in reports] == [[] for _ in reports]
+    assert [report["acquired"] for report in reports] == [rounds for _ in reports]
+    assert not lock_path.exists()
+    assert not inside.exists()
+    assert runguard._stale_claims(lock_path) == []
+    assert len(list(tmp_path.glob(f".{lock_path.name}.*.orphaned"))) == 1
 
 
 def test_run_lock_waits_until_live_lock_clears(tmp_path, monkeypatch):

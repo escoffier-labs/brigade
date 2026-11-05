@@ -1,0 +1,7 @@
+[Unit]
+Description=Brigade dogfood embedder container
+
+[Slice]
+AllowedCPUs=@EMBED_CPUS@
+MemoryMin=2G
+MemoryMax=4G

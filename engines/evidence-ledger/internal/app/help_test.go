@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/toolpath"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
 // helpCommandFamilies lists every documented command family, including each
@@ -59,7 +59,7 @@ func TestHelpFlagExitsZeroWithUsageForEveryCommandFamily(t *testing.T) {
 			if stderr != "" {
 				t.Errorf("%s: wrote to stderr: %q", name, stderr)
 			}
-			want := "usage: miseledger " + family[0]
+			want := "usage: " + CanonicalProgram + " " + family[0]
 			if !strings.HasPrefix(stdout, want) {
 				t.Errorf("%s: stdout %q does not start with %q", name, stdout, want)
 			}
@@ -78,13 +78,13 @@ func TestHelpFlagNamesTheSubcommandUsage(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"stats", "--help"}, "miseledger stats [--json]"},
-		{[]string{"search", "-h"}, "miseledger search <query>"},
-		{[]string{"scans", "show", "--help"}, "miseledger scans show <id-or-path>"},
-		{[]string{"prune", "policy", "-h"}, "miseledger prune policy [--policy default|FILE]"},
-		{[]string{"import", "codex", "--help"}, "miseledger import codex <path-or-dir>"},
-		{[]string{"adapter", "grok", "-h"}, "miseledger adapter grok <path-or-dir> --out <file|->"},
-		{[]string{"crawl", "docs", "--help"}, "miseledger crawl docs <path>"},
+		{[]string{"stats", "--help"}, CanonicalProgram + " stats [--json]"},
+		{[]string{"search", "-h"}, CanonicalProgram + " search <query>"},
+		{[]string{"scans", "show", "--help"}, CanonicalProgram + " scans show <id-or-path>"},
+		{[]string{"prune", "policy", "-h"}, CanonicalProgram + " prune policy [--policy default|FILE]"},
+		{[]string{"import", "codex", "--help"}, CanonicalProgram + " import codex <path-or-dir>"},
+		{[]string{"adapter", "grok", "-h"}, CanonicalProgram + " adapter grok <path-or-dir> --out <file|->"},
+		{[]string{"crawl", "docs", "--help"}, CanonicalProgram + " crawl docs <path>"},
 		{[]string{"doctor", "--help"}, "[--mcp] [--archive]"},
 		{[]string{"migrate", "--help"}, "full-table LIKE scan"},
 		{[]string{"migrate", "codex-arguments", "-h"}, "full-table LIKE scan"},
@@ -106,13 +106,13 @@ func TestHelpFlagAfterDoubleDashIsALiteralArgument(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("search -- --help exit %d, want a literal search: stderr %q", code, stderr)
 	}
-	if strings.HasPrefix(stdout, "usage: miseledger") {
+	if strings.HasPrefix(stdout, "usage: "+CanonicalProgram) {
 		t.Fatalf("search -- --help printed usage instead of searching for the literal term: %q", stdout)
 	}
 
 	for _, route := range []string{"memory", "cursor", "sessions"} {
 		code, stdout, stderr := run("crawl", route, "--", "--help")
-		if strings.Contains(stdout, "usage: miseledger") {
+		if strings.Contains(stdout, "usage: "+CanonicalProgram) {
 			t.Fatalf("crawl %s -- --help printed usage for a literal argument: %q (code %d, stderr %q)", route, stdout, code, stderr)
 		}
 	}

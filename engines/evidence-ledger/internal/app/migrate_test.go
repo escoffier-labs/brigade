@@ -13,8 +13,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/escoffier-labs/miseledger/internal/adapter"
-	"github.com/escoffier-labs/miseledger/internal/sources"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/adapter"
+	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 )
 
 func TestMigrateCodexArguments(t *testing.T) {
@@ -245,7 +245,7 @@ func TestMigrateCodexArguments(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("expected non-zero exit for --apply --dry-run together")
 	}
-	if !strings.Contains(errw.String(), "usage: miseledger migrate codex-arguments") {
+	if !strings.Contains(errw.String(), "usage: "+CanonicalProgram+" migrate codex-arguments") {
 		t.Fatalf("expected usage message, got: %s", errw.String())
 	}
 
@@ -469,7 +469,7 @@ func TestMigrateCommandRegistered(t *testing.T) {
 	if code := cmdMigrate(nil, out, errw); code == 0 {
 		t.Fatalf("migrate without a target must fail, got exit 0")
 	}
-	if !strings.Contains(errw.String(), "usage: miseledger migrate codex-arguments") {
+	if !strings.Contains(errw.String(), "usage: "+CanonicalProgram+" migrate codex-arguments") {
 		t.Fatalf("expected usage text, got %q", errw.String())
 	}
 	out.Reset()
@@ -487,10 +487,10 @@ func TestMigrateHelpAliasAfterTerminatorIsRejectedAsOperand(t *testing.T) {
 	if code == 0 {
 		t.Fatalf("migrate codex-arguments -- -h must reject the operand, got exit 0 and stdout %q", stdout)
 	}
-	if strings.Contains(stdout, "usage: miseledger migrate codex-arguments") {
+	if strings.Contains(stdout, "usage: "+CanonicalProgram+" migrate codex-arguments") {
 		t.Fatalf("migrate codex-arguments -- -h printed help for a terminated operand: %q", stdout)
 	}
-	if !strings.Contains(stderr, "usage: miseledger migrate codex-arguments") {
+	if !strings.Contains(stderr, "usage: "+CanonicalProgram+" migrate codex-arguments") {
 		t.Fatalf("expected invalid-operand usage on stderr, got %q", stderr)
 	}
 }

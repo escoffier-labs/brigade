@@ -34,11 +34,15 @@ Two deliberate exceptions to "nothing under the checkout":
     validation only, and is the one flag outside the target contract.
 
 Only paths this helper recorded are ever removed.
+
+`audit` is read-only. It reads the feature map and the live CLI command tree,
+writes nothing, and needs no target or state root.
 """
 
 from __future__ import annotations
 
 import argparse
+import importlib
 import json
 import os
 import re
@@ -50,6 +54,7 @@ import sys
 import tempfile
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -88,6 +93,119 @@ FEED_SAMPLE = {
         }
     ],
 }
+
+# Guard parity fixture. Every trigger token is split into fragments so this
+# tracked file never holds a contiguous match for the content-guard job; the
+# drive joins them at run time and writes the result into the temp target.
+# All values are fake: "example-user" and "Example User" are not accounts,
+# 555 is the guard's own example-number prefix, and the 012 area code cannot
+# exist (NANP area codes never start with 0 or 1).
+_GP_LH = "local" + "host"
+_GP_HOME = "/ho" + "me"
+_GP_ROOT = "/ro" + "ot"
+_GP_WIN = "C:\\" + "Users"
+_GP_HOST = "build.inter" + "nal"
+_GP_TAIL = "-67" + "89"
+GUARD_PARITY_FIXTURE_LINES = (
+    "guard parity fixture: synthetic values only",
+    # example-phone-555: (?<!\w) lookbehind, positive
+    "desk 555-010-0199 ext",
+    # example-phone-555: a word character before the token, and one after it
+    "id x555-010-0199 and 555-010-01990",
+    # localhost-bare: (?<![\w.-]) lookbehind, positive
+    "serve on " + _GP_LH + " today",
+    # localhost-bare: word character before, hyphen after
+    "no x" + _GP_LH + " or " + _GP_LH + "-dev",
+    # home-path: (?<![\w.-]) lookbehind, positive
+    "notes at " + _GP_HOME + "/example-user/notes.txt",
+    # home-path: word character before /home, and the tool-dir lookahead
+    "no /srv" + _GP_HOME + "/example-user or " + _GP_HOME + "/.cache/tool",
+    # us-phone: (?<!\w) lookbehind, dashed and parenthesized positives
+    "dial 012-345" + _GP_TAIL + " or (012) 345" + _GP_TAIL,
+    # us-phone: underscore is a word character before the token
+    "ref_012-345" + _GP_TAIL + " stays",
+    # private-hostname: (?<![\w.-]) lookbehind, positive in prose
+    "reach " + _GP_HOST + " for docs",
+    # private-hostname: hyphen before, and a further dotted label after
+    "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
+    # windows-home-path: matched quotes, (?P=windows_quote) bounds a spaced path
+    'open "' + _GP_WIN + '\\Example User\\My Docs\\a b.txt" now',
+    # windows-home-path: unquoted branch of the (?(windows_quote)...) conditional
+    "open " + _GP_WIN + "\\example-user\\notes.txt now",
+    # windows-home-path: mismatched quotes (observed: no finding, see feature doc)
+    'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
+    # windows-home-path: word character before the drive letter
+    "no X" + _GP_WIN + "\\example-user",
+    # root-path: matched quotes, (?P=root_quote) bounds a spaced path
+    "edit '" + _GP_ROOT + "/My Files/a b.txt' now",
+    # root-path: unquoted branch
+    "edit " + _GP_ROOT + "/.config/tool.json now",
+    # root-path: mismatched quotes fall back to the unquoted branch
+    'edit "' + _GP_ROOT + "/My Files/a b.txt' now",
+    # root-path: word character before /root
+    "no /srv" + _GP_ROOT + "/project",
+)
+GUARD_PARITY_FIXTURE = "\n".join(GUARD_PARITY_FIXTURE_LINES) + "\n"
+
+# Every category redacts, so no finding blocks and every match is replaced in
+# the redact output. The 555 rule carries a built-in warn override, so it is
+# set explicitly.
+GUARD_PARITY_POLICY = {
+    "name": "verify-brigade-guard-parity",
+    "defaults": {
+        category: "redact"
+        for category in ("infrastructure", "secret", "pii", "personal", "business", "attribution", "tooling")
+    },
+    "rules": {"example-phone-555": "redact"},
+}
+
+# Golden findings, pasted from `brigade guard scan --json` on main b18e6f51d:
+# (line, column, start, end, rule_id, action). `start`/`end` are 0-based
+# offsets into the fixture with `end` exclusive; `line`/`column` are 1-based.
+# The drive also checks each reported `match` equals fixture[start:end].
+GUARD_PARITY_GOLDEN_FINDINGS = (
+    (2, 6, 49, 61, "example-phone-555", "redact"),
+    (4, 10, 110, 119, "localhost-bare", "redact"),
+    (6, 10, 166, 194, "home-path", "redact"),
+    (8, 6, 247, 259, "us-phone", "redact"),
+    (8, 22, 263, 277, "us-phone", "redact"),
+    (10, 7, 307, 321, "private-hostname", "redact"),
+    (12, 7, 382, 419, "windows-home-path", "redact"),
+    (13, 6, 430, 461, "windows-home-path", "redact"),
+    (16, 7, 539, 561, "root-path", "redact"),
+    (17, 6, 572, 595, "root-path", "redact"),
+    (18, 7, 606, 614, "root-path", "redact"),
+)
+
+# Golden redact output, pasted from `brigade guard redact` on main b18e6f51d.
+# Lines the guard leaves alone reuse the fixture fragments so this file stays
+# clean under content-guard.
+GUARD_PARITY_GOLDEN_REDACTED = (
+    "\n".join(
+        (
+            "guard parity fixture: synthetic values only",
+            "desk <EXAMPLE_PHONE> ext",
+            "id x555-010-0199 and 555-010-01990",
+            "serve on [redacted-service] today",
+            "no x" + _GP_LH + " or " + _GP_LH + "-dev",
+            "notes at <PRIVATE_HOME_PATH>",
+            "no /srv" + _GP_HOME + "/example-user or " + _GP_HOME + "/.cache/tool",
+            "dial <PRIVATE_PHONE> or <PRIVATE_PHONE>",
+            "ref_012-345" + _GP_TAIL + " stays",
+            "reach [redacted-host] for docs",
+            "no -" + _GP_HOST + " or " + _GP_HOST + ".example",
+            'open "<PRIVATE_HOME_PATH>" now',
+            "open <PRIVATE_HOME_PATH> now",
+            'open "' + _GP_WIN + "\\Example User\\a b.txt' now",
+            "no X" + _GP_WIN + "\\example-user",
+            "edit '[redacted-root-path]' now",
+            "edit [redacted-root-path] now",
+            "edit \"[redacted-root-path] Files/a b.txt' now",
+            "no /srv" + _GP_ROOT + "/project",
+        )
+    )
+    + "\n"
+)
 
 
 class HelperError(Exception):
@@ -318,14 +436,26 @@ def run(
     name: str,
     env_extra: dict[str, str] | None = None,
     timeout: int = DEFAULT_TIMEOUT,
+    stdin_text: str | None = None,
 ) -> dict:
-    """Run one command, capture it to the state root, and return the record."""
+    """Run one command, capture it to the state root, and return the record.
+
+    `stdin_text` is fed to the command; without it stdin is inherited, as before.
+    """
     env = dict(os.environ)
     if env_extra:
         env.update(env_extra)
     started = time.monotonic()
     try:
-        proc = subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, check=False)
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env=env,
+            check=False,
+            input=stdin_text,
+        )
     except FileNotFoundError as exc:
         raise HelperError(f"command not found: {argv[0]}") from exc
     except subprocess.TimeoutExpired:
@@ -893,6 +1023,540 @@ def cmd_handoff_lint(args: argparse.Namespace) -> int:
     )
 
 
+def guard_parity_findings(payload: dict) -> tuple[list[list], list[dict]]:
+    """Normalize `guard scan --json` findings; also return any whose match disagrees with its offsets."""
+    findings = payload.get("findings") if isinstance(payload.get("findings"), list) else []
+    observed: list[list] = []
+    inconsistent: list[dict] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            inconsistent.append({"finding": finding, "reason": "not an object"})
+            continue
+        row = [finding.get(key) for key in ("line", "column", "start", "end", "rule_id", "action")]
+        observed.append(row)
+        start, end = finding.get("start"), finding.get("end")
+        sliced = GUARD_PARITY_FIXTURE[start:end] if isinstance(start, int) and isinstance(end, int) else None
+        if finding.get("match") != sliced:
+            inconsistent.append({"finding": row, "reason": "match is not fixture[start:end]"})
+    return observed, inconsistent
+
+
+def guard_parity_workdir(target: Path) -> Path:
+    """Create `<target>/guard-parity`, refusing any path that could redirect a write.
+
+    `guard_target` already resolved the target itself, so only the work
+    directory and the three files the drive writes are left to check.
+    """
+    work = target / "guard-parity"
+    if work.is_symlink() or (work.exists() and not work.is_dir()):
+        raise HelperError(f"refusing to write through {work}: it is a symlink or not a directory")
+    work.mkdir(exist_ok=True)
+    for name in ("fixture.txt", "policy.json", "in-place.txt"):
+        path = work / name
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise HelperError(f"refusing to write through {path}: it is a symlink or not a regular file")
+    return work
+
+
+def cmd_guard_parity(args: argparse.Namespace) -> int:
+    """Scan and redact the bundled lookbehind/backreference fixture; compare to the goldens."""
+    root = state_root(args)
+    target = guard_target(Path(args.target), root)
+    if not target.is_dir():
+        raise HelperError(f"target {target} is not an existing directory; create one with new-target first")
+    work = target / "guard-parity"
+    fixture, policy, in_place = work / "fixture.txt", work / "policy.json", work / "in-place.txt"
+    brigade = brigade_args(args)
+    scan_argv = brigade + ["guard", "scan", "--policy", str(policy), "--json", str(fixture)]
+    redact_argv = brigade + ["guard", "redact", "--policy", str(policy), str(fixture)]
+    stdin_argv = brigade + ["guard", "redact", "--policy", str(policy)]
+    in_place_argv = brigade + ["guard", "redact", "--policy", str(policy), "--in-place", str(in_place)]
+    if args.dry_run:
+        return emit(
+            {
+                "action": "guard-parity",
+                "ok": True,
+                "dry_run": True,
+                "target": str(target),
+                "would_write": [str(fixture), str(policy), str(in_place)],
+                "would_run": [scan_argv, redact_argv, stdin_argv, in_place_argv],
+            }
+        )
+    guard_parity_workdir(target)
+    fixture.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
+    in_place.write_bytes(GUARD_PARITY_FIXTURE.encode("utf-8"))
+    policy.write_text(json.dumps(GUARD_PARITY_POLICY, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    scan = run(scan_argv, root=root, name="guard-scan", timeout=args.timeout)
+    redact = run(redact_argv, root=root, name="guard-redact", timeout=args.timeout)
+    stdin = run(stdin_argv, root=root, name="guard-redact-stdin", timeout=args.timeout, stdin_text=GUARD_PARITY_FIXTURE)
+    rewrite = run(in_place_argv, root=root, name="guard-redact-in-place", timeout=args.timeout)
+
+    # A timed-out record carries no "json" key; its exit code is reported below.
+    payload = scan.get("json") if isinstance(scan.get("json"), dict) else {}
+    observed, inconsistent = guard_parity_findings(payload)
+    golden = [list(row) for row in GUARD_PARITY_GOLDEN_FINDINGS]
+    mismatches: list[dict] = []
+    for name, record in (("scan", scan), ("redact", redact), ("redact-stdin", stdin), ("redact-in-place", rewrite)):
+        if record["returncode"] != 0:
+            mismatches.append({"check": f"{name} exit code", "expected": 0, "observed": record["returncode"]})
+    if observed != golden:
+        mismatches.append(
+            {
+                "check": "scan findings",
+                "missing": [row for row in golden if row not in observed],
+                "unexpected": [row for row in observed if row not in golden],
+            }
+        )
+    mismatches += [{"check": "scan match", **item} for item in inconsistent]
+    for name, text in (("redact stdout", redact["stdout"]), ("redact stdin stdout", stdin["stdout"])):
+        if text != GUARD_PARITY_GOLDEN_REDACTED:
+            mismatches.append({"check": name, "expected": GUARD_PARITY_GOLDEN_REDACTED, "observed": text})
+    # stdout is decoded text, so the on-disk rewrite is the byte-for-byte check.
+    # `--in-place` writes with Path.write_text, which emits the platform newline
+    # (CRLF on Windows), so the expected bytes follow os.linesep.
+    written = in_place.read_bytes()
+    if written != GUARD_PARITY_GOLDEN_REDACTED.replace("\n", os.linesep).encode("utf-8"):
+        mismatches.append(
+            {
+                "check": "redact --in-place bytes",
+                "expected": GUARD_PARITY_GOLDEN_REDACTED,
+                "observed": written.decode("utf-8", "replace"),
+            }
+        )
+    ok = not mismatches
+    return emit(
+        {
+            "action": "guard-parity",
+            "ok": ok,
+            "dry_run": False,
+            "target": str(target),
+            "fixture": str(fixture),
+            "policy": str(policy),
+            "rule_ids": sorted({row[4] for row in observed if isinstance(row[4], str)}),
+            "findings": observed,
+            "redacted": redact["stdout"],
+            "mismatches": mismatches,
+            "scan": slim(scan),
+            "redact": slim(redact),
+            "redact_stdin": slim(stdin),
+            "redact_in_place": slim(rewrite),
+        },
+        0 if ok else 3,
+    )
+
+
+def load_sibling(name: str):
+    """Import a module that sits next to this helper (`hub_contract`, `storage_parity`) however it was started."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    return importlib.import_module(name)
+
+
+# ------------------------------------------------------------------ audit
+#
+# `audit` compares the feature map (features/*.md headers plus the known-gap
+# list in features/MAINTENANCE.md) against the live CLI command tree. It is
+# read-only: it runs `brigade completions bash`, `brigade --version`, and
+# `brigade <surface> --help`, reads the map, and writes nothing anywhere.
+
+FEATURE_STATUSES = ("active", "paused", "unreachable")
+FEATURE_PROOFS = ("drive", "stand-in")
+FEATURE_KEYS = frozenset({"status", "proof", "surfaces", "drive", "last-drive", "reason", "unpause"})
+MAP_DOCS = frozenset({"README.md", "MAINTENANCE.md"})
+DEFAULT_MAX_AGE_DAYS = 45
+LAST_DRIVE_PATTERN = re.compile(r"(\d{4}-\d{2}-\d{2}) ([0-9a-f]{7,40})")
+UNPAUSE_PATTERN = re.compile(r"#\d+|https://\S+|pending: \S.*")
+SURFACE_PATTERN = re.compile(r"[a-z0-9][a-z0-9-]*( [a-z0-9][a-z0-9-]*)*")
+TREE_LINE = re.compile(r'^\s*\["brigade(?: ([^"]*))?"\]="([^"]*)"\s*$')
+FLAG_PATTERN = re.compile(r"(?<![\w-])--[a-z][a-z0-9-]*")
+GAP_FENCE = "```audit-gaps"
+
+
+def feature_header(text: str) -> dict[str, str] | None:
+    """The `key: value` block between a leading `---` line and the next one."""
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    header: dict[str, str] = {}
+    for line in lines[1:]:
+        if line.strip() == "---":
+            return header
+        key, sep, value = line.partition(":")
+        if not sep:
+            header.setdefault("__malformed__", line)
+            continue
+        header[key.strip()] = value.strip()
+    return None
+
+
+def split_list(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def helper_subcommands() -> set[str]:
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return set(action.choices)
+    return set()
+
+
+def load_feature(path: Path, drives: set[str], today: datetime) -> tuple[dict, list[str]]:
+    """Parse and validate one feature file. Returns (feature, errors)."""
+    name = path.name
+    text = path.read_text(encoding="utf-8")
+    header = feature_header(text)
+    if header is None:
+        return {"file": name}, [f"{name}: missing the --- status header"]
+    errors: list[str] = []
+    if "__malformed__" in header:
+        errors.append(f"{name}: header line is not `key: value`: {header.pop('__malformed__')!r}")
+    for key in sorted(set(header) - FEATURE_KEYS):
+        errors.append(f"{name}: unknown header key {key!r}")
+    status = header.get("status", "")
+    if status not in FEATURE_STATUSES:
+        errors.append(f"{name}: status must be one of {', '.join(FEATURE_STATUSES)}, got {status!r}")
+    proof = header.get("proof", "")
+    if proof not in FEATURE_PROOFS:
+        errors.append(f"{name}: proof must be one of {', '.join(FEATURE_PROOFS)}, got {proof!r}")
+    surfaces = split_list(header.get("surfaces", ""))
+    if not surfaces:
+        errors.append(f"{name}: surfaces must name at least one CLI command path")
+    for surface in surfaces:
+        if not SURFACE_PATTERN.fullmatch(surface):
+            errors.append(f"{name}: surface {surface!r} is not a command path like `work verify run`")
+    drive = split_list(header.get("drive", ""))
+    if status == "active" and proof == "drive" and not drive:
+        errors.append(f"{name}: an active drive needs at least one helper subcommand in `drive`")
+    for step in drive:
+        if step not in drives:
+            errors.append(f"{name}: drive step {step!r} is not a control-brigade.py subcommand")
+    reason = header.get("reason", "")
+    if status in ("paused", "unreachable") and not reason:
+        errors.append(f"{name}: a {status} feature needs a reason")
+    unpause = header.get("unpause", "")
+    if status == "paused" and not UNPAUSE_PATTERN.fullmatch(unpause):
+        errors.append(f"{name}: a paused feature needs `unpause: #<issue>`, a URL, or `pending: <what unblocks it>`")
+    if status != "paused" and unpause:
+        errors.append(f"{name}: only a paused feature carries `unpause`")
+    last_drive = None
+    raw_last = header.get("last-drive", "")
+    if raw_last:
+        match = LAST_DRIVE_PATTERN.fullmatch(raw_last)
+        if not match:
+            errors.append(f"{name}: last-drive must be `YYYY-MM-DD <commit>`, got {raw_last!r}")
+        else:
+            try:
+                when = datetime.strptime(match.group(1), "%Y-%m-%d").replace(tzinfo=timezone.utc)
+            except ValueError:
+                errors.append(f"{name}: last-drive date {match.group(1)!r} is not a date")
+            else:
+                last_drive = {
+                    "date": match.group(1),
+                    "commit": match.group(2),
+                    "age_days": (today - when).days,
+                }
+    feature = {
+        "file": name,
+        "status": status,
+        "proof": proof,
+        "surfaces": surfaces,
+        "drive": drive,
+        "last_drive": last_drive,
+        "reason": reason or None,
+        "unpause": unpause or None,
+        "text": text,
+    }
+    return feature, errors
+
+
+def load_gaps(path: Path) -> tuple[list[dict], list[str]]:
+    """Known gaps: lines `<command path>[ *]  <note>` in an audit-gaps fence."""
+    if not path.is_file():
+        return [], [f"{path.name}: missing (the known-gap list lives there)"]
+    gaps: list[dict] = []
+    errors: list[str] = []
+    inside = False
+    found = False
+    for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        stripped = line.strip()
+        if stripped == GAP_FENCE:
+            inside = found = True
+            continue
+        if inside and stripped == "```":
+            inside = False
+            continue
+        if not inside or not stripped:
+            continue
+        surface, _, note = stripped.partition("  ")
+        surface = surface.strip()
+        wildcard = surface.endswith(" *")
+        base = surface[:-2] if wildcard else surface
+        if not SURFACE_PATTERN.fullmatch(base) or not note.strip():
+            errors.append(f"{path.name}:{number}: gap line must be `<command path>[ *]  <note>`")
+            continue
+        gaps.append({"surface": base, "wildcard": wildcard, "note": note.strip()})
+    if not found:
+        errors.append(f"{path.name}: no {GAP_FENCE} block")
+    return gaps, errors
+
+
+def command_tree(brigade: list[str], timeout: int) -> dict[str, list[str]]:
+    """The live CLI tree from `brigade completions bash`: path -> child commands."""
+    try:
+        proc = subprocess.run(
+            brigade + ["completions", "bash"], capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except FileNotFoundError as exc:
+        raise HelperError(f"command not found: {brigade[0]}") from exc
+    except subprocess.TimeoutExpired as exc:
+        raise HelperError("brigade completions bash timed out") from exc
+    if proc.returncode != 0:
+        raise HelperError(f"brigade completions bash exited {proc.returncode}: {proc.stderr.strip()[-300:]}")
+    tree: dict[str, list[str]] = {}
+    for line in proc.stdout.splitlines():
+        match = TREE_LINE.match(line)
+        if match:
+            tree[match.group(1) or ""] = match.group(2).split()
+    if not tree.get(""):
+        raise HelperError("brigade completions bash printed no command tree")
+    return tree
+
+
+HELP_CHILD = re.compile(r"^  ([a-z0-9][a-z0-9-]*)\s{2,}\S")
+
+
+def help_children(brigade: list[str], family: str, timeout: int) -> list[str]:
+    """Child commands listed under `commands:` in `brigade <family> --help`.
+
+    Families such as `guard` hand their arguments to their own parser, so the
+    completion tree stops at the family name. Their `--help` still lists the
+    verbs, one per line, two spaces in.
+    """
+    try:
+        proc = subprocess.run(
+            brigade + family.split() + ["--help"], capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return []
+    children: list[str] = []
+    inside = False
+    for line in proc.stdout.splitlines():
+        if line.strip() == "commands:":
+            inside = True
+            continue
+        if inside:
+            match = HELP_CHILD.match(line)
+            if match:
+                children.append(match.group(1))
+            elif not line.strip() and children:
+                break
+    return children
+
+
+def in_tree(tree: dict[str, list[str]], surface: str) -> bool:
+    parent, _, leaf = surface.rpartition(" ")
+    return leaf in tree.get(parent, [])
+
+
+def surface_help(brigade: list[str], surface: str, timeout: int) -> dict:
+    try:
+        proc = subprocess.run(
+            brigade + surface.split() + ["--help"], capture_output=True, text=True, timeout=timeout, check=False
+        )
+    except subprocess.TimeoutExpired:
+        return {"surface": surface, "returncode": None, "flags": [], "detail": "--help timed out"}
+    # Only the usage block: it lists every option once, while the prose below
+    # it can quote flags that belong to some other command.
+    usage = proc.stdout.split("\n\n", 1)[0]
+    flags = sorted(set(FLAG_PATTERN.findall(usage)) - {"--help"})
+    detail = "" if proc.returncode == 0 else (proc.stderr or proc.stdout).strip()[-300:]
+    return {"surface": surface, "returncode": proc.returncode, "flags": flags, "detail": detail}
+
+
+def cmd_audit(args: argparse.Namespace) -> int:
+    """Read-only: does the feature map still match the live CLI?"""
+    features_dir = (
+        Path(args.features_dir).resolve() if args.features_dir else Path(__file__).resolve().parent / "features"
+    )
+    if not features_dir.is_dir():
+        raise HelperError(f"features directory not found: {features_dir}")
+    brigade = brigade_args(args)
+    today = datetime.now(timezone.utc)
+    drives = helper_subcommands()
+
+    errors: list[str] = []
+    features: list[dict] = []
+    for path in sorted(features_dir.glob("*.md")):
+        if path.name in MAP_DOCS:
+            continue
+        feature, problems = load_feature(path, drives, today)
+        features.append(feature)
+        errors.extend(problems)
+    gaps, problems = load_gaps(features_dir / "MAINTENANCE.md")
+    errors.extend(problems)
+
+    tree = command_tree(brigade, args.timeout)
+    version = subprocess.run(brigade + ["--version"], capture_output=True, text=True, timeout=args.timeout, check=False)
+
+    valid = [f for f in features if f.get("status") in FEATURE_STATUSES]
+
+    # Fill in families the completion tree cannot see into, but only along
+    # paths a feature walks: that keeps the audit to a few `--help` calls.
+    help_families: list[str] = []
+    for surface in sorted({s for f in valid for s in f["surfaces"]}):
+        words = surface.split()
+        for depth in range(1, len(words)):
+            family = " ".join(words[:depth])
+            if family not in tree and in_tree(tree, family):
+                children = help_children(brigade, family, args.timeout)
+                if children:
+                    tree[family] = children
+                    help_families.append(family)
+
+    active = [f for f in valid if f["status"] == "active"]
+    paused = [f for f in valid if f["status"] == "paused"]
+    unreachable = [f for f in valid if f["status"] == "unreachable"]
+
+    # Coverage. A stand-in proof covers nothing: it is listed, never counted.
+    covered = {s for f in valid if f["proof"] == "drive" for s in f["surfaces"] if in_tree(tree, s)}
+    touched = set(covered)
+    walked = {""}
+    for surface in covered:
+        words = surface.split()
+        for depth in range(1, len(words) + 1):
+            prefix = " ".join(words[:depth])
+            touched.add(prefix)
+            walked.add(prefix)
+    uncovered_paths = sorted(
+        {
+            f"{parent} {child}".strip()
+            for parent in walked
+            for child in tree.get(parent, [])
+            if f"{parent} {child}".strip() not in touched
+        }
+    )
+
+    def gap_for(surface: str) -> dict | None:
+        for gap in gaps:
+            if not gap["wildcard"] and gap["surface"] == surface:
+                return gap
+        matches = [gap for gap in gaps if gap["wildcard"] and surface.startswith(gap["surface"] + " ")]
+        return max(matches, key=lambda gap: len(gap["surface"]), default=None)
+
+    uncovered = []
+    used_gaps: set[int] = set()
+    for surface in uncovered_paths:
+        gap = gap_for(surface)
+        if gap is not None:
+            used_gaps.add(id(gap))
+        uncovered.append({"surface": surface, "known_gap": gap is not None, "note": gap["note"] if gap else None})
+    stale_gaps = []
+    for gap in gaps:
+        if id(gap) in used_gaps:
+            continue
+        label = gap["surface"] + (" *" if gap["wildcard"] else "")
+        if not in_tree(tree, gap["surface"]):
+            why = "not in the CLI command tree"
+        elif gap["surface"] in touched and not gap["wildcard"]:
+            why = "a feature covers it now"
+        else:
+            why = "matches no uncovered surface"
+        stale_gaps.append({"gap": label, "reason": why})
+
+    # Active features: every surface must still exist and answer --help.
+    checks = [(f, s) for f in active for s in f["surfaces"]]
+    broken: list[dict] = []
+    uncovered_flags: list[dict] = []
+    known = sorted({surface for _, surface in checks if in_tree(tree, surface)})
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        helps = dict(
+            zip(known, pool.map(lambda surface: surface_help(brigade, surface, args.timeout), known), strict=True)
+        )
+    for feature, surface in checks:
+        if surface not in helps:
+            broken.append({"feature": feature["file"], "surface": surface, "detail": "not in the CLI command tree"})
+            continue
+        result = helps[surface]
+        if result["returncode"] != 0:
+            broken.append(
+                {"feature": feature["file"], "surface": surface, "detail": result["detail"] or "--help failed"}
+            )
+            continue
+        missing = [flag for flag in result["flags"] if flag not in feature["text"]]
+        if missing:
+            uncovered_flags.append({"feature": feature["file"], "surface": surface, "flags": missing})
+
+    stale = []
+    for feature in active:
+        last = feature["last_drive"]
+        if last is None:
+            stale.append({"feature": feature["file"], "last_drive": None, "reason": "no drive recorded"})
+        elif last["age_days"] > args.max_age_days:
+            stale.append(
+                {"feature": feature["file"], "last_drive": last, "reason": f"older than {args.max_age_days} days"}
+            )
+
+    def listing(feature: dict) -> dict:
+        return {
+            "feature": feature["file"],
+            "surfaces": feature["surfaces"],
+            "reason": feature["reason"],
+            **({"unpause": feature["unpause"]} if feature["status"] == "paused" else {}),
+        }
+
+    undocumented = [item for item in uncovered if not item["known_gap"]]
+    failures = (
+        [f"map error: {e}" for e in errors]
+        + [f"broken surface: {b['feature']} -> {b['surface']} ({b['detail']})" for b in broken]
+        + [f"uncovered surface with no feature and no known gap: {u['surface']}" for u in undocumented]
+        + [f"stale known gap: {g['gap']} ({g['reason']})" for g in stale_gaps]
+    )
+    ok = not failures
+    return emit(
+        {
+            "action": "audit",
+            "ok": ok,
+            "cli": {
+                "brigade": brigade,
+                "version": (version.stdout or version.stderr).strip(),
+                "commands": len(tree.get("", [])),
+                "help_families": help_families,
+            },
+            "features_dir": str(features_dir),
+            "features": [
+                {key: f.get(key) for key in ("file", "status", "proof", "surfaces", "drive", "last_drive")}
+                for f in features
+            ],
+            "paused": [listing(f) for f in paused],
+            "unreachable": [listing(f) for f in unreachable],
+            "stand_ins": [f["file"] for f in valid if f["proof"] == "stand-in"],
+            "uncovered": uncovered,
+            "uncovered_flags": uncovered_flags,
+            "stale": stale,
+            "stale_gaps": stale_gaps,
+            "broken": broken,
+            "errors": errors,
+            "failures": failures,
+            "summary": {
+                "features": len(features),
+                "active": len(active),
+                "paused": len(paused),
+                "unreachable": len(unreachable),
+                "uncovered": len(uncovered),
+                "uncovered_known_gaps": len(uncovered) - len(undocumented),
+                "uncovered_undocumented": len(undocumented),
+                "uncovered_flags": sum(len(item["flags"]) for item in uncovered_flags),
+                "stale": len(stale),
+                "broken": len(broken),
+                "errors": len(errors),
+            },
+        },
+        0 if ok else 3,
+    )
+
+
 def cmd_evidence(args: argparse.Namespace) -> int:
     """Copy captures and receipts somewhere cleanup never looks."""
     root = state_root(args)
@@ -1118,6 +1782,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--content-guard", action="store_true", help="Add the leak and injection scan.")
     p.add_argument("paths", nargs="*", help="Explicit handoff files. Defaults to the pending inbox.")
     p.set_defaults(func=cmd_handoff_lint)
+
+    p = sub.add_parser("guard-parity", help="Scan and redact the guard parity fixture against the goldens.")
+    add_target(p)
+    add_dry_run(p, "Report the commands without writing the fixture.")
+    p.set_defaults(func=cmd_guard_parity)
+
+    try:  # a lone copy of this helper, without its sibling modules, has no hub-contract
+        load_sibling("hub_contract_cli").add_parser(sub, sys.modules[__name__], add_dry_run)
+    except ImportError:
+        pass
+
+    try:  # a lone copy of this helper, without its sibling modules, has no storage-parity
+        load_sibling("storage_parity").add_parser(sub, sys.modules[__name__], add_dry_run)
+    except ImportError:
+        pass
+
+    p = sub.add_parser("audit", help="Read-only: compare the feature map against the live CLI command tree.")
+    p.add_argument("--features-dir", default=None, help="Feature map to audit (default: this skill's features/).")
+    p.add_argument(
+        "--max-age-days",
+        type=int,
+        default=DEFAULT_MAX_AGE_DAYS,
+        help="Report an active feature as stale when its last drive is older than this.",
+    )
+    p.set_defaults(func=cmd_audit)
 
     p = sub.add_parser("evidence", help="Copy captures and receipts to a named evidence dir.")
     p.add_argument("--target", default=None, help="Temp target whose receipts to copy.")

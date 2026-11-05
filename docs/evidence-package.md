@@ -3,8 +3,8 @@
 The first retention slice of issue #1407 exports one Brigade verify run as a
 self-contained directory that a WORM store, SIEM batch, or auditor can ingest.
 It is **not** a signed attestation, a legal-hold receipt, or an acknowledgement
-of retention. Destination acknowledgement has a separate
-[offline acceptance contract](evidence-ack-acceptance.md). The package checks
+of retention. The unused destination acknowledgement
+acceptance APIs have been removed. The package checks
 that the copied files still match its manifest.
 
 ## Commands

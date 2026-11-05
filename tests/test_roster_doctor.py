@@ -18,6 +18,8 @@ import time
 import pytest
 from pathlib import Path
 
+from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+
 from brigade import model_inventory, roster_cmd
 
 
@@ -27,9 +29,9 @@ def _hanging_command(pid_file: Path) -> list[str]:
     # original Windows-fleet failure. argv[0] identifies the probe child so
     # the test can assert the exact process is gone after doctor returns.
     code = (
-        "import subprocess, sys, time; "
+        PUBLISH_SOURCE + "import subprocess, sys, time; "
         "grandchild = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(300)']); "
-        f"open({str(pid_file)!r}, 'w').write(str(grandchild.pid)); "
+        f"publish({str(pid_file)!r}, str(grandchild.pid)); "
         "time.sleep(120)"
     )
     return [sys.executable, "-c", code]
@@ -107,7 +109,9 @@ def test_roster_doctor_bounds_hanging_probe_and_reaps_its_tree(monkeypatch, tmp_
     if os.name == "posix":
         # The grandchild outlives a direct-child-only kill: the probe tree
         # kill must reap it too, or it lingers like the fleet orphans.
-        grandchild_pid = int(pid_file.read_text().strip())
+        published = wait_for_text(pid_file, timeout=5)
+        assert published is not None, "probe did not publish its grandchild PID"
+        grandchild_pid = int(published)
         assert not _pid_alive(grandchild_pid), "probe grandchild must not be orphaned"
 
 
@@ -243,7 +247,7 @@ def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, cap
         'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
         '[agents.worker]\ncli = "codex"\nrole = "implement"\n'
     )
-    run_preference.write_cached(run_preference.RunPreference(chef="worker"))
+    run_preference.write_cached(run_preference.RunPreference(orchestrator="worker"))
 
     def forbidden(*args, **kwargs):
         raise AssertionError("readiness attempted a network refresh")

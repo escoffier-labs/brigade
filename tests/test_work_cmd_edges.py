@@ -14,7 +14,7 @@ import pytest
 from brigade import cli, work_cmd
 from brigade.work_cmd import edges as edges_mod
 
-from tests.work_cmd_test_helpers import _init_git_repo
+from tests.work_cmd_test_helpers import add_dependency_edge, _init_git_repo
 
 
 def _add(target: Path, text: str, **kwargs):
@@ -34,7 +34,7 @@ def test_edge_crud_add_list_remove_and_dedupe(tmp_path, monkeypatch, capsys):
     b = _add(tmp_path, "Task B")
 
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"], json_output=True)
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"], json_output=True)
         == 0
     )
     payload = json.loads(capsys.readouterr().out)
@@ -45,22 +45,19 @@ def test_edge_crud_add_list_remove_and_dedupe(tmp_path, monkeypatch, capsys):
     edge_id = payload["edge"]["id"]
 
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"], json_output=True)
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"], json_output=True)
         == 0
     )
     payload = json.loads(capsys.readouterr().out)
     assert payload["created"] is False
     assert payload["edge"]["id"] == edge_id
 
-    assert work_cmd.task_edge_list(target=tmp_path, json_output=True) == 0
-    listed = json.loads(capsys.readouterr().out)
-    assert listed["count"] == 1
+    assert len(work_cmd._read_task_ledger(tmp_path)["edges"]) == 1
 
     assert work_cmd.task_edge_remove(target=tmp_path, edge_id=edge_id, json_output=True) == 0
     removed = json.loads(capsys.readouterr().out)
     assert len(removed["removed"]) == 1
-    assert work_cmd.task_edge_list(target=tmp_path, json_output=True) == 0
-    assert json.loads(capsys.readouterr().out)["count"] == 0
+    assert work_cmd._read_task_ledger(tmp_path)["edges"] == []
 
 
 def test_ready_gating_by_edge_type(tmp_path, monkeypatch, capsys):
@@ -80,15 +77,12 @@ def test_ready_gating_by_edge_type(tmp_path, monkeypatch, capsys):
     discovered = _add(tmp_path, "Discovered item")
     provenance = _add(tmp_path, "Provenance source")
 
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=blocked["id"]) == 0
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=blocked["id"]) == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
-    )
-    assert (
-        work_cmd.task_edge_add(
+        add_dependency_edge(
             target=tmp_path,
             edge_type="discovered-from",
             source=discovered["id"],
@@ -127,12 +121,9 @@ def test_parent_propagates_blockers_to_children(tmp_path, monkeypatch, capsys):
     parent = _add(tmp_path, "Epic parent")
     child = _add(tmp_path, "Epic child")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
-    assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=upstream["id"], target_id=parent["id"]) == 0
-    )
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=upstream["id"], target_id=parent["id"]) == 0
     capsys.readouterr()
     assert work_cmd.ready(target=tmp_path, explain=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -153,10 +144,10 @@ def test_blocks_cycle_rejected_at_add_time(tmp_path, monkeypatch, capsys):
     )
     a = _add(tmp_path, "A")
     b = _add(tmp_path, "B")
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
     capsys.readouterr()
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=b["id"], target_id=a["id"], json_output=True)
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=b["id"], target_id=a["id"], json_output=True)
         == 2
     )
     payload = json.loads(capsys.readouterr().out)
@@ -174,11 +165,11 @@ def test_three_node_transitive_blocks_cycle_rejected_at_add_time(tmp_path, monke
     a = _add(tmp_path, "A")
     b = _add(tmp_path, "B")
     c = _add(tmp_path, "C")
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=b["id"], target_id=c["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=b["id"], target_id=c["id"]) == 0
     capsys.readouterr()
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=c["id"], target_id=a["id"], json_output=True)
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=c["id"], target_id=a["id"], json_output=True)
         == 2
     )
     payload = json.loads(capsys.readouterr().out)
@@ -198,13 +189,12 @@ def test_mixed_blocks_parent_child_transitive_cycle_rejected_at_add_time(tmp_pat
     child = _add(tmp_path, "Epic child")
     blocker = _add(tmp_path, "Upstream blocker")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=child["id"], target_id=blocker["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=child["id"], target_id=blocker["id"]) == 0
     capsys.readouterr()
     assert (
-        work_cmd.task_edge_add(
+        add_dependency_edge(
             target=tmp_path,
             edge_type="blocks",
             source=blocker["id"],
@@ -228,8 +218,8 @@ def test_discovered_from_ignored_by_cycle_detection(tmp_path, monkeypatch, capsy
     )
     a = _add(tmp_path, "A")
     b = _add(tmp_path, "B")
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="discovered-from", source=a["id"], target_id=b["id"]) == 0
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="discovered-from", source=b["id"], target_id=a["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="discovered-from", source=a["id"], target_id=b["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="discovered-from", source=b["id"], target_id=a["id"]) == 0
     capsys.readouterr()
     assert work_cmd.ready(target=tmp_path, explain=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
@@ -271,9 +261,7 @@ def test_terminal_statuses_satisfy_blockers(tmp_path, monkeypatch, capsys):
     )
     blocker = _add(tmp_path, "Will complete")
     blocked = _add(tmp_path, "Waiting")
-    assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=blocked["id"]) == 0
-    )
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=blocked["id"]) == 0
     capsys.readouterr()
     assert work_cmd.task_done(target=tmp_path, task_id=blocker["id"], json_output=True) == 0
     done_payload = json.loads(capsys.readouterr().out)
@@ -454,8 +442,7 @@ def test_close_parent_refuses_open_children_unless_forced(tmp_path, monkeypatch,
     parent = _add(tmp_path, "Parent epic")
     child = _add(tmp_path, "Open child")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
     capsys.readouterr()
     assert work_cmd.task_done(target=tmp_path, task_id=parent["id"], json_output=True) == 2
@@ -479,8 +466,7 @@ def test_close_reports_completable_parents(tmp_path, monkeypatch, capsys):
     parent = _add(tmp_path, "Parent")
     child = _add(tmp_path, "Only child")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"])
-        == 0
+        add_dependency_edge(target=tmp_path, edge_type="parent-child", source=parent["id"], target_id=child["id"]) == 0
     )
     capsys.readouterr()
     assert work_cmd.task_done(target=tmp_path, task_id=child["id"], json_output=True) == 0
@@ -531,7 +517,7 @@ def test_tasks_and_next_json_include_ready_view(tmp_path, monkeypatch, capsys):
     )
     a = _add(tmp_path, "Ready task")
     b = _add(tmp_path, "Blocked task")
-    assert work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
+    assert add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=b["id"]) == 0
     capsys.readouterr()
     assert work_cmd.tasks(target=tmp_path, json_output=True) == 0
     tasks_payload = json.loads(capsys.readouterr().out)
@@ -582,17 +568,20 @@ def test_self_edge_and_unknown_endpoints_rejected(tmp_path, monkeypatch, capsys)
     )
     a = _add(tmp_path, "Alone")
     assert (
-        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=a["id"], target_id=a["id"], json_output=True)
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id=a["id"], json_output=True)
         == 2
     )
     assert json.loads(capsys.readouterr().out)["reason"] == edges_mod.REASON_SELF_EDGE
     assert (
-        work_cmd.task_edge_add(
-            target=tmp_path, edge_type="blocks", source=a["id"], target_id="missing", json_output=True
-        )
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source=a["id"], target_id="missing", json_output=True)
         == 2
     )
     assert json.loads(capsys.readouterr().out)["reason"] == edges_mod.REASON_UNKNOWN_TARGET
+    assert (
+        add_dependency_edge(target=tmp_path, edge_type="blocks", source="missing", target_id=a["id"], json_output=True)
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out)["reason"] == edges_mod.REASON_UNKNOWN_SOURCE
 
 
 def test_stable_ready_ordering(tmp_path, monkeypatch, capsys):
@@ -635,7 +624,7 @@ def test_concurrent_edge_writes_do_not_lose_dependency_edges(tmp_path, monkeypat
         ready.wait()
         for attempt in range(3):
             try:
-                rc = work_cmd.task_edge_add(
+                rc = add_dependency_edge(
                     target=tmp_path,
                     edge_type="blocks",
                     source=hub["id"],

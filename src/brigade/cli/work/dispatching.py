@@ -90,6 +90,14 @@ def _dispatch_impl(args) -> int:
             return install_cmd.hooks_uninstall(target=args.target, scope=args.scope)
         args._brigade_parser.error(f"unknown hooks command: {args.hooks_command}")
         return 2
+    if args.work_command in {"mode", "rails"}:
+        from ...work_mode_cmd import mode_command, rails_command
+
+        if args.work_command == "mode":
+            return mode_command(
+                target=args.target, action=args.mode_command, mode=getattr(args, "mode", None), json_output=args.json
+            )
+        return rails_command(target=args.target, action=args.rails_command, json_output=args.json)
     if args.work_command == "hook-run":
         from ...claude_hooks.runtime import hook_run
 
@@ -185,7 +193,7 @@ def _dispatch_impl(args) -> int:
                     target=args.target,
                     manifest_id=args.verify_manifest_id,
                     timeout=args.timeout,
-                    graphtrail_timeout=args.graphtrail_timeout,
+                    code_graph_timeout=args.code_graph_timeout,
                     json_output=args.json,
                     capture=args.capture,
                     capture_kind=args.capture_kind,
@@ -210,7 +218,7 @@ def _dispatch_impl(args) -> int:
                 commands=commands,
                 manifest_id=None,
                 timeout=args.timeout,
-                graphtrail_timeout=args.graphtrail_timeout,
+                code_graph_timeout=args.code_graph_timeout,
                 json_output=args.json,
                 capture=args.capture,
                 capture_kind=args.capture_kind,
@@ -702,17 +710,6 @@ def _dispatch_impl(args) -> int:
             if_status=args.if_status,
             json_output=args.json,
         )
-    if args.work_command == "reassign":
-        return work_cmd.reassign(
-            target=args.target,
-            task_id=args.task_id,
-            to_actor=args.to_actor,
-            claim_id=args.claim_id,
-            new_claim_id=args.new_claim_id,
-            if_actor=args.if_actor,
-            if_status=args.if_status,
-            json_output=args.json,
-        )
     if args.work_command == "tasks":
         return work_cmd.tasks(target=args.target, all_tasks=args.all, json_output=args.json)
     if args.work_command == "task":
@@ -736,18 +733,6 @@ def _dispatch_impl(args) -> int:
                 dry_run=args.dry_run,
                 json_output=args.json,
             )
-        if args.task_command == "annotate":
-            return work_cmd.task_annotate(
-                target=args.target,
-                task_id=args.task_id,
-                seat_class=args.seat_class,
-                spend_by=args.spend_by,
-                clear_seat_class=args.clear_seat_class,
-                clear_spend_by=args.clear_spend_by,
-                json_output=args.json,
-            )
-        if args.task_command == "show":
-            return work_cmd.task_show(target=args.target, task_id=args.task_id, json_output=args.json)
         if args.task_command == "plan":
             return work_cmd.task_plan(
                 target=args.target,
@@ -771,26 +756,9 @@ def _dispatch_impl(args) -> int:
                 rationale=args.rationale,
                 evidence_ref=args.evidence_ref,
             )
-        if args.task_command == "claim":
-            return work_cmd.task_claim(
-                target=args.target,
-                task_id=args.task_id,
-                actor=args.actor,
-                files=args.files,
-                from_plan=args.from_plan,
-                json_output=args.json,
-            )
         if args.task_command == "done":
             return work_cmd.task_done(target=args.target, task_id=args.task_id, force=args.force, json_output=args.json)
         if args.task_command == "edge":
-            if args.edge_command == "add":
-                return work_cmd.task_edge_add(
-                    target=args.target,
-                    edge_type=args.edge_type,
-                    source=args.source,
-                    target_id=args.target_id,
-                    json_output=args.json,
-                )
             if args.edge_command == "remove":
                 return work_cmd.task_edge_remove(
                     target=args.target,
@@ -800,8 +768,6 @@ def _dispatch_impl(args) -> int:
                     edge_type=args.edge_type,
                     json_output=args.json,
                 )
-            if args.edge_command == "list":
-                return work_cmd.task_edge_list(target=args.target, task_id=args.task_id, json_output=args.json)
             args._brigade_parser.error(f"unknown task edge command: {args.edge_command}")
             return 2
         args._brigade_parser.error(f"unknown task command: {args.task_command}")
@@ -823,6 +789,18 @@ def _dispatch_impl(args) -> int:
             args._brigade_parser.error("parent --target and --json require --from-bd-jsonl")
         if args.bd_version or args.import_command is None:
             args._brigade_parser.error("work import requires a subcommand or --from-bd-jsonl with --bd-version")
+        if args.import_command == "bd":
+            from ...work_cmd.bd_sync import sync_bd
+
+            return sync_bd(
+                target=args.target,
+                bd_repo=args.bd_repo,
+                bd_bin=args.bd_bin,
+                input_path=args.bd_sync_input,
+                bd_version=args.bd_sync_version,
+                dry_run=args.dry_run,
+                json_output=args.json,
+            )
         if args.import_command == "add":
             return work_cmd.import_add(
                 target=args.target,
@@ -832,12 +810,12 @@ def _dispatch_impl(args) -> int:
                 metadata=args.metadata,
             )
         if args.import_command == "context":
-            if args.from_miseledger is not None:
+            if args.from_evidence is not None:
                 if args.text or args.from_file is not None:
-                    args._brigade_parser.error("--from-miseledger cannot be combined with text or --from-file")
+                    args._brigade_parser.error("--from-evidence cannot be combined with text or --from-file")
                 return work_cmd.import_context_from_miseledger(
                     target=args.target,
-                    query=args.from_miseledger,
+                    query=args.from_evidence,
                     limit=args.limit,
                     json_output=args.json,
                 )
@@ -951,6 +929,13 @@ def _dispatch_impl(args) -> int:
                 metadata=args.metadata,
             )
         args._brigade_parser.error(f"unknown import command: {args.import_command}")
+        return 2
+    if args.work_command == "export":
+        if args.export_command == "bd-outcomes":
+            from ...work_cmd.bd_sync import export_bd_outcomes
+
+            return export_bd_outcomes(target=args.target, output=args.output, json_output=args.json)
+        args._brigade_parser.error("work export requires a subcommand: bd-outcomes")
         return 2
     if args.work_command == "list":
         return work_cmd.list_sessions(target=args.target, limit=args.limit)

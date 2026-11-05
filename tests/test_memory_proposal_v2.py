@@ -475,7 +475,9 @@ def test_bundle_alias_consolidation_preserves_pending_fence(tmp_path, monkeypatc
     path, receipt = verified_card
     cache = tmp_path / "cache"
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
-    bundle = cache / "miseledger/evidence/example.json"
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    bundle = cache / "brigade/evidence/evidence/example.json"
     bundle.parent.mkdir(parents=True)
     bundle.write_text("{}\n")
     stamp = "2026-10-21T12:00:00Z"
@@ -950,7 +952,9 @@ def test_duplicate_merge_keeps_scalar_evidence_from_both_sources(tmp_path):
 def test_evidence_ops_count_bundle_aliases_once_without_rewriting_citations(tmp_path, monkeypatch, merge):
     path = setup(tmp_path)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    evidence(tmp_path, "cache/miseledger/evidence/example.json")
+    monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    evidence(tmp_path, "cache/brigade/evidence/evidence/example.json")
     canonical, alias, missing = "miseledger:example", "miseledger://evidence/example", "miseledger:missing"
     path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([canonical, missing])}"))
     support = ".brigade/receipts/support.json"

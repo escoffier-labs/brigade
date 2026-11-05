@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+
+from brigade.engine_deprecation import LegacyOption
 import json
 from pathlib import Path
 
@@ -96,6 +98,28 @@ def register(sub: argparse._SubParsersAction) -> None:
         )
         if action == "status":
             parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_mode = work_sub.add_parser(
+        "mode", help="Show or set the work-loop mode: enforced (default) or yolo (no verification enforcement)."
+    )
+    mode_sub = p_work_mode.add_subparsers(dest="mode_command", metavar="<mode-command>")
+    mode_sub.required = True
+    p_mode_show = mode_sub.add_parser("show", help="Print the work mode and safety-rails state.")
+    p_mode_set = mode_sub.add_parser("set", help="Persist the work mode and reconcile managed Claude hooks.")
+    p_mode_set.add_argument("mode", choices=("enforced", "yolo"))
+    p_work_rails = work_sub.add_parser(
+        "rails", help="Show or switch safety rails (content guard and pre-push scanning); independent of the mode."
+    )
+    rails_sub = p_work_rails.add_subparsers(dest="rails_command", metavar="<rails-command>")
+    rails_sub.required = True
+    rails_parsers = [
+        rails_sub.add_parser("show", help="Print the safety-rails state."),
+        rails_sub.add_parser("on", help="Turn safety rails back on (the default)."),
+        rails_sub.add_parser("off", help="Skip the pre-push content guard and secret scanning for this target."),
+        rails_sub.add_parser("check", help="Exit 0 when rails are on, 3 when off (used by hooks/pre-push)."),
+    ]
+    for parser in (p_mode_show, p_mode_set, *rails_parsers):
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Brigade-wired repo or workspace.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_hook_run = work_sub.add_parser("hook-run", help="Run one managed Claude hook event.")
     p_work_hook_run.add_argument(
         "--event",
@@ -251,10 +275,21 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_verify_run.add_argument("--timeout", type=int, default=900, help="Timeout per command in seconds.")
     p_work_verify_run.add_argument(
-        "--graphtrail-timeout",
+        "--code-graph-timeout",
+        dest="code_graph_timeout",
         type=float,
         default=None,
-        help="Timeout in seconds for each GraphTrail sync/diff during code graph delta capture.",
+        help="Timeout in seconds for each code graph sync/diff during code graph delta capture.",
+    )
+    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
+    p_work_verify_run.add_argument(
+        "--graphtrail-timeout",
+        action=LegacyOption,
+        replacement="--code-graph-timeout",
+        dest="code_graph_timeout",
+        type=float,
+        default=None,
+        help=argparse.SUPPRESS,
     )
     p_work_verify_run.add_argument(
         "--capture",
@@ -614,23 +649,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_release.add_argument("--if-actor", default=None, help="CAS guard: require current assignee.")
     p_work_release.add_argument("--if-status", default=None, help="CAS guard: require current status.")
     p_work_release.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_reassign = work_sub.add_parser(
-        "reassign",
-        help="Reassign a live claim to a new actor (compares claim id when provided).",
-    )
-    p_work_reassign.add_argument("task_id", help="Task id or unique prefix.")
-    p_work_reassign.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_work_reassign.add_argument("--to", dest="to_actor", required=True, help="New actor / seat label.")
-    p_work_reassign.add_argument("--claim-id", default=None, help="Require this claim id before reassigning.")
-    p_work_reassign.add_argument("--new-claim-id", default=None, help="Opaque claim id for the new assignment.")
-    p_work_reassign.add_argument("--if-actor", default=None, help="CAS guard: require current assignee.")
-    p_work_reassign.add_argument("--if-status", default=None, help="CAS guard: require current status.")
-    p_work_reassign.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_tasks = work_sub.add_parser("tasks", help="List pending work tasks.")
     p_work_tasks.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_tasks.add_argument("--all", action="store_true", help="Include completed tasks.")
     p_work_tasks.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_task = work_sub.add_parser("task", help="Add, show, or complete one work task.")
+    p_work_task = work_sub.add_parser("task", help="Add or complete one work task.")
     task_sub = p_work_task.add_subparsers(dest="task_command", metavar="<task-command>")
     task_sub.required = True
     p_work_task_add = task_sub.add_parser("add", help="Add a pending work task.")
@@ -691,40 +714,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_task_add.add_argument("--dry-run", action="store_true", help="Validate --graph without writing.")
     p_work_task_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_task_annotate = task_sub.add_parser(
-        "annotate",
-        help="Set or clear seat-class / spend-by dispatch annotations on one task.",
-    )
-    p_work_task_annotate.add_argument("task_id", help="Task id or unique prefix.")
-    p_work_task_annotate.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_work_task_annotate.add_argument(
-        "--seat-class",
-        choices=TASK_SEAT_CLASSES,
-        default=None,
-        help="Dispatch seat-class hint (mechanical|judgment|review). Never a model id.",
-    )
-    p_work_task_annotate.add_argument(
-        "--spend-by",
-        default=None,
-        help="ISO-8601 spend-by deadline for quota-driven dispatch routing.",
-    )
-    p_work_task_annotate.add_argument(
-        "--clear-seat-class",
-        action="store_true",
-        help="Remove the seat-class annotation.",
-    )
-    p_work_task_annotate.add_argument(
-        "--clear-spend-by",
-        action="store_true",
-        help="Remove the spend-by annotation.",
-    )
-    p_work_task_annotate.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_task_show = task_sub.add_parser("show", help="Show one work task.")
-    p_work_task_show.add_argument("task_id", help="Task id or unique prefix.")
-    p_work_task_show.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
-    p_work_task_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_plan = task_sub.add_parser("plan", help="Show task acceptance criteria and run plan.")
     p_work_task_plan.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_plan.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -811,27 +800,6 @@ def register(sub: argparse._SubParsersAction) -> None:
             "checkpoint (stored as written; not validated as a local file)."
         ),
     )
-    p_work_task_claim = task_sub.add_parser(
-        "claim",
-        help="Claim a task and refine its footprint from plan-named files.",
-    )
-    p_work_task_claim.add_argument("task_id", help="Task id or unique prefix.")
-    p_work_task_claim.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
-    p_work_task_claim.add_argument("--actor", default=None, help="Assignee / claiming actor name.")
-    p_work_task_claim.add_argument(
-        "--file",
-        dest="files",
-        action="append",
-        default=None,
-        help="Concrete file path to refine the footprint with (repeatable).",
-    )
-    p_work_task_claim.add_argument(
-        "--from-plan",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Extract plan-named files when --file is omitted (default: true).",
-    )
-    p_work_task_claim.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_done = task_sub.add_parser("done", help="Mark one work task done.")
     p_work_task_done.add_argument("task_id", help="Task id or unique prefix.")
     p_work_task_done.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
@@ -839,17 +807,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--force", action="store_true", help="Allow closing a parent that still has open children."
     )
     p_work_task_done.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_task_edge = task_sub.add_parser("edge", help="Add, remove, or list dependency edges between tasks.")
+    p_work_task_edge = task_sub.add_parser("edge", help="Remove dependency edges between tasks.")
     edge_sub = p_work_task_edge.add_subparsers(dest="edge_command", metavar="<edge-command>")
     edge_sub.required = True
-    p_work_task_edge_add = edge_sub.add_parser("add", help="Add a dependency edge (source TYPE target).")
-    p_work_task_edge_add.add_argument("edge_type", choices=["blocks", "parent-child", "discovered-from"])
-    p_work_task_edge_add.add_argument("source", help="Source task id or unique prefix.")
-    p_work_task_edge_add.add_argument("target_id", help="Target task id or unique prefix.")
-    p_work_task_edge_add.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
-    )
-    p_work_task_edge_add.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_task_edge_remove = edge_sub.add_parser("remove", help="Remove a dependency edge by id or endpoints.")
     p_work_task_edge_remove.add_argument("--id", dest="edge_id", default=None, help="Edge id.")
     p_work_task_edge_remove.add_argument(
@@ -863,12 +823,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update."
     )
     p_work_task_edge_remove.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_task_edge_list = edge_sub.add_parser("list", help="List dependency edges.")
-    p_work_task_edge_list.add_argument("--task", dest="task_id", default=None, help="Limit to edges touching one task.")
-    p_work_task_edge_list.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
-    )
-    p_work_task_edge_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import = work_sub.add_parser("import", help="Add, list, show, or promote scanner-ready work imports.")
     p_work_import.add_argument("--from-bd-jsonl", type=Path, help="Stage an additive bd export snapshot in the inbox.")
     p_work_import.add_argument("--bd-version", help="Version of bd that produced the export, such as 1.3.1.")
@@ -912,12 +866,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_import_context.add_argument("--from-file", type=Path, default=None, help="Read context body from a file.")
     p_work_import_context.add_argument(
-        "--from-miseledger",
+        "--from-evidence",
+        dest="from_evidence",
         default=None,
         metavar="QUERY",
-        help="Fetch a Brigade-source evidence bundle from MiseLedger and print it as untrusted context.",
+        help="Fetch a Brigade-source evidence bundle from the evidence engine and print it as untrusted context.",
     )
-    p_work_import_context.add_argument("--limit", type=int, default=5, help="Maximum MiseLedger results to fetch.")
+    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
+    p_work_import_context.add_argument(
+        "--from-miseledger",
+        action=LegacyOption,
+        replacement="--from-evidence",
+        dest="from_evidence",
+        default=None,
+        help=argparse.SUPPRESS,
+    )
+    p_work_import_context.add_argument("--limit", type=int, default=5, help="Maximum evidence results to fetch.")
     p_work_import_context.add_argument(
         "--max-chars", type=int, default=20000, help="Maximum characters of body to fence."
     )
@@ -1108,6 +1072,30 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--metadata", action="append", default=[], help="Limit --all dismissal by metadata key=value. May be repeated."
     )
     p_work_import_dismiss.add_argument("--reason", default=None, help="Optional dismiss reason.")
+    p_work_import_bd = import_sub.add_parser(
+        "bd", help="Mirror bd issues and dependency edges into the task ledger. Reads bd only."
+    )
+    p_work_import_bd.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")
+    p_work_import_bd.add_argument(
+        "--bd-repo", type=Path, default=None, help="Repo whose bd project to read. Defaults to --target."
+    )
+    p_work_import_bd.add_argument("--bd-bin", default="bd", help="bd executable to run (default: bd on PATH).")
+    p_work_import_bd.add_argument(
+        "--from-jsonl", dest="bd_sync_input", type=Path, default=None, help="Read a saved bd export instead of bd."
+    )
+    p_work_import_bd.add_argument(
+        "--bd-version", dest="bd_sync_version", default=None, help="bd release that wrote --from-jsonl."
+    )
+    p_work_import_bd.add_argument("--dry-run", action="store_true", help="Report changes without writing.")
+    p_work_import_bd.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_export = work_sub.add_parser("export", help="Export work outcomes for other tools.")
+    export_sub = p_work_export.add_subparsers(dest="export_command", metavar="<export-command>")
+    p_work_export_bd = export_sub.add_parser(
+        "bd-outcomes", help="Write receipts and PR links per bd issue id as JSONL."
+    )
+    p_work_export_bd.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to read.")
+    p_work_export_bd.add_argument("--output", "-o", type=Path, required=True, help="JSONL file to write.")
+    p_work_export_bd.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_list = work_sub.add_parser("list", help="List recent Brigade work sessions.")
     p_work_list.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_list.add_argument("--limit", type=int, default=10, help="Maximum sessions to show.")

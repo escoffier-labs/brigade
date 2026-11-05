@@ -17,6 +17,7 @@ import urllib.request
 import pytest
 
 from scripts import pr_tier_shadow as shadow
+from tests._coverage_env import scrub_coverage_environ
 
 ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
@@ -493,6 +494,7 @@ def test_full_only_failures_stay_unconfirmed_and_timing_units_are_separate(evide
         "wrong-job-sha",
         "wrong-run",
         "shadow-incomplete",
+        "unfinished-job",
     ],
 )
 def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
@@ -532,6 +534,8 @@ def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
         jobs[0]["run_id"] = 124
     elif problem == "shadow-incomplete":
         selected["complete"] = False
+    elif problem == "unfinished-job":
+        jobs[0]["completed_at"] = None
     result = shadow.compare(IDENTITY, run, jobs, logs, selected, errors=errors)
     assert result["status"] == "incomplete"
     assert result["full_only_candidate_count"] is None
@@ -576,7 +580,8 @@ def test_trial_boundaries_are_utc_and_expiry_retains_report(tmp_path, monkeypatc
 
 
 @pytest.mark.parametrize("broken", [False, True])
-def test_real_pytest_run_retains_outcomes_and_durations(tmp_path, broken):
+def test_real_pytest_run_retains_outcomes_and_durations(tmp_path, monkeypatch, broken):
+    scrub_coverage_environ(monkeypatch)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_tiny.py").write_text(
         "def test_ok():\n    assert True\n\ndef test_failure():\n    assert False\n"
@@ -884,7 +889,8 @@ def test_successful_shard_zero_requires_its_auxiliary_pytest_summary(evidence):
     assert result["full_only_candidate_count"] is None
 
 
-def test_worker_uses_full_shard_coverage_settings_in_actual_child(tmp_path):
+def test_worker_uses_full_shard_coverage_settings_in_actual_child(tmp_path, monkeypatch):
+    scrub_coverage_environ(monkeypatch)
     output = tmp_path / "evidence"
     (tmp_path / "test_settings.py").write_text(
         "import os\n"
@@ -901,7 +907,8 @@ def test_worker_uses_full_shard_coverage_settings_in_actual_child(tmp_path):
     assert (output / ".coverage").is_file()
 
 
-def test_actual_subtest_durations_are_not_added_twice_and_failures_are_retained(tmp_path):
+def test_actual_subtest_durations_are_not_added_twice_and_failures_are_retained(tmp_path, monkeypatch):
+    scrub_coverage_environ(monkeypatch)
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests/test_sub.py").write_text(
         "import time\n"
