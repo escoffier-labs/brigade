@@ -2,16 +2,24 @@
 //! compare-and-set on revision with `log_epoch`, idempotency, grants and
 //! trust rules, behind the authority protocol in [`writer`].
 //!
-//! Not here yet: search and the lexical index (S13b), proposals and decisions
-//! (S19a), embedding (S15) and content scanning (S18). The scan hook reports
-//! unavailable, so no write raises trust.
+//! `search` answers from the lexical index in [`index`] (S13b), with the
+//! scorer and tokenizer copied from Python in [`text`].
+//!
+//! Not here yet: proposals and decisions (S19a), embedding (S15) and content
+//! scanning (S18). The scan hook reports unavailable, so no write raises trust.
 pub mod auth;
 pub mod ids;
+pub mod index;
 pub mod ops;
+mod pytables;
 pub mod scan;
 pub mod schema;
+pub mod search;
+pub mod text;
 pub mod writer;
 
+#[cfg(test)]
+mod lexical_tests;
 #[cfg(test)]
 mod powercut;
 #[cfg(test)]
@@ -37,9 +45,10 @@ pub const ADMIN: &str = "hub:admin";
 /// Card text returned per `card` call, in characters.
 pub const CHUNK_CHARS: usize = 30_000;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
+/// How long `search` with `min_seq` waits for the index to reach it.
+pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
 /// Actions in the route table that later slices build.
 const LATER: &[&str] = &[
-    "search",
     "propose",
     "decide",
     "rollback",
@@ -83,6 +92,16 @@ pub struct Store {
     clock: ids::Clock,
     scanner: Arc<dyn Scanner>,
     last_sweep: std::sync::atomic::AtomicI64,
+    index: Arc<index::Index>,
+}
+
+impl Drop for Store {
+    /// Stops and joins the index rebuild thread first, so its read-only
+    /// connection is closed before anything swaps the memory file. The
+    /// writer then answers what is queued and closes its connections.
+    fn drop(&mut self) {
+        self.index.stop();
+    }
 }
 
 struct Conn<'a>(&'a rusqlite::Connection);
@@ -99,7 +118,7 @@ pub fn read_only(body: &[u8]) -> bool {
     serde_json::from_slice::<Json>(body).is_ok_and(|v| {
         matches!(
             v.get("action").and_then(Json::as_str),
-            Some("card" | "log" | "status")
+            Some("card" | "log" | "search" | "status")
         )
     })
 }
@@ -119,6 +138,8 @@ impl Store {
         let created = !options.memory.exists();
         let db = worker::open_file(&options.memory, true).map_err(|e| e.to_string())?;
         schema::migrate(&db, options.clock.now_ms())?;
+        // A restart rebuilds the index from the store before the hub serves.
+        let index = index::Index::open(&db, options.memory.clone()).map_err(|e| e.to_string())?;
         if created {
             // A new file's directory entry must be durable before any write is acknowledged.
             worker::sync_directory(&db).map_err(|e| e.to_string())?;
@@ -131,6 +152,7 @@ impl Store {
             options.admin_digest.clone(),
         );
         config.hook = options.hook;
+        config.index = Some(index.clone());
         let writer = writer::Writer::start(config, db, options.arbiter.clone())
             .map_err(|e| e.to_string())?;
         Ok(Self {
@@ -142,7 +164,12 @@ impl Store {
             clock: options.clock,
             scanner: options.scanner,
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
+            index,
         })
+    }
+    /// The lexical index, for `/metrics` and `status`.
+    pub fn index(&self) -> &Arc<index::Index> {
+        &self.index
     }
     pub fn metrics(&self) -> writer::Metrics {
         self.writer.metrics.lock().unwrap().clone()
@@ -195,6 +222,7 @@ impl Store {
         let action = map.get("action").and_then(Json::as_str).unwrap_or("");
         match action {
             "card" | "log" | "status" => self.read(credential, action, map).await,
+            "search" => self.search(credential, map).await,
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
@@ -485,15 +513,49 @@ impl Store {
         })
     }
 
+    async fn search(&self, credential: &Credential, map: &Map<String, Json>) -> Reply {
+        let request = match search::parse(map) {
+            Ok(r) => r,
+            Err(reply) => return reply,
+        };
+        let snapshot = match request.min_seq {
+            Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
+            None => self.index.current(),
+        };
+        let credential = credential.clone();
+        match self
+            .readers
+            .submit(move |c| search::run(&Conn(c), &credential, &request, &snapshot))
+            .await
+        {
+            Ok(reply) => reply,
+            Err(_) => Reply::new(
+                503,
+                json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+            ),
+        }
+    }
+
     async fn read(&self, credential: &Credential, action: &str, map: &Map<String, Json>) -> Reply {
         let credential = credential.clone();
         let map = map.clone();
         let action = action.to_string();
         let now_ms = self.clock.now_ms();
         let scan = self.scanner.describe();
+        let indexed_seq = self.index.current().indexed_seq;
         match self
             .readers
-            .submit(move |c| reads(&Conn(c), &credential, &action, &map, now_ms, scan))
+            .submit(move |c| {
+                reads(
+                    &Conn(c),
+                    &credential,
+                    &action,
+                    &map,
+                    now_ms,
+                    scan,
+                    indexed_seq,
+                )
+            })
             .await
         {
             Ok(reply) => reply,
@@ -534,6 +596,7 @@ fn reads<T: ReadTx + ?Sized>(
     map: &Map<String, Json>,
     now_ms: i64,
     scan: (bool, Option<String>),
+    indexed_seq: i64,
 ) -> rusqlite::Result<Reply> {
     let allowed: &[&str] = match action {
         "card" => &["action", "card_id", "scope", "revision", "offset"],
@@ -579,7 +642,7 @@ fn reads<T: ReadTx + ?Sized>(
                     "cards": count("SELECT count(*) FROM memory_cards WHERE state='live'")?,
                     "revisions": count("SELECT count(*) FROM memory_card_revisions")?,
                     "seq": count("SELECT COALESCE(max(seq),0) FROM memory_events")?,
-                    "indexed_seq": 0,
+                    "indexed_seq": indexed_seq,
                     "log_epoch": epoch,
                     "hub_time": ids::isoformat(now_ms),
                     "scan": {"available": scan.0, "ruleset_version": scan.1},

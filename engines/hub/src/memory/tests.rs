@@ -68,18 +68,18 @@ impl Scanner for Fixed {
     }
 }
 
-struct Hub {
-    dir: PathBuf,
-    hub: PathBuf,
-    clock: PathBuf,
-    arbiter: Arc<Arbiter>,
-    store: Option<Store>,
+pub(super) struct Hub {
+    pub(super) dir: PathBuf,
+    pub(super) hub: PathBuf,
+    pub(super) clock: PathBuf,
+    pub(super) arbiter: Arc<Arbiter>,
+    pub(super) store: Option<Store>,
 }
 impl Hub {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self::with(Arc::new(scan::Unavailable), None)
     }
-    fn with(scanner: Arc<dyn Scanner>, hook: Option<writer::Hook>) -> Self {
+    pub(super) fn with(scanner: Arc<dyn Scanner>, hook: Option<writer::Hook>) -> Self {
         let dir = temp_dir();
         let hub = hub_fixture(&dir);
         let mut h = Self {
@@ -93,10 +93,10 @@ impl Hub {
         h.open(scanner, hook);
         h
     }
-    fn memory(&self) -> PathBuf {
+    pub(super) fn memory(&self) -> PathBuf {
         self.dir.join("fleet-hub-memory.db")
     }
-    fn open(&mut self, scanner: Arc<dyn Scanner>, hook: Option<writer::Hook>) {
+    pub(super) fn open(&mut self, scanner: Arc<dyn Scanner>, hook: Option<writer::Hook>) {
         let readers = Arc::new(ReaderPool::open_unchecked(&self.hub, 1, 64, READ_LIMIT).unwrap());
         self.store = Some(
             Store::open(
@@ -116,26 +116,26 @@ impl Hub {
             .unwrap(),
         );
     }
-    fn set_clock(&self, ms: i64) {
+    pub(super) fn set_clock(&self, ms: i64) {
         std::fs::write(&self.clock, format!("{}", ms as f64 / 1000.0)).unwrap();
     }
-    fn now(&self) -> i64 {
+    pub(super) fn now(&self) -> i64 {
         ids::Clock {
             file: Some(self.clock.clone()),
         }
         .now_ms()
     }
-    fn id(&self) -> String {
+    pub(super) fn id(&self) -> String {
         ids::mint(self.now())
     }
-    async fn call(&self, token: &str, body: Json) -> Reply {
+    pub(super) async fn call(&self, token: &str, body: Json) -> Reply {
         let store = self.store.as_ref().unwrap();
         match store.authenticate(token).await {
             Ok(c) => store.handle(&c, body.to_string().as_bytes()).await,
             Err(r) => r,
         }
     }
-    async fn put(
+    pub(super) async fn put(
         &self,
         token: &str,
         scope: &str,
@@ -151,7 +151,7 @@ impl Hub {
         )
         .await
     }
-    async fn epoch(&self) -> String {
+    pub(super) async fn epoch(&self) -> String {
         self.call(ADMIN_TOKEN, json!({"action":"status"}))
             .await
             .body["log_epoch"]
@@ -159,7 +159,7 @@ impl Hub {
             .unwrap()
             .to_string()
     }
-    fn events(&self) -> i64 {
+    pub(super) fn events(&self) -> i64 {
         Connection::open(self.memory())
             .unwrap()
             .query_row("SELECT count(*) FROM memory_events", [], |r| r.get(0))
@@ -172,10 +172,10 @@ impl Drop for Hub {
         let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
-fn rev(r: &Reply) -> i64 {
+pub(super) fn rev(r: &Reply) -> i64 {
     r.body["event"]["revision"].as_i64().unwrap_or(-1)
 }
-fn code(r: &Reply) -> &str {
+pub(super) fn code(r: &Reply) -> &str {
     r.body["code"].as_str().unwrap_or("")
 }
 
@@ -1315,12 +1315,12 @@ fn disk_pressure_refuses_memory_writes_but_not_reads() {
     assert_eq!(pressure_refusal(&disk, put), None);
     // A WAL past 1 GiB turns pressure on.
     disk.update(2 * 1024 * 1024 * 1024, None);
-    for read in ["card", "log", "status"] {
+    for read in ["card", "log", "search", "status"] {
         let body = format!(r#"{{"action":"{read}"}}"#);
         assert_eq!(pressure_refusal(&disk, body.as_bytes()), None, "{read}");
     }
     for write in [
-        "put", "import", "retire", "handoff", "capture", "grant", "search", "nope",
+        "put", "import", "retire", "handoff", "capture", "grant", "nope",
     ] {
         let body = format!(r#"{{"action":"{write}"}}"#);
         assert_eq!(

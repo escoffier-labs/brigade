@@ -157,10 +157,10 @@ S7 claims handlers run with `--route-mode claims=native` (proxy by default).
 This serves `GET /claims` and every `POST /claims` action natively, with
 generation fencing, retired holders, lease expiry and `claim.expired` events
 through the same writer as registration. Three cases stay on the Python
-upstream: `GET /owners`, which joins policy, sessions and Grok Bot state; a
-`GET /claims` while Grok Bot leases are active, which needs Python's display
-projection; and a `POST /claims` whose target is not ASCII, since its refusal
-text carries Python's `repr()` of the target.
+upstream. `GET /owners` joins policy, sessions and Grok Bot state. A
+`GET /claims` while Grok Bot leases are active needs Python's display
+projection. A `POST /claims` whose target is not ASCII needs Python's
+`repr()` of the target in its refusal text.
 
 Hub memory (S13a) runs with `--route-mode memory=native`. This serves
 `POST /memory` from `fleet-hub-memory.db` beside the hub database, which the
@@ -177,6 +177,65 @@ After restoring the memory file from a copy, start a new `log_epoch` before
 serving it (`brigade_hub::memory::schema::rotate_epoch`, which S31's restore
 tool calls). `/metrics` adds `brigade_hub_memory_*` lines for batches,
 hub-lock residence and wait, authority timeouts and the residence bucket.
+
+`search` (S13b) answers from an in-memory lexical index that the hub builds
+from the memory file at start and the memory writer updates after every
+commit. It scores with BM25 (k1=1.2, b=0.75), using the local scorer's
+tokenizer and card fields, over the live cards in the scopes the caller can
+read, and breaks ties by `cards/<card_id>.md`, then scope. A write answers
+with its `seq`. A `search` with `min_seq` waits up to 500 ms for the index to
+reach it and otherwise answers with `retrieval.stale: true`. If the index
+cannot follow a commit, searches keep the last good snapshot, marked stale,
+until a background rebuild from the store replaces it. A failed rebuild
+retries on its own, starting at 100 ms and doubling to 30 s, so a card
+retired during an index failure leaves search without waiting for another
+write, and a new index failure during that backoff starts the next try at
+once. Each commit adds one delta segment. Whenever the newest 8 deltas share
+a merge level, they merge into one delta a level up, from their postings
+alone, so small commits never rebuild the main segment. Past 64 deltas,
+every delta merges into one. A rebuild starts once delta documents pass 10%
+of the main segment or once a quarter of the indexed documents are dead
+(each needs at least 256 documents). When the hub stops, it stops and joins
+the rebuild thread before the memory writer closes, so no thread keeps the
+memory file open after it. `/metrics` adds the committed and indexed `seq`, the lag
+between them, the stale flag, segments, documents, publications, failures,
+rebuilds and the last build's time.
+
+The query is refused with `memory_query_invalid` when it is over 4,096 UTF-8
+bytes as sent (a guard on normalization's work, with its own message) or
+over 256 characters after normalization. A query with no word characters is
+matched literally, as the local scorer does, and every match scores 0.0. The
+hub reads the visible cards in answer order (`cards/<card_id>.md`, then
+scope), up to 1,000 cards or 4 MiB of card text. When more cards are visible
+than that budget, it also stops at `limit` matches. Its `matches` are the same
+as a full scan's first `limit`. When every visible card fits the budget,
+`match_count` is exact, as in the local scorer. A scan that stops before the
+last visible card answers `retrieval.truncated: true`, and then `match_count`
+counts only the matches it read, so it is a lower bound.
+
+The Unicode tables in `src/memory/pytables.rs` and the goldens in
+`tests/lexical-golden.json` come from Python 3.12, the version the Hub
+workflow pins, and R0 parity holds against Python 3.12. Brigade runs on
+Python 3.11 and later, and a local search on another minor version can
+tokenize characters that version's Unicode data classifies differently. After
+a change to the local scorer or a new pinned Python minor version, regenerate
+both with `PYTHONPATH=src python engines/hub/tests/lexical_golden.py --write`
+from the repository root. `tests/memory.py` checks that they are current and
+runs gate R0 (same ids, order and scores as `bm25`) on
+`evals/memory-retrieval`.
+
+Front-matter lists go through a copy of the subset of `ast.literal_eval` that
+cards use, including base-prefixed integers, lone surrogate escapes (shown as
+U+FFFD), trailing `#` comments and CPython's limit of 200 nested brackets.
+Where it differs, the hub keeps the raw text: a `\N{name}` escape, because
+the hub ships no Unicode name table, and a base-prefixed integer over 4,300
+decimal digits, where Python raises `ValueError`. A card with such a line can
+score differently from the local search. A surrogate pair written as two
+escapes, as `json.dumps` writes 🎉, is two lone surrogates to Python and two
+U+FFFD to the hub, so the hub's `tags` show `��` where a local search shows
+🎉. Tokens and scores are the same. Joining the pair for display alone would
+need a second copy of each tag, because the literal match must still see two
+characters as Python does.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.
