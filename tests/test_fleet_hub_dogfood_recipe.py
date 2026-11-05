@@ -893,11 +893,12 @@ def test_backup_job_copies_each_file_in_its_own_call(tmp_path):
         "      - ./hub:/brigade:ro\n" in (RECIPE / "compose.yaml").read_text(encoding="utf-8").split("\n  backup:\n")[1]
     )
     calls = backup_job.calls(Path("/var/lib/brigade"), Path("/backups"), ["--json"])
-    assert [argv[argv.index("--db") + 1] for _, argv in calls] == [
-        "/var/lib/brigade/fleet-hub.db",
-        "/var/lib/brigade/fleet-hub-memory.db",
+    # Compared as paths: the job runs in the Linux image, the test on any host.
+    assert [Path(argv[argv.index("--db") + 1]) for _, argv in calls] == [
+        Path("/var/lib/brigade/fleet-hub.db"),
+        Path("/var/lib/brigade/fleet-hub-memory.db"),
     ]
-    assert [argv[argv.index("--dest") + 1] for _, argv in calls] == ["/backups", "/backups/memory"]
+    assert [Path(argv[argv.index("--dest") + 1]) for _, argv in calls] == [Path("/backups"), Path("/backups/memory")]
     data = tmp_path / "data"
     _hub_files(data)
     done = _run_backup_job(tmp_path, data)
@@ -941,6 +942,7 @@ def test_backup_job_refuses_a_db_argument():
         backup_job.main(["--db", "/elsewhere.db"])
 
 
+@pytest.mark.skipif(os.name == "nt", reason="the S31 backups check reads POSIX owners and modes on the Linux host")
 def test_backups_check_reads_hub_and_memory_copies_apart(tmp_path, monkeypatch):
     import argparse
 
