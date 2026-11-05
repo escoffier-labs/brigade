@@ -2132,6 +2132,35 @@ def test_a_scope_refused_mid_pull_is_saved_before_a_later_failure(hub, tmp_path)
     assert matches == []
 
 
+def test_a_pull_refused_every_read_grant_discards_the_replica(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "a1", "a confidential app card")
+    sync.pull(target, client(hub), settings(target))
+    assert _card_ids(store.replica(target)) == {"a1"}
+    hub.status_reply = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    with pytest.raises(hubc.HubRefusal):
+        sync.pull(target, client(hub), settings(target))
+    assert not store.replica(target).exists
+    hub.status_reply = None
+    hub.mode = "down"
+    matches, _ = hub_search._replica_matches(target, "confidential", client(hub).identity, settings(target))
+    assert matches == []
+
+
+def test_push_resends_a_card_published_under_an_old_epoch(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\npublished before the restore\n")
+    before = hub.snapshot()
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [p["card_id"] for p in report["published"]] == ["one"]
+    hub.restore(before)  # the restored hub never saw the card
+    sync.pull(target, client(hub), settings(target))
+    report = sync.push(target, client(hub), settings(target))
+    assert [p["card_id"] for p in report["published"]] == ["one"]
+    assert hub.cards[("repo:test/app", "one")]["text"] == "# One\npublished before the restore\n"
+    # Published under the current epoch now: the next push sends nothing.
+    assert sync.push(target, client(hub), settings(target))["published"] == []
+
+
 def test_push_adopts_a_replica_head_only_under_the_hubs_current_epoch(hub, tmp_path):
     target = workspace(tmp_path, mode="sync")
     _put(hub, "repo:test/app", "x", "# X\nshared\n")

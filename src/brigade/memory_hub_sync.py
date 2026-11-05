@@ -79,6 +79,15 @@ def forget_other_principal(target: Path, hub: str, principal: object) -> bool:
     return False
 
 
+def forget_hub_replica(target: Path, hub: str) -> None:
+    """Discard the live replica and any rebuild pulled from `hub`. Takes the state lock."""
+    with store.locked(target):
+        if store.replica(target).meta.get("hub") == hub:
+            store.discard_replica(target)
+        if store.building(target).meta.get("hub") == hub:
+            store.discard_building(target)
+
+
 def _card_text(
     client: hubc.MemoryHubClient, scope: str, card_id: str, revision: int, epoch: str
 ) -> dict[str, Any] | None:
@@ -118,7 +127,14 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
 
 
 def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
-    status = read_status(client, settings)
+    try:
+        status = read_status(client, settings)
+    except hubc.HubRefusal as exc:
+        if exc.status == 403 and exc.code == "memory_grant_missing":
+            # This credential can read no scope on this hub now: nothing
+            # pulled from it may be served by fallback search later.
+            forget_hub_replica(target, client.identity)
+        raise
     epoch = str(status.get("log_epoch") or "")
     principal = str(status["principal"])
     readable = set(status["readable_scopes"]) & set(settings.read_scopes)
@@ -520,6 +536,11 @@ def _publishable(
             skipped.append({"path": card["rel"], "reason": "pending"})
             continue
         last = state.get(card["card_id"])
+        if isinstance(last, dict) and epoch and last.get("log_epoch") and last.get("log_epoch") != epoch:
+            # Published under another log_epoch: the restored hub may not hold
+            # this card, so the old base proves nothing. Adopt a current head
+            # or send the card again; a base the hub rejects becomes a proposal.
+            last = None
         if isinstance(last, dict) and last.get("content_hash") == card["content_hash"]:
             continue
         if last is None and matches_head:
