@@ -36,6 +36,8 @@ pub struct Request {
     pub limit: usize,
     pub scopes: Option<Vec<String>>,
     pub min_seq: Option<i64>,
+    pub prompt: bool,
+    pub push: bool,
 }
 
 fn invalid(message: &str) -> Reply {
@@ -140,6 +142,11 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         limit,
         scopes,
         min_seq,
+        prompt: matches!(
+            map.get("query_source").and_then(Json::as_str),
+            Some("prompt")
+        ),
+        push: false,
     })
 }
 
@@ -215,6 +222,7 @@ pub fn run<T: ReadTx + ?Sized>(
     credential: &Credential,
     request: &Request,
     snap: &Snapshot,
+    scanner: &dyn super::scan::Scanner,
 ) -> rusqlite::Result<Reply> {
     if !auth::has_right(tx, credential, None, "read")? {
         return Ok(error(
@@ -255,6 +263,29 @@ pub fn run<T: ReadTx + ?Sized>(
     } else {
         (snap.score(&allowed, &request.tokens), true)
     };
+    // Push revalidates the exact snapshot head and its current scan receipt.
+    // Unavailable, pending, flagged, retired and stale versions never leave here.
+    let hits = if request.push {
+        let mut eligible = Vec::new();
+        let (available, ruleset) = scanner.describe();
+        if available {
+            if let Some(ruleset) = ruleset {
+                for (n, score) in hits {
+                    let d = snap.doc(n);
+                    let rows = tx.query(
+                        "SELECT 1 FROM memory_cards c JOIN memory_card_revisions r ON r.scope=c.scope AND r.card_id=c.card_id AND r.revision=c.revision JOIN memory_scans s ON s.content_hash=c.content_hash WHERE c.scope=?1 AND c.card_id=?2 AND c.revision=?3 AND c.content_hash=?4 AND c.state='live' AND c.trust IN ('imported','reviewed','policy-promoted') AND r.scan_state='clean' AND s.ruleset_version=?5 AND s.state='clean'",
+                        &[Value::Text(scopes[d.scope as usize].to_string()), Value::Text(d.card_id.to_string()), Value::Integer(d.revision), Value::Text(d.content_hash.to_string()), Value::Text(ruleset.clone())],
+                    )?;
+                    if !rows.is_empty() {
+                        eligible.push((n, score));
+                    }
+                }
+            }
+        }
+        eligible
+    } else {
+        hits
+    };
     let total = hits.len();
     let matches: Vec<Json> = snap
         .top(hits, TOP)
@@ -263,7 +294,7 @@ pub fn run<T: ReadTx + ?Sized>(
         .enumerate()
         .map(|(rank, (n, score))| {
             let d = snap.doc(n);
-            json!({
+            let hit = json!({
                 "path": format!("cards/{}.md", d.card_id),
                 "scope": scopes[d.scope as usize],
                 "card_id": &*d.card_id,
@@ -276,9 +307,29 @@ pub fn run<T: ReadTx + ?Sized>(
                 "content_hash": &*d.content_hash,
                 "trust": &*d.trust,
                 "ranks": {"lexical": rank + 1},
-            })
+            });
+            if request.prompt {
+                let Some(body) = blob(tx, &d.content_hash)? else {
+                    return Ok(
+                        json!({"card_id": &*d.card_id, "blocked": "memory_scan_unavailable"}),
+                    );
+                };
+                Ok(super::scan::prompt_hit(
+                    scanner,
+                    &d.card_id,
+                    hit,
+                    &[
+                        &d.fields.title,
+                        &d.fields.summary,
+                        &d.fields.tags.join("\n"),
+                        &body,
+                    ],
+                ))
+            } else {
+                Ok(hit)
+            }
         })
-        .collect();
+        .collect::<rusqlite::Result<_>>()?;
     let stale = snap.stale || request.min_seq.is_some_and(|m| snap.indexed_seq < m);
     let mut retrieval = json!({"mode": "lexical", "degraded": false, "stale": stale});
     if !complete {
@@ -287,6 +338,7 @@ pub fn run<T: ReadTx + ?Sized>(
     Ok(Reply::new(
         200,
         json!({
+            "content_trust": "untrusted",
             "query": request.query,
             "matches": matches,
             "match_count": total,

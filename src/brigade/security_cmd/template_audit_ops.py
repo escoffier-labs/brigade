@@ -66,7 +66,10 @@ def _is_placeholder(value: str) -> bool:
 
 def _redact_secret_evidence(line: str) -> str:
     if _contains_private_key_material(line):
-        return PRIVATE_KEY_RE.sub("-----BEGIN REDACTED PRIVATE KEY-----", line)
+        return PRIVATE_KEY_RE.sub(
+            "-----BEGIN REDACTED PRIVATE KEY-----",  # content-guard: allow private-key-block
+            line,
+        )  # content-guard: allow private-key-block
 
     def redact_secret(match: re.Match[str]) -> str:
         return match.group(0).replace(match.group(2), "[REDACTED]")

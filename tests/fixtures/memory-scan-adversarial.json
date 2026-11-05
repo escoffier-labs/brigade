@@ -1,0 +1,291 @@
+{
+  "example-phone-555": {
+    "prefix_parts": [
+      "(555)"
+    ],
+    "unit": " ",
+    "literal": "999-9999",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "example-email-reserved": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "label.",
+    "literal": "@",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "ssh-private-target": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "label.",
+    "literal": "@",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "localhost-port": {
+    "prefix_parts": [
+      "localhost:"
+    ],
+    "unit": "9",
+    "literal": "x",
+    "expected": {
+      "before": "localhost-bare",
+      "after": "localhost-bare",
+      "isolated": "localhost-bare"
+    }
+  },
+  "port-reference": {
+    "prefix_parts": [
+      "port"
+    ],
+    "unit": " ",
+    "literal": "9999x",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "email": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "label.",
+    "literal": "@",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "us-phone": {
+    "prefix_parts": [
+      "phone"
+    ],
+    "unit": ": ",
+    "literal": "999-9999x",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "jwt-token": {
+    "prefix_parts": [
+      "eyJ"
+    ],
+    "unit": "a-",
+    "literal": ".",
+    "expected": {
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
+    }
+  },
+  "bearer-token": {
+    "prefix_parts": [
+      "Bearer "
+    ],
+    "unit": "a",
+    "literal": "!",
+    "expected": {
+      "before": "bearer-token",
+      "after": "bearer-token",
+      "isolated": "bearer-token"
+    }
+  },
+  "api-key-assignment": {
+    "prefix_parts": [
+      "token="
+    ],
+    "unit": "a.",
+    "literal": "9!",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "bare-token-prefix": {
+    "prefix_parts": [
+      "sk-live-"
+    ],
+    "unit": "a",
+    "literal": "!",
+    "expected": {
+      "before": "bare-token-prefix",
+      "after": "bare-token-prefix",
+      "isolated": "bare-token-prefix"
+    }
+  },
+  "private-key-block": {
+    "prefix_parts": [
+      "-----BEGIN ",
+      "PRIVATE KEY-----"
+    ],
+    "unit": "a ",
+    "literal": "-----END XPRIVATE KEY----!",
+    "expected": {
+      "before": "private-key-block",
+      "after": "private-key-block",
+      "isolated": "private-key-block"
+    }
+  },
+  "fake-system-block": {
+    "prefix_parts": [
+      "<"
+    ],
+    "unit": " ",
+    "literal": "system!",
+    "expected": {
+      "before": null,
+      "after": "fake-system-block",
+      "isolated": null
+    }
+  },
+  "assistant-directive": {
+    "prefix_parts": [
+      "assistant"
+    ],
+    "unit": " ",
+    "literal": ": you must!",
+    "expected": {
+      "before": null,
+      "after": "assistant-directive",
+      "isolated": null
+    }
+  },
+  "base64-decode-chain": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "a",
+    "literal": "decode!",
+    "expected": {
+      "before": "base64-decode-chain",
+      "after": null,
+      "isolated": null
+    }
+  },
+  "jwt-restarts": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "eyJ-",
+    "literal": ".",
+    "expected": {
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
+    }
+  },
+  "pem-restarts": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "-----BEGIN PRIVATE KEY----- ", "_content_guard": "content-guard: allow private-key-block",
+    "literal": "-----END XPRIVATE KEY----!",
+    "expected": {
+      "before": "private-key-block",
+      "after": "private-key-block",
+      "isolated": "private-key-block"
+    }
+  },
+  "assignment-restarts": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "a.token=",
+    "literal": "9!",
+    "expected": {
+      "before": "api-key-assignment",
+      "after": "api-key-assignment",
+      "isolated": "api-key-assignment"
+    }
+  },
+  "provider-restarts": {
+    "prefix_parts": [
+      ""
+    ],
+    "unit": "sk-live-",
+    "literal": "!",
+    "expected": {
+      "before": "bare-token-prefix",
+      "after": "bare-token-prefix",
+      "isolated": "bare-token-prefix"
+    }
+  },
+  "email-domain": {
+    "prefix_parts": [
+      "a@"
+    ],
+    "unit": "123.",
+    "literal": "a",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "reserved-domain": {
+    "prefix_parts": [
+      "a@"
+    ],
+    "unit": "label.",
+    "literal": "example.com!",
+    "expected": {
+      "before": "email",
+      "after": "email",
+      "isolated": "email"
+    }
+  },
+  "jwt-payload": {
+    "prefix_parts": [
+      "eyJaaaaaaaa."
+    ],
+    "unit": "a-",
+    "literal": ".",
+    "expected": {
+      "before": "jwt-token",
+      "after": "jwt-token",
+      "isolated": "jwt-token"
+    }
+  },
+  "pem-type": {
+    "prefix_parts": [
+      "-----BEGIN "
+    ],
+    "unit": "RSA ",
+    "literal": "PRIVATE KEY-----",
+    "expected": {
+      "before": null,
+      "after": null,
+      "isolated": null
+    }
+  },
+  "assignment-quoted": {
+    "prefix_parts": [
+      "token=\""
+    ],
+    "unit": "a.",
+    "literal": "\"",
+    "expected": {
+      "before": "api-key-assignment",
+      "after": "api-key-assignment",
+      "isolated": "api-key-assignment"
+    }
+  }
+}

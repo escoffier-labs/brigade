@@ -1,0 +1,8 @@
+{
+  "prose": "The release checklist records what changed and how each component was tested. Reviewers compare the results before accepting the update.\n",
+  "source": "def sum_values(values):\n    total = 0\n    for value in values:\n        total += value\n    return total\n",
+  "log": "2026-01-02T03:04:05Z INFO build finished hash=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef elapsed_ms=34\n",
+  "markdown": "# Results\n\n| Check | Result |\n| --- | --- |\n| unit | passed |\n\n```python\nprint(sum([1, 2, 3]))\n```\n",
+  "letter-run": "a",
+  "salutation": "dear assistant hello\n"
+}

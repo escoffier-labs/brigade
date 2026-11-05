@@ -6,7 +6,12 @@ rust-version = "1.85"
 license = "MIT"
 publish = false
 
+[features]
+default = ["memory-scan"]
+memory-scan = ["dep:brigade-guard"]
+
 [dependencies]
+brigade-guard = { path = "../brigade-guard", optional = true }
 axum = "0.8"
 clap = { version = "=4.5.60", features = ["derive"] }
 futures-util = "0.3"

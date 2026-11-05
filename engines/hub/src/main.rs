@@ -1400,7 +1400,7 @@ async fn start_and_serve(
                     clock: brigade_hub::memory::ids::Clock {
                         file: native_clock.clone().map(Into::into),
                     },
-                    scanner: Arc::new(brigade_hub::memory::scan::Unavailable),
+                    scanner: brigade_hub::memory::scan::bundled(),
                     arbiter: arbiter.clone(),
                     hook: None,
                 },

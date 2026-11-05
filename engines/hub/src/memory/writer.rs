@@ -42,6 +42,7 @@ pub struct Config {
     pub hub: PathBuf,
     pub admin_digest: String,
     pub capacity: usize,
+    pub scanner: Arc<dyn super::scan::Scanner>,
     /// Wait for the memory lock: only a truncating checkpoint can hold it.
     pub memory_wait: Duration,
     /// Wait for the hub lock once the turn is granted (the Python upstream).
@@ -62,6 +63,7 @@ impl Config {
             hub,
             admin_digest,
             capacity: 1024,
+            scanner: Arc::new(super::scan::Unavailable),
             memory_wait: Duration::from_millis(250),
             hub_wait: Duration::from_secs(2),
             turn_wait: Duration::from_secs(5),
@@ -273,12 +275,17 @@ pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
 
 /// Apply one command inside its savepoint. A refusal or error rolls the
 /// savepoint back, so only successful commands leave rows behind.
-fn apply_one(db: &Connection, p: &Prepared, authority: &Authority) -> Answer {
+fn apply_one(
+    db: &Connection,
+    p: &Prepared,
+    authority: &Authority,
+    scanner: &dyn super::scan::Scanner,
+) -> Answer {
     if db.execute_batch("SAVEPOINT command").is_err() {
         return Err(storage("storage-error"));
     }
     let result = catch_unwind(AssertUnwindSafe(|| {
-        ops::apply(&worker::Tx(db) as &dyn WriteTx, p, authority)
+        ops::apply(&worker::Tx(db) as &dyn WriteTx, p, authority, scanner)
     }));
     if db.is_autocommit() {
         return Err(storage("storage-error"));
@@ -471,7 +478,9 @@ pub(crate) fn run(
                     &config.admin_digest,
                     p.command.action.needs_policy(),
                 ) {
-                    Ok(authority) => apply_one(&db, &p.command, &authority),
+                    Ok(authority) => {
+                        apply_one(&db, &p.command, &authority, config.scanner.as_ref())
+                    }
                     Err(refusal) => refusal,
                 };
                 results.push((p, result));

@@ -1,0 +1,214 @@
+{
+  "jwt-token:payload": {
+    "prefix_parts": [
+      "eyJaaaaaaaa."
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ".aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "rule": "jwt-token"
+  },
+  "jwt-token:header": {
+    "prefix_parts": [
+      "eyJ"
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ".aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "rule": "jwt-token"
+  },
+  "jwt-token:signature": {
+    "prefix_parts": [
+      "eyJaaaaaaaa.aaaaaaaa."
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "jwt-token"
+  },
+  "bearer-token:jwt": {
+    "prefix_parts": [
+      "Authorization: Bearer eyJaaaaaaaa."
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ".aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    ],
+    "rule": "jwt-token"
+  },
+  "bearer-token:opaque": {
+    "prefix_parts": [
+      "Authorization: Bearer "
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bearer-token"
+  },
+  "api-key-assignment:quoted": {
+    "prefix_parts": [
+      "token: \""
+    ],
+    "repeat": 4097,
+    "unit": "a",
+    "suffix_parts": [
+      "\""
+    ],
+    "rule": "api-key-assignment"
+  },
+  "api-key-assignment:unquoted": {
+    "prefix_parts": [
+      "token: 1"
+    ],
+    "repeat": 5000,
+    "unit": "a",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "api-key-assignment"
+  },
+  "private-key-block:9000": {
+    "prefix_parts": [
+      "-----BEGIN ",
+      "PRIVATE KEY-----\n"
+    ],
+    "repeat": 140,
+    "unit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "suffix_parts": [
+      "-----END PRIVATE KEY-----"
+    ],
+    "rule": "private-key-block"
+  },
+  "private-key-block:8192": {
+    "prefix_parts": [
+      "-----BEGIN ",
+      "PRIVATE KEY-----\n"
+    ],
+    "repeat": 128,
+    "unit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "suffix_parts": [
+      "-----END PRIVATE KEY-----"
+    ],
+    "rule": "private-key-block"
+  },
+  "bare-token-prefix:sk-live-": {
+    "prefix_parts": [
+      "sk-live-"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:github_pat_": {
+    "prefix_parts": [
+      "github_pat_"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:ghp_": {
+    "prefix_parts": [
+      "ghp_"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:xoxb-": {
+    "prefix_parts": [
+      "xoxb-"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:AIza": {
+    "prefix_parts": [
+      "AIza"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:glpat-": {
+    "prefix_parts": [
+      "glpat-"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:AKIA": {
+    "prefix_parts": [
+      "AKIA"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "bare-token-prefix:ASIA": {
+    "prefix_parts": [
+      "ASIA"
+    ],
+    "repeat": 9000,
+    "unit": "A",
+    "suffix_parts": [
+      ""
+    ],
+    "rule": "bare-token-prefix"
+  },
+  "api-key-assignment:late-digit": {
+    "prefix_parts": [
+      "token: "
+    ],
+    "unit": "a",
+    "repeat": 4097,
+    "suffix_parts": [
+      "1"
+    ],
+    "rule": "api-key-assignment"
+  },
+  "private-key-block:rsa-10240-sized": {
+    "prefix_parts": [
+      "-----BEGIN ",
+      "RSA PRIVATE KEY-----\n"
+    ],
+    "unit": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+    "repeat": 124,
+    "suffix_parts": [
+      "-----END RSA PRIVATE KEY-----"
+    ],
+    "rule": "private-key-block"
+  }
+}

@@ -334,6 +334,8 @@ class MemoryHubClient:
             raise HubRefusal(401, {"error": str(payload.get("error") or "unauthorized"), "code": "unauthorized"})
         if 500 <= status and not payload.get("code"):
             raise HubUnavailable(f"http-{status}", status=status)
+        # Coded 503s, including non-retryable memory_scan_failed, are refusals.
+        # Sync turns these into proposals and removes any existing spool entry.
         raise HubRefusal(status, payload)
 
 
