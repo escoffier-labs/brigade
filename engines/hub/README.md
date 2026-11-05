@@ -189,19 +189,28 @@ cannot follow a commit, searches keep the last good snapshot, marked stale,
 until a background rebuild from the store replaces it. A failed rebuild
 retries on its own, starting at 100 ms and doubling to 30 s, so a card
 retired during an index failure leaves search without waiting for another
-write. A rebuild also starts once delta documents pass 10% of the main
-segment, once there are more than 64 delta segments, or once a quarter of
-the indexed documents are dead (each of the first and last needs at least
-256 documents). `/metrics` adds the committed and indexed `seq`, the lag
+write, and a new index failure during that backoff starts the next try at
+once. Each commit adds one delta segment. Whenever the newest 8 deltas share
+a merge level, they merge into one delta a level up, from their postings
+alone, so small commits never rebuild the main segment. Past 64 deltas,
+every delta merges into one. A rebuild starts once delta documents pass 10%
+of the main segment or once a quarter of the indexed documents are dead
+(each needs at least 256 documents). When the hub stops, it stops and joins
+the rebuild thread before the memory writer closes, so no thread keeps the
+memory file open after it. `/metrics` adds the committed and indexed `seq`, the lag
 between them, the stale flag, segments, documents, publications, failures,
 rebuilds and the last build's time.
 
 The query is refused with `memory_query_invalid` when it is over 4,096 UTF-8
 bytes as sent (a guard on normalization's work, with its own message) or
 over 256 characters after normalization. A query with no word characters is
-matched literally, as the local scorer does, but over at most 1,000 cards or
-4 MiB of card text per request, and a scan that stopped there answers
-`retrieval.truncated: true`.
+matched literally, as the local scorer does, and every match scores 0.0. The
+hub reads the visible cards in answer order (`cards/<card_id>.md`, then
+scope) and stops at `limit` matches, 1,000 cards or 4 MiB of card text,
+whichever comes first. Its `matches` are the same as a full scan's first
+`limit`. A scan that stops before the last visible card answers
+`retrieval.truncated: true`, and then `match_count` counts only the matches
+it read, so it is a lower bound.
 
 The Unicode tables in `src/memory/pytables.rs` and the goldens in
 `tests/lexical-golden.json` come from Python 3.12, the version the Hub
@@ -220,7 +229,12 @@ U+FFFD), trailing `#` comments and CPython's limit of 200 nested brackets.
 Where it differs, the hub keeps the raw text: a `\N{name}` escape, because
 the hub ships no Unicode name table, and a base-prefixed integer over 4,300
 decimal digits, where Python raises `ValueError`. A card with such a line can
-score differently from the local search.
+score differently from the local search. A surrogate pair written as two
+escapes, as `json.dumps` writes 🎉, is two lone surrogates to Python and two
+U+FFFD to the hub, so the hub's `tags` show `��` where a local search shows
+🎉. Tokens and scores are the same. Joining the pair for display alone would
+need a second copy of each tag, because the literal match must still see two
+characters as Python does.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.
