@@ -56,10 +56,19 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     expanded_secret_spans: set[tuple[int, int]] = set()
     js_fields: set[int] | None = None
 
+    pem_searched = False
+    pem_closing: re.Match[str] | None = None
     rules = list(active_policy.all_rules())
     for rule, spans in zip(rules, rule_spans(text, rules), strict=True):
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
         expanded_end = 0
+        # Built-in PEM spans are ordered and expanded_end makes them disjoint.
+        # Only earlier rules can overlap them, even with many missing ENDs.
+        precedence_spans = (
+            occupied.copy()
+            if rule.id == "private-key-block" and any(rule is default for default in DEFAULT_RULES)
+            else occupied
+        )
         for start, end in spans:
             if start < expanded_end:
                 continue
@@ -94,7 +103,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                         for root_start, root_end in root_spans
                     )
                 )
-                for prev_start, prev_end, prev_category in occupied
+                for prev_start, prev_end, prev_category in precedence_spans
             ):
                 continue
             # Keep nested secret and PII decisions independent of root policy.
@@ -108,12 +117,18 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
 
             # Resolve detector precedence on raw spans. A secret tail must not
             # disappear because an earlier non-secret detector claimed its body.
+            # Later rules keep findings inside expanded secrets, whose masking edits supersede theirs.
+            raw_end = end
             if any(rule is default for default in DEFAULT_RULES):
-                raw_end = end
-                end = _secret_end(text, rule.id, start, end)
+                if rule.id == "private-key-block":
+                    # Ordered headers reuse a future END or the exhausted suffix.
+                    if not pem_searched or (pem_closing is not None and pem_closing.start() < end):
+                        pem_closing = _PEM_END.search(text, end)
+                        pem_searched = True
+                    end = pem_closing.end() if pem_closing else _pem_body_end(text, end)
+                else:
+                    end = _secret_end(text, rule.id, start, end)
                 expanded_end = end
-                if rule.category == "secret" and end > raw_end:
-                    expanded_secret_spans.add((start, end))
 
             line = _line_for_offset(line_starts, start)
             allowed_by = _allowed_by(rule.id, rule.category, line, allow_by_line, file_allows)
@@ -134,6 +149,8 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     allow_values, text[start:end], line_text, line_start, start, end
                 )
             action = "allow" if allowed_by else active_policy.action_for(rule)
+            if rule.category == "secret" and end > raw_end and action in {"redact", "block"}:
+                expanded_secret_spans.add((start, end))
             findings.append(
                 Finding(
                     rule_id=rule.id,
@@ -153,7 +170,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             if is_root_path:
                 root_spans.append((start, end))
             else:
-                occupied.append((start, end, rule.category))
+                occupied.append((start, raw_end, rule.category))
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -262,11 +279,6 @@ def _secret_end(text: str, rule_id: str, start: int, end: int) -> int:
     spans, then this shared policy engine expands them after raw overlap
     checks and before allows, findings and edits. Custom rules keep their spans.
     """
-    if rule_id == "private-key-block":
-        closing = _PEM_END.search(text, end)
-        if closing:
-            return closing.end()
-        return _pem_body_end(text, end)
     if rule_id == "bare-token-prefix":
         # Ordinary provider endpoints already delimit the complete token.
         # Only saturation spans need expansion, using that provider's class.
@@ -302,30 +314,53 @@ def _secret_end(text: str, rule_id: str, start: int, end: int) -> int:
 
 
 def _pem_body_end(text: str, end: int) -> int:
-    """Cap an unterminated PEM at its contiguous line-oriented body.
+    """Cap an unterminated PEM at its contiguous body in common text layouts.
 
-    Accept ASCII base64 lines and Proc-Type:/DEK-Info: metadata. Blank
+    Accept consistently indented or quoted ASCII base64 lines, inline space
+    or escaped-newline runs, and Proc-Type:/DEK-Info: metadata. Blank
     lines may separate the header/metadata from the first body line, but a
     blank after base64 ends the body. Pending blanks are never masked unless
     followed by body or metadata. A header alone masks only the header.
     """
     cursor = end
     body_seen = False
+    prefix: str | None = None
+    header_line = True
     while cursor < len(text):
         newline = text.find("\n", cursor)
         line_end = len(text) if newline == -1 else newline
         line = text[cursor:line_end].removesuffix("\r")
-        if not line:
+        # Only the header line accepts space-separated or escaped body runs.
+        # Physical continuation lines must retain their first body prefix.
+        body_end = line_end - (text[line_end - 1 : line_end] == "\r")
+        if header_line:
+            body = line.lstrip(" \t")
+            if body.startswith(r"\n"):
+                body = body[2:]
+            inline = re.match(r"[A-Za-z0-9+/]+={0,2}(?:(?:[ \t]+|\\n)[A-Za-z0-9+/]+={0,2})*(?:\\n)?", body)
+            is_body = inline is not None
+            if inline is not None:
+                body_end = cursor + len(line) - len(body) + inline.end()
+        else:
+            leading = re.match(r"[ \t]*(?:> )?", line)
+            assert leading is not None
+            current_prefix = leading.group()
+            body = line[len(current_prefix) :]
+            is_body = (prefix is None or prefix == current_prefix) and bool(re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", body))
+            if is_body and prefix is None:
+                prefix = current_prefix
+        if not line.strip():
             if body_seen:
                 break
-        elif re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", line):
+        elif is_body:
             body_seen = True
-            end = line_end - (text[line_end - 1 : line_end] == "\r")
+            end = body_end
         elif not body_seen and line.startswith(("Proc-Type:", "DEK-Info:")):
             end = line_end - (text[line_end - 1 : line_end] == "\r")
         else:
             break
         cursor = line_end + 1
+        header_line = False
     return end
 
 

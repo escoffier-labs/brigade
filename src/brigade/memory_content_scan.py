@@ -116,6 +116,11 @@ _SSH_HOST = re.compile(r"@(?:10\.|172\.(?:1[6-9]|2\d|3[01])\.|192\.168\.|127\.)"
 _ASSIGNMENT_START = re.compile(r"\b(?:api[_-]?key|token|secret)\s{0,256}[:=]\s{0,256}", re.IGNORECASE)
 _ASSIGNMENT_START_ASCII = re.compile(_ASSIGNMENT_START.pattern, re.IGNORECASE | re.ASCII)
 _DIGIT = re.compile(r"[0-9]")
+# Every pinned bundle rule needs an ASCII literal letter or digit, except
+# us-phone which can consist entirely of Unicode digits and punctuation.
+# IGNORECASE admits the four extra Unicode letter folds too. Recheck this
+# necessary condition whenever the versioned bundle gains a rule.
+_BUNDLE_LITERAL = re.compile(r"[A-Z0-9]", re.IGNORECASE)
 _TOKEN_RUN = re.compile(r"[A-Z0-9._~+/=-]+", re.IGNORECASE)
 
 
@@ -123,10 +128,12 @@ def _assignment_search(pattern: re.Pattern[str], text: str) -> bool:
     # Short unquoted matches need an ASCII digit within 4096 characters.
     # Saturated runs and quoted values bypass that requirement. Index both
     # once instead of walking 4096 characters at every assignment start.
+    prefixes = _ASSIGNMENT_START_ASCII if pattern.flags & re.ASCII else _ASSIGNMENT_START
+    if prefixes.search(text) is None:
+        return False
     digits = [match.start() for match in _DIGIT.finditer(text)]
     long_runs = [(run.start(), run.end()) for run in _TOKEN_RUN.finditer(text) if run.end() - run.start() >= 4097]
     run_index = 0
-    prefixes = _ASSIGNMENT_START_ASCII if pattern.flags & re.ASCII else _ASSIGNMENT_START
     for prefix in prefixes.finditer(text):
         value = prefix.end()
         if value == len(text):
@@ -171,9 +178,12 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
         # need the ASCII pass. Bundle tests require review of inverse classes.
         copies = tuple(dict.fromkeys((text, lines)))
         extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
+        literal_copies = {copy: _BUNDLE_LITERAL.search(copy) is not None for copy in copies}
         possible: dict[tuple[str, str], bool] = {}
         for name, _action, pattern in _RULES:
             for copy in copies:
+                if name != "us-phone" and not literal_copies[copy]:
+                    continue
                 if pattern.flags & re.ASCII and copy.isascii():
                     continue
                 key = (name, copy)

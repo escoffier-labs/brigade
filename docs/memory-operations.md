@@ -169,10 +169,23 @@ exclusions. Short unquoted values need a digit within the first 4096 characters,
 and longer token runs also hit the ceiling without a digit.
 A PEM private-key header alone blocks, independent of body size or an END line.
 The shared guard policy engine extends detected token spans through the full
-token run and PEM spans through the END line or end of input. This applies to
+token run and PEM spans through the END line. Without END, the mask stops at
+the contiguous base64 body, including consistent indentation or quote prefixes,
+escaped newlines, and space-separated runs on the header line. A blank after the
+body ends the mask. Header-only mentions preserve the following paragraph.
+END searches share a per-scan cache, including exhausted suffixes.
+Later rules compare raw spans and retain their findings inside expanded secrets.
+Only masking secret edits supersede contained edits, so allowing or warning on a
+PEM still permits independent hostname masking. This applies to
 Python and native matching, including the pre-push content guard and evidence
 redaction. It prevents bounded prefix matches from leaving secret tails.
 Custom rules retain their configured spans.
+
+The Python memory scanner skips literal-based bundle rules on raw copies
+without ASCII letters or digits, including Unicode letter case folds. Unicode
+phone matches still scan the raw copy to preserve boundary behavior. Assignment
+digit indexes are built only when an assignment prefix exists. Folded copies
+retain the email-domain prefilter and are scanned once per required regex mode.
 
 SSH suffixes still match their first 4096 characters and local port strings
 allow 256 digits. The base64 heuristic accepts a bounded prefix of a longer

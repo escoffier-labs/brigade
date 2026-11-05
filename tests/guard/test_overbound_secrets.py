@@ -54,9 +54,18 @@ def pem_backend(request, monkeypatch):
 
 @pytest.mark.parametrize("ending", ["closed", "unterminated"])
 @pytest.mark.parametrize("repeat", [2, 140])
-def test_pem_trailing_findings_keep_secret_and_unrelated_text(pem_backend, ending, repeat):
+@pytest.mark.parametrize("layout", ["plain", "indent", "quote", "escaped", "escaped-json", "spaces"])
+def test_pem_trailing_findings_keep_secret_and_unrelated_text(pem_backend, ending, repeat, layout):
     header = "-----BEGIN " + "PRIVATE KEY-----\n"
     body = ("a" * 64 + "\n") * repeat
+    if layout in {"indent", "quote"}:
+        prefix = "    " if layout == "indent" else "> "
+        header = prefix + header
+        body = (prefix + "a" * 64 + "\n") * repeat
+    elif layout in {"escaped", "escaped-json", "spaces"}:
+        separator = r"\n" if layout.startswith("escaped") else " "
+        header = header.rstrip("\n") + separator
+        body = separator.join(["a" * 64] * repeat) + ('"' if layout == "escaped-json" else "") + "\n"
     closing = "-----END PRIVATE KEY-----\n" if ending == "closed" else ""
     # Synthetic canaries exercise independent trailing decisions.
     trailing = "Contact planted@probe-corp-canary.com host 10.23.45.67 logs /home/example-user/work done.\n"  # content-guard: allow email content-guard: allow private-ipv4 content-guard: allow home-path
@@ -115,3 +124,47 @@ def test_pem_blank_after_body_ends_mask(pem_backend, separator):
     text = header + "a" * 64 + separator + "Paragraph\n"
     result = scan_text(text)
     assert result.redacted_text == "[redacted-private-key]" + separator + "Paragraph\n"
+
+
+@pytest.mark.parametrize("layout", ["headers", "bodies", "final-end"])
+def test_pem_repeated_headers_scan_time(pem_backend, layout):
+    # Print scan time separately from the generous process safety timeout.
+    program = r"""
+import sys
+from time import perf_counter
+from brigade.guard import scan_text
+unit = "-----BEGIN " + "PRIVATE KEY-----\n"
+if sys.argv[1] != "headers":
+    unit += "a" * 64 + "\n"
+text = (unit * (512 * 1024 // len(unit) + 1))[:512 * 1024]
+if sys.argv[1] == "final-end":
+    text += "\n-----END PRIVATE KEY-----"
+start = perf_counter()
+result = scan_text(text)
+print(f"scan elapsed seconds {perf_counter() - start:.6f}", flush=True)
+assert any(f.rule_id == "private-key-block" for f in result.findings)
+assert "a" * 60 not in result.redacted_text
+"""
+    result = subprocess.run([sys.executable, "-c", program, layout], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    print(layout, os.environ["BRIGADE_GUARD_BACKEND"], result.stdout.strip())
+    assert float(result.stdout.split()[3]) < (4 if sys.platform == "win32" else 2), result.stdout
+
+
+@pytest.mark.parametrize("action", ["allow", "warn", "block"])
+def test_pem_policy_keeps_later_hostname_decision(pem_backend, action):
+    from brigade.guard.policy import Policy
+
+    header = "-----BEGIN " + "PRIVATE KEY-----\n"
+    text = header + "DEK-Info: https://service.corp\n\naaaa\n"  # content-guard: allow private-hostname
+    result = scan_text(text, policy=Policy(rules={"private-key-block": action}))
+    findings = {finding.rule_id: finding for finding in result.findings}
+    assert findings["private-key-block"].action == action
+    assert findings["private-hostname"].action == "block"
+    assert "service.corp" not in result.redacted_text  # content-guard: allow private-hostname
+    if action == "block":
+        assert result.redacted_text == "[redacted-private-key]\n"
+    else:
+        assert header in result.redacted_text
+        assert "DEK-Info: https://" in result.redacted_text
+        assert result.redacted_text.endswith("\n\naaaa\n")

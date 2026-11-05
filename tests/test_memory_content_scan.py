@@ -538,3 +538,50 @@ def test_reserved_domain_prefilter_bounds(labels, possible, label):
     assert scan._rule_possible("example-email-reserved", text) is possible
     pattern = next(pattern for name, _, pattern in scan._RULES if name == "example-email-reserved")
     assert bool(pattern.search(text)) is possible
+
+
+def test_fullwidth_only_original_skips_literal_rules(monkeypatch):
+    from brigade import memory_content_scan as scan
+
+    text = dict(
+        runpy.run_path(str(Path(__file__).with_name("memory_scan_adversarial.py")))["vectors"]("email-domain", 524288)
+    )["after-fullwidth"]
+    calls = []
+
+    class RecordingPattern:
+        def __init__(self, pattern):
+            self.pattern = pattern
+            self.flags = pattern.flags
+
+        def search(self, copy):
+            calls.append(copy)
+            return self.pattern.search(copy)
+
+    name, action, pattern = scan._RULES[0]
+    monkeypatch.setattr(scan, "_RULES", [(name, action, RecordingPattern(pattern))])
+    assert scan.blocked_rule([text]) is None
+    assert text not in calls
+    assert scan._scan_copies(text)[0] in calls
+
+
+def test_fullwidth_phone_raw_boundary_survives_literal_prefilter():
+    # Fullwidth underscores are non-word in the original but fold to word
+    # characters. Only the raw Unicode pass can match this phone's boundaries.
+    assert blocked_rule(["＿１２３.４５６.７８９０＿"]) == "us-phone"  # content-guard: allow us-phone
+
+
+def test_absent_assignment_prefix_skips_digit_index(monkeypatch):
+    from brigade import memory_content_scan as scan
+
+    calls = []
+    digits = scan._DIGIT
+
+    class RecordingDigits:
+        def finditer(self, text):
+            calls.append(text)
+            return digits.finditer(text)
+
+    monkeypatch.setattr(scan, "_DIGIT", RecordingDigits())
+    pattern = next(pattern for name, _, pattern in scan._RULES if name == "api-key-assignment")
+    assert not scan._assignment_search(pattern, "123." * 1000)
+    assert calls == []
