@@ -143,7 +143,14 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     principal = str(status["principal"])
     readable = set(status["readable_scopes"]) & set(settings.read_scopes)
     hub = client.identity
-    report: dict[str, Any] = {"hub": hub, "log_epoch": epoch, "rebuilt": False, "applied": 0, "warnings": []}
+    report: dict[str, Any] = {
+        "hub": hub,
+        "log_epoch": epoch,
+        "principal": principal,
+        "rebuilt": False,
+        "applied": 0,
+        "warnings": [],
+    }
     with store.locked(target):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
@@ -240,9 +247,23 @@ def refresh_scan_metadata(target: Path, client: hubc.MemoryHubClient, settings: 
             live = store.replica(target)
             if not live.belongs_to(hub, principal) or str(live.meta.get("log_epoch") or "") != epoch:
                 raise hubc.HubConfigError("the replica changed during the metadata refresh. Run memory hub pull")
-            for key, fields in fetched.items():
-                if key in live.heads and live.heads[key].get("revision") == stale[key].get("revision"):
-                    live.heads[key].update(fields)
+            updated = {
+                key: {**live.heads[key], **fields}
+                for key, fields in fetched.items()
+                if key in live.heads and live.heads[key].get("revision") == stale[key].get("revision")
+            }
+            # The added fields can grow a replica that sits near the cap. A replica over it would be
+            # accepted as complete, because nothing is marked missing, so refuse and save nothing.
+            grown = live.bytes() + sum(
+                store.head_size(key, head) - store.head_size(key, live.heads[key]) for key, head in updated.items()
+            )
+            if grown > settings.replica_max_bytes:
+                raise hubc.HubConfigError(
+                    "refreshing scan metadata would push the replica past its "
+                    f"{settings.replica_max_bytes // (1024 * 1024)} MB cap, replica unchanged. "
+                    "Increase [hub] replica_max_mb and run memory hub pull"
+                )
+            live.heads.update(updated)
             if fetched:
                 live.save()
     return len(fetched)

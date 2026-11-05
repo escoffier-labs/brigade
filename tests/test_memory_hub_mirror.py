@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import stat
 import time
 from pathlib import Path
 
@@ -497,7 +499,7 @@ def test_front_matter_in_card_becomes_one_block(setup):
     assert note.startswith("---\n")
     front, body = note[4:].split("\n---\n", 1)
     assert body.lstrip("\n") == "Body [[Beta]]\n"
-    assert front.count("tags:") == 1
+    assert sum(line.startswith("tags:") for line in front.splitlines()) == 1
     assert 'card: {"aliases": ["Al"], "related": "Beta", "title": "Alpha"}' in front
 
 
@@ -670,7 +672,8 @@ def test_overlapping_runs_on_one_folder_serialize(setup, tmp_path, monkeypatch):
     assert len(mirror.mirror(target, client, settings, out)["written"]) == 2
     monkeypatch.setattr(mirror, "_note", real_note)
     # Run in turn, the second run sees the first run's marker and owns its note.
-    report = mirror.mirror(other, client, settings, out)
+    # It comes from another workspace, so it adopts the folder with --init.
+    report = mirror.mirror(other, client, settings, out, init=True)
     assert [name.split("-")[0] for name in report["deleted"]] == ["alpha"]
     marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
     assert sorted(marker["files"]) == sorted([mirror.INDEX, *(p.name for p in out.glob("beta-*.md"))])
@@ -770,9 +773,9 @@ def test_stale_temp_files_are_removed_under_the_lock(setup):
     *_, out, replica = setup
     card(replica)
     run(setup)
-    stale = out / ".mirror-old.tmp"
-    fresh = out / ".mirror-new.tmp"
-    unrelated = out / ".mirror-notes.txt"
+    stale = out / ".brigade-mirror-abcd1234.tmp"
+    fresh = out / ".brigade-mirror-wxyz5678.tmp"
+    unrelated = out / ".brigade-mirror-notes.txt"
     for path in (stale, fresh, unrelated):
         path.write_text("partial", encoding="utf-8")
     old = time.time() - 11 * 60
@@ -790,7 +793,7 @@ def test_stale_temp_cleanup_skips_a_refused_folder(setup):
     *_, out, replica = setup
     card(replica)
     run(setup)
-    stale = out / ".mirror-old.tmp"
+    stale = out / ".brigade-mirror-abcd1234.tmp"
     stale.write_text("partial", encoding="utf-8")
     old = time.time() - 11 * 60
     os.utime(stale, (old, old))
@@ -926,9 +929,9 @@ def test_folder_of_another_principal_is_refused_until_init(setup):
     run(setup)
     before = {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
     _other_identity(setup, principal="node-other")
-    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
         run(setup)
-    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
         run(setup, dry_run=True)
     assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
     run(setup, init=True)
@@ -944,7 +947,7 @@ def test_folder_of_another_hub_is_refused_until_init(setup):
     marker = json.loads(marker_path.read_text(encoding="utf-8"))
     marker["hub"] = "http://other-hub.example:3774"
     marker_path.write_text(json.dumps(marker), encoding="utf-8")
-    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
         run(setup)
     run(setup, init=True)
     assert json.loads(marker_path.read_text(encoding="utf-8"))["hub"] == client.identity
@@ -971,7 +974,7 @@ def test_second_workspace_with_another_principal_does_not_take_over_the_folder(s
     other_replica.meta["principal"] = "node-other"
     other_replica.save()
     card(other_replica, "beta")
-    with pytest.raises(hubc.HubConfigError, match="another hub or principal"):
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
         mirror.mirror(other, client, settings, out)
     assert len(list(out.glob("alpha-*.md"))) == 1
     assert not list(out.glob("beta-*.md"))
@@ -991,3 +994,236 @@ def test_non_403_grant_code_during_metadata_refresh_keeps_the_replica(setup):
     saved = store.replica(target)
     assert len(saved.heads) == 2
     assert saved.meta["read_scopes"] == ["fleet"]
+
+
+def _front(note: str) -> dict:
+    """The note's own front matter, one JSON value per line."""
+    block = note.split("\n---\n", 1)[0].removeprefix("---\n")
+    return {line.split(": ", 1)[0]: json.loads(line.split(": ", 1)[1]) for line in block.splitlines()}
+
+
+def test_multiline_description_survives_in_the_note(setup):
+    *_, out, replica = setup
+    block = "title: Alpha\ndescription: |\n  first line\n  second line\nmeta:\n  nested: yes\n"
+    card(replica, text=f"---\n{block}---\nBody\n")
+    run(setup)
+    front = _front(next(out.glob("alpha-*.md")).read_text(encoding="utf-8"))
+    assert front["card_frontmatter"] == block
+    assert "second line" in front["card_frontmatter"] and "nested: yes" in front["card_frontmatter"]
+
+
+def test_card_without_a_stripped_block_has_no_verbatim_field(setup):
+    *_, out, replica = setup
+    card(replica, text="plain body\n")
+    run(setup)
+    assert "card_frontmatter" not in _front(next(out.glob("alpha-*.md")).read_text(encoding="utf-8"))
+
+
+def test_card_aliases_are_merged_into_the_top_level_list(setup):
+    *_, out, replica = setup
+    card(replica, text="---\ntitle: Alpha\naliases: [Al, alpha, Alpha, Al, ' ']\n---\nbody\n")
+    card(replica, "beta", text="---\naliases: Bee\n---\nbody\n")
+    run(setup)
+    assert _front(next(out.glob("alpha-*.md")).read_text(encoding="utf-8"))["aliases"] == ["Alpha", "alpha", "Al"]
+    assert _front(next(out.glob("beta-*.md")).read_text(encoding="utf-8"))["aliases"] == ["beta", "Bee"]
+
+
+def _trace_writes(monkeypatch) -> list[str]:
+    events: list[str] = []
+    real_atomic, real_sync = mirror._atomic, mirror._sync_directory
+    monkeypatch.setattr(
+        mirror, "_atomic", lambda path, text: (events.append(f"write {path.name}"), real_atomic(path, text))[1]
+    )
+    monkeypatch.setattr(mirror, "_sync_directory", lambda directory: (events.append("sync"), real_sync(directory))[1])
+    return events
+
+
+def test_marker_write_is_synced_before_the_notes_change(setup, monkeypatch):
+    *_, replica = setup
+    card(replica)
+    events = _trace_writes(monkeypatch)
+    run(setup)
+    # The first marker names what is about to be written, and is durable before any note lands.
+    assert events[:2] == [f"write {mirror.MARKER}", "sync"]
+    assert all(event.startswith("write ") and mirror.MARKER not in event for event in events[2:])
+
+
+def test_final_marker_write_is_synced(setup, monkeypatch):
+    *_, replica = setup
+    card(replica)
+    run(setup)
+    replica.heads[store.Replica.key("fleet", "alpha")]["trust"] = "flagged"
+    replica.save()
+    events = _trace_writes(monkeypatch)
+    assert run(setup)["deleted"]
+    assert events[-2:] == [f"write {mirror.MARKER}", "sync"]
+
+
+def test_directory_sync_fsyncs_the_folder(tmp_path, monkeypatch):
+    synced: list[bool] = []
+    real_fsync = os.fsync
+    monkeypatch.setattr(os, "fsync", lambda fd: (synced.append(stat.S_ISDIR(os.fstat(fd).st_mode)), real_fsync(fd))[1])
+    mirror._sync_directory(tmp_path)
+    assert synced == [True]
+
+
+def test_directory_sync_is_skipped_on_windows(tmp_path, monkeypatch):
+    synced: list[int] = []
+    monkeypatch.setattr(mirror.os, "name", "nt")
+    monkeypatch.setattr(os, "fsync", synced.append)
+    mirror._sync_directory(tmp_path)
+    assert synced == []
+
+
+def test_users_mirror_backup_tmp_survives_init_and_later_runs(setup):
+    *_, out, replica = setup
+    card(replica)
+    out.mkdir()
+    old = time.time() - 11 * 60
+    keep = out / ".mirror-backup.tmp"
+    keep.write_text("mine", encoding="utf-8")
+    os.utime(keep, (old, old))
+    run(setup, init=True)
+    assert keep.read_text(encoding="utf-8") == "mine"
+    run(setup)
+    assert keep.read_text(encoding="utf-8") == "mine"
+
+
+def test_stale_temps_of_both_prefixes_go_only_with_a_valid_marker(setup):
+    *_, out, replica = setup
+    card(replica)
+    out.mkdir()
+    old = time.time() - 11 * 60
+    names = [".brigade-mirror-abcd1234.tmp", ".mirror-abcd1234.tmp"]
+    for name in names:
+        (out / name).write_text("partial", encoding="utf-8")
+        os.utime(out / name, (old, old))
+    # No marker yet (a first run on an existing folder): nothing is deleted.
+    run(setup, init=True)
+    assert all((out / name).exists() for name in names)
+    run(setup)
+    assert not any((out / name).exists() for name in names)
+
+
+def test_first_run_killed_before_its_marker_reruns_without_init(setup):
+    *_, out, replica = setup
+    card(replica)
+    out.mkdir()
+    (out / mirror.LOCK).write_text("", encoding="utf-8")
+    (out / ".brigade-mirror-abcd1234.tmp").write_text("partial", encoding="utf-8")
+    assert len(run(setup)["written"]) == 2
+    assert (out / mirror.MARKER).is_file()
+    # An unrelated file in that folder is still foreign.
+    other = out.parent / "other"
+    other.mkdir()
+    (other / ".brigade-mirror-notes.txt").write_text("mine", encoding="utf-8")
+    target, settings, client, _, _ = setup
+    with pytest.raises(hubc.HubConfigError, match="lacks ownership marker"):
+        mirror.mirror(target, client, settings, other)
+
+
+def test_temp_files_use_the_tools_own_prefix(setup, monkeypatch):
+    *_, out, replica = setup
+    card(replica)
+    names: list[str] = []
+    real_replace = os.replace
+    monkeypatch.setattr(
+        os, "replace", lambda src, dst, *a, **k: (names.append(Path(src).name), real_replace(src, dst))[1]
+    )
+    run(setup)
+    assert names and all(mirror._TEMP.fullmatch(name) for name in names)
+
+
+def test_marker_records_the_workspace(setup):
+    target, *_, out, replica = setup
+    card(replica)
+    run(setup)
+    marker = json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))
+    assert marker["workspace"] == str(target.resolve())
+
+
+def test_run_from_another_workspace_is_refused_until_init(setup, tmp_path):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    run(setup)
+    other, other_replica = _second_workspace(setup, tmp_path)
+    card(other_replica, "beta")
+    before = {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
+        mirror.mirror(other, client, settings, out)
+    with pytest.raises(hubc.HubConfigError, match="another hub, principal or workspace"):
+        mirror.mirror(other, client, settings, out, dry_run=True)
+    assert before == {p.name: p.read_bytes() for p in out.iterdir() if p.name != mirror.LOCK}
+    mirror.mirror(other, client, settings, out, init=True)
+    assert json.loads((out / mirror.MARKER).read_text(encoding="utf-8"))["workspace"] == str(other.resolve())
+
+
+def test_marker_without_a_workspace_is_adopted(setup):
+    target, *_, out, replica = setup
+    card(replica)
+    run(setup)
+    marker_path = out / mirror.MARKER
+    marker = json.loads(marker_path.read_text(encoding="utf-8"))
+    del marker["workspace"]
+    marker_path.write_text(json.dumps(marker, sort_keys=True) + "\n", encoding="utf-8")
+    assert run(setup)["written"] == []
+    assert json.loads(marker_path.read_text(encoding="utf-8"))["workspace"] == str(target.resolve())
+
+
+def test_replica_pulled_as_another_principal_before_the_lock_is_refused(setup, monkeypatch):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+    # The pull authenticated as node-test.
+    monkeypatch.setattr(sync, "pull", lambda *_: {"seq": 1, "warnings": [], "principal": "node-test"})
+    real_lock = mirror.held_file_lock
+
+    from contextlib import contextmanager
+
+    @contextmanager
+    def other_principal_pulls_first(*args, **kwargs):
+        pulled = store.replica(target)
+        pulled.meta["principal"] = "node-other"
+        card(pulled, "intruder")
+        with real_lock(*args, **kwargs):
+            yield
+
+    monkeypatch.setattr(mirror, "held_file_lock", other_principal_pulls_first)
+    with pytest.raises(hubc.HubConfigError, match="another principal"):
+        mirror.mirror(target, client, settings, out)
+    assert not list(out.glob("*.md"))
+    assert not (out / mirror.MARKER).exists()
+
+
+def test_replica_pulled_as_another_principal_after_the_pull_is_refused(setup, monkeypatch):
+    target, settings, client, out, replica = setup
+    card(replica, "alpha")
+
+    def pull_then_switch(*_):
+        switched = store.replica(target)
+        switched.meta["principal"] = "node-other"
+        switched.save()
+        return {"seq": 1, "warnings": [], "principal": "node-test"}
+
+    monkeypatch.setattr(sync, "pull", pull_then_switch)
+    with pytest.raises(hubc.HubConfigError, match="another principal"):
+        mirror.mirror(target, client, settings, out)
+    assert not out.exists() or not list(out.glob("*.md"))
+
+
+def test_refresh_that_would_pass_the_replica_cap_changes_nothing(setup):
+    target, settings, _, out, replica = setup
+    legacy(replica)
+    calls: list[dict] = []
+    client = hubc.client_for(settings, transport=hub_transport(replica, calls))
+    held = store.replica(target)
+    # Room for the legacy head as it is, not for the metadata the refresh adds.
+    tight = dataclasses.replace(settings, replica_max_bytes=held.bytes() + 10)
+    before = (held.directory / "heads.json").read_bytes(), (held.directory / "meta.json").read_bytes()
+    with pytest.raises(hubc.HubConfigError, match="cap"):
+        sync.refresh_scan_metadata(target, client, tight)
+    after = store.replica(target)
+    assert (after.directory / "heads.json").read_bytes() == before[0]
+    assert (after.directory / "meta.json").read_bytes() == before[1]
+    assert all("scan_state" not in head for head in after.heads.values())
+    # Within the cap the same refresh still works.
+    assert sync.refresh_scan_metadata(target, client, settings) >= 1

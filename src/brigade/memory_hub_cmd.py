@@ -398,6 +398,8 @@ def _replica_card(
         "trust": head.get("trust"),
         "text": chunk,
         "next_offset": following,
+        # What the hub's own read carries. A replica pulled before these were kept lacks them.
+        **{name: head[name] for name in ("scan_state", "writer", "updated_at") if name in head},
     }
     return {"ok": True, "card": card, "log_epoch": replica.meta.get("log_epoch"), "source": "replica"}
 

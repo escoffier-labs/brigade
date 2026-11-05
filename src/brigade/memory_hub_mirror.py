@@ -30,6 +30,11 @@ MARKER = ".brigade-memory-mirror.json"
 LOCK = ".brigade-memory-mirror.lock"
 LOCK_DEADLINE_SECONDS = 30.0
 STALE_TEMP_SECONDS = 10 * 60
+# Temp files carry a prefix that belongs to this tool, so a user's own `.mirror-*` file is never touched.
+TEMP_PREFIX = ".brigade-mirror-"
+_TEMP = re.compile(r"\.brigade-mirror-[a-z0-9_]{8}\.tmp")
+# The first release named them `.mirror-<8 random>.tmp`. Cleaned only inside a folder with a valid marker.
+_LEGACY_TEMP = re.compile(r"\.mirror-[a-z0-9_]{8}\.tmp")
 INDEX = "Hub Memory Index.md"
 KIND = "brigade.memory-mirror.v1"
 # Windows has no O_NOFOLLOW; _read then checks is_symlink before it opens.
@@ -88,8 +93,20 @@ def _read(path: Path) -> bytes | None:
         return stream.read()
 
 
+def _sync_directory(directory: Path) -> None:
+    """Make a rename in `directory` durable. POSIX only: Windows cannot open a directory to fsync it."""
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
 def _atomic(path: Path, text: str) -> None:
-    fd, name = tempfile.mkstemp(prefix=".mirror-", suffix=".tmp", dir=path.parent)
+    """Write `path` through a temp file and a rename. The caller syncs the folder when the rename must outlive a crash."""
+    fd, name = tempfile.mkstemp(prefix=TEMP_PREFIX, suffix=".tmp", dir=path.parent)
     temporary = Path(name)
     try:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as stream:
@@ -119,8 +136,10 @@ def _readable_heads(
 def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> tuple[list[dict], str, list[str]]:
     warnings: list[str] = []
     offline = False
+    authenticated: str | None = None
     try:
         report = sync.pull(target, client, settings)
+        authenticated = report.get("principal")
         warnings.extend(report["warnings"])
         if report.get("seq") is None:
             raise hubc.HubConfigError("replica rebuild incomplete, mirror unchanged. Run memory hub pull again")
@@ -128,6 +147,7 @@ def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSetting
         offline = True
         warnings.append(f"hub unavailable ({exc.reason}), using this host's replica")
     heads, principal = _readable_heads(target, client, settings)
+    _require_principal(authenticated, principal)
     if any("scan_state" not in head for head in heads):
         # A head without scan_state cannot be judged clean, and skipping it would
         # delete its note. Refetch only those heads in place, never discard the
@@ -139,8 +159,18 @@ def _heads(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSetting
         except hubc.HubUnavailable as exc:
             raise hubc.HubConfigError(f"{PREDATES} (hub unavailable: {exc.reason})") from exc
         heads, principal = _readable_heads(target, client, settings)
+        _require_principal(authenticated, principal)
         _require_scan_state(heads)
-    return heads, principal, warnings
+    # Offline there is no authentication to keep: the replica's own principal is the one to hold to.
+    return heads, authenticated or principal, warnings
+
+
+def _require_principal(expected: str | None, actual: str) -> None:
+    """Refuse a replica another principal pulled into since `expected` authenticated, so its cards are not exported."""
+    if expected is not None and actual != expected:
+        raise hubc.HubConfigError(
+            "the replica was pulled as another principal since this run authenticated, mirror unchanged. Run again"
+        )
 
 
 def _require_scan_state(heads: list[dict]) -> None:
@@ -148,8 +178,11 @@ def _require_scan_state(heads: list[dict]) -> None:
         raise hubc.HubConfigError(PREDATES)
 
 
-def _split(text: str) -> tuple[dict[str, Any], str]:
-    """A card's leading front matter and the body after it. A leading BOM is ignored."""
+def _split_raw(text: str) -> tuple[dict[str, Any], str | None, str]:
+    """A card's leading front matter, that block's text as written, and the body after it. A leading BOM is ignored.
+
+    The text is None when no block was stripped: the body is then the whole card.
+    """
     text = text.removeprefix("\ufeff")
     meta = parse_frontmatter(text)
     # A block that parses to nothing stays in the body, so none of it is lost.
@@ -157,8 +190,13 @@ def _split(text: str) -> tuple[dict[str, Any], str]:
         lines = text.splitlines(keepends=True)
         for index in range(1, len(lines)):
             if lines[index].strip() == "---":
-                return meta, "".join(lines[index + 1 :]).lstrip("\r\n")
-    return meta, text
+                return meta, "".join(lines[1:index]), "".join(lines[index + 1 :]).lstrip("\r\n")
+    return meta, None, text
+
+
+def _split(text: str) -> tuple[dict[str, Any], str]:
+    meta, _, body = _split_raw(text)
+    return meta, body
 
 
 def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]:
@@ -197,9 +235,28 @@ def _select(heads: list[dict]) -> tuple[list[tuple[dict, dict]], dict[str, int]]
     return selected, dict(sorted(skipped.items()))
 
 
+def _aliases(head: dict, meta: dict) -> list[str]:
+    """The note's aliases: the title, the id, then the card's own string aliases, each once.
+
+    Obsidian offers only a top-level `aliases` in link suggestions, so the
+    card's own are merged here as well as kept under `card`.
+    """
+    own = meta.get("aliases", [])
+    own = [own] if isinstance(own, str) else own if isinstance(own, list) else []
+    seen: dict[str, None] = {}
+    for alias in (str(meta.get("title") or head["card_id"]), head["card_id"], *own):
+        if isinstance(alias, str) and alias.strip():
+            seen.setdefault(alias.strip(), None)
+    return list(seen)
+
+
 def _note(head: dict, meta: dict) -> str:
     # The card's own front matter moves under `card` so the note has one block.
     own = {key: value for key, value in meta.items() if key != "tags"}
+    # The parser is lossy (a multiline `description` or a nested map keeps nothing), so the
+    # stripped block is also kept verbatim. Detecting what the parser dropped would be the same
+    # lossy guess, so it is always kept when a block was removed.
+    _, raw_block, body = _split_raw(str(head["text"]))
     fields = {
         "card_id": head["card_id"],
         "scope": head["scope"],
@@ -208,14 +265,15 @@ def _note(head: dict, meta: dict) -> str:
         "source": head.get("writer"),
         "tags": meta.get("tags", []),
         "scan_state": head["scan_state"],
-        "aliases": [str(meta.get("title") or head["card_id"]), head["card_id"]],
+        "aliases": _aliases(head, meta),
         **({"card": own} if own else {}),
+        **({"card_frontmatter": raw_block} if raw_block is not None else {}),
     }
     # JSON values are YAML-compatible and quote control characters safely.
     front = "\n".join(
         f"{key}: {json.dumps(value, ensure_ascii=False, sort_keys=True, default=str)}" for key, value in fields.items()
     )
-    return f"---\n{front}\n---\n\n{_split(str(head['text']))[1]}"
+    return f"---\n{front}\n---\n\n{body}"
 
 
 def _check_destination(out: Path) -> None:
@@ -235,19 +293,37 @@ def _check_destination(out: Path) -> None:
         raise hubc.HubConfigError(f"mirror destination is not a directory: {out}")
 
 
-def _marker_value(files: dict[str, Any], notes: dict[str, str], hub: str, principal: str) -> bytes:
-    body = {"kind": KIND, "hub": hub, "principal": principal, "files": files, "notes": notes}
+def _marker_value(files: dict[str, Any], notes: dict[str, str], identity: dict[str, str]) -> bytes:
+    body = {"kind": KIND, **identity, "files": files, "notes": notes}
     return (json.dumps(body, sort_keys=True) + "\n").encode("utf-8")
 
 
+def _is_own_temp(path: Path) -> bool:
+    """A regular file named like this tool's temp files. Nothing else in a destination is ever its own."""
+    if not _TEMP.fullmatch(path.name):
+        return False
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
 def _foreign_entries(out: Path) -> bool:
-    return out.is_dir() and any(path.name != LOCK for path in out.iterdir())
+    """Whether `out` holds anything but this tool's lock and temp files. A run killed before its marker leaves only those."""
+    return out.is_dir() and any(path.name != LOCK and not _is_own_temp(path) for path in out.iterdir())
 
 
 def _drop_stale_temps(out: Path) -> None:
-    """Remove `.mirror-*.tmp` files a killed run left behind. A live run holds the lock, so none is in use."""
+    """Remove temp files a killed run left behind. Call only for a folder with a valid marker.
+
+    A live run holds the lock, so none is in use. Both the current prefix and
+    the first release's `.mirror-<8 random>.tmp` names go, so files from earlier
+    runs are not stranded. Any other name, such as a user's `.mirror-backup.tmp`, stays.
+    """
     cutoff = time.time() - STALE_TEMP_SECONDS
-    for path in out.glob(".mirror-*.tmp"):
+    for path in out.iterdir():
+        if not (_TEMP.fullmatch(path.name) or _LEGACY_TEMP.fullmatch(path.name)):
+            continue
         try:
             info = path.lstat()
             if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
@@ -274,9 +350,10 @@ def mirror(
         )
     # The pull stays outside the destination lock: it can wait on the network.
     heads, principal, warnings = _heads(target, client, settings)
+    identity = {"hub": client.identity, "principal": principal, "workspace": str(target.resolve())}
     if dry_run:
         selected, skipped = _select(heads)
-        return _transact(out, client.identity, principal, heads, selected, skipped, warnings, init=init, dry_run=True)
+        return _transact(out, identity, heads, selected, skipped, warnings, init=init, dry_run=True)
     try:
         out.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
@@ -289,18 +366,16 @@ def mirror(
     with held_file_lock(resolved / LOCK, deadline_seconds=LOCK_DEADLINE_SECONDS):
         # A run that pulled earlier may reach the lock after a newer run finished. Plan
         # from the replica as it is now, so the last run to write always writes the newest state.
-        heads, principal = _readable_heads(target, client, settings)
+        heads, current = _readable_heads(target, client, settings)
+        _require_principal(principal, current)
         _require_scan_state(heads)
         selected, skipped = _select(heads)
-        return _transact(
-            resolved, client.identity, principal, heads, selected, skipped, warnings, init=init, dry_run=False
-        )
+        return _transact(resolved, identity, heads, selected, skipped, warnings, init=init, dry_run=False)
 
 
 def _transact(
     out: Path,
-    hub: str,
-    principal: str,
+    identity: dict[str, str],
     heads: list[dict],
     selected: list[tuple[dict, dict]],
     skipped: dict[str, int],
@@ -327,12 +402,14 @@ def _transact(
         raise hubc.HubConfigError(
             "non-empty mirror destination lacks ownership marker. Use --init to preserve foreign files"
         )
-    # One folder per workspace identity. A marker from before these fields is adopted by this run.
-    if not init and (marker.get("hub") not in (None, hub) or marker.get("principal") not in (None, principal)):
+    # One folder per workspace identity. A marker from before a field is adopted by this run.
+    if not init and any(marker.get(name) not in (None, value) for name, value in identity.items()):
         raise hubc.HubConfigError(
-            "mirror folder belongs to another hub or principal. Use one folder per workspace, or --init to adopt it"
+            "mirror folder belongs to another hub, principal or workspace. "
+            "Use one folder per workspace, or --init to adopt it"
         )
-    if not dry_run:
+    if not dry_run and raw is not None:
+        # Only a folder this tool already owns: a first run on someone's vault never deletes their files.
         _drop_stale_temps(out)
     desired: dict[str, str] = {}
     notes: dict[str, str] = {}
@@ -371,16 +448,19 @@ def _transact(
         if written or deleted:
             # Own everything about to be written or removed before touching it, so a
             # run killed midway leaves nothing foreign and nothing unowned.
-            current = _marker_value({**marker["files"], **dict.fromkeys(desired, True)}, notes, hub, principal)
+            current = _marker_value({**marker["files"], **dict.fromkeys(desired, True)}, notes, identity)
             if current != raw:
+                # Synced before any note changes, so a crash cannot keep a note and lose its owner.
                 _atomic(out / MARKER, current.decode("utf-8"))
+                _sync_directory(out)
         for name in written:
             _atomic(out / name, desired[name])
         for name in deleted:
             (out / name).unlink(missing_ok=True)
-        value = _marker_value(dict.fromkeys(desired, True), notes, hub, principal)
+        value = _marker_value(dict.fromkeys(desired, True), notes, identity)
         if current != value:
             _atomic(out / MARKER, value.decode("utf-8"))
+            _sync_directory(out)
     return {
         "ok": True,
         "written": written,
