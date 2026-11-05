@@ -21,7 +21,8 @@ pub const QUERY_CHARS: usize = 256;
 pub const RAW_QUERY_BYTES: usize = 4096;
 /// A literal query (no word characters) reads at most this many cards and
 /// this much card text per request, so its cost does not grow with the
-/// corpus. A scan that stops early answers `retrieval.truncated: true`.
+/// corpus. A scan that stops before the last visible card answers
+/// `retrieval.truncated: true`.
 pub const LITERAL_DOCS: usize = 1000;
 pub const LITERAL_BYTES: usize = 4 << 20;
 pub const LIMIT_MAX: i64 = 20;
@@ -149,13 +150,19 @@ pub struct Literal {
 }
 /// `memory_bm25.rank` for a query with no word characters: the literal
 /// substring match on the lowered field, every match scoring 0.0. `body`
-/// reads a document's card text from the store. The scan goes in document
-/// order and stops after [`LITERAL_DOCS`] cards or [`LITERAL_BYTES`] of
-/// card text.
+/// reads a document's card text from the store.
+///
+/// The scan goes in answer order (`cards/<card_id>.md`, then scope) and
+/// stops at `limit` hits, after [`LITERAL_DOCS`] cards or after
+/// [`LITERAL_BYTES`] of card text, whichever comes first. Every hit scores
+/// 0.0, so the hits it returns are exactly the first `limit` of a full scan,
+/// whatever the document numbers are. When it stops early, `complete` is
+/// false and the hit count is only a lower bound on a full scan's.
 pub fn literal(
     snap: &Snapshot,
     allowed: &[bool],
     query: &str,
+    limit: usize,
     mut body: impl FnMut(&str) -> rusqlite::Result<Option<String>>,
 ) -> rusqlite::Result<Literal> {
     let lowered = text::py_lower(query);
@@ -167,10 +174,10 @@ pub fn literal(
     if needles.is_empty() {
         return Ok(out);
     }
+    let (order, visible) = snap.in_answer_order(allowed, LITERAL_DOCS);
     let (mut docs, mut bytes) = (0, 0);
-    for n in snap.live(allowed) {
-        if docs == LITERAL_DOCS || bytes >= LITERAL_BYTES {
-            out.complete = false;
+    for n in order {
+        if out.hits.len() >= limit || bytes >= LITERAL_BYTES {
             break;
         }
         docs += 1;
@@ -184,6 +191,7 @@ pub fn literal(
             out.hits.push((n, 0.0));
         }
     }
+    out.complete = docs == visible;
     Ok(out)
 }
 fn blob<T: ReadTx + ?Sized>(tx: &T, hash: &str) -> rusqlite::Result<Option<String>> {
@@ -236,7 +244,9 @@ pub fn run<T: ReadTx + ?Sized>(
         }
     }
     let (hits, complete) = if request.tokens.is_empty() {
-        let found = literal(snap, &allowed, &request.query, |hash| blob(tx, hash))?;
+        let found = literal(snap, &allowed, &request.query, request.limit, |hash| {
+            blob(tx, hash)
+        })?;
         (found.hits, found.complete)
     } else {
         (snap.score(&allowed, &request.tokens), true)

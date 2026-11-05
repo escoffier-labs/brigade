@@ -121,9 +121,11 @@ fn scorer_matches_python_goldens() {
                 .collect();
             let tokens = text::tokenize(query);
             let hits = if tokens.is_empty() {
-                search::literal(&snap, &allowed, query, |h| Ok(texts.get(h).cloned()))
-                    .unwrap()
-                    .hits
+                search::literal(&snap, &allowed, query, usize::MAX, |h| {
+                    Ok(texts.get(h).cloned())
+                })
+                .unwrap()
+                .hits
             } else {
                 snap.score(&allowed, &tokens)
             };
@@ -672,18 +674,28 @@ fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
     });
     let snap = Builder::from_cards(cards, 1).snapshot();
     let (mut reads, mut bytes) = (0, 0);
-    let small = search::literal(&snap, &[true], "::", |_| {
+    // Every card matches: the scan stops at the limit.
+    let first = search::literal(&snap, &[true], "::", 10, |_| {
         reads += 1;
         Ok(Some("path::to -> thing\n".into()))
     })
     .unwrap();
-    assert_eq!(reads, search::LITERAL_DOCS);
-    assert_eq!(small.hits.len(), search::LITERAL_DOCS);
-    assert!(!small.complete);
-    // Large cards stop the scan at the byte budget first.
-    let big = "x -> y ".repeat(64 * 1024);
+    assert_eq!((reads, first.hits.len()), (10, 10));
+    assert!(!first.complete);
+    // No card matches: the scan stops at the document budget.
     reads = 0;
-    let large = search::literal(&snap, &[true], "->", |_| {
+    let none = search::literal(&snap, &[true], "::", 20, |_| {
+        reads += 1;
+        Ok(Some("nothing here\n".into()))
+    })
+    .unwrap();
+    assert_eq!(reads, search::LITERAL_DOCS);
+    assert!(none.hits.is_empty());
+    assert!(!none.complete);
+    // Large cards stop the scan at the byte budget first.
+    let big = "x y ".repeat(64 * 1024);
+    reads = 0;
+    let large = search::literal(&snap, &[true], "->", 20, |_| {
         reads += 1;
         bytes += big.len();
         Ok(Some(big.clone()))
@@ -692,7 +704,7 @@ fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
     assert!(!large.complete);
     assert!(bytes < search::LITERAL_BYTES + big.len(), "{bytes}");
     assert!(reads < search::LITERAL_DOCS, "{reads}");
-    // A corpus under both bounds is scanned in full.
+    // A corpus under every bound is scanned in full.
     let few = Builder::from_cards(
         (0..10).map(|n| Card {
             scope: "fleet".into(),
@@ -705,29 +717,128 @@ fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
         1,
     )
     .snapshot();
-    let all = search::literal(&few, &[true], "::", |_| Ok(Some("a :: b\n".into()))).unwrap();
-    assert!(all.complete);
-    assert_eq!(all.hits.len(), 10);
+    for limit in [10, 20] {
+        let all =
+            search::literal(&few, &[true], "::", limit, |_| Ok(Some("a :: b\n".into()))).unwrap();
+        assert!(all.complete, "limit {limit}");
+        assert_eq!(all.hits.len(), 10);
+    }
+}
+
+fn literal_card(scope: &str, card_id: &str, n: i64) -> Card {
+    Card {
+        scope: scope.into(),
+        card_id: card_id.into(),
+        revision: n,
+        content_hash: format!("h-{scope}-{card_id}"),
+        trust: "agent-unreviewed".into(),
+        text: "x -> y\n".into(),
+    }
+}
+/// `(scope, card_id)` of a literal scan's hits, in answer order.
+fn literal_ids(snap: &super::index::Snapshot, limit: usize) -> (Vec<(String, String)>, bool) {
+    let allowed = vec![true; snap.scopes().len()];
+    let found =
+        search::literal(snap, &allowed, "->", limit, |_| Ok(Some("x -> y\n".into()))).unwrap();
+    let ids = snap
+        .top(found.hits, usize::MAX)
+        .into_iter()
+        .map(|(n, _)| {
+            let d = snap.doc(n);
+            (
+                snap.scopes()[d.scope as usize].clone(),
+                d.card_id.to_string(),
+            )
+        })
+        .collect();
+    (ids, found.complete)
+}
+
+/// Claude round 2 #1: a truncated scan goes in answer order, so it returns
+/// the full scan's first cards whatever order the documents were added in.
+#[test]
+fn a_truncated_literal_scan_returns_the_full_scans_first_cards() {
+    fn many(scope: &'static str, prefix: &'static str) -> impl Iterator<Item = Card> {
+        (0..1000i64).map(move |n| literal_card(scope, &format!("{prefix}{n:04}"), n + 1))
+    }
+    // Delta case: `a` comes after 1,000 `c` cards in document order.
+    let mut delta = Builder::from_cards(many("fleet", "c"), 1);
+    delta.apply(vec![Change::Live(literal_card("fleet", "a", 1))], 2);
+    let snap = delta.snapshot();
+    assert_eq!(&*snap.doc(1000).card_id, "a");
+    let (got, complete) = literal_ids(&snap, 1);
+    assert_eq!(got, vec![pair("fleet", "a")]);
+    assert!(!complete);
+    let (got, _) = literal_ids(&snap, 3);
+    assert_eq!(
+        got,
+        vec![
+            pair("fleet", "a"),
+            pair("fleet", "c0000"),
+            pair("fleet", "c0001")
+        ]
+    );
+    // Scope-major case: the main segment is in (scope, card_id) order, so
+    // `repo:x/a` follows 1,000 `fleet` cards but sorts first by path.
+    let scoped = Builder::from_cards(
+        many("fleet", "b").chain([literal_card("repo:x", "a", 1)]),
+        1,
+    )
+    .snapshot();
+    assert_eq!(&*scoped.doc(1000).card_id, "a");
+    assert_eq!(literal_ids(&scoped, 1).0, vec![pair("repo:x", "a")]);
+    // A rebuild renumbers every document; the answer stays the same. A
+    // revised card moves to the end of the table and keeps its place too.
+    delta.apply(vec![Change::Live(literal_card("fleet", "c0000", 2))], 3);
+    let before = delta.snapshot();
+    let mut live: Vec<Card> = many("fleet", "c").collect();
+    live.push(literal_card("fleet", "a", 1));
+    live.sort_by(|x, y| (&x.scope, &x.card_id).cmp(&(&y.scope, &y.card_id)));
+    let after = Builder::from_cards(live, 3).snapshot();
+    for limit in [1, 2, 10, 20] {
+        assert_eq!(
+            literal_ids(&before, limit),
+            literal_ids(&after, limit),
+            "limit {limit}"
+        );
+    }
+    assert_eq!(
+        literal_ids(&before, 2).0,
+        vec![pair("fleet", "a"), pair("fleet", "c0000")]
+    );
 }
 
 #[tokio::test]
 async fn a_truncated_literal_scan_is_reported() {
-    let h = Hub::new();
-    let mut last = 0;
+    let mut h = Hub::new();
     for n in 0..search::LITERAL_DOCS + 5 {
-        let r = h
-            .put(NODE_TOKEN, "fleet", &format!("c{n:04}"), None, "a :: b")
+        h.put(NODE_TOKEN, "fleet", &format!("c{n:04}"), None, "a :: b")
             .await;
-        last = r.body["event"]["seq"].as_i64().unwrap();
     }
-    let r = search(&h, NODE_TOKEN, json!({"query":"::","min_seq":last})).await;
+    // Added last, so in the index it follows the `c` cards until a rebuild.
+    let last = h.put(NODE_TOKEN, "fleet", "a", None, "a :: b").await;
+    let last = last.body["event"]["seq"].as_i64().unwrap();
+    let body = json!({"query":"::","min_seq":last,"limit":3});
+    let r = search(&h, NODE_TOKEN, body.clone()).await;
     assert_eq!(r.body["retrieval"]["truncated"], json!(true));
     assert_eq!(
-        r.body["match_count"].as_u64(),
-        Some(search::LITERAL_DOCS as u64)
+        ids(&r),
+        vec![
+            pair("fleet", "a"),
+            pair("fleet", "c0000"),
+            pair("fleet", "c0001")
+        ]
     );
+    // A lower bound when truncated: the scan stopped at the limit.
+    assert_eq!(r.body["match_count"].as_u64(), Some(3));
     let words = search(&h, NODE_TOKEN, json!({"query":"a"})).await;
     assert!(words.body["retrieval"].get("truncated").is_none());
+    // A restart rebuilds the index with new document numbers, and the
+    // answer is the same.
+    h.store.take();
+    h.open(std::sync::Arc::new(super::scan::Unavailable), None);
+    let again = search(&h, NODE_TOKEN, body).await;
+    assert_eq!(again.body, r.body);
 }
 
 fn card(n: usize) -> Card {
@@ -741,19 +852,51 @@ fn card(n: usize) -> Card {
     }
 }
 
-/// Claude #4: many small commits and mostly-retire workloads also rebuild.
+/// Claude #4, round 2 #2: many small commits merge their deltas instead of
+/// rebuilding, and mostly-retire workloads still rebuild.
 #[test]
-fn rebuild_triggers_on_segment_count_and_dead_documents() {
-    use super::index::{MAX_DELTA_SEGMENTS, REBUILD_FLOOR};
+fn small_commits_merge_and_dead_documents_rebuild() {
+    use super::index::{MAX_DELTA_SEGMENTS, MERGE_FAN_IN, REBUILD_FLOOR};
     // Segments: a large main segment, so the delta document share stays small.
     let mut b = Builder::from_cards((0..10_000).map(card), 1);
-    for k in 0..MAX_DELTA_SEGMENTS {
+    let mut most = 0;
+    for k in 0..MAX_DELTA_SEGMENTS + 1 {
         b.apply(vec![Change::Live(card(20_000 + k))], k as i64 + 2);
         assert!(!b.wants_rebuild(), "after {} deltas", k + 1);
+        most = most.max(b.snapshot().segments());
     }
-    b.apply(vec![Change::Live(card(30_000))], 100);
-    assert_eq!(b.snapshot().segments(), MAX_DELTA_SEGMENTS + 2);
-    assert!(b.wants_rebuild());
+    // 65 commits in base 8 are 1, 0, 1: two deltas besides the main segment.
+    // Fewer than 8 deltas per level, and 65 has three base-8 digits.
+    assert_eq!(b.snapshot().segments(), 3);
+    assert!(most <= 1 + 3 * (MERGE_FAN_IN - 1), "{most}");
+    // Without tiers, the segment cap merges every delta into one.
+    let mut flat = Builder::from_cards((0..10_000).map(card), 1);
+    flat.fan_in = usize::MAX;
+    for k in 0..MAX_DELTA_SEGMENTS {
+        flat.apply(vec![Change::Live(card(20_000 + k))], k as i64 + 2);
+    }
+    assert_eq!(flat.snapshot().segments(), MAX_DELTA_SEGMENTS + 1);
+    flat.apply(vec![Change::Live(card(30_000))], 100);
+    assert_eq!(flat.snapshot().segments(), 2);
+    assert!(!flat.wants_rebuild());
+    // Merged segments answer as one fresh build over the same cards does.
+    let words: Vec<String> = ["word5", "word20003", "word20040", "word30000"]
+        .map(String::from)
+        .to_vec();
+    let by_id = |snap: &super::index::Snapshot| {
+        let mut out: Vec<(String, f64)> = snap
+            .score(&[true], &words)
+            .into_iter()
+            .map(|(n, score)| (snap.doc(n).card_id.to_string(), score))
+            .collect();
+        out.sort_by(|x, y| x.0.cmp(&y.0));
+        out
+    };
+    let mut cards: Vec<Card> = (0..10_000).map(card).collect();
+    cards.extend((0..MAX_DELTA_SEGMENTS).map(|k| card(20_000 + k)));
+    cards.push(card(30_000));
+    let fresh = Builder::from_cards(cards, 100).snapshot();
+    assert_eq!(by_id(&flat.snapshot()), by_id(&fresh));
     // Dead documents: retirements add no segment and no delta document.
     let total = 4 * REBUILD_FLOOR;
     let mut b = Builder::from_cards((0..total).map(card), 1);
@@ -772,12 +915,58 @@ fn rebuild_triggers_on_segment_count_and_dead_documents() {
     assert!(!b.wants_rebuild());
 }
 
+/// Claude round 2 #2: 1,000 single-card commits on a large main segment
+/// start no full rebuild (the 64-segment cap used to start 15), keep the
+/// segment count logarithmic and answer as a fresh build does.
+#[test]
+fn a_thousand_single_card_commits_need_no_full_rebuild() {
+    use super::index::MERGE_FAN_IN;
+    let mut b = Builder::from_cards((0..20_000).map(card), 1);
+    let (mut rebuilds, mut most) = (0, 0);
+    for k in 0..1000 {
+        // Every tenth commit revises a main-segment card, so merges drop
+        // dead postings as well as join live ones.
+        let next = if k % 10 == 0 {
+            card(k * 7)
+        } else {
+            card(20_000 + k)
+        };
+        b.apply(vec![Change::Live(next)], k as i64 + 2);
+        if b.wants_rebuild() {
+            rebuilds += 1;
+        }
+        most = most.max(b.snapshot().segments());
+    }
+    assert_eq!(rebuilds, 0);
+    // 1,000 commits are four base-8 digits: at most 7 deltas per level.
+    assert!(most <= 1 + 4 * (MERGE_FAN_IN - 1), "{most}");
+    let snap = b.snapshot();
+    let mut live: Vec<Card> = (0..20_000).map(card).collect();
+    live.extend((0..1000).filter(|k| k % 10 != 0).map(|k| card(20_000 + k)));
+    let fresh = Builder::from_cards(live, 1001).snapshot();
+    let words: Vec<String> = ["word0", "word70", "word20001", "word20999", "word19999"]
+        .map(String::from)
+        .to_vec();
+    let by_id = |snap: &super::index::Snapshot| {
+        let mut out: Vec<(String, f64)> = snap
+            .score(&[true], &words)
+            .into_iter()
+            .map(|(n, score)| (snap.doc(n).card_id.to_string(), score))
+            .collect();
+        out.sort_by(|x, y| x.0.cmp(&y.0));
+        out
+    };
+    assert_eq!(by_id(&snap), by_id(&fresh));
+    assert_eq!(by_id(&snap).len(), words.len());
+}
+
 #[tokio::test]
-async fn many_small_commits_rebuild_past_the_segment_cap() {
+async fn many_small_commits_merge_without_a_full_rebuild() {
     let h = Hub::new();
     let i = index(&h);
+    let count = super::index::MAX_DELTA_SEGMENTS + 4;
     let mut last = 0;
-    for n in 0..super::index::MAX_DELTA_SEGMENTS + 4 {
+    for n in 0..count {
         let r = h
             .put(
                 NODE_TOKEN,
@@ -789,18 +978,17 @@ async fn many_small_commits_rebuild_past_the_segment_cap() {
             .await;
         last = r.body["event"]["seq"].as_i64().unwrap();
     }
-    until("rebuild", || i.metrics.lock().unwrap().rebuilds >= 1).await;
     let r = search(
         &h,
         NODE_TOKEN,
         json!({"query":"shared","min_seq":last,"limit":20}),
     )
     .await;
-    assert_eq!(
-        r.body["match_count"].as_u64(),
-        Some(super::index::MAX_DELTA_SEGMENTS as u64 + 4)
-    );
-    assert!(i.current().segments() <= super::index::MAX_DELTA_SEGMENTS);
+    assert_eq!(r.body["match_count"].as_u64(), Some(count as u64));
+    // 68 commits stay under the rebuild floor, so only merges ran: 68 in
+    // base 8 is 1, 0, 4, five deltas besides the main segment.
+    assert_eq!(i.metrics.lock().unwrap().rebuilds, 0);
+    assert_eq!(i.current().segments(), 6);
 }
 
 /// Claude #7: a failed rebuild retries on its own, so a retired card leaves
@@ -837,6 +1025,139 @@ async fn a_failed_rebuild_retries_without_a_new_commit() {
     assert_eq!(r.body["retrieval"]["stale"], json!(false));
     assert_eq!(r.body["indexed_seq"].as_i64(), Some(retired_seq));
     assert_eq!(ids(&r), vec![pair("fleet", "other")]);
+}
+
+/// Claude round 2 #3: when the memory writer cannot reopen its file it
+/// closes its channel but keeps its sender, and the retry loop must end then
+/// instead of loading the store every 30 seconds until shutdown. The writer
+/// path needs a failed commit and a failed `quick_check`, which a unit test
+/// cannot cause, so this drives the rebuild thread with a channel in that
+/// same state.
+#[test]
+fn the_rebuild_retry_stops_once_the_writer_closes_its_channel() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let dir = super::tests::temp_dir();
+    let path = dir.join("fleet-hub-memory.db");
+    let db = rusqlite::Connection::open(&path).unwrap();
+    super::schema::migrate(&db, 0).unwrap();
+    let index = super::index::Index::open(&db, path).unwrap();
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<super::writer::Job>(4);
+    index.attach(sender.downgrade());
+    let mut publisher = index.publisher().unwrap();
+    index.fail_loads.store(usize::MAX, SeqCst);
+    publisher.rebuild();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while index.metrics.lock().unwrap().rebuild_failures == 0 {
+        assert!(Instant::now() < deadline, "no failed load");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    receiver.close();
+    // The next retry comes within a few backoff steps (100, 200, 400 ms).
+    while index.rebuild_running() {
+        assert!(
+            Instant::now() < deadline,
+            "the retry loop outlived the writer"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(index.metrics.lock().unwrap().rebuilds, 0);
+    let failures = index.metrics.lock().unwrap().rebuild_failures;
+    assert!(failures <= 4, "{failures}");
+    // The writer's sender stayed alive until here.
+    drop((publisher, sender, db));
+    std::fs::remove_dir_all(&dir).unwrap();
+}
+
+/// Claude round 2 #4: dropping the store wakes a rebuild that is backing
+/// off and joins it, so no thread keeps the memory file open afterwards.
+#[tokio::test]
+async fn dropping_the_store_joins_a_rebuild_that_is_backing_off() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let mut h = Hub::new();
+    h.put(NODE_TOKEN, "fleet", "before", None, "alpha").await;
+    let i = index(&h);
+    until("first publication", || i.current().indexed_seq > 0).await;
+    *i.retry_wait.lock().unwrap() = Some(Duration::from_secs(600));
+    i.fail_loads.store(usize::MAX, SeqCst);
+    i.fail.store(1, SeqCst);
+    h.put(NODE_TOKEN, "fleet", "during", None, "alpha").await;
+    until("a failed load", || {
+        i.metrics.lock().unwrap().rebuild_failures == 1
+    })
+    .await;
+    assert!(i.rebuild_running());
+    // The thread now waits 600 s before its next load.
+    let started = Instant::now();
+    h.store.take();
+    let took = started.elapsed();
+    assert!(took < Duration::from_secs(60), "{took:?}");
+    assert!(!i.rebuild_running());
+    // The rebuild thread and the writer held the only other references.
+    assert_eq!(std::sync::Arc::strong_count(&i), 1);
+    #[cfg(target_os = "linux")]
+    {
+        // The file, its WAL and its shared-memory index.
+        let memory = h.memory().to_string_lossy().into_owned();
+        let open = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|e| std::fs::read_link(e.ok()?.path()).ok())
+            .filter(|target| target.to_string_lossy().starts_with(&memory))
+            .count();
+        assert_eq!(open, 0, "a file descriptor still names {memory:?}");
+    }
+}
+
+/// Claude round 2 #4: a new index failure during a rebuild's backoff starts
+/// the next load at once, so a retired card stops being searchable promptly.
+#[tokio::test]
+async fn a_new_index_failure_wakes_a_rebuild_that_is_backing_off() {
+    use std::sync::atomic::Ordering::SeqCst;
+    let h = Hub::new();
+    let i = index(&h);
+    *i.retry_wait.lock().unwrap() = Some(Duration::from_secs(600));
+    i.fail_loads.store(1, SeqCst);
+    // REBUILD_FLOOR cards on an empty main segment start a rebuild by the
+    // 10% rule, and its first load fails.
+    let mut secret = None;
+    for n in 0..super::index::REBUILD_FLOOR {
+        let r = h
+            .put(NODE_TOKEN, "fleet", &format!("c{n:03}"), None, "shared")
+            .await;
+        if n == 0 {
+            secret = Some(r);
+        }
+    }
+    until("a failed load", || {
+        i.metrics.lock().unwrap().rebuild_failures == 1
+    })
+    .await;
+    assert!(!i.current().stale);
+    // The retire's publication fails while the rebuild waits 600 s.
+    i.fail.store(1, SeqCst);
+    let epoch = h.epoch().await;
+    let retired = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"retire","scope":"fleet","card_id":"c000","base_revision":rev(secret.as_ref().unwrap()),"base_epoch":epoch,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(retired.status, 200, "{:?}", retired.body);
+    let seq = retired.body["event"]["seq"].as_i64().unwrap();
+    until("the woken rebuild", || {
+        i.metrics.lock().unwrap().rebuilds == 1
+    })
+    .await;
+    let r = search(
+        &h,
+        NODE_TOKEN,
+        json!({"query":"shared","min_seq":seq,"limit":20}),
+    )
+    .await;
+    assert_eq!(r.body["retrieval"]["stale"], json!(false));
+    assert_eq!(
+        r.body["match_count"].as_u64(),
+        Some(super::index::REBUILD_FLOOR as u64 - 1)
+    );
 }
 
 #[test]

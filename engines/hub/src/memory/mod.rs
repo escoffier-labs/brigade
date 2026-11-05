@@ -95,6 +95,15 @@ pub struct Store {
     index: Arc<index::Index>,
 }
 
+impl Drop for Store {
+    /// Stops and joins the index rebuild thread first, so its read-only
+    /// connection is closed before anything swaps the memory file. The
+    /// writer then answers what is queued and closes its connections.
+    fn drop(&mut self) {
+        self.index.stop();
+    }
+}
+
 struct Conn<'a>(&'a rusqlite::Connection);
 impl ReadTx for Conn<'_> {
     fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
