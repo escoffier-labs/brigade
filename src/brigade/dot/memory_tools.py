@@ -48,6 +48,9 @@ class MemoryTools:
         return value, None
 
     def memory_search(self, query: str, limit: int = 10) -> dict[str, Any]:
+        """`brigade memory search`. With hub memory on, it makes no hub `status` call, so an admin
+        token in the node slot is not refused here: matches stay inside the `[hub]` read scopes
+        but skip this node's grants within them. `memory_card` refuses that token."""
         value, error = self._brigade_json(
             ["memory", "search", "--target", str(self.workspace), "--limit", str(limit), "--json", "--", query],
             timeout=30,
@@ -94,7 +97,9 @@ class MemoryTools:
         search match reports it, picks one when the id is in more than one.
         While the hub is unavailable the CLI answers from this host's replica,
         so a replica search match opens too; `source` says which answered. A
-        hub refusal (401, 403 or a coded answer) never falls back.
+        hub refusal (401, 403 or a coded answer) never falls back, and a scope
+        the hub refused is never served from the replica. The CLI reads the
+        hub's `status` first and refuses an admin token in the node slot.
         """
         from ..memory_hub_client import HubConfigError, hub_mode
 

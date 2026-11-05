@@ -604,9 +604,13 @@ def drop_proposal(
       which becomes the published base, so the next push sends nothing for it.
 
     Both need a replica pulled from this hub, as the principal and under the
-    log_epoch its `status` reports now; otherwise they refuse and say to pull
-    first. The closed record, and for `keep-hub` the card file's text it
-    replaced, move to `proposals/dropped/`. None when there is no such proposal.
+    log_epoch its `status` reports now, whose head for the card is the one the
+    hub's `card` answers now; otherwise they refuse and say to pull first. A
+    replica pulled before the conflicting write has the right epoch and an old
+    head. `keep-hub` finds the local card by its id, so a moved card is
+    rewritten where it is, and refuses when more than one file holds the id.
+    The closed record, and for `keep-hub` the card file's text it replaced,
+    move to `proposals/dropped/`. None when there is no such proposal.
     """
     if keep not in {DROP_KEEP_LOCAL, DROP_KEEP_HUB}:
         raise ValueError(keep)
@@ -634,19 +638,22 @@ def drop_proposal(
         key = store.Replica.key(scope, card_id)
         if key in replica.missing:
             raise DropRefused(f"{scope}/{card_id} is left out of the replica for its size cap; raise replica_max_mb")
+        if scope not in settings.read_scopes:
+            raise DropRefused(
+                f"{scope} is not one of the [hub] read scopes, so the replica holds no head for {scope}/{card_id}; "
+                "add it to read_scopes and pull"
+            )
         head = replica.readable_heads(settings.read_scopes).get(key)
         epoch = replica.meta.get("log_epoch")
+        _require_current_head(client, scope, card_id, head, epoch)
         extra: dict[str, Any] = {}
         if keep == DROP_KEEP_HUB:
             if head is None:
                 raise DropRefused(
-                    f"the replica holds no hub head for {scope}/{card_id}; it is retired, absent or outside the "
-                    "read scopes, so there is no hub text to keep"
+                    f"the replica holds no hub head for {scope}/{card_id}; it is retired or absent, "
+                    "so there is no hub text to keep"
                 )
-            path = _card_path(target, entry.get("path"))
-            if path.is_symlink() or (path.exists() and not path.is_file()):
-                raise DropRefused(f"{path} is not a regular card file")
-            previous = path.read_text(encoding="utf-8") if path.exists() else None
+            path, previous = _keep_hub_card(target, card_id, entry.get("path"))
             extra["card_text_replaced"] = previous
             closed = store.drop_proposal(target, proposal_id, outcome=DROP_KEEP_HUB, **extra)
             assert closed is not None
@@ -676,6 +683,58 @@ def drop_proposal(
             "rebased_on": head.get("revision") if head is not None else None,
             "dropped_to": closed["dropped_to"],
         }
+
+
+def _require_current_head(
+    client: hubc.MemoryHubClient, scope: str, card_id: str, head: dict[str, Any] | None, epoch: object
+) -> None:
+    """Refuse unless the replica's head for the card is the hub's head now."""
+    try:
+        body = client.call("card", card_id=card_id, scope=scope, offset=0)
+    except hubc.HubRefusal as exc:
+        if exc.code != "memory_card_not_found":
+            raise
+        live: dict[str, Any] | None = None
+    else:
+        if str(body.get("log_epoch") or "") != str(epoch or ""):
+            raise DropRefused("the hub's log_epoch changed; run `brigade memory hub pull` first")
+        card = hubc.obj(body.get("card"))
+        live = None if card.get("state") == "retired" else card
+    hub_head = (live.get("revision"), live.get("content_hash")) if live is not None else None
+    replica_head = (head.get("revision"), head.get("content_hash")) if head is not None else None
+    if hub_head != replica_head:
+        held = f"revision {replica_head[0]}" if replica_head else "no head"
+        current = f"revision {hub_head[0]}" if hub_head else "no head"
+        raise DropRefused(
+            f"the replica is behind the hub for {scope}/{card_id} (replica: {held}, hub: {current}); "
+            "run `brigade memory hub pull` first"
+        )
+
+
+def _keep_hub_card(target: Path, card_id: str, rel: object) -> tuple[Path, str | None]:
+    """The local card file `keep-hub` rewrites, and its text now (None when it is gone).
+
+    The card is found by id, so a card that moved since the proposal is
+    rewritten where it is now. More than one file with the id, or a file at
+    the recorded path that holds another id or cannot be read, refuses.
+    """
+    holders = [card["rel"] for card in _local_cards(target) if card["card_id"] == card_id]
+    if len(holders) > 1:
+        raise DropRefused(
+            f"more than one local card holds id {card_id} ({', '.join(sorted(holders))}); keep one and drop again"
+        )
+    path = _card_path(target, holders[0] if holders else rel)
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise DropRefused(f"{path} is not a regular card file")
+    if not path.exists():
+        return path, None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise DropRefused(f"{path} cannot be read as UTF-8 text ({type(exc).__name__}); fix or move it") from exc
+    if not holders:
+        raise DropRefused(f"{path} no longer holds card id {card_id}; move the card back or drop with --keep-local")
+    return path, text
 
 
 def _card_path(target: Path, rel: object) -> Path:

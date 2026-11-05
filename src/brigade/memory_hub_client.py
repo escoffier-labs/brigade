@@ -13,11 +13,14 @@ credential is this machine's node token, as `brigade fleet` reads it. The
 client never reads the shared admin token (`BRIGADE_FLEET_TOKEN`): without a
 node token the hub client is unavailable. The node-token slot can still hold
 the admin token by mistake, and the hub then answers as its admin. `status`,
-`pull`, `push`, `import` and `proposals drop` ask the hub's `status` first and
-refuse when it reports `credential: "admin"`. Search makes no `status` call,
-so it cannot tell; its reads still stay inside `read_scopes`, and it writes
-nothing. Tokens are sent as a bearer header and never logged, printed or
-stored.
+`pull`, `push`, `import`, `card` and `proposals drop` ask the hub's `status`
+first and refuse when it reports `credential: "admin"`, so Dot and Duet
+`memory_card`, which run `card`, refuse too. Search (`memory search`, and Dot
+and Duet `memory_search`) makes no `status` call, to stay inside its latency
+budget, so it cannot tell: with the admin token in the node slot it reads
+every card the admin may read inside `read_scopes`, including scopes this
+node holds no grant for. It writes and replicates nothing. Tokens are sent as
+a bearer header and never logged, printed or stored.
 """
 
 from __future__ import annotations

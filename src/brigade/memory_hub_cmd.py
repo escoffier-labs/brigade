@@ -121,8 +121,20 @@ def _unavailable(exc: hubc.HubUnavailable, *, json_output: bool) -> int:
     )
 
 
+class _CardUnavailable(hubc.HubUnavailable):
+    """The hub became unavailable during a card read, after it refused the card in `refused` scopes."""
+
+    def __init__(self, exc: hubc.HubUnavailable, refused: tuple[str, ...]) -> None:
+        super().__init__(exc.reason, status=exc.status)
+        self.refused = refused
+
+
 def _card_scope(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace) -> tuple[str, dict]:
-    """The read scope that holds the card, and the first chunk's answer. Never a scope outside the config."""
+    """The read scope that holds the card, and the first chunk's answer. Never a scope outside the config.
+
+    When the hub turns unavailable after it refused the card in one scope,
+    the HubUnavailable carries that scope, so the replica never serves it.
+    """
     if args.scope:
         if args.scope not in settings.read_scopes:
             raise hubc.HubConfigError(
@@ -133,13 +145,17 @@ def _card_scope(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: 
         candidates = settings.read_scopes
     found: list[tuple[str, dict]] = []
     refusal: hubc.HubRefusal | None = None
+    refused: list[str] = []
     for scope in candidates:
         try:
             found.append((scope, client.call("card", card_id=args.card_id, scope=scope, offset=args.offset)))
+        except hubc.HubUnavailable as exc:
+            raise _CardUnavailable(exc, tuple(refused)) from exc
         except hubc.HubRefusal as exc:
             if len(candidates) == 1 or exc.code not in {"memory_card_not_found", "memory_grant_missing"}:
                 raise
             refusal = refusal or exc
+            refused.append(scope)
     if len(found) > 1:
         scopes = [scope for scope, _ in found]
         raise hubc.HubRefusal(
@@ -223,7 +239,17 @@ def _read_chunks(
 
 
 def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace) -> dict[str, Any]:
-    """The card from the hub. A restore between chunks restarts the read once, then refuses."""
+    """The card from the hub. A restore between chunks restarts the read once, then refuses.
+
+    The hub's `status` is read first so an admin credential in the node slot
+    is refused before any card is read. A credential that cannot read status
+    cannot read a card either; the card call then carries the hub's refusal.
+    """
+    try:
+        hubc.refuse_admin(client.call("status"))
+    except hubc.HubRefusal as exc:
+        if not (exc.status == 403 and exc.code == "memory_grant_missing"):
+            raise
     for attempt in (1, 2):
         scope, body = _card_scope(client, settings, args)
         try:
@@ -243,20 +269,26 @@ def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: ar
 
 
 def _replica_card(
-    target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace
+    target: Path,
+    client: hubc.MemoryHubClient,
+    settings: hubc.HubSettings,
+    args: argparse.Namespace,
+    *,
+    refused: tuple[str, ...] = (),
 ) -> dict[str, Any] | None:
     """The card from this host's replica, used only when the hub is unavailable.
 
     The replica must have been pulled from this hub, and only heads in scopes
     both configured now and readable at that pull count. A refusal never
-    reaches here. None when the replica does not hold the card.
+    reaches here, and a scope the hub refused during this read (`refused`)
+    is never served. None when the replica does not hold the card.
     """
     from . import memory_hub_store as store
 
     replica = store.replica(target)
     if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
         return None
-    scopes = (args.scope,) if args.scope else settings.read_scopes
+    scopes = [scope for scope in ((args.scope,) if args.scope else settings.read_scopes) if scope not in refused]
     found = [
         head
         for scope in scopes
@@ -385,7 +417,8 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             payload = _hub_card(client, settings, args)
         except hubc.HubUnavailable as exc:
             # Not now, rather than no: the replica may stand in, as for search.
-            fallback = _replica_card(target, client, settings, args)
+            refused = exc.refused if isinstance(exc, _CardUnavailable) else ()
+            fallback = _replica_card(target, client, settings, args, refused=refused)
             if fallback is None:
                 raise
             warning = f"hub unavailable ({exc.reason}); answered from this host's replica"

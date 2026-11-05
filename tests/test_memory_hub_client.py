@@ -796,7 +796,6 @@ def _card_ids(replica: store.Replica) -> set[str]:
     return {head["card_id"] for head in replica.heads.values()}
 
 
-@POSIX_DOT
 def test_dot_reads_only_the_configured_scope(hub, tmp_path):
     # This credential can read as much as an admin, private scopes included.
     hub.grants["node-1"] = {"*", "principal:alice"}
@@ -807,9 +806,14 @@ def test_dot_reads_only_the_configured_scope(hub, tmp_path):
     found = tools.memory_search("salary")
     assert [(m["card_id"], m["scope"], m["source"]) for m in found["matches"]] == [("app-pay", "repo:me/app", "hub")]
     assert [c["scopes"] for c in hub.calls if c["action"] == "search"] == [["repo:me/app"]]
-    for name in ("alice-notes", "fleet-pay"):
-        assert tools.memory_card(name) == {"error": "card_not_found", "name": name}
-    assert tools.memory_card("app-pay")["content"] == "salary app-pay\n"
+    for name, scope in (("alice-notes", "principal:alice"), ("fleet-pay", "fleet")):
+        assert tools.memory_card(name, scope=scope) == {"error": "card_not_found", "name": name}
+    assert tools.memory_card("app-pay", scope="repo:me/app")["content"] == "salary app-pay\n"
+    if os.name == "posix":
+        # A read without a scope opens the local cards directory first, which needs POSIX.
+        for name in ("alice-notes", "fleet-pay"):
+            assert tools.memory_card(name) == {"error": "card_not_found", "name": name}
+        assert tools.memory_card("app-pay")["content"] == "salary app-pay\n"
     assert {c.get("scope") for c in hub.calls if c["action"] == "card"} == {"repo:me/app"}
 
 
@@ -1121,7 +1125,6 @@ def test_redirects_timeouts_and_rate_limits_spool_instead_of_proposing(hub, tmp_
 # --- review round 1: Dot card scope, config errors, files, fusion ---------------------------------
 
 
-@POSIX_DOT
 def test_dot_memory_card_opens_a_card_held_in_two_read_scopes(hub, tmp_path, capsys):
     from brigade.dot.adapter import validate_arguments
     from brigade.dot.contracts import DotError
@@ -1132,7 +1135,9 @@ def test_dot_memory_card_opens_a_card_held_in_two_read_scopes(hub, tmp_path, cap
     code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--json", "twin"], capsys)
     assert code == 1 and json.loads(out)["code"] == "memory_card_ambiguous"
     tools = _dot_cli(target)
-    assert tools.memory_card("twin") == {"error": "card_not_found", "name": "twin"}
+    if os.name == "posix":
+        # A read without a scope opens the local cards directory first, which needs POSIX.
+        assert tools.memory_card("twin") == {"error": "card_not_found", "name": "twin"}
     got = tools.memory_card("twin", scope="fleet")
     assert (got["scope"], got["content"]) == ("fleet", "fleet twin\n")
     assert tools.commands.argv[-1][-4:] == ["--scope", "fleet", "--", "twin"]
@@ -1342,7 +1347,6 @@ def test_card_reads_fall_back_to_the_replica_only_when_the_hub_is_unavailable(hu
     assert code == 1 and json.loads(out)["code"] == "memory_grant_missing"
 
 
-@POSIX_DOT
 def test_dot_memory_card_opens_a_replica_match_while_the_hub_is_down(hub, tmp_path):
     target = workspace(tmp_path, mode="read")
     _put(hub, "fleet", "theirs", "otter replicated")
@@ -1404,3 +1408,146 @@ def test_card_all_never_splices_chunks_from_two_epochs(hub, tmp_path, capsys):
     hub.do_card = wrong_hash
     code, out, _ = run(argv, capsys)
     assert code == 1 and json.loads(out)["code"] == "memory_card_hash_mismatch"
+
+
+# --- review round 3: refused scopes, stale drops, admin card reads, moved cards -----------------
+
+
+@pytest.mark.parametrize(
+    "refusal",
+    [
+        (403, {"error": "no read grant", "code": "memory_grant_missing"}),
+        (404, {"error": "card not found", "code": "memory_card_not_found"}),
+    ],
+    ids=["revoked-grant", "retired-card"],
+)
+def test_a_scope_the_hub_refused_is_never_served_from_the_replica(hub, tmp_path, capsys, refusal):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "repo:b"))
+    _put(hub, "repo:a", "x", "refused scope text")
+    sync.pull(target, client(hub), settings(target))
+    original = hub.do_card
+
+    def refuse_a_then_rate_limit_b(body):
+        if body.get("scope") == "repo:a":
+            return refusal
+        if body.get("scope") == "repo:b":
+            return 429, {}
+        return original(body)
+
+    hub.do_card = refuse_a_then_rate_limit_b
+    code, out, err = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "x"], capsys)
+    assert code == 1 and "refused scope text" not in out + err
+    assert json.loads(out).get("source") != "replica"
+    tools = _dot_cli(target)
+    if os.name == "posix":
+        # The scope-less read opens the local cards directory first, which needs POSIX.
+        assert tools.memory_card("x") == {"error": "card_not_found", "name": "x"}
+    # A scope the hub never refused still falls back while the hub is unavailable.
+    _put(hub, "repo:b", "y", "rate limited scope text")
+    hub.do_card = original
+    sync.pull(target, client(hub), settings(target))
+    hub.do_card = refuse_a_then_rate_limit_b
+    got = tools.memory_card("y", scope="repo:b")
+    assert (got["source"], got["content"]) == ("replica", "rate limited scope text\n")
+
+
+@pytest.mark.parametrize("keep", ["--keep-hub", "--keep-local"])
+def test_drop_refuses_a_replica_pulled_before_the_conflicting_write(hub, tmp_path, capsys, keep):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    # A routine pull before the other writer's edit: same epoch, same principal, an old head.
+    sync.pull(target, client(hub), settings(target))
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), keep, proposal_id]
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "pull" in err and "first" in err, out + err
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    assert not store.dropped_dir(target).exists()
+    assert card.read_text(encoding="utf-8") == "# One\nmine\n"
+    # A pull after the conflict, then a third write: still behind the hub.
+    sync.pull(target, client(hub), settings(target))
+    _put_on(hub, "one", "third\n")
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "pull" in err, out + err
+    sync.pull(target, client(hub), settings(target))
+    code, out, err = run(argv, capsys)
+    head = hub.cards[("repo:test/app", "one")]["revision"]
+    assert code == 0 and f"revision {head}" in out, err
+
+
+def _put_on(hub: FakeHub, card_id: str, text: str, scope: str = "repo:test/app") -> None:
+    """Another writer moves the head of an existing card."""
+    head = hub.cards[(scope, card_id)]["revision"]
+    client(hub).call(
+        "put",
+        scope=scope,
+        card_id=card_id,
+        base_revision=head,
+        base_epoch=hub.epoch,
+        text=text,
+        client_event_id=hubc.event_id(),
+    )
+
+
+def test_card_refuses_an_admin_token_in_the_node_slot(hub, tmp_path, monkeypatch, capsys):
+    hub.grants["node-1"] = {"repo:test/app"}
+    target = workspace(tmp_path, mode="read", read_scopes=("repo:test/app", "principal:alice"))
+    _put(hub, "principal:alice", "alice-notes", "alice private text", token=ADMIN_CREDENTIAL)
+    code, out, _ = run(
+        ["memory", "hub", "card", "--target", str(target), "--scope", "principal:alice", "--json", "alice-notes"],
+        capsys,
+    )
+    assert code == 1 and json.loads(out)["code"] == "memory_grant_missing"
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", ADMIN_CREDENTIAL)
+    hub.calls.clear()
+    code, out, err = run(
+        ["memory", "hub", "card", "--target", str(target), "--scope", "principal:alice", "--json", "alice-notes"],
+        capsys,
+    )
+    assert code == 2 and "admin token" in err and "alice private text" not in out + err
+    assert ADMIN_CREDENTIAL not in out + err
+    assert [c["action"] for c in hub.calls] == ["status"]
+    tools = _dot_cli(target)
+    assert tools.memory_card("alice-notes", scope="principal:alice") == {
+        "error": "card_not_found",
+        "name": "alice-notes",
+    }
+
+
+def test_keep_hub_follows_a_moved_card_by_id(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="---\nid: one\n---\n# One\nfirst\n")
+    cards = target / "memory" / "cards"
+    sync.push(target, client(hub), settings(target), yes=True)
+    theirs = "---\nid: one\n---\n# One\ntheirs\n"
+    proposal_id = _conflict(hub, target, theirs, "---\nid: one\n---\n# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    (cards / "archive").mkdir()
+    (cards / "one.md").rename(cards / "archive" / "one.md")
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-hub", proposal_id]
+    # Two local cards hold the id: refuse rather than pick one.
+    (cards / "one.md").write_text("---\nid: one\n---\n# One\ncopy\n", encoding="utf-8")
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "more than one" in err, out + err
+    (cards / "one.md").unlink()
+    code, out, err = run(argv, capsys)
+    assert code == 0, err
+    assert not (cards / "one.md").exists()
+    assert (cards / "archive" / "one.md").read_text(encoding="utf-8") == hubc.normalize_text(theirs)
+    before = len(hub.puts())
+    report = sync.push(target, client(hub), settings(target))
+    assert report["published"] == [] and report["proposals"] == [] and len(hub.puts()) == before
+
+
+def test_keep_hub_refuses_a_card_file_that_is_not_utf8(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    card.write_bytes(b"# One\n\xff\xfe not utf-8\n")
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-hub", proposal_id]
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "Traceback" not in err and "one.md" in err, out + err
+    assert card.read_bytes() == b"# One\n\xff\xfe not utf-8\n"
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
