@@ -310,6 +310,11 @@ def test_compose_config_holder_layout_no_ports_and_gpu_only_in_the_profile(proje
     assert hub["environment"]["BRIGADE_FLEET_FINDINGS_KEY_FILE"] == "/run/secrets/findings_key"
     assert {item["source"] for item in hub["secrets"]} == {"admin_token", "findings_key"}
     assert full["services"]["backup"]["network_mode"] == "none"
+    # Compose renders the Rust front as written: the dogfood target, the wrapper and memory native.
+    assert hub["build"]["target"] == "dogfood"
+    assert hub["entrypoint"] == ["python", "/brigade/entry.py"]
+    assert hub["command"][hub["command"].index("--route-mode") + 1] == "memory=native"
+    assert "/var/lib/brigade/fleet-hub-memory.db" in full["services"]["backup"]["command"]
 
 
 # --------------------------------------------------------- front wrapper
@@ -705,7 +710,7 @@ def _hub_kill_fakes(monkeypatch, *, restarted: bool):
     return calls
 
 
-def test_hub_kill_signals_the_serve_process_and_never_uses_docker_kill(monkeypatch, capsys):
+def test_hub_kill_signals_the_rust_front_and_never_uses_docker_kill(monkeypatch, capsys):
     import argparse
 
     calls = _hub_kill_fakes(monkeypatch, restarted=True)
@@ -713,10 +718,12 @@ def test_hub_kill_signals_the_serve_process_and_never_uses_docker_kill(monkeypat
     checks.check_restart(argparse.Namespace(case="hub-kill"), result)
     assert not any(argv[:2] == ["docker", "kill"] for argv in calls)
     execs = [argv for argv in calls if argv[:2] == ["docker", "exec"]]
-    assert execs == [["docker", "exec", "hub-cid", "python", "-c", checks.KILL_SERVE]]
-    script = checks.KILL_SERVE
-    compile(script, "kill-serve", "exec")
-    assert "signal.SIGKILL" in script and '[b"fleet", b"serve"]' in script
+    assert execs == [["docker", "exec", "hub-cid", "python", "-c", checks.KILL_HUB]]
+    script = checks.KILL_HUB
+    compile(script, "kill-hub", "exec")
+    # The front owns the port; the entrypoint wrapper and the Python upstream are not it.
+    assert "signal.SIGKILL" in script and 'os.path.basename(argv[0]) == b"brigade-hub"' in script
+    assert 'split(b"\\0")' in script
     # PID 1 (docker-init) ignores SIGKILL from inside its namespace, so it is skipped.
     assert "(1, me)" in script
     assert result.status == "pass"
@@ -731,3 +738,265 @@ def test_hub_kill_restores_service_when_the_container_does_not_restart(monkeypat
     checks.check_restart(argparse.Namespace(case="hub-kill"), result)
     assert result.status == "fail"
     assert calls[-1][-5:] == ["up", "-d", "--no-build", "hub", "front"]
+
+
+# ------------------------------------------------- Rust hub in the recipe (S31c)
+
+
+def _stages(text):
+    """`FROM` lines of the Containerfile in order: (image, stage name or None)."""
+    stages = []
+    for line in text.splitlines():
+        if line.startswith("FROM "):
+            parts = line.split()
+            stages.append((parts[1], parts[3] if len(parts) == 4 and parts[2] == "AS" else None))
+    return stages
+
+
+def _stage_body(text, name):
+    start = text.index(f" AS {name}\n")
+    following = text.find("\nFROM ", start)
+    return text[start : following if following != -1 else len(text)]
+
+
+def _service_list(service, key):
+    """The list items under `key:` of one compose service, read without a YAML parser."""
+    text = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    block = text[text.index(f"\n  {service}:\n") :]
+    block = block[: block.index("\n\n")]
+    items, inside = [], False
+    for line in block.splitlines():
+        if line == f"    {key}:":
+            inside = True
+        elif inside and line.startswith("      - "):
+            items.append(line[len("      - ") :].strip('"'))
+        elif inside and not line.startswith("      #"):
+            inside = False
+    return items
+
+
+def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only_the_binary():
+    text = (RECIPE / "Containerfile").read_text(encoding="utf-8")
+    stages = _stages(text)
+    names = [name for _, name in stages]
+    assert names == ["source", "hub-build", "python-hub", "dogfood", None]
+    images = dict((name, image) for image, name in stages)
+    rust_version = (ROOT / "engines" / "hub" / "Cargo.toml").read_text(encoding="utf-8").split('rust-version = "')[1]
+    rust_version = rust_version.split('"')[0]
+    # The toolchain by exact version, every base image by digest.
+    assert images["hub-build"].startswith(f"rust:{rust_version}.0-slim-bookworm@sha256:")
+    for image, name in stages[:3]:
+        tag, _, digest = image.partition("@sha256:")
+        assert len(digest) == 64 and all(c in "0123456789abcdef" for c in digest), name
+    assert images["source"] == images["python-hub"]
+    # The Rust stage builds from the same checked archive as the Python hub.
+    source = _stage_body(text, "source")
+    assert "hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}'" in source
+    assert "archive/${BRIGADE_REF}.tar.gz" in source
+    build = _stage_body(text, "hub-build")
+    assert "COPY --from=source /src /src" in build
+    assert "cargo build --locked --release --bin brigade-hub" in build
+    dogfood = _stage_body(text, "dogfood")
+    assert images["dogfood"] == "python-hub"
+    copies = [line for line in dogfood.splitlines() if line.startswith("COPY ")]
+    assert copies == ["COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub"]
+    assert "ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3" in dogfood
+    # The default target is the Python-only image, so the Quadlet recipe and
+    # the container smoke never compile Rust.
+    assert stages[-1] == ("python-hub", None)
+    assert 'ENTRYPOINT ["brigade", "fleet", "serve"]' in _stage_body(text, "python-hub")
+
+
+def test_compose_hub_runs_brigade_hub_with_the_s31_flags_and_memory_native():
+    text = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    assert "      target: dogfood\n" in text
+    assert '    entrypoint: ["python", "/brigade/entry.py"]\n' in text
+    assert "      - ./hub:/brigade:ro\n" in text
+    command = _service_list("hub", "command")
+    assert command[:2] == ["--host", "127.0.0.1"]
+    assert command[command.index("--db") + 1] == "/var/lib/brigade/fleet-hub.db"
+    assert command[command.index("--token-file") + 1] == "/run/secrets/admin_token"
+    assert "--trust-forwarded-proto" in command
+    modes = [command[i + 1] for i, item in enumerate(command) if item == "--route-mode"]
+    # Memory is the only family the dogfood hub moves; the rest keep their defaults.
+    assert modes == ["memory=native"]
+    assert "--upstream" not in command
+    assert "BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key" in text
+    assert "    stop_grace_period: 40s\n" in text
+    # The default source pin has the Rust hub's memory route and S31's backup.
+    ref = text.split("BRIGADE_REF: ${BRIGADE_REF:-")[1].split("}")[0]
+    digest = text.split("BRIGADE_SHA256: ${BRIGADE_SHA256:-")[1].split("}")[0]
+    assert len(ref) == 40 and len(digest) == 64
+    assert ref != "e6009f6969dc6e45db2ab93790aa3e407c791409"
+
+
+def test_backup_job_copies_the_memory_file_beside_the_hub_file(tmp_path):
+    import sqlite3
+
+    from brigade import fleet_hub, fleet_hub_backup
+
+    command = _service_list("backup", "command")
+    sources = [command[i + 1] for i, item in enumerate(command) if item == "--db"]
+    assert sources == ["/var/lib/brigade/fleet-hub.db", "/var/lib/brigade/fleet-hub-memory.db"]
+    # The same two files through the real backup tool and the check's verifier.
+    data = tmp_path / "data"
+    data.mkdir()
+    fleet_hub.init_db(data / "fleet-hub.db").close()
+    memory = sqlite3.connect(data / "fleet-hub-memory.db")
+    memory.execute("PRAGMA journal_mode=WAL")
+    memory.execute("CREATE TABLE memory_meta (key TEXT PRIMARY KEY, value TEXT)")
+    memory.execute("INSERT INTO memory_meta VALUES ('log_epoch', 'fake-epoch')")
+    memory.commit()
+    try:
+        report = fleet_hub_backup.take_backup(
+            [data / Path(item).name for item in sources],
+            tmp_path / "copies",
+            disk_usage=lambda _p: type("U", (), {"free": 10**15}),
+        )
+    finally:
+        memory.close()
+    files = checks.verify_copy(Path(report["copy"]))
+    assert set(files) == {"fleet-hub.db", "fleet-hub-memory.db"}
+    assert all(item["integrity_check"] == "ok" for item in files.values())
+    copied = sqlite3.connect(Path(report["copy"]) / "fleet-hub-memory.db")
+    try:
+        assert copied.execute("SELECT value FROM memory_meta").fetchone() == ("fake-epoch",)
+    finally:
+        copied.close()
+    # The refusal check runs the job with the same two files.
+    source = (RECIPE / "checks" / "s31_checks.py").read_text(encoding="utf-8")
+    assert '"--db",\n                "/var/lib/brigade/fleet-hub-memory.db",' in source
+
+
+def _memory_fakes(monkeypatch, report):
+    from types import SimpleNamespace
+
+    calls = []
+
+    def run(argv, **_):
+        calls.append(argv)
+        if argv[:2] == ["docker", "exec"]:
+            return SimpleNamespace(stdout=json.dumps(report) + "\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="hub-cid\n", stderr="", returncode=0)
+
+    monkeypatch.setattr(checks, "run", run)
+    return calls
+
+
+def test_memory_check_posts_status_with_the_admin_token_inside_the_namespace(monkeypatch, capsys):
+    import argparse
+
+    good = {"status": 200, "error": None, "reason": None, "log_epoch": True, "memory_file": True}
+    calls = _memory_fakes(monkeypatch, good)
+    result = checks.Result("memory")
+    checks.check_memory(argparse.Namespace(), result)
+    assert result.status == "pass"
+    assert ["docker", "exec", "hub-cid", "python", "-c", checks.MEMORY_STATUS] in calls
+    script = checks.MEMORY_STATUS
+    compile(script, "memory-status", "exec")
+    assert '"http://127.0.0.1:3774/memory"' in script and 'json.dumps({"action": "status"})' in script
+    assert 'method="POST"' in script and '"/run/secrets/admin_token"' in script
+    # The probe prints a summary, never the token or the response body.
+    printed = script[script.index("print(") :]
+    assert "token" not in printed and "body" not in printed
+    assert "memory" in checks.CHECKS and checks.parser().parse_args(["memory"]).check == "memory"
+
+
+def test_memory_check_fails_on_a_hub_without_the_native_route(monkeypatch, capsys):
+    import argparse
+
+    absent = {"status": 404, "error": "not found", "reason": None, "log_epoch": False, "memory_file": False}
+    _memory_fakes(monkeypatch, absent)
+    result = checks.Result("memory")
+    checks.check_memory(argparse.Namespace(), result)
+    assert result.status == "fail"
+    first = next(item for item in result.items if item["name"].startswith("POST /memory"))
+    assert first["status"] == "FAIL" and "memory=native" in first["detail"]["hint"]
+
+
+entry = _load("brigade_hub_entry", RECIPE / "hub" / "entry.py")
+
+FAKE_HUB = """
+import http.server, signal, sys, threading
+args = sys.argv[1:]
+port = int(args[args.index("--port") + 1])
+mode = args[args.index("--fake") + 1]
+
+class Health(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200 if self.path == "/health" else 404)
+        self.end_headers()
+
+    def log_message(self, *_):
+        pass
+
+server = http.server.HTTPServer(("127.0.0.1", port), Health)
+threading.Thread(target=server.serve_forever, daemon=True).start()
+if mode == "crash":
+    sys.exit(3)
+done = threading.Event()
+signal.signal(signal.SIGTERM, lambda *_: done.set())
+done.wait(30)
+sys.exit(0 if mode == "clean" else 5)
+"""
+
+
+def _free_port():
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _run_entry(tmp_path, mode, *, stop):
+    import signal
+
+    fake = tmp_path / "brigade-hub"
+    fake.write_text(f"#!{sys.executable}\n{FAKE_HUB}", encoding="utf-8")
+    fake.chmod(0o755)
+    port = _free_port()
+    argv = ["--host", "127.0.0.1", "--port", str(port), "--db", "/var/lib/brigade/fleet-hub.db"]
+    argv += ["--route-mode", "memory=native", "--fake", mode]
+    proc = subprocess.Popen(
+        [sys.executable, str(RECIPE / "hub" / "entry.py"), *argv],
+        env={**os.environ, "BRIGADE_HUB_BIN": str(fake)},
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    first = proc.stdout.readline()
+    if stop:
+        proc.send_signal(signal.SIGTERM)
+    rest, _ = proc.communicate(timeout=30)
+    return proc.returncode, first + rest
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+def test_entry_writes_the_lines_the_s31_checks_read_on_a_clean_stop(tmp_path, monkeypatch):
+    code, out = _run_entry(tmp_path, "clean", stop=True)
+    assert code == 0
+    lines = out.splitlines()
+    assert lines[0].startswith(checks.HUB_STARTED + " 127.0.0.1:")
+    assert "route modes memory=native" in lines[0]
+    assert lines[-1] == checks.HUB_STOPPED
+    # The lines satisfy the clean-exit check as the container log.
+    _log_fakes(monkeypatch, out)
+    assert checks.clean_exit_logged(container="hub") is True
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signals")
+@pytest.mark.parametrize(("mode", "stop", "expected"), [("crash", False, 3), ("unclean", True, 5)])
+def test_entry_passes_a_failure_through_without_the_clean_exit_line(tmp_path, mode, stop, expected):
+    code, out = _run_entry(tmp_path, mode, stop=stop)
+    assert code == expected
+    assert checks.HUB_STOPPED not in out
+
+
+def test_entry_reads_the_hub_flags_and_maps_signal_deaths():
+    argv = ["--host", "::1", "--port=3999", "--route-mode", "memory=native", "--route-mode=claims=proxy"]
+    assert entry.option(argv, "--host", "x") == "::1"
+    assert entry.option(argv, "--port", "3774") == "3999"
+    assert entry.option(argv, "--db", "default") == "default"
+    assert entry.route_modes(argv) == ["memory=native", "claims=proxy"]
+    assert entry.exit_code(-9) == 137 and entry.exit_code(2) == 2
+    assert (entry.STARTED, entry.STOPPED) == (checks.HUB_STARTED, checks.HUB_STOPPED)

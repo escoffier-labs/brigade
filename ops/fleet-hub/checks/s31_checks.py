@@ -686,13 +686,15 @@ def check_load(args: argparse.Namespace, result: Result) -> None:
 
 # Run inside the hub container by `restart --case hub-kill`. `docker kill`
 # marks a container manually stopped, so the restart policy ignores it and the
-# watchdog skips it. A crash is the hub's own process dying instead. docker-init
-# is PID 1 (compose `init: true`), and a namespace's init ignores SIGKILL sent
-# from inside the namespace, so this signals its child, `brigade fleet serve`.
-# docker exec runs as the image's USER 10001, the serve process's own uid, so
-# the kill needs no CAP_KILL (compose drops every capability). docker-init then
-# exits non-zero and `restart: unless-stopped` starts the container again.
-KILL_SERVE = """
+# watchdog skips it. A crash is the hub's own process dying instead: the Rust
+# front, `brigade-hub`, which owns the port and supervises the Python hub.
+# docker-init is PID 1 (compose `init: true`), and a namespace's init ignores
+# SIGKILL sent from inside the namespace, so this signals the front, two levels
+# down under the recipe's entrypoint. docker exec runs as the image's USER
+# 10001, the front's own uid, so the kill needs no CAP_KILL (compose drops
+# every capability). The entrypoint then exits non-zero, docker-init exits with
+# it, and `restart: unless-stopped` starts the container again.
+KILL_HUB = """
 import os, signal
 me = os.getpid()
 for name in os.listdir("/proc"):
@@ -703,12 +705,12 @@ for name in os.listdir("/proc"):
             argv = handle.read().split(b"\\0")
     except OSError:
         continue
-    if any(argv[i : i + 2] == [b"fleet", b"serve"] for i in range(len(argv))):
+    if os.path.basename(argv[0]) == b"brigade-hub":
         os.kill(int(name), signal.SIGKILL)
         print(name)
         break
 else:
-    raise SystemExit("no brigade fleet serve process in the container")
+    raise SystemExit("no brigade-hub process in the container")
 """
 
 
@@ -718,13 +720,15 @@ def restart_count(container: str) -> int:
 
 
 def hub_kill(result: Result, limit: float = 60) -> None:
-    """SIGKILL the hub's serve process, then expect the restart policy and the front to bring it back."""
+    """SIGKILL the hub's Rust front, then expect the restart policy and the front to bring it back."""
     hub = container_id("hub")
     before = restart_count(hub)
-    killed = run(["docker", "exec", hub, "python", "-c", KILL_SERVE])
+    killed = run(["docker", "exec", hub, "python", "-c", KILL_HUB])
     started = time.monotonic()
     result.ok(
-        killed.returncode == 0, "SIGKILL to the hub's serve process", (killed.stdout + killed.stderr).strip()[:200]
+        killed.returncode == 0,
+        "SIGKILL to the hub's brigade-hub process",
+        (killed.stdout + killed.stderr).strip()[:200],
     )
     after = before
     while time.monotonic() - started < limit:
@@ -792,6 +796,58 @@ def check_restart(args: argparse.Namespace, result: Result) -> None:
     one_namespace(result)
 
 
+# Run inside the hub container by `memory`, on loopback in the hub's own
+# namespace, so the admin token never leaves the container and never reaches
+# this process's output. Prints one JSON line without the response body.
+MEMORY_STATUS = """
+import json, os, urllib.error, urllib.request
+with open("/run/secrets/admin_token", encoding="utf-8") as handle:
+    token = handle.read().strip()
+request = urllib.request.Request(
+    "http://127.0.0.1:3774/memory",
+    data=json.dumps({"action": "status"}).encode("utf-8"),
+    method="POST",
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        status, body = response.status, response.read()
+except urllib.error.HTTPError as exc:
+    status, body = exc.code, exc.read()
+try:
+    parsed = json.loads(body)
+except ValueError:
+    parsed = None
+parsed = parsed if isinstance(parsed, dict) else {}
+print(json.dumps({
+    "status": status,
+    "error": parsed.get("error"),
+    "reason": parsed.get("reason"),
+    "log_epoch": bool(parsed.get("log_epoch")),
+    "memory_file": os.path.isfile("/var/lib/brigade/fleet-hub-memory.db"),
+}))
+"""
+
+
+def check_memory(args: argparse.Namespace, result: Result) -> None:
+    """Hub memory: POST /memory with the admin token and the `status` action answers 200."""
+    hub = container_id("hub")
+    if not result.ok(bool(hub), "hub container running"):
+        return
+    done = run(["docker", "exec", hub, "python", "-c", MEMORY_STATUS])
+    try:
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        result.add("FAIL", "memory status probe ran", (done.stdout + done.stderr).strip()[:200])
+        return
+    detail: dict[str, Any] = {key: report.get(key) for key in ("status", "error", "reason")}
+    if report.get("status") == 404:
+        detail["hint"] = "404 comes from the Python upstream: is --route-mode memory=native in the hub's command?"
+    result.ok(report.get("status") == 200, "POST /memory status answers 200 with the admin token", detail)
+    result.ok(report.get("log_epoch") is True, "status reports the memory file's log_epoch")
+    result.ok(report.get("memory_file") is True, "fleet-hub-memory.db sits beside fleet-hub.db on the state volume")
+
+
 def verify_copy(copy: Path) -> dict[str, Any]:
     manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
     files = {}
@@ -844,6 +900,8 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
                 "backup",
                 "--db",
                 "/var/lib/brigade/fleet-hub.db",
+                "--db",
+                "/var/lib/brigade/fleet-hub-memory.db",
                 "--dest",
                 "/backups",
                 "--owner",
@@ -1099,6 +1157,7 @@ CHECKS = {
     "front": check_front,
     "load": check_load,
     "restart": check_restart,
+    "memory": check_memory,
     "backups": check_backups,
     "restore": check_restore,
     "commit": check_commit,

@@ -1,4 +1,28 @@
-FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+# Stages: `source` fetches and checks the pinned Brigade archive, `hub-build`
+# compiles the Rust hub from it, `python-hub` installs the Python hub, and
+# `dogfood` adds only the `brigade-hub` binary to that image. The Compose recipe
+# builds `target: dogfood`. The default target, the last stage, stays the
+# Python-only image the Quadlet recipe and the container smoke build, so they
+# never compile Rust.
+
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS source
+
+ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
+ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168
+
+RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
+    && mkdir /src \
+    && tar -xzf /tmp/brigade.tar.gz -C /src --strip-components=1 \
+    && rm /tmp/brigade.tar.gz
+
+# The hub crate's minimum Rust version, which the hub CI job also builds.
+FROM rust:1.85.0-slim-bookworm@sha256:1829c432be4a592f3021501334d3fcca24f238432b13306a4e62669dec538e52 AS hub-build
+
+COPY --from=source /src /src
+WORKDIR /src/engines/hub
+RUN cargo build --locked --release --bin brigade-hub
+
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS python-hub
 
 ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
 ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168
@@ -22,3 +46,12 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
     CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"]
 ENTRYPOINT ["brigade", "fleet", "serve"]
 CMD ["--host", "0.0.0.0", "--port", "3774", "--db", "/var/lib/brigade/fleet-hub.db", "--token-file", "/run/secrets/admin_token"]
+
+# The Python hub plus the Rust front. brigade-hub starts the Python hub as its
+# managed upstream with this interpreter. The recipe's entrypoint runs it.
+FROM python-hub AS dogfood
+
+COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub
+ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3
+
+FROM python-hub

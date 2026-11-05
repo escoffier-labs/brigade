@@ -40,13 +40,20 @@ services:
     build:
       context: ../..
       dockerfile: ops/fleet-hub/Containerfile
+      # The Python hub plus the brigade-hub binary, both from BRIGADE_REF.
+      target: dogfood
       args:
-        BRIGADE_REF: ${BRIGADE_REF:-e6009f6969dc6e45db2ab93790aa3e407c791409}
-        BRIGADE_SHA256: ${BRIGADE_SHA256:-68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168}
+        BRIGADE_REF: ${BRIGADE_REF:-6dc3aa1207f6a025a896946e64514af46a356419}
+        BRIGADE_SHA256: ${BRIGADE_SHA256:-3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce}
     image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
     network_mode: "service:netns"
     depends_on:
       - netns
+    # brigade-hub (the Rust hub) takes the port in managed mode and starts the
+    # Python hub as its child on an ephemeral loopback port, keyed by a value
+    # generated at each start. hub/entry.py forwards stop signals and writes
+    # the listening and clean-exit lines the S31 checks read.
+    entrypoint: ["python", "/brigade/entry.py"]
     command:
       - --host
       - 127.0.0.1
@@ -57,6 +64,10 @@ services:
       - --token-file
       - /run/secrets/admin_token
       - --trust-forwarded-proto
+      # Hub memory (POST /memory) is native, in fleet-hub-memory.db beside
+      # fleet-hub.db. Every other family keeps its default.
+      - --route-mode
+      - memory=native
     environment:
       BRIGADE_FLEET_FINDINGS_KEY_FILE: /run/secrets/findings_key
     secrets:
@@ -64,11 +75,12 @@ services:
       - findings_key
     volumes:
       - brigade-state:/var/lib/brigade
-      # Read by the planned Rust hub (S10, S15). Today's Python hub ignores it.
+      # For the planned `--config` (S10, S15). Neither hub reads it yet.
       - ./config/hub.toml:/etc/brigade/hub.toml:ro
+      - ./hub:/brigade:ro
     cap_drop: [ALL]
-    # Covers the hub's drain, its final checkpoint and the upstream's
-    # shutdown. The Docker daemon's own shutdown timeout must be at least this.
+    # Covers brigade-hub's drain of at most 25 s and the upstream's shutdown.
+    # The Docker daemon's own shutdown timeout must be at least this.
     stop_grace_period: 40s
     oom_score_adj: -900
     cgroup_parent: ${BRIGADE_HUB_SLICE:-brigade-hub.slice}
@@ -172,6 +184,8 @@ services:
     command:
       - --db
       - /var/lib/brigade/fleet-hub.db
+      - --db
+      - /var/lib/brigade/fleet-hub-memory.db
       - --dest
       - /backups
       - --owner

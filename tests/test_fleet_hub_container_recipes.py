@@ -78,7 +78,9 @@ def test_compose_recipe_publishes_no_port_and_keeps_the_token_out_of_environment
     assert text.count('network_mode: "service:netns"') == 2
     assert "file: ./secrets/admin-token.txt" in text and "      - admin_token\n" in text
     assert dockerignore == ["**", "!ops/", "!ops/fleet-hub/", "!ops/fleet-hub/Containerfile"]
-    assert not any(line.startswith(("ADD ", "COPY ")) for line in containerfile)
+    # Nothing comes from the build context: every COPY takes an earlier stage's output.
+    assert not any(line.startswith("ADD ") for line in containerfile)
+    assert all(line.startswith("COPY --from=") for line in containerfile if line.startswith("COPY "))
     assert "BRIGADE_FLEET_TOKEN" not in text
     assert "restart: unless-stopped" in text
     assert "healthcheck:" in text
