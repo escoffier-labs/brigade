@@ -789,6 +789,9 @@ async fn reads_log_paging_and_visibility() {
         .await;
     assert_eq!(rest.body["card"]["text"].as_str().unwrap().len(), 6);
     assert_eq!(rest.body["card"]["next_offset"], Json::Null);
+    assert_eq!(rest.body["card"]["scan_state"], "pending");
+    assert_eq!(rest.body["card"]["writer"], "node-1");
+    assert!(rest.body["card"]["updated_at"].as_str().is_some());
 }
 
 #[tokio::test]
@@ -1614,4 +1617,32 @@ fn s18_review_empty_rule_list_withholds_prompt() {
             json!({"card_id":"review", "blocked":"memory_scan_flagged"})
         );
     }
+}
+
+#[tokio::test]
+async fn mirror_metadata_includes_clean_scan_and_writer() {
+    let h = Hub::with(
+        Arc::new(Fixed(Scan::Clean {
+            ruleset: "fixture".into(),
+        })),
+        None,
+    );
+    h.put(
+        NODE_TOKEN,
+        "fleet",
+        "mirror-clean",
+        None,
+        "A [[linked]] card",
+    )
+    .await;
+    let read = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"card","card_id":"mirror-clean"}),
+        )
+        .await;
+    assert_eq!(read.status, 200);
+    assert_eq!(read.body["card"]["scan_state"], "clean");
+    assert_eq!(read.body["card"]["writer"], "node-1");
+    assert!(read.body["card"]["updated_at"].as_str().is_some());
 }

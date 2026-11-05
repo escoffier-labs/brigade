@@ -331,13 +331,14 @@ def _apply(
         return replica.bytes()
     if card is None or card.get("state") == "retired":
         return used
-    head = {
+    head: dict[str, Any] = {
         "scope": event["scope"],
         "card_id": event["card_id"],
         "revision": card.get("revision", event["revision"]),
         "content_hash": card.get("content_hash", ""),
         "trust": card.get("trust", ""),
         "text": card["text"],
+        **{name: card[name] for name in ("state", "scan_state", "writer", "updated_at") if name in card},
     }
     size = store.head_size(key, head)
     if used + size > settings.replica_max_bytes:
@@ -612,6 +613,7 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "card_id": card["card_id"],
         "base_revision": base.get("revision") if base else None,
         "text": card["text"],
+        **{name: card[name] for name in ("state", "scan_state", "writer", "updated_at") if name in card},
         "origin": "interactive",
         "path": card["rel"],
     }

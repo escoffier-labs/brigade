@@ -2585,3 +2585,41 @@ check does not protect against a hostile same-UID process racing those readers,
 and the report is never a reusable approval token.
 
 The receipt export subcommand and context import flag retain their legacy spelling for compatibility through v0.32.
+
+### Disposable hub memory mirror
+
+`brigade memory hub mirror --out "Hub Memory/"` pulls through the S14 client
+and exports the readable replica as Markdown. It lives under `memory hub`
+because it uses the same hub settings, node credential and replica as `pull`.
+Set `[hub] mode = "read"` and `read_scopes` in `.brigade/memory-care.toml`,
+configure `[fleet] hub_url` and this machine's node credential first.
+
+Use `--dry-run` to list writes and deletions without changing the output.
+Use `--init` to initialize a non-empty output folder. Existing foreign files
+are preserved, and a foreign file at a generated path causes a refusal.
+The `.brigade-memory-mirror.json` marker records owned files. Keep it with the
+notes. Deleting the entire mirror folder is safe. The next run rebuilds it.
+
+Only live, scan-clean, non-private heads are exported. Flagged, pending,
+unknown-scan and superseded cards are counted by reason. The client's privacy
+withholding rules apply, including malformed visibility declarations.
+An older hub that does not return scan metadata exports no cards until
+upgraded. Older S14 replicas are rebuilt after a successful pull to collect
+that metadata. Retirement events remove cards from the replica before export.
+Supersession metadata uses `supersedes` for predecessor ids or `superseded_by`
+for a successor id in card front matter, within the same scope.
+
+Each note includes card identity, scope, revision, update time, source, tags
+and scan state in YAML front matter. Its body preserves card text and wiki
+links. Notes have readable slugs and a scope-and-id hash suffix. Filenames
+remain stable across title changes while the marker is retained. The generated
+index links to notes by scope. Unchanged files retain their bytes and mtimes.
+Changed files use a temporary file in the output folder and an atomic rename.
+
+Hub outages use the readable local replica and print a warning. Missing,
+incomplete or rebuilding replicas leave the mirror untouched and exit non-zero.
+An access refusal never falls back to the replica. Dry runs may refresh the
+workspace's replica, but do not create or modify the output folder.
+
+Local edits are replaced on the next run. A future edit-to-proposal workflow
+would integrate with hub proposals and require explicit review.
