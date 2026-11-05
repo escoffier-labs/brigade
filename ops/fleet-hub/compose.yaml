@@ -45,6 +45,7 @@ services:
       args:
         BRIGADE_REF: ${BRIGADE_REF:-6dc3aa1207f6a025a896946e64514af46a356419}
         BRIGADE_SHA256: ${BRIGADE_SHA256:-3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce}
+        BRIGADE_VERSION: ${BRIGADE_VERSION:-0.31.0}
     image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
     network_mode: "service:netns"
     depends_on:

@@ -1,14 +1,21 @@
 # Stages: `source` fetches and checks the pinned Brigade archive, `hub-build`
-# compiles the Rust hub from it, `python-hub` installs the Python hub, and
-# `dogfood` adds only the `brigade-hub` binary to that image. The Compose recipe
-# builds `target: dogfood`. The default target, the last stage, stays the
-# Python-only image the Quadlet recipe and the container smoke build, so they
-# never compile Rust.
+# compiles the Rust hub from it, `python-hub` installs the Python hub from the
+# same pinned archive, and `dogfood` adds only the `brigade-hub` binary to that
+# image. The Compose recipe builds `target: dogfood`. The default target, the
+# last stage, is the Python-only image the Quadlet recipe and the container
+# smoke build.
+#
+# Every stage defaults to the same ref and archive digest as compose.yaml, so
+# `--target dogfood` builds with no build args. A ref older than the Rust hub
+# (no engines/hub) builds only the default target, and only with a builder
+# that skips stages the target does not use: BuildKit and buildah do, the
+# legacy builder (DOCKER_BUILDKIT=0) builds every stage, `hub-build` included.
+# Pass BRIGADE_REF, BRIGADE_SHA256 and BRIGADE_VERSION together.
 
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS source
 
-ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
-ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168
+ARG BRIGADE_REF=6dc3aa1207f6a025a896946e64514af46a356419
+ARG BRIGADE_SHA256=3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce
 
 RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && mkdir /src \
@@ -24,10 +31,12 @@ RUN cargo build --locked --release --bin brigade-hub
 
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS python-hub
 
-ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
-ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168
+ARG BRIGADE_REF=6dc3aa1207f6a025a896946e64514af46a356419
+ARG BRIGADE_SHA256=3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce
+# The CLI version at BRIGADE_REF.
+ARG BRIGADE_VERSION=0.31.0
 LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
-      org.opencontainers.image.version="0.28.0" \
+      org.opencontainers.image.version="${BRIGADE_VERSION}" \
       org.opencontainers.image.revision="${BRIGADE_REF}" \
       org.opencontainers.image.description="Brigade Fleet Hub"
 

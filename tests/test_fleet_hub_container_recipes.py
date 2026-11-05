@@ -54,12 +54,26 @@ def test_wait_for_health_delays_retries_and_reports_last_failure(monkeypatch, fa
 def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
     text = (CONTAINER / "Containerfile").read_text()
 
-    assert "ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409" in text
+    # Both stages default to the dogfood recipe's pin; the Quadlet build and
+    # the smoke pass the reviewed e6009f6 pin as a whole.
+    assert text.count("ARG BRIGADE_REF=6dc3aa1207f6a025a896946e64514af46a356419\n") == 2
     assert (
         "FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e"
         in text
     )
-    assert "ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168" in text
+    assert text.count("ARG BRIGADE_SHA256=3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce\n") == 2
+    assert "ARG BRIGADE_VERSION=0.31.0\n" in text
+    assert 'org.opencontainers.image.version="${BRIGADE_VERSION}"' in text
+    pin = (
+        "--build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \\\n"
+        "  --build-arg BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168 \\\n"
+        "  --build-arg BRIGADE_VERSION=0.28.0 \\\n"
+    )
+    assert pin in (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text(encoding="utf-8")
+    smoke = (ROOT / "tests" / "fleet_hub_container_smoke.py").read_text(encoding="utf-8")
+    for name in ("BRIGADE_REF", "BRIGADE_SHA256", "BRIGADE_VERSION"):
+        assert f'f"{name}={{{name}}}",' in smoke
+    assert 'BRIGADE_SHA256 = "68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168"' in smoke
     assert "setuptools==75.8.0 wheel==0.45.1" in text
     assert "--no-build-isolation /tmp/brigade.tar.gz" in text
     assert 'org.opencontainers.image.revision="${BRIGADE_REF}"' in text

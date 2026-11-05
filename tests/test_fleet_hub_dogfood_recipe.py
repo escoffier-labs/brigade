@@ -801,9 +801,10 @@ def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only
     copies = [line for line in dogfood.splitlines() if line.startswith("COPY ")]
     assert copies == ["COPY --from=hub-build /src/engines/hub/target/release/brigade-hub /usr/local/bin/brigade-hub"]
     assert "ENV BRIGADE_HUB_PYTHON=/usr/local/bin/python3" in dogfood
-    # The default target is the Python-only image, so the Quadlet recipe and
-    # the container smoke never compile Rust.
+    # The default target is the Python-only image. A builder that skips
+    # unused stages builds it without compiling Rust; the legacy builder does not.
     assert stages[-1] == ("python-hub", None)
+    assert "DOCKER_BUILDKIT=0" in text
     assert 'ENTRYPOINT ["brigade", "fleet", "serve"]' in _stage_body(text, "python-hub")
 
 
@@ -828,6 +829,23 @@ def test_compose_hub_runs_brigade_hub_with_the_s31_flags_and_memory_native():
     digest = text.split("BRIGADE_SHA256: ${BRIGADE_SHA256:-")[1].split("}")[0]
     assert len(ref) == 40 and len(digest) == 64
     assert ref != "e6009f6969dc6e45db2ab93790aa3e407c791409"
+
+
+def test_containerfile_stage_defaults_match_the_compose_pin():
+    # `docker build --target dogfood` with no build args gets the ref Compose
+    # builds, so the Rust stage finds engines/hub and both hubs come from one archive.
+    text = (RECIPE / "Containerfile").read_text(encoding="utf-8")
+    compose_text = (RECIPE / "compose.yaml").read_text(encoding="utf-8")
+    pins = {}
+    for name in ("BRIGADE_REF", "BRIGADE_SHA256", "BRIGADE_VERSION"):
+        pins[name] = compose_text.split(f"{name}: ${{{name}:-")[1].split("}")[0]
+    for stage in ("source", "python-hub"):
+        body = _stage_body(text, stage)
+        assert f"ARG BRIGADE_REF={pins['BRIGADE_REF']}\n" in body, stage
+        assert f"ARG BRIGADE_SHA256={pins['BRIGADE_SHA256']}\n" in body, stage
+    assert f"ARG BRIGADE_VERSION={pins['BRIGADE_VERSION']}\n" in _stage_body(text, "python-hub")
+    assert pins["BRIGADE_REF"] == "6dc3aa1207f6a025a896946e64514af46a356419"
+    assert pins["BRIGADE_SHA256"] == "3054df758493d9621201b7e95cebe1de2f58402a7589176d38a61ac39e73cdce"
 
 
 def test_backup_job_copies_the_memory_file_beside_the_hub_file(tmp_path):
