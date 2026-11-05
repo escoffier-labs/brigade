@@ -1,25 +1,25 @@
 {
   "schemaVersion": 1,
   "label": "downloads/month",
-  "message": "3,327",
+  "message": "3,295",
   "color": "blue",
-  "total": 3327,
+  "total": 3295,
   "sources": {
     "pypi": {
       "package": "brigade-cli",
-      "downloads": 3226,
+      "downloads": 3193,
       "mirrors": false
     },
     "npm": {
       "package": "@escoffier-labs/brigade",
-      "downloads": 101
+      "downloads": 102
     }
   },
   "period": {
-    "start": "2026-10-05",
-    "end": "2026-11-03",
+    "start": "2026-10-06",
+    "end": "2026-11-04",
     "days": 30,
     "timezone": "UTC"
   },
-  "updatedAt": "2026-11-04T19:54:39Z"
+  "updatedAt": "2026-11-05T20:06:51Z"
 }
