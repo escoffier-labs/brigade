@@ -9,8 +9,12 @@ from pathlib import Path
 from typing import Any
 
 from . import memory_hub_client as hubc
+from .inbox_lock import InboxLockTimeout
 
 COMMANDS = ("status", "pull", "push", "import", "card", "proposals")
+# Another push, pull or proposal change holds the hub state lock (EX_TEMPFAIL).
+EXIT_BUSY = 75
+BUSY = "another memory hub push or pull is running in this workspace; try again when it finishes"
 
 
 def register(memory_sub: argparse._SubParsersAction) -> None:
@@ -23,8 +27,11 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
         "pull": "Follow the hub log into this host's replica; a changed log_epoch rebuilds it.",
         "push": 'Publish changed local cards to the configured scope (needs [hub] mode = "sync").',
         "import": "Import cards into hub memory, one call per card (needs the import grant).",
-        "card": "Read one hub card's text from the [hub] read scopes, in 30,000-character chunks.",
-        "proposals": "List the writes waiting for review, or drop one so its card pushes again.",
+        "card": (
+            "Read one hub card's text from the [hub] read scopes, in 30,000-character chunks; "
+            "while the hub is unavailable, from this host's replica."
+        ),
+        "proposals": "List the writes waiting for review, or drop one, keeping the local text or the hub's.",
     }
     for name in COMMANDS:
         command = commands.add_parser(name, help=helps[name])
@@ -33,9 +40,33 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
             listing = actions.add_parser("list", help="List open proposals for every hub.")
             drop = actions.add_parser(
                 "drop",
-                help="Drop one proposal after review; the replica's hub head becomes the card's base when known.",
+                help=(
+                    "Close one proposal after review. Needs the hub and a current replica (pull first). "
+                    "The closed record is kept under proposals/dropped/."
+                ),
             )
             drop.add_argument("proposal_id", help="Proposal id, as `proposals list` prints it.")
+            choice = drop.add_mutually_exclusive_group(required=True)
+            choice.add_argument(
+                "--keep-local",
+                dest="keep",
+                action="store_const",
+                const="keep-local",
+                help=(
+                    "Keep the local card: the hub head becomes its base, so the next push overwrites "
+                    "the other writer's text on the hub."
+                ),
+            )
+            choice.add_argument(
+                "--keep-hub",
+                dest="keep",
+                action="store_const",
+                const="keep-hub",
+                help=(
+                    "Keep the hub's text: the local card file is rewritten with the hub head and the "
+                    "next push sends nothing for it. The replaced local text is kept with the record."
+                ),
+            )
             for action in (listing, drop):
                 action.add_argument(
                     "--target", "-t", type=Path, default=Path("."), help="Workspace with the [hub] config."
@@ -124,7 +155,7 @@ def _card_scope(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: 
     return found[0]
 
 
-def _proposals(args: argparse.Namespace, target: Path) -> int:
+def _proposals(args: argparse.Namespace, target: Path, transport: hubc.Transport | None) -> int:
     from . import memory_hub_sync as sync
 
     if args.memory_hub_proposals_command == "list":
@@ -132,16 +163,139 @@ def _proposals(args: argparse.Namespace, target: Path) -> int:
         lines = [f"proposals: {len(rows)} waiting for review"]
         lines += [f"- {row['proposal_id']}  {row['scope']}/{row['card_id']}  ({row['reason']})" for row in rows]
         return _emit({"ok": True, "proposals": rows}, json_output=args.json, lines=lines)
-    dropped = sync.drop_proposal(target, args.proposal_id)
+    settings = hubc.load_settings(target)
+    if not settings.enabled:
+        raise hubc.HubConfigError('hub memory is off; set [hub] mode = "read" or "sync" in .brigade/memory-care.toml')
+    client = hubc.client_for(settings, transport=transport)
+    dropped = sync.drop_proposal(target, client, settings, args.proposal_id, keep=args.keep)
     if dropped is None:
         payload = {"ok": False, "error": "no such proposal", "proposal_id": args.proposal_id}
         return _emit(payload, json_output=args.json, lines=[f"error: no proposal {args.proposal_id}"], code=1)
     line = f"dropped {dropped['proposal_id']} ({dropped['scope']}/{dropped['card_id']})"
-    if dropped["rebased_on"] is not None:
-        line += f"; the next push writes on top of hub revision {dropped['rebased_on']}"
+    if dropped["keep"] == sync.DROP_KEEP_HUB:
+        line += f"; the local card now holds hub revision {dropped['rebased_on']} and the next push sends nothing"
+    elif dropped["rebased_on"] is not None:
+        line += f"; the next push writes the local card over hub revision {dropped['rebased_on']}"
     else:
-        line += "; no replicated hub head to rebase on, so pull first or the next push may conflict again"
-    return _emit({"ok": True, **dropped}, json_output=args.json, lines=[line])
+        line += "; the hub holds no head for it, so the next push sends the local card with no base"
+    lines = [line, f"the closed proposal is kept at {dropped['dropped_to']}"]
+    return _emit({"ok": True, **dropped}, json_output=args.json, lines=lines)
+
+
+class _ChunkEpochMoved(Exception):
+    """A later chunk of `card --all` came from another log_epoch."""
+
+
+def _read_chunks(
+    client: hubc.MemoryHubClient, args: argparse.Namespace, scope: str, body: dict[str, Any]
+) -> tuple[dict[str, Any], str]:
+    """Follow `--all` from the first chunk's answer; every chunk must share its epoch and revision."""
+    epoch = str(body.get("log_epoch") or "")
+    fields: dict[str, Any] = {"card_id": args.card_id, "scope": scope}
+    card = hubc.obj(body.get("card"))
+    parts = [str(card.get("text", ""))]
+    offset: int | None = args.offset
+    while args.all:
+        following = card.get("next_offset")
+        if not (isinstance(following, int) and offset is not None and following > offset):
+            break
+        offset = following
+        # Pin every later chunk to the revision the first one came from. A
+        # restore reissues revision numbers, so the epoch must match too.
+        fields["revision"] = card.get("revision")
+        later = client.call("card", offset=offset, **fields)
+        if str(later.get("log_epoch") or "") != epoch:
+            raise _ChunkEpochMoved
+        card = hubc.obj(later.get("card"))
+        parts.append(str(card.get("text", "")))
+    if args.all:
+        card = {**card, "text": "".join(parts), "next_offset": None}
+        expected = card.get("content_hash")
+        if args.offset == 0 and isinstance(expected, str) and expected and hubc.content_hash(card["text"]) != expected:
+            raise hubc.HubRefusal(
+                502,
+                {
+                    "code": "memory_card_hash_mismatch",
+                    "error": "the joined chunks do not hash to the card's content_hash; read it again",
+                },
+            )
+    return card, epoch
+
+
+def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace) -> dict[str, Any]:
+    """The card from the hub. A restore between chunks restarts the read once, then refuses."""
+    for attempt in (1, 2):
+        scope, body = _card_scope(client, settings, args)
+        try:
+            card, epoch = _read_chunks(client, args, scope, body)
+        except _ChunkEpochMoved:
+            if attempt == 2:
+                raise hubc.HubRefusal(
+                    409,
+                    {
+                        "code": "memory_epoch_changed",
+                        "error": "the hub's log_epoch changed while the card was read in chunks; read it again",
+                    },
+                ) from None
+            continue
+        return {"ok": True, "card": card, "log_epoch": epoch, "source": "hub"}
+    raise AssertionError("unreachable")
+
+
+def _replica_card(
+    target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace
+) -> dict[str, Any] | None:
+    """The card from this host's replica, used only when the hub is unavailable.
+
+    The replica must have been pulled from this hub, and only heads in scopes
+    both configured now and readable at that pull count. A refusal never
+    reaches here. None when the replica does not hold the card.
+    """
+    from . import memory_hub_store as store
+
+    replica = store.replica(target)
+    if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
+        return None
+    scopes = (args.scope,) if args.scope else settings.read_scopes
+    found = [
+        head
+        for scope in scopes
+        if (head := replica.readable_heads(settings.read_scopes).get(store.Replica.key(scope, args.card_id)))
+    ]
+    if len(found) > 1:
+        names = [str(head["scope"]) for head in found]
+        raise hubc.HubRefusal(
+            409,
+            {
+                "code": "memory_card_ambiguous",
+                "error": f"the card is in more than one read scope; pass --scope ({', '.join(names)})",
+                "scopes": names,
+            },
+        )
+    if not found:
+        return None
+    head = found[0]
+    text = str(head.get("text", ""))
+    if args.all:
+        chunk, following = text[args.offset :], None
+    else:
+        chunk = text[args.offset : args.offset + REPLICA_CHUNK]
+        end = args.offset + len(chunk)
+        following = end if end < len(text) else None
+    card = {
+        "scope": head.get("scope"),
+        "card_id": args.card_id,
+        "revision": head.get("revision"),
+        "content_hash": head.get("content_hash"),
+        "trust": head.get("trust"),
+        "text": chunk,
+        "next_offset": following,
+    }
+    return {"ok": True, "card": card, "log_epoch": replica.meta.get("log_epoch"), "source": "replica"}
+
+
+# The hub's chunk size for `card`.
+REPLICA_CHUNK = 30_000
 
 
 def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = None) -> int:
@@ -151,7 +305,7 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
     name = args.memory_hub_command
     try:
         if name == "proposals":
-            return _proposals(args, target)
+            return _proposals(args, target, transport)
         settings = hubc.load_settings(target)
         if name != "status" and not settings.enabled:
             raise hubc.HubConfigError(
@@ -212,6 +366,10 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                 f"{len(report['proposals'])} proposal(s), {len(report['skipped'])} skipped"
             ]
             lines += [f"- refused {item['card_id']}: {item['code']}" for item in report["refused"]]
+            lines += [
+                f"- resolved {proposal_id}; its text is kept at {path}"
+                for proposal_id, path in (report.get("resolved_kept") or {}).items()
+            ]
             return _emit(report, json_output=args.json, lines=lines)
         if name == "import":
             scope = args.scope or settings.scope
@@ -223,27 +381,24 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                 detail = item.get("code") or item.get("reason") or item.get("revision") or ""
                 lines.append(f"- {item['path']}  {item['status']}  {detail}".rstrip())
             return _emit(report, json_output=args.json, lines=lines, code=0 if report["ok"] else 1)
-        scope, body = _card_scope(client, settings, args)
-        fields: dict[str, Any] = {"card_id": args.card_id, "scope": scope}
-        offset: int | None = args.offset
-        parts: list[str] = []
-        card: dict[str, Any] = {}
-        first = True
-        while offset is not None:
-            if not first:
-                body = client.call("card", offset=offset, **fields)
-            first = False
-            card = hubc.obj(body.get("card"))
-            parts.append(str(card.get("text", "")))
-            following = card.get("next_offset")
-            offset = following if args.all and isinstance(following, int) and following > offset else None
-            if args.all and offset is not None:
-                # Pin every later chunk to the revision the first one came from.
-                fields["revision"] = card.get("revision")
-        if args.all:
-            card = {**card, "text": "".join(parts), "next_offset": None}
-        payload = {"ok": True, "card": card, "log_epoch": body.get("log_epoch")}
-        return _emit(payload, json_output=args.json, lines=[str(card.get("text", ""))])
+        try:
+            payload = _hub_card(client, settings, args)
+        except hubc.HubUnavailable as exc:
+            # Not now, rather than no: the replica may stand in, as for search.
+            fallback = _replica_card(target, client, settings, args)
+            if fallback is None:
+                raise
+            warning = f"hub unavailable ({exc.reason}); answered from this host's replica"
+            payload = {**fallback, "retrieval": {"hub": "unavailable", "degraded": True, "reason": exc.reason}}
+            if args.json:
+                payload["warnings"] = [warning]
+            else:
+                # stderr, so `card --all > file` holds only the card text.
+                print(f"warning: {warning}", file=sys.stderr)
+        return _emit(payload, json_output=args.json, lines=[str(payload["card"].get("text", ""))])
+    except InboxLockTimeout:
+        print(f"error: {BUSY}", file=sys.stderr)
+        return EXIT_BUSY
     except hubc.HubConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

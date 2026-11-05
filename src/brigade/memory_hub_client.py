@@ -10,9 +10,14 @@ A workspace opts in through a `[hub]` table in `.brigade/memory-care.toml`:
 
 The hub URL comes from the fleet settings (`[fleet] hub_url`) and the
 credential is this machine's node token, as `brigade fleet` reads it. The
-shared admin token is never used for memory: without a node token the hub
-client is unavailable. Tokens are sent as a bearer header and never logged,
-printed or stored.
+client never reads the shared admin token (`BRIGADE_FLEET_TOKEN`): without a
+node token the hub client is unavailable. The node-token slot can still hold
+the admin token by mistake, and the hub then answers as its admin. `status`,
+`pull`, `push`, `import` and `proposals drop` ask the hub's `status` first and
+refuse when it reports `credential: "admin"`. Search makes no `status` call,
+so it cannot tell; its reads still stay inside `read_scopes`, and it writes
+nothing. Tokens are sent as a bearer header and never logged, printed or
+stored.
 """
 
 from __future__ import annotations
@@ -85,6 +90,19 @@ class HubSettings:
     @property
     def enabled(self) -> bool:
         return self.mode != "off"
+
+
+ADMIN_CREDENTIAL_REFUSAL = (
+    "the hub says this credential is its admin token; hub memory runs only as a node or principal "
+    "credential, so set BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file to this machine's node token"
+)
+
+
+def refuse_admin(status_body: dict[str, Any]) -> dict[str, Any]:
+    """`status_body` as is, unless the hub reports the admin credential: then HubConfigError."""
+    if status_body.get("credential") == "admin":
+        raise HubConfigError(ADMIN_CREDENTIAL_REFUSAL)
+    return status_body
 
 
 def valid_scope(scope: object) -> bool:

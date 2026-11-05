@@ -29,6 +29,10 @@ OTHER_CREDENTIAL = "-".join(("fixture", "other", "credential", "0123456789"))
 ADMIN_CREDENTIAL = "-".join(("fixture", "admin", "credential", "0123456789"))
 HUB_URL = "http://127.0.0.1:3774"
 CHUNK = 16  # the fake hub's card chunk, small so the client follows next_offset
+POSIX_DOT = pytest.mark.skipif(
+    os.name != "posix",
+    reason="Dot reads cards through POSIX directory descriptors; trusted_directory refuses on Windows",
+)
 
 
 class FakeHub:
@@ -394,11 +398,13 @@ def test_replica_and_spool_are_private(hub, tmp_path):
     spool = store.root(target) / store.SPOOL
     entries = list(spool.glob("*/*.json"))
     assert len(entries) == 1
+    # Everything under hub/, discarded replicas and temporary files included, is ignored.
+    assert (store.root(target) / ".gitignore").read_text(encoding="utf-8") == "*\n"
+    if os.name != "posix":
+        pytest.skip("POSIX file modes; Windows reports 0o777 or 0o666 whatever chmod asked")
     for directory in (store.root(target), spool, entries[0].parent):
         assert stat.S_IMODE(os.stat(directory).st_mode) == 0o700
     assert stat.S_IMODE(os.stat(entries[0]).st_mode) == 0o600
-    # Everything under hub/, discarded replicas and temporary files included, is ignored.
-    assert (store.root(target) / ".gitignore").read_text(encoding="utf-8") == "*\n"
 
 
 # --- spool and replay ------------------------------------------------------------------
@@ -656,7 +662,9 @@ def test_off_mode_output_is_byte_identical(hub, tmp_path, capsys):
         for extra in ([], ["--json"]):
             code, out, err = run(["memory", "search", "--target", str(target), *extra, "words"], capsys)
             assert code == 0 and err == ""
-            outputs.append(out.replace(str(target.resolve()), "<target>"))
+            # JSON escapes the backslashes of a Windows path.
+            resolved = str(target.resolve())
+            outputs.append(out.replace(json.dumps(resolved)[1:-1], "<target>").replace(resolved, "<target>"))
     assert outputs[0] == outputs[2] and outputs[1] == outputs[3]
     assert hub.calls == []
     memory_cmd.search(target=plain, query="words")
@@ -701,6 +709,7 @@ def _dot_memory(target: Path, reply: dict):
     return tools
 
 
+@POSIX_DOT
 def test_dot_memory_card_reads_a_hub_only_card(tmp_path):
     target = workspace(tmp_path, mode="read")
     for directory in (target, target / "memory", target / "memory" / "cards"):
@@ -767,6 +776,7 @@ def _card_ids(replica: store.Replica) -> set[str]:
     return {head["card_id"] for head in replica.heads.values()}
 
 
+@POSIX_DOT
 def test_dot_reads_only_the_configured_scope(hub, tmp_path):
     # This credential can read as much as an admin, private scopes included.
     hub.grants["node-1"] = {"*", "principal:alice"}
@@ -1024,12 +1034,17 @@ def test_dropping_or_resolving_a_proposal_unblocks_its_card(hub, tmp_path, capsy
     [row] = json.loads(out)["proposals"]
     assert code == 0 and (row["card_id"], row["scope"]) == ("one", "repo:test/app")
     assert sync.push(target, client(hub), settings(target))["published"] == []
-    # Drop after review: the replicated hub head becomes the base, so the local text goes on top.
+    # Drop after review, keeping the local text: the replicated hub head becomes the base.
     sync.pull(target, client(hub), settings(target))
     code, out, _ = run(
-        ["memory", "hub", "proposals", "drop", "--target", str(target), "--json", row["proposal_id"]], capsys
+        ["memory", "hub", "proposals", "drop", "--target", str(target), "--json", "--keep-local", row["proposal_id"]],
+        capsys,
     )
-    assert code == 0 and json.loads(out)["rebased_on"] == 2
+    dropped = json.loads(out)
+    assert code == 0 and dropped["rebased_on"] == 2 and dropped["keep"] == "keep-local"
+    kept = json.loads(Path(dropped["dropped_to"]).read_text(encoding="utf-8"))
+    assert kept["entry"]["text"] == "# One\nmine\n" and kept["outcome"] == "keep-local"
+    assert Path(dropped["dropped_to"]).parent == store.dropped_dir(target)
     report = sync.push(target, client(hub), settings(target))
     assert [p["card_id"] for p in report["published"]] == ["one"] and report["proposals"] == []
     assert hub.cards[("repo:test/app", "one")]["text"] == "# One\nmine\n"
@@ -1042,7 +1057,11 @@ def test_dropping_or_resolving_a_proposal_unblocks_its_card(hub, tmp_path, capsy
     report = sync.push(target, client(hub), settings(target))
     assert report["resolved"] == [open_id] and report["published"] == [] and len(hub.puts()) == before
     assert list(store.proposals(target)) == []
-    code, out, _ = run(["memory", "hub", "proposals", "drop", "--target", str(target), open_id], capsys)
+    # The resolved proposal's own text is kept, not deleted.
+    resolved = json.loads(Path(report["resolved_kept"][open_id]).read_text(encoding="utf-8"))
+    assert resolved["entry"]["text"] == "# One\nmine again\n"
+    assert any("kept under" in w for w in report["warnings"])
+    code, out, _ = run(["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-local", open_id], capsys)
     assert code == 1 and "no proposal" in out
 
 
@@ -1082,6 +1101,7 @@ def test_redirects_timeouts_and_rate_limits_spool_instead_of_proposing(hub, tmp_
 # --- review round 1: Dot card scope, config errors, files, fusion ---------------------------------
 
 
+@POSIX_DOT
 def test_dot_memory_card_opens_a_card_held_in_two_read_scopes(hub, tmp_path, capsys):
     from brigade.dot.adapter import validate_arguments
     from brigade.dot.contracts import DotError
@@ -1118,6 +1138,8 @@ def test_an_unreadable_config_keeps_todays_error(hub, tmp_path, capsys):
     assert err.startswith("error: invalid memory-care config:")
     code, _, err = run(["memory", "hub", "status", "--target", str(target)], capsys)
     assert code == 2 and err.startswith("error: invalid memory-care config:")
+    if os.name != "posix":
+        pytest.skip("Dot reads cards through POSIX directory descriptors; trusted_directory refuses on Windows")
     for directory in (target, target / "memory", target / "memory" / "cards"):
         directory.chmod(0o755)
     tools = _dot_memory(target, {"ok": True, "card": {"text": "never read"}})
@@ -1125,6 +1147,7 @@ def test_an_unreadable_config_keeps_todays_error(hub, tmp_path, capsys):
     assert tools.commands.argv == [] and hub.calls == []
 
 
+@pytest.mark.skipif(os.name != "posix", reason="POSIX directory modes; Windows reports 0o777 whatever chmod asked")
 def test_hub_state_leaves_the_shared_memory_dir_alone(hub, tmp_path):
     target = workspace(tmp_path, mode="sync", one="# One\n")
     shared = target / ".brigade" / "memory"
@@ -1162,3 +1185,202 @@ def test_fusion_keeps_scopes_apart_caps_the_hub_limit_and_reports_its_count(hub,
 def test_event_ids_from_one_process_strictly_increase():
     ids = [hubc.event_id() for _ in range(2000)]
     assert ids == sorted(ids) and len(set(ids)) == len(ids)
+
+
+# --- review round 2: admin credential, locks, dropped proposals, card reads ----------------------
+
+
+def _conflict(hub: FakeHub, target: Path, theirs: str, mine: str) -> str:
+    """Another writer moves the hub head; this workspace's edit becomes a proposal. Returns its id."""
+    head = hub.cards[("repo:test/app", "one")]["revision"]
+    client(hub).call(
+        "put",
+        scope="repo:test/app",
+        card_id="one",
+        base_revision=head,
+        base_epoch=hub.epoch,
+        text=theirs,
+        client_event_id=hubc.event_id(),
+    )
+    (target / "memory" / "cards" / "one.md").write_text(mine, encoding="utf-8")
+    [proposal] = sync.push(target, client(hub), settings(target))["proposals"]
+    return str(proposal["proposal_id"])
+
+
+def test_an_admin_token_in_the_node_slot_is_refused(hub, tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", ADMIN_CREDENTIAL)
+    target = workspace(tmp_path, mode="sync", one="# One\nsalary\n")
+    hub.import_reply = (201, {"event": {"revision": 1}, "log_epoch": hub.epoch})
+    commands = (
+        ["status", "--json"],
+        ["pull"],
+        ["push", "--yes"],
+        ["import", "--scope", "principal:alice", str(target / "memory" / "cards" / "one.md")],
+    )
+    for command in commands:
+        code, out, err = run(["memory", "hub", command[0], "--target", str(target), *command[1:]], capsys)
+        assert code == 2 and "admin token" in err, command
+        assert ADMIN_CREDENTIAL not in out + err
+    admin = hubc.MemoryHubClient(HUB_URL, ADMIN_CREDENTIAL, transport=hub)
+    with pytest.raises(hubc.HubConfigError, match="admin token"):
+        sync.drop_proposal(target, admin, settings(target), "hub-0", keep=sync.DROP_KEEP_LOCAL)
+    # Only status calls reached the hub: nothing was read, written or imported as the admin.
+    assert {c["action"] for c in hub.calls} == {"status"}
+    assert not store.replica(target).exists and store.spool_count(target) == 0
+
+
+def test_a_long_pull_never_blocks_a_push_and_a_busy_lock_says_so(hub, tmp_path, monkeypatch, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\n")
+    _put(hub, "fleet", "theirs", "theirs")
+    original = hub.do_log
+    free: list[bool] = []
+
+    def log_while_checking_the_state_lock(body):
+        # The pull's network calls run without the state lock.
+        with store.locked(target, deadline_seconds=0.1):
+            free.append(True)
+        return original(body)
+
+    hub.do_log = log_while_checking_the_state_lock
+    sync.pull(target, client(hub), settings(target))
+    assert free and _card_ids(store.replica(target)) == {"theirs"}
+    hub.do_log = original
+    monkeypatch.setattr(store, "LOCK_DEADLINE_SECONDS", 0.1)
+    with store.pulling(target):
+        code, out, err = run(["memory", "hub", "push", "--target", str(target), "--yes"], capsys)
+        assert code == 0 and "1 published" in out
+        code, out, err = run(["memory", "hub", "pull", "--target", str(target)], capsys)
+        assert code == 75 and "another memory hub push or pull is running" in err and "unusable" not in err
+    with store.locked(target):
+        code, out, err = run(["memory", "hub", "push", "--target", str(target)], capsys)
+        assert code == 75 and "another memory hub push or pull is running" in err and "unusable" not in err
+
+
+def test_keep_hub_rewrites_the_card_and_keeps_the_local_text(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    code, out, err = run(
+        ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-hub", proposal_id], capsys
+    )
+    assert code == 0, err
+    assert "holds hub revision 2" in out and "kept at" in out
+    assert card.read_text(encoding="utf-8") == "theirs\n"
+    [kept] = list(store.dropped_dir(target).glob("*.json"))
+    record = json.loads(kept.read_text(encoding="utf-8"))
+    assert record["entry"]["text"] == "# One\nmine\n" and record["card_text_replaced"] == "# One\nmine\n"
+    assert record["outcome"] == "keep-hub"
+    if os.name == "posix":
+        assert stat.S_IMODE(os.stat(kept).st_mode) == 0o600
+    before = len(hub.puts())
+    report = sync.push(target, client(hub), settings(target))
+    assert report["published"] == [] and report["proposals"] == [] and len(hub.puts()) == before
+    assert hub.cards[("repo:test/app", "one")]["text"] == "theirs\n"
+
+
+def test_drop_refuses_a_replica_from_an_old_epoch_or_without_one(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-local", proposal_id]
+    code, _, err = run(argv, capsys)
+    assert code == 2 and "pull" in err and "first" in err
+    sync.pull(target, client(hub), settings(target))
+    hub.restore(hub.snapshot())  # a restore: same data, a new log_epoch
+    code, _, err = run(argv, capsys)
+    assert code == 2 and "current log_epoch" in err
+    # Nothing changed: the proposal is still open and nothing was moved aside.
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    assert not store.dropped_dir(target).exists()
+    sync.pull(target, client(hub), settings(target))
+    code, out, _ = run(argv, capsys)
+    assert code == 0 and "over hub revision 2" in out
+
+
+def test_card_reads_fall_back_to_the_replica_only_when_the_hub_is_unavailable(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "theirs", "replicated text that spans several chunks")
+    sync.pull(target, client(hub), settings(target))
+    hub.mode = "down"
+    code, out, err = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "theirs"], capsys)
+    payload = json.loads(out)
+    assert code == 0 and payload["source"] == "replica" and payload["retrieval"]["reason"] == "unreachable"
+    assert payload["card"]["text"] == "replicated text that spans several chunks\n"
+    assert payload["card"]["scope"] == "fleet" and payload["card"]["next_offset"] is None
+    code, out, err = run(["memory", "hub", "card", "--target", str(target), "--all", "theirs"], capsys)
+    assert out == "replicated text that spans several chunks\n\n" and "replica" in err
+    code, out, _ = run(["memory", "hub", "card", "--target", str(target), "--json", "missing"], capsys)
+    assert code == 1 and json.loads(out)["hub"] == "unavailable"
+    # A refusal never falls back.
+    hub.mode = "up"
+    hub.do_card = lambda body: (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    code, out, _ = run(
+        ["memory", "hub", "card", "--target", str(target), "--scope", "fleet", "--json", "theirs"], capsys
+    )
+    assert code == 1 and json.loads(out)["code"] == "memory_grant_missing"
+
+
+@POSIX_DOT
+def test_dot_memory_card_opens_a_replica_match_while_the_hub_is_down(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "theirs", "otter replicated")
+    sync.pull(target, client(hub), settings(target))
+    hub.mode = "down"
+    tools = _dot_cli(target)
+    [match] = tools.memory_search("otter")["matches"]
+    assert (match["card_id"], match["source"]) == ("theirs", "replica")
+    got = tools.memory_card("theirs", scope=match["scope"])
+    assert (got["source"], got["content"], got["scope"]) == ("replica", "otter replicated\n", "fleet")
+    hub.mode = "up"
+    hub.do_card = lambda body: (401, {"error": "unauthorized"})
+    assert tools.memory_card("theirs", scope="fleet") == {"error": "card_not_found", "name": "theirs"}
+
+
+def test_card_all_never_splices_chunks_from_two_epochs(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    text = "first version, long enough for several chunks"
+    _put(hub, "fleet", "long", text)
+    original = hub.do_card
+    restores = [1]
+
+    def restored_between_chunks(body):
+        if body.get("offset") and restores:
+            restores.pop()
+            snap = hub.snapshot()
+            hub.restore(snap)  # same revision numbers under a new log_epoch
+            key = ("fleet", "long", hub.cards[("fleet", "long")]["revision"])
+            other = hubc.normalize_text("other version entirely, also long enough to chunk")
+            changed = {**hub.revisions[key], "text": other, "hash": hashlib.sha256(other.encode()).hexdigest()}
+            hub.revisions[key] = changed
+            hub.cards[("fleet", "long")] = dict(changed)
+        return original(body)
+
+    hub.do_card = restored_between_chunks
+    argv = ["memory", "hub", "card", "--target", str(target), "--all", "--json", "long"]
+    code, out, _ = run(argv, capsys)
+    payload = json.loads(out)
+    # The read restarted under the new epoch and returned one whole version.
+    assert code == 0 and payload["card"]["text"] == "other version entirely, also long enough to chunk\n"
+    assert payload["log_epoch"] == hub.epoch
+    assert hubc.content_hash(payload["card"]["text"]) == payload["card"]["content_hash"]
+
+    def always_moving(body):
+        if body.get("offset"):
+            hub.epoch = hubc.event_id()
+        return original(body)
+
+    hub.do_card = always_moving
+    code, out, _ = run(argv, capsys)
+    assert code == 1 and json.loads(out)["code"] == "memory_epoch_changed"
+
+    def wrong_hash(body):
+        status, reply = original(body)
+        if status != 200:
+            return status, reply
+        return status, {**reply, "card": {**reply["card"], "content_hash": "00" * 32}}
+
+    hub.do_card = wrong_hash
+    code, out, _ = run(argv, capsys)
+    assert code == 1 and json.loads(out)["code"] == "memory_card_hash_mismatch"

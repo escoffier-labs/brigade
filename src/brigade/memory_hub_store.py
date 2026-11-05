@@ -11,11 +11,14 @@
   against another.
 - `proposals/`: spooled writes the hub can no longer take as they are (a base
   mismatch, an epoch change, an expired id, a refusal). They wait for review
-  and are never resent on their own.
+  and are never resent on their own. A dropped or resolved proposal moves to
+  `proposals/dropped/`, so its text is never lost.
 - `published.json`: the revision and epoch each published card was last
   written at, which the next `push` names as its base.
-- `lock`: held by `push`, `pull` and proposal changes, so two runs never
-  interleave.
+- `lock`: held by `push` and proposal changes for their whole run, and by
+  `pull` only while it changes the replica, so two writers never interleave.
+- `pull.lock`: held by `pull` for its whole run, network calls included, so
+  two pulls never interleave and a long pull never blocks a push.
 
 `hub/` is this module's own directory: 0700, owned by this user, with files
 0600 written through a temporary file and an atomic replace. Symlinks are
@@ -44,6 +47,8 @@ SPOOL = "spool"
 PROPOSALS = "proposals"
 PUBLISHED = "published.json"
 LOCK = "lock"
+PULL_LOCK = "pull.lock"
+DROPPED = "dropped"
 IGNORE_MARKER = "*\n"
 SPOOL_CAP = 10_000
 LOCK_DEADLINE_SECONDS = 30.0
@@ -100,12 +105,29 @@ def ensure_root(target: Path) -> Path:
 
 
 @contextlib.contextmanager
-def locked(target: Path, *, deadline_seconds: float = LOCK_DEADLINE_SECONDS) -> Iterator[None]:
-    """Hold this workspace's hub state lock: one push, pull or proposal change at a time."""
+def _held(target: Path, name: str, deadline_seconds: float | None) -> Iterator[None]:
     from .inbox_lock import held_file_lock
 
     ensure_root(target)
-    with held_file_lock(root(target) / LOCK, deadline_seconds=deadline_seconds):
+    deadline = LOCK_DEADLINE_SECONDS if deadline_seconds is None else deadline_seconds
+    with held_file_lock(root(target) / name, deadline_seconds=deadline):
+        yield
+
+
+@contextlib.contextmanager
+def locked(target: Path, *, deadline_seconds: float | None = None) -> Iterator[None]:
+    """Hold this workspace's hub state lock: one change to the replica, spool, proposals or published state at a time.
+
+    Raises `inbox_lock.InboxLockTimeout` when another run holds it past the deadline.
+    """
+    with _held(target, LOCK, deadline_seconds):
+        yield
+
+
+@contextlib.contextmanager
+def pulling(target: Path, *, deadline_seconds: float | None = None) -> Iterator[None]:
+    """Hold this workspace's pull lock: one pull at a time. Changes still take `locked`."""
+    with _held(target, PULL_LOCK, deadline_seconds):
         yield
 
 
@@ -372,14 +394,32 @@ def _proposal_path(target: Path, proposal_id: str) -> Path | None:
     return root(target) / PROPOSALS / f"{proposal_id}.json"
 
 
-def drop_proposal(target: Path, proposal_id: str) -> dict[str, Any] | None:
-    """Remove one proposal and return it; None when there is no such proposal. Hold `locked`."""
+def read_proposal(target: Path, proposal_id: str) -> dict[str, Any] | None:
+    """One open proposal; None when there is no such proposal."""
     path = _proposal_path(target, proposal_id)
     record = read_json(path) if path is not None else None
-    if path is None or not isinstance(record, dict):
+    return record if isinstance(record, dict) else None
+
+
+def dropped_dir(target: Path) -> Path:
+    return root(target) / PROPOSALS / DROPPED
+
+
+def drop_proposal(target: Path, proposal_id: str, *, outcome: str, **extra: Any) -> dict[str, Any] | None:
+    """Close one proposal and return it, with `dropped_to` naming where it went. Hold `locked`.
+
+    The record, with `outcome` and `extra` added, moves to `proposals/dropped/`
+    (0600) before the open copy goes, so its text is never lost. None when there
+    is no such proposal.
+    """
+    path = _proposal_path(target, proposal_id)
+    record = read_proposal(target, proposal_id)
+    if path is None or record is None:
         return None
+    kept = dropped_dir(target) / path.name
+    write_json(kept, {**record, **extra, "outcome": outcome})
     path.unlink(missing_ok=True)
-    return record
+    return {**record, "dropped_to": str(kept)}
 
 
 def proposal_cards(target: Path, hub: str) -> dict[tuple[str, str], list[str]]:

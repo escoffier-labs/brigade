@@ -92,6 +92,9 @@ class MemoryTools:
 
         The CLI reads only the workspace's `[hub]` read scopes; `scope`, as a
         search match reports it, picks one when the id is in more than one.
+        While the hub is unavailable the CLI answers from this host's replica,
+        so a replica search match opens too; `source` says which answered. A
+        hub refusal (401, 403 or a coded answer) never falls back.
         """
         from ..memory_hub_client import HubConfigError, hub_mode
 
@@ -116,9 +119,10 @@ class MemoryTools:
                 return {"card_id": name, "blocked": rule}
         chunk = text[offset : offset + CARD_CHUNK_CHARS]
         following = offset + len(chunk)
+        source = value.get("source") if value.get("source") in {"hub", "replica"} else "hub"
         return dict(
             name=name,
-            source="hub",
+            source=source,
             scope=card.get("scope"),
             revision=card.get("revision"),
             sha256=card.get("content_hash"),
