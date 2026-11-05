@@ -452,8 +452,8 @@ impl Runtime {
         match result {
             Ok(mut rows) => Ok(rows.remove(0)),
             Err(e) => {
-                if !(e.reason == "embedder-timeout" && contention)
-                    && !matches!(e.reason, "content-blocked" | "scan-unavailable")
+                if !(matches!(e.reason, "content-blocked" | "scan-unavailable")
+                    || e.reason == "embedder-timeout" && contention)
                 {
                     self.fail(e.reason);
                 }
