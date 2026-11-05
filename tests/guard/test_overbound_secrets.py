@@ -178,8 +178,8 @@ def measure(size):
     assert "a" * 60 not in result.redacted_text
     return elapsed
 measure(64 * 1024)  # Warm caches before comparing input sizes.
-small = min(measure(64 * 1024) for _ in range(2))
-large = min(measure(512 * 1024) for _ in range(2))
+small = min(measure(64 * 1024) for _ in range(3))
+large = min(measure(512 * 1024) for _ in range(3))
 print(small, large, large / small, flush=True)
 """
     result = subprocess.run([sys.executable, "-c", program, layout], capture_output=True, text=True, timeout=120)
@@ -187,7 +187,10 @@ print(small, large, large / small, flush=True)
     print(layout, os.environ["BRIGADE_GUARD_BACKEND"], result.stdout.strip())
     small, large, ratio = map(float, result.stdout.split())
     assert large < 20, result.stdout
-    assert ratio < 16, result.stdout
+    # An 8x input step is about 8x when linear and about 64x when quadratic.
+    # 24 sits near their geometric midpoint, so shared-runner noise (16.9 seen
+    # on CI) passes while the pre-memo engine (49x) still fails.
+    assert ratio < 24, result.stdout
 
 
 @pytest.mark.parametrize("action", ["allow", "warn", "block"])
