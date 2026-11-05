@@ -1,10 +1,7 @@
 name: Hub
+# Reusable workflow: ci.yml calls it as the hub-rust job so ci-gate covers it.
 on:
-  push:
-    branches: [main]
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
-  pull_request:
-    paths: ['engines/hub/**', 'src/brigade/fleet_hub_server.py', 'tests/test_fleet_hub_server.py', 'src/brigade/fleet_hub*.py', 'registry/skills/verify-brigade/hub_contract*', 'registry/skills/verify-brigade/hub_readonly.py', 'registry/skills/verify-brigade/hub_audit.py', 'src/brigade/memory_bm25.py', 'src/brigade/memory_cmd.py', 'src/brigade/memory_hub_*.py', 'src/brigade/memory_retrieval_eval/**', 'evals/memory-retrieval/**', '.github/workflows/hub.yml']
+  workflow_call:
 permissions:
   contents: read
 jobs:

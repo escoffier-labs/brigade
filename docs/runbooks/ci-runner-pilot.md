@@ -11,8 +11,8 @@ variants and all platform checks.
 
 Merge the workflow with `merge_group: checks_requested` support before enabling
 merge queue. Merge groups bypass the path filter and classify all four component
-flags as the string `true`: code graph, evidence ledger, notify, and Fleet Hub
-container. Pushes and pull requests retain path filtering. Public pull requests
+flags as the string `true`: code graph, evidence ledger, notify, Fleet Hub
+container, and the Rust hub suite. Pushes and pull requests retain path filtering. Public pull requests
 and merge-group jobs continue to use hosted runners.
 
 Preserve current branch protections, review requirements, and conversation
@@ -25,7 +25,10 @@ resolution requirements throughout the pilot. The queue was prepared while the
 It always runs and requires success from the 9 jobs behind the former 20
 required statuses plus their 4 dependencies. A missing or extra dependency
 fails closed. Fleet Hub container may skip only after successful classification
-marks it unchanged, and never in a merge group. The gate excludes the optional
+marks it unchanged, and never in a merge group. The Rust hub suite (`hub-rust`,
+the reusable `hub.yml` on stable and 1.85.0) follows the same rule, so a failing
+hub job blocks the merge and the queue always runs it on the merged tree. The
+gate excludes the optional
 trusted-runner-canary.
 
 On 2026-10-21 `ci-gate` replaced the 20 per-job required statuses. These
