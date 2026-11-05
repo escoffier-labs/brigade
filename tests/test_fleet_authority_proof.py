@@ -1057,8 +1057,9 @@ def test_reservation_accept_rechecks_operator_retirement_without_policy_change(
     conn, consumer, accepted_first, identity
 ):
     body = _accept_route(conn, consumer=consumer, brigade_model="provider-a/brigade-model")
+    accepted = None
     if accepted_first:
-        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        _, accepted = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
     policy = fleet_hub_policy.current_policy(conn)
     conn.execute(
         "INSERT INTO retired_models (provider, family, match_kind, permanent, reason_code, created_at) "
@@ -1067,8 +1068,13 @@ def test_reservation_accept_rechecks_operator_retirement_without_policy_change(
     )
     conn.commit()
     before = _accept_state(conn)
-    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
-        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    if accepted_first:
+        # The acceptance already happened. A replay returns it and does not re-run first-acceptance checks.
+        _, replay = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+        assert replay == accepted
+    else:
+        with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="retired"):
+            fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
     assert _accept_state(conn) == before
     current = fleet_hub_policy.current_policy(conn)
     assert (current["revision"], current["digest"]) == (policy["revision"], policy["digest"])
@@ -1157,6 +1163,99 @@ def test_reservation_accept_replay_survives_work_leaving_ready(conn):
         assert _accept_state(conn) == before
     finally:
         fleet_hub_routing.set_work_item_lookup(None)
+
+
+def _record_running(conn, *, session_ids, run_ids):
+    from brigade import fleet_hub_routing
+
+    fleet_hub_routing.observe_machine(
+        conn,
+        {
+            "node_id": NODE_A,
+            "observed_at": fleet_hub_routing._iso(),
+            "status": "available",
+            "credential_state": "ok",
+            "usable_seats": [SEAT],
+            "running": {"session_ids": session_ids, "run_ids": run_ids},
+        },
+        NODE_A,
+    )
+
+
+def _telemetry_state(conn):
+    return conn.execute("SELECT * FROM fleet_machine_telemetry").fetchall()
+
+
+def test_reservation_accept_replay_survives_running_launch_on_concurrency_one_machine(conn):
+    body = _accept_route(conn)
+    _, accepted = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    # The accepting launch now reports as running, on a machine that has room for exactly one.
+    _record_running(conn, session_ids=[SESSION], run_ids=["run-accepting-launch"])
+    before = _accept_state(conn)
+    telemetry = _telemetry_state(conn)
+    status, replay = fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert status == 200
+    assert replay == accepted
+    assert replay["reservation_id"] == body["reservation_id"]
+    assert replay["expires_at"] == before[0][0][9]
+    assert _accept_state(conn) == before
+    assert _telemetry_state(conn) == telemetry
+    assert not conn.in_transaction
+
+
+def test_reservation_accept_first_acceptance_still_refused_on_busy_machine(conn):
+    body = _accept_route(conn)
+    fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    _record_running(conn, session_ids=[SESSION], run_ids=["run-accepting-launch"])
+    # A second, unaccepted reservation on the same concurrency-one machine, built by copying the first.
+    conn.execute(
+        "INSERT INTO fleet_route_decisions SELECT 'dec-second', 'key-second', request_digest, admission_generation, "
+        "policy_version, policy_digest, origin, origin_node, 'session-second', consumer, repo_identity, workload, "
+        "work_id, selected_machine, selected_seat, 'rsv-second', reason, override_reason, request_document, "
+        "document, created_at FROM fleet_route_decisions WHERE decision_id=?",
+        (body["decision_id"],),
+    )
+    conn.execute(
+        "INSERT INTO fleet_reservations SELECT 'rsv-second', 'dec-second', 'session-second', machine, seat, node_id, "
+        "origin_node, state, 0, expires_at, created_at, updated_at FROM fleet_reservations WHERE reservation_id=?",
+        (body["reservation_id"],),
+    )
+    conn.execute(
+        "INSERT INTO fleet_dispatch_intents SELECT 'dec-second', 'rsv-second', 'session-second', origin_node, "
+        "target_node, 'pending', created_at, updated_at FROM fleet_dispatch_intents WHERE decision_id=?",
+        (body["decision_id"],),
+    )
+    conn.commit()
+    second = {
+        "action": "reservation-accept",
+        "reservation_id": "rsv-second",
+        "decision_id": "dec-second",
+        "session_id": "session-second",
+    }
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="machine-capacity"):
+        fleet_hub_policy_api.handle_policy(conn, second, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before
+    assert not conn.in_transaction
+
+
+@pytest.mark.parametrize("fault", ["expired", "released"])
+def test_reservation_accept_replay_still_refused_after_expiry_or_release(conn, fault):
+    body = _accept_route(conn)
+    fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    _record_running(conn, session_ids=[SESSION], run_ids=["run-accepting-launch"])
+    if fault == "expired":
+        conn.execute("UPDATE fleet_reservations SET expires_at='2000-01-01T00:00:00Z'")
+    else:
+        fleet_hub_policy_api.handle_policy(
+            conn, {**body, "action": "reservation-release"}, caller_node=NODE_A, is_admin=False
+        )
+    conn.commit()
+    before = _accept_state(conn)
+    with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError):
+        fleet_hub_policy_api.handle_policy(conn, body, caller_node=NODE_A, is_admin=False)
+    assert _accept_state(conn) == before
+    assert not conn.in_transaction
 
 
 def test_reservation_accept_replays_without_renewal_and_preserves_lifecycle(conn):
