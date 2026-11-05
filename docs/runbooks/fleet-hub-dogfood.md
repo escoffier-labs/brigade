@@ -6,8 +6,10 @@ Compose recipe in `ops/fleet-hub/` (S31 in
 The recipe is the install path the design offers everyday users. The dogfood
 hub is not production: no production node points at it, and it holds dogfood
 data only. Production stays on the LXC hub host
-([Fleet hub on a Proxmox LXC](fleet-hub-proxmox.md)). It runs today's Python
-hub. S10 moves the same recipe to the Rust hub.
+([Fleet hub on a Proxmox LXC](fleet-hub-proxmox.md)). The hub container runs
+the Rust hub, `brigade-hub`, in front of the Python hub, with hub memory
+served natively. S10 replaces the recipe's entrypoint with the planned
+`fleet serve --engine rust`.
 
 Machines are named by role. Replace every angle-bracket value. Host-specific
 values (core numbers, devices, the compose account, the front's name) belong
@@ -23,7 +25,7 @@ each one before anyone runs it. The scripted acceptance checks are in
 | Container | Network | Role |
 |---|---|---|
 | `netns` (holder) | compose default network and the internal `embed` network | Owns the network namespace. Runs only a pause process with no health check and an OOM score adjustment of -1000, so nothing restarts it. |
-| `hub` | `service:netns` | `brigade fleet serve` bound to `127.0.0.1:3774`. No GPU, no published port. |
+| `hub` | `service:netns` | `brigade-hub` bound to `127.0.0.1:3774` in managed mode, with `--route-mode memory=native`. It starts `brigade fleet serve` as its child on an ephemeral loopback port, and the child refuses any request without the key `brigade-hub` generates at each start. Memory lives in `fleet-hub-memory.db` beside `fleet-hub.db` on the state volume. No GPU, no published port. |
 | `front` | `service:netns` | The private network's HTTPS front. Terminates HTTPS with the certificate the private network issues for its own name and forwards to `127.0.0.1:3774`, so the hub's peer is loopback, as on the LXC hub host. SSH stays off. |
 | `embedder` | `embed` only (internal) | Only under the `gpu` profile. One GPU through a device reservation, its own model volume, no published port. The hub reaches it as `http://embedder:11434`. |
 | `backup` | none | One-shot `brigade fleet backup`, started hourly by a timer. |
@@ -71,13 +73,18 @@ Approved and done, from [HOST-ACTIONS.md](../../ops/fleet-hub/HOST-ACTIONS.md):
 
 The Brigade image must install a reviewed commit that includes
 `brigade fleet backup`, `brigade fleet restore`, the recovery floor and
-`BRIGADE_FLEET_FINDINGS_KEY_FILE`, which landed with S31. The default
-`BRIGADE_REF` in `compose.yaml` predates them. Pass the merged commit and its
-source archive digest to setup:
+`BRIGADE_FLEET_FINDINGS_KEY_FILE`, which landed with S31, and the Rust hub's
+native memory route (#2283). The image builds both the Python package and
+`brigade-hub` from that one commit. The default `BRIGADE_REF` in
+`compose.yaml` has all of them. To build a newer reviewed commit, pass it,
+its source archive digest and the version in its `pyproject.toml` (the image's
+version label) to setup:
 
 ```bash
 ref=<MERGED_COMMIT_SHA>
 curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" | sha256sum
+curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" \
+  | tar -xzO "brigade-${ref}/pyproject.toml" | grep -m1 '^version'
 ```
 
 ## Set up
@@ -88,6 +95,7 @@ Run setup as the compose account, from the repository checkout:
 cd ops/fleet-hub
 bin/hub-setup.py init \
   --brigade-ref <MERGED_COMMIT_SHA> --brigade-sha256 <ARCHIVE_SHA256> \
+  --brigade-version <VERSION_IN_ITS_PYPROJECT> \
   --front-hostname <FRONT_NODE_NAME> \
   --backup-dir "$HOME/brigade-hub-backups"
 ```
@@ -114,9 +122,8 @@ configuration it could not probe, offers only R1 models, and never
 overwrites an existing secret. It writes `.env`, `config/hub.toml` and the
 secrets, and creates the backup directory with mode 0700.
 
-`config/hub.toml` is mounted into the hub for the planned Rust hub (S10, S15).
-Today's Python hub has no embedder and ignores it, so on this hub both modes
-answer from BM25. The mode switch below already works on the files and the
+`config/hub.toml` is mounted into the hub for the planned `--config` (S10,
+S15). Neither hub reads it yet, so on this hub both modes answer from BM25. The mode switch below already works on the files and the
 containers, and S15 adds the status fields.
 
 Put the private network's auth key in `secrets/front-authkey` (tagged, not
@@ -144,8 +151,15 @@ sed -i "s|^BRIGADE_HUB_IMAGE=.*|BRIGADE_HUB_IMAGE=${image_id}|" .env
 docker compose up -d --no-build
 docker compose ps
 docker compose exec hub python -c "import urllib.request; print(urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read())"
+checks/s31_checks.py memory
 docker compose exec front tailscale serve status
 ```
+
+`docker compose build` compiles `brigade-hub` in the Containerfile's Rust
+stage, which takes a few minutes the first time. `checks/s31_checks.py memory`
+sends `POST /memory` with the admin token and the `status` action on loopback
+inside the hub container and expects 200. A 404 means the Python hub answered,
+so `--route-mode memory=native` is missing from the hub's command.
 
 Pinning `BRIGADE_HUB_IMAGE` to the image ID makes every start, the boot unit's
 included, use the reviewed build. After the boot unit is enabled
@@ -208,8 +222,19 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
   container by itself.
 - `stop_grace_period: 40s` covers the hub's shutdown. The Docker stop timeout
   drop-in and `"shutdown-timeout": 45` keep a host shutdown from cutting it
-  short. On SIGTERM the hub logs `brigade fleet hub stopped cleanly` and exits
-  0, which the restart and UPS checks look for.
+  short. On SIGTERM `brigade-hub` stops accepting and drains for at most
+  25 s. Then it sends the Python hub SIGTERM, so the Python hub's own
+  shutdown runs, and waits up to 10 s for it. A Python hub still running then
+  gets SIGKILL. `brigade-hub` logs which of these happened and exits 0 only
+  when the Python hub exited 0 after its SIGTERM. A stop that comes while the
+  hub is still starting also sends the Python hub SIGTERM, but the Python hub
+  may not have installed its handler yet. It then ends by that SIGTERM's
+  default action, without its own shutdown, and `brigade-hub` exits 2. The
+  Python hub runs in its own process group, so a Ctrl-C or a signal to the
+  whole group reaches only `brigade-hub`, which stops it once. When it exits 0 after a stop, the recipe's entrypoint
+  (`hub/entry.py`) logs `brigade fleet hub stopped cleanly`, which the restart
+  and UPS checks look for. It logs `brigade fleet hub listening on` once
+  `/health` answers.
 - Fence the hub with `touch hub.fenced && docker compose stop hub front` in
   the project directory. The boot unit and the watchdog leave the hub down
   while `hub.fenced` exists, so the fence survives a reboot or a Docker
@@ -220,17 +245,24 @@ backfill covers every live card, then `hybrid`. BM25 answers in the meantime.
 ## Backups
 
 The backup timer (`brigade-hub-backup.timer`, HOST-ACTIONS 4) runs
-`docker compose --profile backup run --rm --no-deps backup` every hour.
-`brigade fleet backup` copies each database file through SQLite's online
-backup API into a dated directory under `BRIGADE_BACKUP_DIR` on the home
-volume, never Docker's data root. It runs `integrity_check` on every copy and
-keeps 48 hourly copies and the newest copy of each of the last 14 days.
+`docker compose --profile backup run --rm --no-deps backup` every hour. The
+job (`hub/backup.py`) runs `brigade fleet backup` twice, once per file, and
+runs both calls whatever the other did. `fleet-hub.db` goes into a dated
+directory under `BRIGADE_BACKUP_DIR`, and `fleet-hub-memory.db` into a dated
+directory under `BRIGADE_BACKUP_DIR/memory`. Both are on the home volume,
+never Docker's data root. Each copy goes through SQLite's online backup API
+and gets an `integrity_check`. Each directory keeps 48 hourly copies and the
+newest copy of each of the last 14 days. A missing memory file is logged and
+skipped, so it never stops the hub file's copy. Any other failure of either
+call fails the job.
 
 Size the retention once, from the real file sizes:
 
 ```bash
-docker compose --profile backup run --rm --no-deps backup \
-  --db /var/lib/brigade/fleet-hub.db --dest /backups --owner "$(id -u):$(id -g)" --plan --json
+docker compose --profile backup run --rm --no-deps --entrypoint brigade backup \
+  fleet backup \
+  --db /var/lib/brigade/fleet-hub.db --db /var/lib/brigade/fleet-hub-memory.db \
+  --dest /backups --owner "$(id -u):$(id -g)" --plan --json
 ```
 
 `--plan` prints the file sizes and the hourly count that keeps the directory
@@ -253,6 +285,14 @@ Any restore from a copy older than the hub's last write is lossy. Everything
 committed after the copy is gone. Never put a copy back with a plain file
 copy: use the restore tool, which keeps ids, claim generations and revisions
 moving forward.
+
+The restore below replaces only `fleet-hub.db`. Leave the live
+`fleet-hub-memory.db` and its sidecars in place. No tool restores a memory
+copy yet: a restored memory file needs a new `log_epoch` before it is served,
+and nothing outside the Rust crate's tests sets one (#2292). If the memory
+file itself is lost, the hub creates an empty one on its next start, and the
+copies under `BRIGADE_BACKUP_DIR/memory` keep the lost cards for when #2292
+lands.
 
 1. Fence the hub: `touch hub.fenced && docker compose stop hub front` in the
    project directory. Clients spool from here on, and the fence holds across
@@ -378,6 +418,7 @@ After the matching host actions are done, run each check from
 | Access from the host | `checks/s31_checks.py access` |
 | Front: forged header, SSH off, forwarded-for | `checks/s31_checks.py front` (starts a header echo for the test only) |
 | Refused connections at the fleet's concurrency | `checks/s31_checks.py load --concurrency <N>` |
+| Hub memory answers on the Rust hub | `checks/s31_checks.py memory` |
 | Restarts and reboots (each at least 3 times) | `checks/s31_checks.py restart --case stop`, `--case hub-kill`, `--case holder-restart`, `--case daemon-restart`, and after each host reboot `--case after-reboot`. `checks/s31_checks.py summary` counts them |
 | Backups | `checks/s31_checks.py backups --include-file <OFF_HOST_INCLUDE_LIST> --refusal` |
 | Restore tool and the full drive on a copy | `checks/s31_checks.py restore --drive` |
