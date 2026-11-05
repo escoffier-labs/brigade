@@ -71,11 +71,15 @@ ALLOWED_OPERATIONS: dict[str, frozenset[str] | None] = {
     "POST /messages keys_get": frozenset({"action", "kid"}),
 }
 # Operations that write on main, kept off the list. The audit runs the ones it
-# can reach as positive controls; each must record a write.
+# can reach as positive controls; each must record a write. Under
+# `messages=native` the Rust hub serves `list`, `sent` and `sent_lookup` as
+# reads that never write, but the `--hub-url` probe cannot tell how a running
+# hub routes them, and bodies serde_json rejects still reach Python, so they
+# stay off the list.
 EXCLUDED_OPERATIONS = {
-    "POST /messages list": "_prune_expired, database-wide",
-    "POST /messages sent": "_prune_expired, database-wide",
-    "POST /messages sent_lookup": "_prune_expired, database-wide",
+    "POST /messages list": "_prune_expired, database-wide, when Python serves it",
+    "POST /messages sent": "_prune_expired, database-wide, when Python serves it",
+    "POST /messages sent_lookup": "_prune_expired, database-wide, when Python serves it",
     "POST /messages ack": "_prune_expired, database-wide",
     "POST /messages who": "may rebuild a paging snapshot under BEGIN IMMEDIATE",
     "POST /messages claims": "may rebuild a paging snapshot under BEGIN IMMEDIATE",
