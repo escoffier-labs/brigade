@@ -349,8 +349,8 @@ def measure(size):
     assert result == expected, (name, position, result, expected)
     return elapsed
 measure(128 * 1024)
-small = min(measure(128 * 1024) for _ in range(2))
-large = min(measure(512 * 1024) for _ in range(2))
+small = min(measure(128 * 1024) for _ in range(3))
+large = min(measure(512 * 1024) for _ in range(3))
 print(small, large, large / small, flush=True)
 """
     result = subprocess.run(
@@ -362,7 +362,11 @@ print(small, large, large / small, flush=True)
     assert result.returncode == 0, result.stdout + result.stderr
     small, large, ratio = map(float, result.stdout.split())
     assert large < 20, result.stdout
-    assert ratio < 8, result.stdout
+    # A 4x input step is about 4x when linear and about 16x when quadratic.
+    # Shared runners measured 9.5x for a rule that scales exactly linearly
+    # locally, so 11 leaves room for that noise and still fails quadratic.
+    # The fixture expectations only hold up to 512 KiB, so the step stays 4x.
+    assert ratio < 11, result.stdout
 
 
 def test_s18_round4_exact_reviewer_inputs():
