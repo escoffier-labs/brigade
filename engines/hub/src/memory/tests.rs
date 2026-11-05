@@ -381,6 +381,70 @@ async fn writes_into_a_scope_the_caller_cannot_write_get_403() {
 }
 
 #[tokio::test]
+async fn status_names_the_principal_and_the_readable_scopes() {
+    let h = Hub::new();
+    let grant = |rights: Json| {
+        json!({"action":"grant","principal":"agent:dot","scope":"repo:example/one",
+               "rights":rights,"client_event_id":h.id()})
+    };
+    assert_eq!(
+        h.call(ADMIN_TOKEN, grant(json!(["read"]))).await.status,
+        200
+    );
+    let asked = json!(["repo:example/one", "fleet", "principal:node-1", "fleet"]);
+    let agent = h
+        .call(AGENT_TOKEN, json!({"action":"status","scopes":asked}))
+        .await;
+    assert_eq!(agent.status, 200, "{agent:?}");
+    assert_eq!(
+        (&agent.body["principal"], &agent.body["credential"]),
+        (&json!("agent:dot"), &json!("principal"))
+    );
+    assert_eq!(agent.body["readable_scopes"], json!(["repo:example/one"]));
+    let node = h
+        .call(NODE_TOKEN, json!({"action":"status","scopes":asked}))
+        .await;
+    assert_eq!(
+        (&node.body["principal"], &node.body["credential"]),
+        (&json!("node-1"), &json!("node"))
+    );
+    assert_eq!(
+        node.body["readable_scopes"],
+        json!(["fleet", "principal:node-1", "repo:example/one"])
+    );
+    // Without `scopes` the answer has no readable list, and nothing in it
+    // is derived from the token.
+    let plain = h.call(NODE_TOKEN, json!({"action":"status"})).await;
+    assert!(plain.body.get("readable_scopes").is_none());
+    assert!(!plain.body.to_string().contains(&digest(NODE_TOKEN)));
+    // A revoked read grant leaves the scope out at once.
+    assert_eq!(
+        h.call(ADMIN_TOKEN, grant(json!(["write"]))).await.status,
+        200
+    );
+    let revoked = h
+        .call(
+            AGENT_TOKEN,
+            json!({"action":"status","scopes":["repo:example/one"]}),
+        )
+        .await;
+    assert_eq!(
+        (revoked.status, code(&revoked)),
+        (403, "memory_grant_missing")
+    );
+    for bad in [json!([]), json!(["nowhere"]), json!("fleet")] {
+        let r = h
+            .call(NODE_TOKEN, json!({"action":"status","scopes":bad}))
+            .await;
+        assert_eq!(
+            (r.status, code(&r)),
+            (400, "memory_request_invalid"),
+            "{bad}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn admin_put_stores_agent_unreviewed_and_import_needs_the_grant() {
     let h = Hub::new();
     let put = h

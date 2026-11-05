@@ -148,6 +148,14 @@ def card_name(value: Any) -> str:
     return value
 
 
+def memory_scope(value: Any) -> str:
+    """A hub memory scope, as a search match reports it: fleet, repo:<identity> or principal:<id>."""
+    from ..memory_hub_client import valid_scope
+
+    require(valid_scope(value))
+    return value
+
+
 def handoff_content(value: Any) -> str:
     _text(max_bytes=MAX_HANDOFF_BYTES, multiline=True)(value)
     require(value.startswith("# Memory Handoff\n"))
@@ -247,7 +255,13 @@ TOOL_SCHEMAS = {
     "fleet_recent": ToolSchema({"limit": _optional(_integer(1, 50), 20)}),
     "fleet_overview": ToolSchema({"include_terminal": _optional(_boolean, False)}),
     "memory_search": ToolSchema({"query": _required(QUERY), "limit": _optional(_integer(1, 20), 10)}),
-    "memory_card": ToolSchema({"name": _required(card_name), "offset": _optional(_integer(0, MAX_CARD_FILE_BYTES), 0)}),
+    "memory_card": ToolSchema(
+        {
+            "name": _required(card_name),
+            "offset": _optional(_integer(0, MAX_CARD_FILE_BYTES), 0),
+            "scope": _optional(memory_scope),
+        }
+    ),
     "handoff_write": ToolSchema({"slug": _required(SLUG), "content": _required(handoff_content)}, read_only=False),
     "inbox_list": ToolSchema({"unacked_only": _optional(_boolean, True), "limit": _optional(_integer(1, 50), 20)}),
     "inbox_ack": ToolSchema({"ids": _required(message_ids)}, read_only=False),

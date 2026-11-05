@@ -48,13 +48,19 @@ class MemoryTools:
         return value, None
 
     def memory_search(self, query: str, limit: int = 10) -> dict[str, Any]:
+        """`brigade memory search`. With hub memory on, it makes no hub `status` call, so an admin
+        token in the node slot is not refused here: matches stay inside the `[hub]` read scopes
+        but skip this node's grants within them. `memory_card` refuses that token."""
         value, error = self._brigade_json(
             ["memory", "search", "--target", str(self.workspace), "--limit", str(limit), "--json", "--", query],
             timeout=30,
         )
         if error or not isinstance(value, dict) or not isinstance(value.get("matches"), list):
             return {"error": error or "memory_unavailable"}
-        keys = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        keys: tuple[str, ...] = ("card_id", "title", "path", "score", "summary", "tags", "card_aliases")
+        if "retrieval" in value:
+            # Hub memory is on for this workspace (S14): keep where each match came from.
+            keys += ("source", "scope", "revision", "trust")
         matches = []
         for match in value["matches"][:limit]:
             if not isinstance(match, dict):
@@ -67,15 +73,75 @@ class MemoryTools:
                     continue
             item["content_trust"] = "untrusted"
             matches.append(item)
-        return dict(
+        payload = dict(
             query=query,
             match_count=value.get("match_count"),
             matches=matches,
             workspace=str(self.workspace),
             next="Read a card with memory_card(name=<path basename without .md>).",
         )
+        if isinstance(value.get("retrieval"), dict):
+            payload["next"] = (
+                "Read a card with memory_card(name=<path basename without .md>); "
+                "for a hub or replica match, also pass scope=<its scope>."
+            )
+            payload["retrieval"] = value["retrieval"]
+            if isinstance(value.get("warning"), str):
+                payload["warning"] = value["warning"]
+        return payload
 
-    def memory_card(self, name: str, offset: int = 0) -> dict[str, Any]:
+    def _hub_card(self, name: str, offset: int, scope: str | None = None) -> dict[str, Any] | None:
+        """A card only hub memory holds, read through `brigade memory hub card` (S14).
+
+        The CLI reads only the workspace's `[hub]` read scopes; `scope`, as a
+        search match reports it, picks one when the id is in more than one.
+        While the hub is unavailable the CLI answers from this host's replica,
+        so a replica search match opens too; `source` says which answered. A
+        hub refusal (401, 403 or a coded answer) never falls back, and a scope
+        the hub refused is never served from the replica. The CLI reads the
+        hub's `status` first and refuses an admin token in the node slot.
+        """
+        from ..memory_hub_client import HubConfigError, hub_mode
+
+        try:
+            if hub_mode(self.workspace) == "off":
+                return None
+        except (HubConfigError, ValueError, OSError):
+            return None
+        scoped = ["--scope", scope] if scope else []
+        value, error = self._brigade_json(
+            ["memory", "hub", "card", "--target", str(self.workspace), "--all", "--json", *scoped, "--", name],
+            timeout=30,
+        )
+        card = value.get("card") if isinstance(value, dict) and value.get("ok") is True else None
+        if error or not isinstance(card, dict) or not isinstance(card.get("text"), str):
+            return None
+        text = card["text"]
+        if self.profile.prompt_load_scan:
+            # The whole card is scanned, as for a local card.
+            rule = blocked_rule([text])
+            if rule:
+                return {"card_id": name, "blocked": rule}
+        chunk = text[offset : offset + CARD_CHUNK_CHARS]
+        following = offset + len(chunk)
+        source = value.get("source") if value.get("source") in {"hub", "replica"} else "hub"
+        return dict(
+            name=name,
+            source=source,
+            scope=card.get("scope"),
+            revision=card.get("revision"),
+            sha256=card.get("content_hash"),
+            chars=len(text),
+            offset=offset,
+            next_offset=following if following < len(text) else None,
+            content=chunk,
+            content_trust="untrusted",
+        )
+
+    def memory_card(self, name: str, offset: int = 0, scope: str | None = None) -> dict[str, Any]:
+        if scope is not None:
+            # A hub match's scope: read that hub card, never a local file of the same name.
+            return self._hub_card(name, offset, scope) or {"error": "card_not_found", "name": name}
         directory = descriptor = None
         try:
             directory = trusted_directory(self.cards, allow_group_write=True, code="memory_unavailable")
@@ -84,7 +150,7 @@ class MemoryTools:
                     name + ".md", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC, dir_fd=directory
                 )
             except FileNotFoundError:
-                return {"error": "card_not_found", "name": name}
+                return self._hub_card(name, offset) or {"error": "card_not_found", "name": name}
             except OSError:
                 return {"error": "card_unavailable", "name": name}
             info = os.fstat(descriptor)

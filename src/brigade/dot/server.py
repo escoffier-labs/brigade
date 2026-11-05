@@ -349,10 +349,10 @@ def register_tools(server: Any, tools: DotTools, profile: ConnectorProfile = DOT
     @tool(
         name="memory_card",
         annotations=annotations("memory_card"),
-        description="Read one canonical memory card by name (memory/cards/<name>.md) in 30000-char chunks; follow next_offset. Returns sha256 for update-card handoffs.",
+        description="Read one canonical memory card by name (memory/cards/<name>.md) in 30000-char chunks; follow next_offset. Returns sha256 for update-card handoffs. For a hub match from memory_search, pass its scope.",
     )
-    async def memory_card(name: str, offset: int | None = None) -> dict:
-        return await invoke("memory_card", {"name": name, "offset": offset})
+    async def memory_card(name: str, offset: int | None = None, scope: str | None = None) -> dict:
+        return await invoke("memory_card", {"name": name, "offset": offset, "scope": scope})
 
     @tool(
         name="handoff_write",

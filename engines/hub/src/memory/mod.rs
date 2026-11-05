@@ -45,6 +45,8 @@ pub const ADMIN: &str = "hub:admin";
 /// Card text returned per `card` call, in characters.
 pub const CHUNK_CHARS: usize = 30_000;
 const COMMAND_DEADLINE: Duration = Duration::from_secs(10);
+/// The most scopes one `status` request may ask about.
+const STATUS_SCOPES_MAX: usize = 64;
 /// How long `search` with `min_seq` waits for the index to reach it.
 pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
 /// Actions in the route table that later slices build.
@@ -601,6 +603,7 @@ fn reads<T: ReadTx + ?Sized>(
     let allowed: &[&str] = match action {
         "card" => &["action", "card_id", "scope", "revision", "offset"],
         "log" => &["action", "after_seq", "limit"],
+        "status" => &["action", "scopes"],
         _ => &["action"],
     };
     if let Some(k) = map.keys().find(|k| !allowed.contains(&k.as_str())) {
@@ -629,6 +632,36 @@ fn reads<T: ReadTx + ?Sized>(
     };
     match action {
         "status" => {
+            // `scopes` asks which of the named scopes this credential can read
+            // now, so a client can drop what it replicated under a revoked
+            // grant. The answer names the principal, never the credential.
+            let readable_scopes = match map.get("scopes") {
+                None | Some(Json::Null) => None,
+                Some(Json::Array(items))
+                    if !items.is_empty() && items.len() <= STATUS_SCOPES_MAX =>
+                {
+                    let mut readable = auth::Readable::new(tx, credential);
+                    let mut names = Vec::new();
+                    for item in items {
+                        let Some(scope) = item.as_str().filter(|s| ids::valid_scope(s)) else {
+                            return Ok(invalid(
+                                "scopes must name fleet, repo:<identity> or principal:<id>",
+                            ));
+                        };
+                        if readable.scope(scope)? {
+                            names.push(scope.to_string());
+                        }
+                    }
+                    names.sort();
+                    names.dedup();
+                    Some(names)
+                }
+                _ => {
+                    return Ok(invalid(&format!(
+                        "scopes must be a list of 1 to {STATUS_SCOPES_MAX} scopes"
+                    )));
+                }
+            };
             let count = |sql: &str| -> rusqlite::Result<i64> {
                 Ok(tx
                     .query(sql, &[])?
@@ -636,7 +669,7 @@ fn reads<T: ReadTx + ?Sized>(
                     .and_then(|r| num(&r[0]))
                     .unwrap_or(0))
             };
-            Ok(Reply::new(
+            let mut reply = Reply::new(
                 200,
                 json!({
                     "cards": count("SELECT count(*) FROM memory_cards WHERE state='live'")?,
@@ -648,8 +681,14 @@ fn reads<T: ReadTx + ?Sized>(
                     "scan": {"available": scan.0, "ruleset_version": scan.1},
                     "embedders": [],
                     "default_mode": "lexical",
+                    "principal": credential.principal(),
+                    "credential": credential.class(),
                 }),
-            ))
+            );
+            if let Some(names) = readable_scopes {
+                reply.body["readable_scopes"] = json!(names);
+            }
+            Ok(reply)
         }
         "log" => {
             let after = match int_field("after_seq", 0, i64::MAX, 0) {

@@ -17,6 +17,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_reflect
 
     memory_reflect.register(memory_sub)
+    from .. import memory_hub_cmd
+
+    memory_hub_cmd.register(memory_sub)
     proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
@@ -275,7 +278,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Report the destination and rendered bytes without writing the vault.",
     )
     p_memory_vault_propose.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_memory_search = memory_sub.add_parser("search", help="Keyword-search local memory cards.")
+    p_memory_search = memory_sub.add_parser(
+        "search", help="Keyword-search memory cards: local ones, fused with hub memory in [hub] read or sync mode."
+    )
     p_memory_search.add_argument("query", help="Search terms (matched against title, tags, summary, and body).")
     p_memory_search.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to search.")
     p_memory_search.add_argument("--limit", type=int, default=20, help="Maximum matches to show.")
@@ -383,6 +388,10 @@ def dispatch(args) -> int:
         from .. import memory_reflect
 
         return memory_reflect.dispatch(args)
+    if args.memory_command == "hub":
+        from .. import memory_hub_cmd
+
+        return memory_hub_cmd.dispatch(args)
     if args.memory_command == "proposal":
         from .. import memory_proposals
         import json
@@ -533,6 +542,13 @@ def dispatch(args) -> int:
         args._brigade_parser.error(f"unknown memory care command: {args.memory_care_command}")
         return 2
     if args.memory_command == "search":
+        from .. import memory_hub_search
+
+        # In `off` mode, the default, search takes the unchanged local path.
+        if memory_hub_search.enabled(args.target):
+            return memory_hub_search.search(
+                target=args.target, query=args.query, limit=args.limit, json_output=args.json
+            )
         return memory_cmd.search(target=args.target, query=args.query, limit=args.limit, json_output=args.json)
     if args.memory_command == "recall":
         return memory_cmd.recall(
