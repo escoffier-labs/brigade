@@ -461,6 +461,26 @@ def test_conflicting_offline_edit_becomes_a_proposal(hub, tmp_path):
     assert sync.push(target, client(hub), settings(target))["published"] == []
 
 
+def test_a_spooled_write_is_withheld_once_its_card_turns_private(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nconfidential draft\n")
+    hub.mode = "down"
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [s["card_id"] for s in report["spooled"]] == ["one"]
+    card = target / "memory" / "cards" / "one.md"
+    card.write_text("---\nvisibility: private\n---\n# One\nconfidential draft\n", encoding="utf-8")
+    hub.mode = "up"
+    report = sync.push(target, client(hub), settings(target))
+    assert hub.puts() == [] and report["published"] == []
+    assert {"path": "memory/cards/one.md", "reason": "visibility-private"} in report["skipped"]
+    assert [(p["card_id"], p["reason"]) for p in report["proposals"]] == [("one", "card-now-private")]
+    assert store.spool_count(target) == 0
+    (kept,) = list(store.proposals(target))
+    assert kept["entry"]["text"] == "# One\nconfidential draft\n"
+    # A later push still sends nothing for the private card.
+    sync.push(target, client(hub), settings(target))
+    assert hub.puts() == []
+
+
 @pytest.mark.parametrize(
     ("setup", "reason"),
     [

@@ -341,11 +341,13 @@ def _adoptable(target: Path, settings: hubc.HubSettings, hub: str, principal: ob
 
 def _publishable(
     target: Path, settings: hubc.HubSettings, hub: str, principal: object
-) -> tuple[list[dict], list[dict], list[dict], list[str]]:
+) -> tuple[list[dict], list[dict], list[dict], list[str], set[str]]:
     """Local cards whose bytes differ from what this workspace last published here.
 
     Also returns the proposals this run resolves: the local card now holds
     exactly the hub head's bytes, so the conflict is over and that head is the base.
+    The last item names the private cards, by card id and by path, so a write
+    spooled before a card turned private is withheld instead of replayed.
     """
     scope = str(settings.scope)
     state = store.published(target).get(hub, {}).get(scope, {})
@@ -357,8 +359,10 @@ def _publishable(
     skipped: list[dict] = []
     adopted: list[dict] = []
     resolved: list[str] = []
+    private: set[str] = set()
     for card in _local_cards(target):
         if card["private"]:
+            private.update((card["card_id"], card["rel"]))
             skipped.append({"path": card["rel"], "reason": "visibility-private"})
             continue
         if not hubc.valid_card_id(card["card_id"]):
@@ -382,7 +386,7 @@ def _publishable(
             adopted.append({"card": card, "revision": head.get("revision"), "log_epoch": log_epoch})
             continue
         changes.append({**card, "base": last if isinstance(last, dict) else None})
-    return changes, skipped, adopted, resolved
+    return changes, skipped, adopted, resolved, private
 
 
 def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str) -> None:
@@ -529,7 +533,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     principal = preflight.principal
     if principal is not None and forget_other_principal(target, hub, principal):
         warnings.append("the replica was pulled as another principal and was discarded; run pull to rebuild it")
-    changes, skipped, adopted, resolved = _publishable(target, settings, hub, principal)
+    changes, skipped, adopted, resolved, private = _publishable(target, settings, hub, principal)
     first = scope not in store.published(target).get(hub, {})
     if first and not yes:
         return {
@@ -555,6 +559,11 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             kept[proposal_id] = closed["dropped_to"]
     run = _Push(target, client, preflight.epoch, reachable=preflight.reachable)
     for entry in store.spool_entries(target, hub):
+        if entry.get("card_id") in private or entry.get("path") in private:
+            # The card turned private after this write was spooled: keep its
+            # text as a local proposal and never send it.
+            run._propose(entry, "card-now-private")
+            continue
         run.send(entry, spooled=True)
     for card in changes:
         run.send(_entry(scope, card, hub), spooled=False)
