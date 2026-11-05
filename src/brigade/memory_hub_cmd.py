@@ -54,7 +54,7 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
                 const="keep-local",
                 help=(
                     "Keep the local card: the hub head becomes its base, so the next push overwrites "
-                    "the other writer's text on the hub."
+                    "the other writer's text on the hub. A gone or private local card sends nothing."
                 ),
             )
             choice.add_argument(
@@ -109,7 +109,7 @@ def _refusal(exc: hubc.HubRefusal, *, json_output: bool) -> int:
 
 NO_NODE_CREDENTIAL = (
     "no node token is configured (BRIGADE_FLEET_NODE_TOKEN or [fleet] node_token_file); "
-    "hub memory never uses the shared admin token"
+    "hub memory never reads the shared admin token (BRIGADE_FLEET_TOKEN)"
 )
 
 
@@ -122,18 +122,27 @@ def _unavailable(exc: hubc.HubUnavailable, *, json_output: bool) -> int:
 
 
 class _CardUnavailable(hubc.HubUnavailable):
-    """The hub became unavailable during a card read, after it refused the card in `refused` scopes."""
+    """The hub became unavailable during a card read.
 
-    def __init__(self, exc: hubc.HubUnavailable, refused: tuple[str, ...]) -> None:
+    `refused` names every scope the hub refused the card in during that read,
+    which the replica never serves. `fallback` is False when the read showed
+    that nothing the replica holds may stand in: `status` refused this
+    credential every read grant, or the log_epoch moved under the read.
+    """
+
+    def __init__(self, exc: hubc.HubUnavailable, refused: tuple[str, ...], *, fallback: bool) -> None:
         super().__init__(exc.reason, status=exc.status)
         self.refused = refused
+        self.fallback = fallback
 
 
-def _card_scope(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace) -> tuple[str, dict]:
+def _card_scope(
+    client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace, refused: list[str]
+) -> tuple[str, dict]:
     """The read scope that holds the card, and the first chunk's answer. Never a scope outside the config.
 
-    When the hub turns unavailable after it refused the card in one scope,
-    the HubUnavailable carries that scope, so the replica never serves it.
+    Each scope that refuses the card is added to `refused`, which the caller
+    keeps for the whole read.
     """
     if args.scope:
         if args.scope not in settings.read_scopes:
@@ -145,17 +154,15 @@ def _card_scope(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: 
         candidates = settings.read_scopes
     found: list[tuple[str, dict]] = []
     refusal: hubc.HubRefusal | None = None
-    refused: list[str] = []
     for scope in candidates:
         try:
             found.append((scope, client.call("card", card_id=args.card_id, scope=scope, offset=args.offset)))
-        except hubc.HubUnavailable as exc:
-            raise _CardUnavailable(exc, tuple(refused)) from exc
         except hubc.HubRefusal as exc:
             if len(candidates) == 1 or exc.code not in {"memory_card_not_found", "memory_grant_missing"}:
                 raise
             refusal = refusal or exc
-            refused.append(scope)
+            if scope not in refused:
+                refused.append(scope)
     if len(found) > 1:
         scopes = [scope for scope, _ in found]
         raise hubc.HubRefusal(
@@ -188,8 +195,15 @@ def _proposals(args: argparse.Namespace, target: Path, transport: hubc.Transport
         payload = {"ok": False, "error": "no such proposal", "proposal_id": args.proposal_id}
         return _emit(payload, json_output=args.json, lines=[f"error: no proposal {args.proposal_id}"], code=1)
     line = f"dropped {dropped['proposal_id']} ({dropped['scope']}/{dropped['card_id']})"
+    nothing = {
+        "gone": "no readable local card holds it",
+        "private": "the local card is private",
+        "matches-hub": "the local card already holds the hub's text",
+    }
     if dropped["keep"] == sync.DROP_KEEP_HUB:
         line += f"; the local card now holds hub revision {dropped['rebased_on']} and the next push sends nothing"
+    elif dropped.get("local_card") in nothing:
+        line += f"; {nothing[dropped['local_card']]}, so the next push sends nothing for it"
     elif dropped["rebased_on"] is not None:
         line += f"; the next push writes the local card over hub revision {dropped['rebased_on']}"
     else:
@@ -244,27 +258,40 @@ def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: ar
     The hub's `status` is read first so an admin credential in the node slot
     is refused before any card is read. A credential that cannot read status
     cannot read a card either; the card call then carries the hub's refusal.
+
+    Any HubUnavailable during the read leaves as _CardUnavailable, carrying
+    every scope refused across both attempts and every chunk, and allowing no
+    replica answer after a `status` 403 or an epoch move seen in this read.
     """
+    refused: list[str] = []
+    fallback = True
     try:
-        hubc.refuse_admin(client.call("status"))
-    except hubc.HubRefusal as exc:
-        if not (exc.status == 403 and exc.code == "memory_grant_missing"):
-            raise
-    for attempt in (1, 2):
-        scope, body = _card_scope(client, settings, args)
         try:
-            card, epoch = _read_chunks(client, args, scope, body)
-        except _ChunkEpochMoved:
-            if attempt == 2:
-                raise hubc.HubRefusal(
-                    409,
-                    {
-                        "code": "memory_epoch_changed",
-                        "error": "the hub's log_epoch changed while the card was read in chunks; read it again",
-                    },
-                ) from None
-            continue
-        return {"ok": True, "card": card, "log_epoch": epoch, "source": "hub"}
+            hubc.refuse_admin(client.call("status"))
+        except hubc.HubRefusal as exc:
+            if not (exc.status == 403 and exc.code == "memory_grant_missing"):
+                raise
+            # This credential can read no scope now, so the replica speaks for none.
+            fallback = False
+        for attempt in (1, 2):
+            scope, body = _card_scope(client, settings, args, refused)
+            try:
+                card, epoch = _read_chunks(client, args, scope, body)
+            except _ChunkEpochMoved:
+                # The replica's epoch may be the one this read just saw replaced.
+                fallback = False
+                if attempt == 2:
+                    raise hubc.HubRefusal(
+                        409,
+                        {
+                            "code": "memory_epoch_changed",
+                            "error": "the hub's log_epoch changed while the card was read in chunks; read it again",
+                        },
+                    ) from None
+                continue
+            return {"ok": True, "card": card, "log_epoch": epoch, "source": "hub"}
+    except hubc.HubUnavailable as exc:
+        raise _CardUnavailable(exc, tuple(refused), fallback=fallback) from exc
     raise AssertionError("unreachable")
 
 
@@ -416,9 +443,11 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
         try:
             payload = _hub_card(client, settings, args)
         except hubc.HubUnavailable as exc:
-            # Not now, rather than no: the replica may stand in, as for search.
-            refused = exc.refused if isinstance(exc, _CardUnavailable) else ()
-            fallback = _replica_card(target, client, settings, args, refused=refused)
+            # Not now, rather than no: the replica may stand in, as for search,
+            # unless this read showed it may not.
+            if not isinstance(exc, _CardUnavailable) or not exc.fallback:
+                raise
+            fallback = _replica_card(target, client, settings, args, refused=exc.refused)
             if fallback is None:
                 raise
             warning = f"hub unavailable ({exc.reason}); answered from this host's replica"

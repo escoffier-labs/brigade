@@ -827,7 +827,7 @@ def test_memory_never_sends_the_admin_token(hub, tmp_path, monkeypatch, capsys):
     assert code == 0 and json.loads(out)["hub"] == {"available": False, "reason": "no-node-credential"}
     for command in (["push", "--yes"], ["pull"], ["card", "one"]):
         code, out, err = run(["memory", "hub", command[0], "--target", str(target), *command[1:]], capsys)
-        assert code == 1 and "never uses the shared admin token" in out, command
+        assert code == 1 and "never reads the shared admin token" in out, command
         assert ADMIN_CREDENTIAL not in out + err
     assert hub.calls == [] and hub.tokens == set()
 
@@ -1551,3 +1551,236 @@ def test_keep_hub_refuses_a_card_file_that_is_not_utf8(hub, tmp_path, capsys):
     assert code == 2 and "Traceback" not in err and "one.md" in err, out + err
     assert card.read_bytes() == b"# One\n\xff\xfe not utf-8\n"
     assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+
+
+# --- review round 4: refusals across a whole card read, fail-closed replay, stale resolution ---------
+
+GRANT_MISSING = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+LONG_B = "a large repo b card, long enough to need several chunks"
+
+
+def _two_scope_reader(hub: FakeHub, tmp_path: Path, *replicated: tuple[str, str, str]) -> Path:
+    """A reader of repo:a and repo:b whose replica holds `replicated` (scope, card id, text)."""
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:a", "repo:b"))
+    for scope, card_id, text in replicated:
+        _put(hub, scope, card_id, text)
+    sync.pull(target, client(hub), settings(target))
+    return target
+
+
+def _card_x(target: Path, capsys) -> tuple[int, dict, str]:
+    """`memory hub card --all --json x`: the exit code, the JSON answer and all output."""
+    code, out, err = run(["memory", "hub", "card", "--target", str(target), "--all", "--json", "x"], capsys)
+    return code, json.loads(out), out + err
+
+
+def test_a_later_chunk_failing_never_serves_a_scope_refused_earlier(hub, tmp_path, capsys):
+    target = _two_scope_reader(hub, tmp_path, ("repo:a", "x", "refused scope text"))
+    _put(hub, "repo:b", "x", LONG_B)  # after the pull, so the replica lacks it
+    original = hub.do_card
+
+    def refuse_a_then_fail_a_later_b_chunk(body):
+        if body.get("scope") == "repo:a":
+            return GRANT_MISSING
+        if body.get("offset"):
+            return 503, {"error": "hub busy"}
+        return original(body)
+
+    hub.do_card = refuse_a_then_fail_a_later_b_chunk
+    code, payload, output = _card_x(target, capsys)
+    assert code == 1 and payload.get("hub") == "unavailable" and "refused scope text" not in output
+
+
+def test_an_epoch_restart_keeps_the_scopes_refused_before_it(hub, tmp_path, capsys):
+    target = _two_scope_reader(hub, tmp_path, ("repo:a", "x", "refused scope text"))
+    _put(hub, "repo:b", "x", LONG_B)
+    original = hub.do_card
+    seen = {"a": 0, "moved": False}
+
+    def refuse_a_move_the_epoch_then_rate_limit_a(body):
+        if body.get("scope") == "repo:a":
+            seen["a"] += 1
+            return GRANT_MISSING if seen["a"] == 1 else (429, {})
+        if body.get("offset") and not seen["moved"]:
+            seen["moved"] = True
+            hub.epoch = hubc.event_id()
+        return original(body)
+
+    hub.do_card = refuse_a_move_the_epoch_then_rate_limit_a
+    code, payload, output = _card_x(target, capsys)
+    assert seen == {"a": 2, "moved": True}
+    assert code == 1 and payload.get("hub") == "unavailable" and "refused scope text" not in output
+
+
+def test_an_epoch_move_during_the_read_disables_the_replica(hub, tmp_path, capsys):
+    target = _two_scope_reader(hub, tmp_path, ("repo:a", "x", "replicated under the old epoch"))
+    original = hub.do_card
+    seen = {"moved": False}
+
+    def move_the_epoch_then_rate_limit(body):
+        if seen["moved"]:
+            return 429, {}
+        if body.get("offset"):
+            seen["moved"] = True
+            hub.epoch = hubc.event_id()
+        return original(body)
+
+    _put_on(hub, "x", LONG_B, scope="repo:a")
+    hub.do_card = move_the_epoch_then_rate_limit
+    code, payload, output = _card_x(target, capsys)
+    assert seen["moved"] and code == 1 and payload.get("hub") == "unavailable"
+    assert "replicated under the old epoch" not in output
+
+
+def test_a_status_403_means_the_replica_serves_nothing(hub, tmp_path, capsys):
+    target = _two_scope_reader(hub, tmp_path, ("repo:b", "x", "repo b replicated text"))
+    hub.status_reply = GRANT_MISSING
+    original = hub.do_card
+
+    def refuse_a_rate_limit_b(body):
+        if body.get("scope") == "repo:a":
+            return GRANT_MISSING
+        if body.get("scope") == "repo:b":
+            return 429, {}
+        return original(body)
+
+    hub.do_card = refuse_a_rate_limit_b
+    code, payload, output = _card_x(target, capsys)
+    assert code == 1 and payload.get("hub") == "unavailable" and "repo b replicated text" not in output
+    # With status answering, the same unavailable repo:b still falls back.
+    hub.status_reply = None
+    code, payload, _ = _card_x(target, capsys)
+    assert code == 0 and payload["source"] == "replica" and payload["card"]["text"] == "repo b replicated text\n"
+
+
+def _spool_then(hub: FakeHub, tmp_path: Path, before: str, change) -> tuple[Path, dict]:
+    """Spool a write of `memory/cards/x.md` while the hub is down, apply `change`, push with the hub up."""
+    target = workspace(tmp_path, mode="sync", x=before)
+    hub.mode = "down"
+    assert [s["card_id"] for s in sync.push(target, client(hub), settings(target), yes=True)["spooled"]] == ["x"]
+    change(target / "memory" / "cards")
+    hub.mode = "up"
+    return target, sync.push(target, client(hub), settings(target))
+
+
+def _rename_private(cards: Path) -> None:
+    (cards / "x.md").unlink()
+    (cards / "x-private.md").write_text("---\nvisibility: private\n---\n# X\nsecret\n", encoding="utf-8")
+
+
+def _reid_move_private(cards: Path) -> None:
+    (cards / "x.md").unlink()
+    (cards / "archive").mkdir()
+    (cards / "archive" / "x.md").write_text("---\nid: x2\nvisibility: private\n---\n# X\nsecret\n", encoding="utf-8")
+
+
+def _delete(cards: Path) -> None:
+    (cards / "x.md").unlink()
+
+
+def _not_utf8(cards: Path) -> None:
+    (cards / "x.md").write_bytes(b"# X\n\xff\xfe secret\n")
+
+
+@pytest.mark.parametrize(
+    ("before", "change", "reason"),
+    [
+        ("# X\nsecret\n", _rename_private, "card-gone"),
+        ("---\nid: x\n---\n# X\nsecret\n", _reid_move_private, "card-gone"),
+        ("# X\nsecret\n", _delete, "card-gone"),
+        ("# X\nsecret\n", _not_utf8, "card-unreadable"),
+    ],
+    ids=["rename-private", "reid-move-private", "deleted", "not-utf8"],
+)
+def test_a_spooled_write_replays_only_onto_the_same_public_card(hub, tmp_path, before, change, reason):
+    target, report = _spool_then(hub, tmp_path, before, change)
+    assert hub.puts() == [] and report["published"] == []
+    assert [(p["card_id"], p["reason"]) for p in report["proposals"]] == [("x", reason)]
+    assert store.spool_count(target) == 0
+    (kept,) = list(store.proposals(target))
+    assert kept["entry"]["text"] == before
+    sync.push(target, client(hub), settings(target))
+    assert hub.puts() == []
+
+
+def test_a_spooled_write_for_a_moved_public_card_waits_for_review(hub, tmp_path, capsys):
+    def move(cards: Path) -> None:
+        (cards / "archive").mkdir()
+        (cards / "x.md").rename(cards / "archive" / "x.md")
+
+    target, report = _spool_then(hub, tmp_path, "---\nid: x\n---\n# X\nmoved\n", move)
+    assert hub.puts() == []
+    [proposal] = report["proposals"]
+    assert proposal["reason"] == "card-identity-changed"
+    # The user reviews it and keeps the local card: the next push sends it from where it is now.
+    sync.pull(target, client(hub), settings(target))
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-local", proposal["proposal_id"]]
+    code, out, err = run(argv, capsys)
+    assert code == 0, err
+    report = sync.push(target, client(hub), settings(target))
+    assert [p["card_id"] for p in report["published"]] == ["x"]
+    assert hub.cards[("repo:test/app", "x")]["text"] == "---\nid: x\n---\n# X\nmoved\n"
+
+
+def test_a_spooled_write_for_a_duplicated_id_waits_for_review(hub, tmp_path):
+    def duplicate(cards: Path) -> None:
+        (cards / "copy.md").write_text("---\nid: x\n---\n# X\ncopy\n", encoding="utf-8")
+
+    _, report = _spool_then(hub, tmp_path, "---\nid: x\n---\n# X\nfirst\n", duplicate)
+    assert hub.puts() == []
+    assert [p["reason"] for p in report["proposals"]] == ["card-id-duplicated"]
+
+
+def test_a_stale_replica_never_resolves_a_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nA\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    sync.pull(target, client(hub), settings(target))
+    proposal_id = _conflict(hub, target, "# One\nB\n", "# One\nC\n")
+    # Back to A: the replica's head, but not the hub's.
+    card.write_text("# One\nA\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == [] and report["published"] == []
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    # After a pull the replica agrees with the head the conflict reported; B resolves it.
+    sync.pull(target, client(hub), settings(target))
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == []
+    card.write_text("# One\nB\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == [proposal_id] and report["published"] == []
+
+
+def test_keep_local_refuses_a_duplicated_id_and_says_when_nothing_is_sent(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="---\nid: one\n---\n# One\nfirst\n")
+    cards = target / "memory" / "cards"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "---\nid: one\n---\n# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-local", proposal_id]
+    (cards / "copy.md").write_text("---\nid: one\n---\n# One\ncopy\n", encoding="utf-8")
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "more than one" in err, out + err
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    (cards / "copy.md").unlink()
+    (cards / "one.md").write_text("---\nid: one\nvisibility: private\n---\n# One\nmine\n", encoding="utf-8")
+    code, out, err = run(argv, capsys)
+    assert code == 0, err
+    assert "sends nothing" in out and "writes the local card over" not in out
+
+
+@pytest.mark.parametrize("keep", ["--keep-hub", "--keep-local"])
+def test_drop_refuses_a_proposal_for_another_scope_than_the_config(hub, tmp_path, capsys, keep):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    config = target / ".brigade" / "memory-care.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace('scope = "repo:test/app"', 'scope = "fleet"'), encoding="utf-8"
+    )
+    code, out, err = run(["memory", "hub", "proposals", "drop", "--target", str(target), keep, proposal_id], capsys)
+    assert code == 2 and "repo:test/app" in err and "fleet" in err, out + err
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    assert card.read_text(encoding="utf-8") == "# One\nmine\n"

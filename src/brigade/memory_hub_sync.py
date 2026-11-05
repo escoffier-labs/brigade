@@ -5,8 +5,8 @@ card changes in `sync` mode as `put` events, flushing the spool first, and
 spools what the hub cannot take right now. A write the hub can no longer take
 as it is becomes a local proposal for review and is never resent on its own.
 
-Every command here except search asks the hub's `status` first and refuses an
-admin credential (`memory_hub_client.refuse_admin`).
+Every command here that contacts the hub asks the hub's `status` first and
+refuses an admin credential (`memory_hub_client.refuse_admin`).
 """
 
 from __future__ import annotations
@@ -339,30 +339,51 @@ def _adoptable(target: Path, settings: hubc.HubSettings, hub: str, principal: ob
     return replica.readable_heads(settings.read_scopes)
 
 
+def _resolves(records: list[dict[str, Any]], card: dict[str, Any], head: dict[str, Any]) -> bool:
+    """The local card ends these conflicts: it holds the head each one reported, and the replica agrees.
+
+    The replica alone is not enough: one pulled before the other writer's
+    edit holds an older head, and the local card matching it says nothing
+    about the hub. A proposal that reported no hub head never resolves here.
+    """
+    if not head or head.get("content_hash") != card["content_hash"]:
+        return False
+    for record in records:
+        reported = record.get("hub") or {}
+        if reported.get("current_hash") != card["content_hash"]:
+            return False
+        if reported.get("current_revision") != head.get("revision"):
+            return False
+    return True
+
+
 def _publishable(
     target: Path, settings: hubc.HubSettings, hub: str, principal: object
-) -> tuple[list[dict], list[dict], list[dict], list[str], set[str]]:
+) -> tuple[list[dict], list[dict], list[dict], list[str], list[dict]]:
     """Local cards whose bytes differ from what this workspace last published here.
 
     Also returns the proposals this run resolves: the local card now holds
-    exactly the hub head's bytes, so the conflict is over and that head is the base.
-    The last item names the private cards, by card id and by path, so a write
-    spooled before a card turned private is withheld instead of replayed.
+    exactly the hub head the conflict reported, and the replica holds that
+    head too, so the conflict is over and that head is the base. The last
+    item is every readable local card, so a spooled write replays only onto
+    the card it came from (`_replay_refusal`).
     """
     scope = str(settings.scope)
     state = store.published(target).get(hub, {}).get(scope, {})
     spooled = {(str(e.get("scope")), str(e.get("card_id"))) for e in store.spool_entries(target, hub)}
-    conflicts = store.proposal_cards(target, hub)
+    conflicts: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for record in store.proposals(target, hub):
+        entry = record.get("entry") or {}
+        conflicts.setdefault((str(entry.get("scope")), str(entry.get("card_id"))), []).append(record)
     heads = _adoptable(target, settings, hub, principal)
     log_epoch = store.replica(target).meta.get("log_epoch")
     changes: list[dict] = []
     skipped: list[dict] = []
     adopted: list[dict] = []
     resolved: list[str] = []
-    private: set[str] = set()
-    for card in _local_cards(target):
+    local = _local_cards(target)
+    for card in local:
         if card["private"]:
-            private.update((card["card_id"], card["rel"]))
             skipped.append({"path": card["rel"], "reason": "visibility-private"})
             continue
         if not hubc.valid_card_id(card["card_id"]):
@@ -371,8 +392,8 @@ def _publishable(
         key = (scope, card["card_id"])
         head = heads.get(store.Replica.key(scope, card["card_id"])) or {}
         matches_head = bool(head) and head.get("content_hash") == card["content_hash"]
-        if key in conflicts and key not in spooled and matches_head:
-            resolved.extend(conflicts.pop(key))
+        if key in conflicts and key not in spooled and _resolves(conflicts[key], card, head):
+            resolved.extend(str(record["proposal_id"]) for record in conflicts.pop(key))
             adopted.append({"card": card, "revision": head.get("revision"), "log_epoch": log_epoch})
             continue
         if key in spooled or key in conflicts:
@@ -386,7 +407,32 @@ def _publishable(
             adopted.append({"card": card, "revision": head.get("revision"), "log_epoch": log_epoch})
             continue
         changes.append({**card, "base": last if isinstance(last, dict) else None})
-    return changes, skipped, adopted, resolved, private
+    return changes, skipped, adopted, resolved, local
+
+
+def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, Any]]) -> str | None:
+    """Why a spooled write must stay local instead of replaying, or None to replay it.
+
+    It replays only when exactly one current, readable, public local card
+    holds its card id, at the path it was spooled from. Anything else (the
+    card turned private, was renamed, moved, re-identified, duplicated,
+    deleted or made unreadable) fails closed: a moved public card waits for
+    review too, so a write never goes out under a stale identity.
+    """
+    card_id, rel = entry.get("card_id"), entry.get("path")
+    holders = [card for card in local if card["card_id"] == card_id]
+    at_path = [card for card in local if card["rel"] == rel]
+    if any(card["private"] for card in holders + at_path):
+        return "card-now-private"
+    if len(holders) > 1:
+        return "card-id-duplicated"
+    if holders and holders[0]["rel"] == rel:
+        return None
+    if holders or at_path:
+        return "card-identity-changed"
+    if isinstance(rel, str) and (target / rel).exists():
+        return "card-unreadable"
+    return "card-gone"
 
 
 def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str) -> None:
@@ -533,7 +579,7 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     principal = preflight.principal
     if principal is not None and forget_other_principal(target, hub, principal):
         warnings.append("the replica was pulled as another principal and was discarded; run pull to rebuild it")
-    changes, skipped, adopted, resolved, private = _publishable(target, settings, hub, principal)
+    changes, skipped, adopted, resolved, local = _publishable(target, settings, hub, principal)
     first = scope not in store.published(target).get(hub, {})
     if first and not yes:
         return {
@@ -559,10 +605,11 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             kept[proposal_id] = closed["dropped_to"]
     run = _Push(target, client, preflight.epoch, reachable=preflight.reachable)
     for entry in store.spool_entries(target, hub):
-        if entry.get("card_id") in private or entry.get("path") in private:
-            # The card turned private after this write was spooled: keep its
-            # text as a local proposal and never send it.
-            run._propose(entry, "card-now-private")
+        refusal = _replay_refusal(target, entry, local)
+        if refusal is not None:
+            # The card is not the one this write was spooled from any more:
+            # keep its text as a local proposal and never send it.
+            run._propose(entry, refusal)
             continue
         run.send(entry, spooled=True)
     for card in changes:
@@ -599,7 +646,8 @@ def drop_proposal(
 
     - `keep-local`: the replica's hub head becomes the card's base, so the next
       push writes the local card on top of it and replaces the other writer's
-      text on the hub.
+      text on the hub. When the card is gone, private or already holds the
+      hub head, the next push sends nothing, and `local_card` says why.
     - `keep-hub`: the local card file is rewritten with the replica's hub head,
       which becomes the published base, so the next push sends nothing for it.
 
@@ -608,9 +656,11 @@ def drop_proposal(
     hub's `card` answers now; otherwise they refuse and say to pull first. A
     replica pulled before the conflicting write has the right epoch and an old
     head. `keep-hub` finds the local card by its id, so a moved card is
-    rewritten where it is, and refuses when more than one file holds the id.
-    The closed record, and for `keep-hub` the card file's text it replaced,
-    move to `proposals/dropped/`. None when there is no such proposal.
+    rewritten where it is. Both refuse when more than one file holds the id,
+    or when the proposal's scope is not `[hub] scope`, the only scope push
+    compares cards against. The closed record, and for `keep-hub` the card
+    file's text it replaced, move to `proposals/dropped/`. None when there is
+    no such proposal.
     """
     if keep not in {DROP_KEEP_LOCAL, DROP_KEEP_HUB}:
         raise ValueError(keep)
@@ -627,6 +677,11 @@ def drop_proposal(
         if not (isinstance(scope, str) and hubc.valid_card_id(card_id)):
             raise DropRefused(f"{proposal_id} names no valid scope and card id")
         assert isinstance(card_id, str)
+        if scope != settings.scope:
+            raise DropRefused(
+                f"{proposal_id} is for {scope}, but [hub] scope is now {settings.scope or 'unset'}; "
+                f'set [hub] scope = "{scope}" to drop it'
+            )
         replica = store.replica(target)
         if not (
             replica.belongs_to(hub, status["principal"]) and replica.meta.get("log_epoch") == status.get("log_epoch")
@@ -646,14 +701,16 @@ def drop_proposal(
         head = replica.readable_heads(settings.read_scopes).get(key)
         epoch = replica.meta.get("log_epoch")
         _require_current_head(client, scope, card_id, head, epoch)
+        holder = _single_holder(target, card_id)
         extra: dict[str, Any] = {}
+        local_card = "present"
         if keep == DROP_KEEP_HUB:
             if head is None:
                 raise DropRefused(
                     f"the replica holds no hub head for {scope}/{card_id}; it is retired or absent, "
                     "so there is no hub text to keep"
                 )
-            path, previous = _keep_hub_card(target, card_id, entry.get("path"))
+            path, previous = _keep_hub_card(target, card_id, holder, entry.get("path"))
             extra["card_text_replaced"] = previous
             closed = store.drop_proposal(target, proposal_id, outcome=DROP_KEEP_HUB, **extra)
             assert closed is not None
@@ -661,6 +718,12 @@ def drop_proposal(
             with open(path, "w", encoding="utf-8", newline="") as handle:
                 handle.write(str(head.get("text", "")))
         else:
+            if holder is None:
+                local_card = "gone"
+            elif holder["private"]:
+                local_card = "private"
+            elif head is not None and holder["content_hash"] == head.get("content_hash"):
+                local_card = "matches-hub"
             closed = store.drop_proposal(target, proposal_id, outcome=DROP_KEEP_LOCAL)
             assert closed is not None
         state = store.published(target)
@@ -680,6 +743,7 @@ def drop_proposal(
             "card_id": card_id,
             "scope": scope,
             "keep": keep,
+            "local_card": local_card,
             "rebased_on": head.get("revision") if head is not None else None,
             "dropped_to": closed["dropped_to"],
         }
@@ -711,19 +775,23 @@ def _require_current_head(
         )
 
 
-def _keep_hub_card(target: Path, card_id: str, rel: object) -> tuple[Path, str | None]:
+def _single_holder(target: Path, card_id: str) -> dict[str, Any] | None:
+    """The one readable local card holding `card_id`, or None. More than one refuses."""
+    holders = [card for card in _local_cards(target) if card["card_id"] == card_id]
+    if len(holders) > 1:
+        names = ", ".join(sorted(card["rel"] for card in holders))
+        raise DropRefused(f"more than one local card holds id {card_id} ({names}); keep one and drop again")
+    return holders[0] if holders else None
+
+
+def _keep_hub_card(target: Path, card_id: str, holder: dict[str, Any] | None, rel: object) -> tuple[Path, str | None]:
     """The local card file `keep-hub` rewrites, and its text now (None when it is gone).
 
-    The card is found by id, so a card that moved since the proposal is
-    rewritten where it is now. More than one file with the id, or a file at
-    the recorded path that holds another id or cannot be read, refuses.
+    The card is found by id (`holder`), so a card that moved since the
+    proposal is rewritten where it is now. A file at the recorded path that
+    holds another id or cannot be read refuses.
     """
-    holders = [card["rel"] for card in _local_cards(target) if card["card_id"] == card_id]
-    if len(holders) > 1:
-        raise DropRefused(
-            f"more than one local card holds id {card_id} ({', '.join(sorted(holders))}); keep one and drop again"
-        )
-    path = _card_path(target, holders[0] if holders else rel)
+    path = _card_path(target, holder["rel"] if holder else rel)
     if path.is_symlink() or (path.exists() and not path.is_file()):
         raise DropRefused(f"{path} is not a regular card file")
     if not path.exists():
@@ -732,7 +800,7 @@ def _keep_hub_card(target: Path, card_id: str, rel: object) -> tuple[Path, str |
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as exc:
         raise DropRefused(f"{path} cannot be read as UTF-8 text ({type(exc).__name__}); fix or move it") from exc
-    if not holders:
+    if holder is None:
         raise DropRefused(f"{path} no longer holds card id {card_id}; move the card back or drop with --keep-local")
     return path, text
 
