@@ -352,7 +352,12 @@ async fn deltas_past_ten_percent_rebuild_without_losing_writes() {
             .await;
         last = r.body["event"]["seq"].as_i64().unwrap();
     }
-    until("rebuild", || i.metrics.lock().unwrap().rebuilds >= 1).await;
+    // The segment cap can start a rebuild partway through the writes, so wait until the index has
+    // compacted after the last one rather than for the first rebuild alone.
+    until("rebuild", || {
+        i.metrics.lock().unwrap().rebuilds >= 1 && i.current().segments() < 16
+    })
+    .await;
     let r = search(
         &h,
         NODE_TOKEN,
@@ -360,7 +365,6 @@ async fn deltas_past_ten_percent_rebuild_without_losing_writes() {
     )
     .await;
     assert_eq!(r.body["match_count"].as_u64(), Some(count as u64));
-    assert!(i.current().segments() < 16, "{}", i.current().segments());
     let one = search(&h, NODE_TOKEN, json!({"query":"token7"})).await;
     assert_eq!(ids(&one), vec![pair("fleet", "card-007")]);
 }
