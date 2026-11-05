@@ -54,7 +54,7 @@ Conventions:
 
   ```bash
   bin/hub-setup.py init --brigade-ref <MERGED_COMMIT_SHA> --brigade-sha256 <ARCHIVE_SHA256> \
-    --front-hostname <FRONT_NODE_NAME> --backup-dir "$HOME/brigade-hub-backups"
+    --brigade-version <VERSION_IN_ITS_PYPROJECT> --front-hostname <FRONT_NODE_NAME> --backup-dir "$HOME/brigade-hub-backups"
   chmod 0644 secrets/front-authkey && "${EDITOR:-vi}" secrets/front-authkey && chmod 0444 secrets/front-authkey
   ```
 

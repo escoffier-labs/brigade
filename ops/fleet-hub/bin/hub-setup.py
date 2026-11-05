@@ -24,6 +24,7 @@ import argparse
 import ipaddress
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -393,8 +394,14 @@ def _base_env(args: argparse.Namespace) -> dict[str, str]:
     if args.brigade_ref:
         if not args.brigade_sha256:
             raise SetupError("--brigade-ref needs --brigade-sha256, the reviewed source archive digest")
+        # The image label carries it; without it Compose labels any ref with its default.
+        if not args.brigade_version or not re.fullmatch(r"[0-9]+(\.[0-9]+)*[0-9A-Za-z.+-]*", args.brigade_version):
+            raise SetupError("--brigade-ref needs --brigade-version, the version in that commit's pyproject.toml")
         values["BRIGADE_REF"] = args.brigade_ref
         values["BRIGADE_SHA256"] = args.brigade_sha256
+        values["BRIGADE_VERSION"] = args.brigade_version
+    elif args.brigade_sha256 or args.brigade_version:
+        raise SetupError("--brigade-sha256 and --brigade-version describe --brigade-ref; pass all three")
     return values
 
 
@@ -519,6 +526,7 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--min-free-gib", type=float, default=20)
     init.add_argument("--brigade-ref", default=None, help="Reviewed Brigade commit the image installs.")
     init.add_argument("--brigade-sha256", default=None, help="SHA-256 of that commit's source archive.")
+    init.add_argument("--brigade-version", default=None, help="Version in that commit's pyproject.toml.")
     init.set_defaults(func=cmd_init)
 
     switch = sub.add_parser("switch", help="Switch the retrieval mode (runbook: Switch retrieval modes).")

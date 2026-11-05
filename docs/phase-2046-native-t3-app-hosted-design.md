@@ -2,6 +2,13 @@
 
 Status: user-approved design, 2026-10-28. Astra builder review found no blocking V0 planning questions.
 
+Operator amendment, 2026-10-29: all Brigade-specific enforcement and recovery
+must be built on our side using shipped T3 capabilities. No upstream request,
+server change or maintainer acceptance is a prerequisite. The
+[Brigade-owned contract](phase-2046-governed-native-child-contract.md) supersedes
+earlier target-enforcement assumptions for subsequent execution slices. V0
+remains a pure supplied-data contract with no execution authority.
+
 ## Decision and approval scope
 
 The user selected app-hosted T3 execution as the first integration target, with
@@ -179,10 +186,12 @@ supported resume/delivery route. No such standalone subscription is assumed.
    dispatch candidate. Claim that prepared task once, then persist the requested
    dispatch fact for the same candidate. Compose the existing budget callback
    with `reclaim_pending=False`. Uncertain recorder/claim outcomes retain budget.
-4. Revalidate cancellation, ownership and expiring authorization at the real
-   launch boundary. Target-side enforcement must bind current governance to
-   native acceptance before the provider starts. Carrying IDs in a prompt is
-   insufficient. V0 has no launch operation.
+4. Revalidate cancellation, ownership and expiring authorization in the
+   Brigade-owned caller before invoking native delegation. This gates our
+   governed path, without asserting a T3-wide or atomic provider-start fence.
+   Verify actual child source through our trusted task workflow and refuse
+   mismatched work/result acceptance. Provider work may already be charged.
+   V0 has no launch operation.
 5. Submit once using the retained native request key, only from a fresh durable
    launch grant after the preceding barriers. Persist returned native acceptance
    before awaiting completion or releasing launch ownership.
@@ -201,9 +210,11 @@ supported resume/delivery route. No such standalone subscription is assumed.
    can mark delivery, so replay after that mark must be established before
    activation. A reported artifact is not a verified artifact or a test receipt.
 
-Native request-key deduplication scope, conflicting reuse, retention, lookup by
-request key and result replay remain T3 acceptance contracts. V0 preserves these
-unknowns. It does not manufacture exactly-once execution from a local claim.
+Observe native request-key scope, conflicting reuse, retention and result
+replay through supported interfaces. No new upstream contract is required.
+Missing exact recovery evidence leaves Brigade obligations unknown and occupied.
+V0 preserves these unknowns. It does not manufacture exactly-once execution
+from a local claim.
 
 ## Readiness
 
@@ -271,18 +282,20 @@ an eligible governed worker route. Follow the focused Brigade gate with actual
 selectors chosen from the impact set. Full verification belongs to the eventual
 PR. Ad hoc receipts remain audit-only. This design phase runs no product tests.
 
-Live activation additionally requires target-side governance tests, real native
-acceptance/recovery and identity proof, worktree/revision verification, joint
-capacity and health contracts, an approved whole-batch binding, and process
-restart tests across claim/submit/acceptance/delivery/result acknowledgement.
-Keep execution disabled when any required contract or evidence is absent.
+Live activation additionally requires Brigade caller governance tests, exact
+native acceptance evidence or conservative holds, actual worktree/source
+verification, capacity and health accounting, an approved whole-batch binding,
+and process restart tests across claim/submit/acceptance/delivery/result
+acknowledgement. Do not claim native provider-start enforcement or automatic
+cross-session recovery. Keep execution disabled until our bounded path is
+qualified.
 
 ## Dependencies and later slices
 
 | Dependency | Accountable coordination | Required before |
 | --- | --- | --- |
-| T3 session enforcement, request reconciliation, replay and restart wakes | T3 integration/API owner, identity still to be confirmed | Live execution |
-| Non-reserving operation readiness and target authority mapping | Existing Brigade backend/admission owner with T3 owner | Ready status and live execution |
+| Brigade-owned caller gates, reconciliation and conservative holds using shipped native tools | Epic 2046 root | Bounded governed execution |
+| Non-reserving operation readiness and Brigade authority mapping | Epic 2046 with explicitly released Brigade backend scope | Ready status and governed execution |
 | Durable native correlation storage and versioned closed-event compatibility | Epic 2046 lifecycle owner with relevant backend owner | Persisted native execution |
 | Whole-batch binding semantics | Epic 2046 parent/batch lane | First member launch |
 | Work/source discovery and correlated owner projection | Existing ownership backend owner plus Hub preview owner for rendering | New owner lookup/display |

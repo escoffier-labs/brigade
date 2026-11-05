@@ -20,6 +20,9 @@ import uuid
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 IMAGE = "brigade-fleet-hub:issue-1635-test"
 BRIGADE_REF = "e6009f6969dc6e45db2ab93790aa3e407c791409"
+# The Containerfile's defaults follow the dogfood recipe; this pin passes all three.
+BRIGADE_SHA256 = "68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168"
+BRIGADE_VERSION = "0.28.0"
 
 PROXY = """
 import http.client
@@ -160,6 +163,10 @@ def build_image(platform: str | None) -> None:
         "ops/fleet-hub/Containerfile",
         "--build-arg",
         f"BRIGADE_REF={BRIGADE_REF}",
+        "--build-arg",
+        f"BRIGADE_SHA256={BRIGADE_SHA256}",
+        "--build-arg",
+        f"BRIGADE_VERSION={BRIGADE_VERSION}",
         "--tag",
         IMAGE,
         ".",

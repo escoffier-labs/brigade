@@ -686,13 +686,15 @@ def check_load(args: argparse.Namespace, result: Result) -> None:
 
 # Run inside the hub container by `restart --case hub-kill`. `docker kill`
 # marks a container manually stopped, so the restart policy ignores it and the
-# watchdog skips it. A crash is the hub's own process dying instead. docker-init
-# is PID 1 (compose `init: true`), and a namespace's init ignores SIGKILL sent
-# from inside the namespace, so this signals its child, `brigade fleet serve`.
-# docker exec runs as the image's USER 10001, the serve process's own uid, so
-# the kill needs no CAP_KILL (compose drops every capability). docker-init then
-# exits non-zero and `restart: unless-stopped` starts the container again.
-KILL_SERVE = """
+# watchdog skips it. A crash is the hub's own process dying instead: the Rust
+# front, `brigade-hub`, which owns the port and supervises the Python hub.
+# docker-init is PID 1 (compose `init: true`), and a namespace's init ignores
+# SIGKILL sent from inside the namespace, so this signals the front, two levels
+# down under the recipe's entrypoint. docker exec runs as the image's USER
+# 10001, the front's own uid, so the kill needs no CAP_KILL (compose drops
+# every capability). The entrypoint then exits non-zero, docker-init exits with
+# it, and `restart: unless-stopped` starts the container again.
+KILL_HUB = """
 import os, signal
 me = os.getpid()
 for name in os.listdir("/proc"):
@@ -703,12 +705,12 @@ for name in os.listdir("/proc"):
             argv = handle.read().split(b"\\0")
     except OSError:
         continue
-    if any(argv[i : i + 2] == [b"fleet", b"serve"] for i in range(len(argv))):
+    if os.path.basename(argv[0]) == b"brigade-hub":
         os.kill(int(name), signal.SIGKILL)
         print(name)
         break
 else:
-    raise SystemExit("no brigade fleet serve process in the container")
+    raise SystemExit("no brigade-hub process in the container")
 """
 
 
@@ -718,13 +720,15 @@ def restart_count(container: str) -> int:
 
 
 def hub_kill(result: Result, limit: float = 60) -> None:
-    """SIGKILL the hub's serve process, then expect the restart policy and the front to bring it back."""
+    """SIGKILL the hub's Rust front, then expect the restart policy and the front to bring it back."""
     hub = container_id("hub")
     before = restart_count(hub)
-    killed = run(["docker", "exec", hub, "python", "-c", KILL_SERVE])
+    killed = run(["docker", "exec", hub, "python", "-c", KILL_HUB])
     started = time.monotonic()
     result.ok(
-        killed.returncode == 0, "SIGKILL to the hub's serve process", (killed.stdout + killed.stderr).strip()[:200]
+        killed.returncode == 0,
+        "SIGKILL to the hub's brigade-hub process",
+        (killed.stdout + killed.stderr).strip()[:200],
     )
     after = before
     while time.monotonic() - started < limit:
@@ -792,6 +796,71 @@ def check_restart(args: argparse.Namespace, result: Result) -> None:
     one_namespace(result)
 
 
+# Run inside the hub container by `memory`, on loopback in the hub's own
+# namespace, so the admin token never leaves the container and never reaches
+# this process's output. Prints one JSON line without the response body.
+MEMORY_STATUS = """
+import json, os, urllib.error, urllib.request
+with open("/run/secrets/admin_token", encoding="utf-8") as handle:
+    token = handle.read().strip()
+request = urllib.request.Request(
+    "http://127.0.0.1:3774/memory",
+    data=json.dumps({"action": "status"}).encode("utf-8"),
+    method="POST",
+    headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"},
+)
+try:
+    with urllib.request.urlopen(request, timeout=10) as response:
+        status, body = response.status, response.read()
+except urllib.error.HTTPError as exc:
+    status, body = exc.code, exc.read()
+try:
+    parsed = json.loads(body)
+except ValueError:
+    parsed = None
+parsed = parsed if isinstance(parsed, dict) else {}
+print(json.dumps({
+    "status": status,
+    "error": parsed.get("error"),
+    "reason": parsed.get("reason"),
+    "log_epoch": bool(parsed.get("log_epoch")),
+    "memory_file": os.path.isfile("/var/lib/brigade/fleet-hub-memory.db"),
+}))
+"""
+
+
+def check_memory(args: argparse.Namespace, result: Result) -> None:
+    """Hub memory: POST /memory with the admin token and the `status` action answers 200."""
+    hub = container_id("hub")
+    if not result.ok(bool(hub), "hub container running"):
+        return
+    done = run(["docker", "exec", hub, "python", "-c", MEMORY_STATUS])
+    try:
+        report = json.loads(done.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        result.add("FAIL", "memory status probe ran", (done.stdout + done.stderr).strip()[:200])
+        return
+    detail: dict[str, Any] = {key: report.get(key) for key in ("status", "error", "reason")}
+    if report.get("status") == 404:
+        detail["hint"] = "404 comes from the Python upstream: is --route-mode memory=native in the hub's command?"
+    result.ok(report.get("status") == 200, "POST /memory status answers 200 with the admin token", detail)
+    result.ok(report.get("log_epoch") is True, "status reports the memory file's log_epoch")
+    result.ok(report.get("memory_file") is True, "fleet-hub-memory.db sits beside fleet-hub.db on the state volume")
+
+
+MEMORY_FILE_PRESENT = 'import os; print(os.path.isfile("/var/lib/brigade/fleet-hub-memory.db"))'
+
+
+def memory_file_present() -> bool | None:
+    """Whether fleet-hub-memory.db is on the hub's state volume; None when the hub is not running to ask."""
+    hub = container_id("hub")
+    if not hub:
+        return None
+    done = run(["docker", "exec", hub, "python", "-c", MEMORY_FILE_PRESENT])
+    answer = done.stdout.strip()
+    return {"True": True, "False": False}.get(answer) if done.returncode == 0 else None
+
+
 def verify_copy(copy: Path) -> dict[str, Any]:
     manifest = json.loads((copy / "manifest.json").read_text(encoding="utf-8"))
     files = {}
@@ -807,20 +876,56 @@ def verify_copy(copy: Path) -> dict[str, Any]:
     return files
 
 
+def completed_copies(folder: Path) -> list[Path]:
+    """Copy directories that have a manifest, oldest first."""
+    if not folder.is_dir():
+        return []
+    return sorted(path for path in folder.iterdir() if path.is_dir() and (path / "manifest.json").exists())
+
+
 def check_backups(args: argparse.Namespace, result: Result) -> None:
-    """Hourly copies, their integrity, the directory's owner and mode, the off-host include set and retention."""
+    """Hourly copies, their integrity, the directory's owner and mode, the off-host include set and retention.
+
+    The job copies fleet-hub.db into the backup directory and, in a separate
+    call, fleet-hub-memory.db into its `memory` subdirectory, so the hub
+    file's copies are checked on their own. No memory copies fail the check
+    only while the memory file exists on the state volume: then the memory
+    call has failed on every run. An absent memory file fails nothing here.
+    """
     folder = Path(args.backup_dir or env_file().get("BRIGADE_BACKUP_DIR", "")).expanduser()
     info = folder.stat()
     result.ok(stat.S_IMODE(info.st_mode) == 0o700, "backup directory mode 0700", oct(stat.S_IMODE(info.st_mode)))
     owner = env_file().get("BRIGADE_BACKUP_OWNER", f"{os.getuid()}:{os.getgid()}")
     result.ok(str(info.st_uid) == owner.split(":")[0], "backup directory belongs to the compose account", info.st_uid)
-    copies = sorted(path for path in folder.iterdir() if path.is_dir() and (path / "manifest.json").exists())
+    copies = completed_copies(folder)
     result.ok(bool(copies), "at least one copy exists", len(copies))
     for copy in copies[-args.last :]:
         files = verify_copy(copy)
         result.ok(
             all(item["integrity_check"] == "ok" for item in files.values()),
             f"{copy.name} passes integrity_check",
+            files,
+        )
+    memory_copies = completed_copies(folder / "memory")
+    if not memory_copies:
+        present = memory_file_present()
+        if present is None:
+            result.add(
+                "PENDING", "memory copies", "none, and the hub is not running to say whether the memory file exists"
+            )
+        elif present:
+            result.add(
+                "FAIL",
+                "memory copies",
+                "none, but fleet-hub-memory.db exists on the state volume: the memory call fails on every run",
+            )
+        else:
+            result.add("INFO", "memory copies", "none: the memory file is absent from the state volume")
+    for copy in memory_copies[-args.last :]:
+        files = verify_copy(copy)
+        result.ok(
+            set(files) == {"fleet-hub-memory.db"} and all(item["integrity_check"] == "ok" for item in files.values()),
+            f"memory/{copy.name} passes integrity_check",
             files,
         )
     stamps = [copy.name for copy in copies]
@@ -842,8 +947,6 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
                 "--rm",
                 "--no-deps",
                 "backup",
-                "--db",
-                "/var/lib/brigade/fleet-hub.db",
                 "--dest",
                 "/backups",
                 "--owner",
@@ -854,9 +957,13 @@ def check_backups(args: argparse.Namespace, result: Result) -> None:
             ),
             timeout=300,
         )
-        after = sorted(path.name for path in folder.iterdir() if path.is_dir())
+        after = [path.name for path in completed_copies(folder)]
+        memory_after = [path.name for path in completed_copies(folder / "memory")]
         result.ok(
-            done.returncode != 0 and "refusing copy" in done.stderr and after == [c.name for c in copies],
+            done.returncode != 0
+            and "refusing copy" in done.stderr
+            and after == [c.name for c in copies]
+            and memory_after == [c.name for c in memory_copies],
             "a copy past the free-space floor is refused and removes nothing",
         )
 
@@ -1099,6 +1206,7 @@ CHECKS = {
     "front": check_front,
     "load": check_load,
     "restart": check_restart,
+    "memory": check_memory,
     "backups": check_backups,
     "restore": check_restore,
     "commit": check_commit,

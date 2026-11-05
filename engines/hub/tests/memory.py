@@ -1,6 +1,8 @@
-"""Memory route availability (D21) and persistence through the managed front."""
+"""Memory route availability (D21), persistence through the managed front,
+and lexical parity with the local BM25 scorer (S13b, gate R0)."""
 
 import http.client
+import importlib.util
 import json
 import os
 import socket
@@ -204,6 +206,68 @@ class Memory(unittest.TestCase):
         hub = self.run_hub("query", "--route-mode memory=native")
         response = hc.request(hub.url, "POST", "/memory?token=x", body={"action": "status"}, token=hub.admin_token)
         self.assertEqual((response.status, response.body), (401, b"Dashboard request refused.\n"))
+
+
+class Lexical(unittest.TestCase):
+    """The hub's scorer against Python: goldens and R0 on the public fixture."""
+
+    def test_goldens_are_current_for_this_python(self):
+        spec = importlib.util.spec_from_file_location("lexical_golden", ROOT / "engines/hub/tests/lexical_golden.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        self.assertEqual(module.main(["--check"]), 0)
+
+    def test_r0_lexical_parity_on_the_public_fixture(self):
+        from brigade.memory_retrieval_eval import adapters, corpus
+
+        root = corpus.default_fixture_root()
+        cards = corpus.load_cards(root)
+        _, queries = corpus.load_queries(root / "queries.json")
+        self.assertGreater(len(cards), 0)
+        self.assertGreater(len(queries), 0)
+        # R0 is defined on the cards/<card_id>.md layout: the hub id is the file stem.
+        stems = {card.card_id: Path(card.path).stem for card in cards}
+        self.assertEqual(len(set(stems.values())), len(cards))
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            hub = launch(state, "--route-mode memory=native")
+            try:
+                last = 0
+                for card in cards:
+                    put = hc.request(
+                        hub.url,
+                        "POST",
+                        "/memory",
+                        token=hub.admin_token,
+                        body={
+                            "action": "put",
+                            "scope": "fleet",
+                            "card_id": stems[card.card_id],
+                            "base_revision": None,
+                            "text": card.body,
+                            "client_event_id": hm.event_id(),
+                        },
+                    )
+                    self.assertEqual(put.status, 201, put)
+                    last = put.json["event"]["seq"]
+                bm25 = adapters.bm25_adapter(cards)
+                for spec in queries:
+                    want = [(stems[card_id], score) for card_id, score in bm25(spec.query, 20)]
+                    everything = bm25(spec.query, len(cards))
+                    got = hc.request(
+                        hub.url,
+                        "POST",
+                        "/memory",
+                        token=hub.admin_token,
+                        body={"action": "search", "query": spec.query, "limit": 20, "min_seq": last},
+                    )
+                    self.assertEqual(got.status, 200, got)
+                    self.assertFalse(got.json["retrieval"]["stale"], spec.query_id)
+                    matches = [(m["card_id"], m["score"]) for m in got.json["matches"]]
+                    self.assertEqual(matches, want, spec.query_id)
+                    self.assertEqual(got.json["match_count"], len(everything), spec.query_id)
+            finally:
+                hc.stop_hub(hub)
 
 
 def raw(hub: hc.Hub, method: str, headers: dict, body: bytes = b"") -> "tuple[int, dict, bytes]":

@@ -36,8 +36,132 @@ use tokio::{
 const BODY_LIMIT: usize = 8 * 1024 * 1024;
 /// Bytes of request bodies the front may buffer at once (S3c's budget).
 const BODY_BUDGET: usize = 64 * 1024 * 1024;
-/// Shutdown drain. A container stop grace period must exceed this.
+/// Shutdown drain. A container stop grace period must exceed this plus
+/// `UPSTREAM_STOP`.
 const DRAIN: Duration = Duration::from_secs(25);
+/// After the drain the managed upstream gets SIGTERM and this long to run its
+/// own shutdown before it is killed. 25 s + 10 s stays under the dogfood
+/// recipe's 40 s `stop_grace_period`.
+const UPSTREAM_STOP: Duration = Duration::from_secs(10);
+const STOPPED_DURING_STARTUP: &str = "stop signal during startup; the hub never served";
+
+/// Block or unblock SIGTERM and SIGINT on the calling thread. `main` blocks
+/// them first, the descriptor-limit re-exec keeps them blocked (the mask and
+/// any pending signal survive exec), and `Stop::install` unblocks them once
+/// its handlers exist, so a stop during startup waits instead of taking the
+/// default action. Since Rust 1.66 a spawned child inherits the spawning
+/// thread's mask, and the runtime's worker threads keep these two blocked for
+/// good, so the managed upstream clears its mask itself (`upstream_child`).
+fn stop_signals(how: libc::c_int) -> std::io::Result<()> {
+    // SAFETY: the set is a local initialised by sigemptyset, and
+    // pthread_sigmask is async-signal-safe, so this is sound in pre_exec too.
+    let code = unsafe {
+        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(set.as_mut_ptr());
+        libc::sigaddset(set.as_mut_ptr(), libc::SIGTERM);
+        libc::sigaddset(set.as_mut_ptr(), libc::SIGINT);
+        libc::pthread_sigmask(how, set.as_ptr(), std::ptr::null_mut())
+    };
+    if code == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::from_raw_os_error(code))
+    }
+}
+
+/// Runs in the managed upstream between fork and exec. It gets an empty signal
+/// mask whatever thread spawned it, its own process group so a signal to this
+/// process's group (Ctrl-C on a terminal, `kill -TERM -<pgid>`) reaches only
+/// `brigade-hub`, which then stops it once with SIGTERM, and SIGTERM if
+/// `parent` dies first, since a group signal no longer reaches it.
+fn upstream_child(parent: libc::pid_t) -> std::io::Result<()> {
+    // SAFETY: every call here is async-signal-safe and touches only locals.
+    unsafe {
+        let mut set = std::mem::MaybeUninit::<libc::sigset_t>::uninit();
+        libc::sigemptyset(set.as_mut_ptr());
+        let code = libc::pthread_sigmask(libc::SIG_SETMASK, set.as_ptr(), std::ptr::null_mut());
+        if code != 0 {
+            return Err(std::io::Error::from_raw_os_error(code));
+        }
+        if libc::setpgid(0, 0) != 0
+            || libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM as libc::c_ulong) != 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        // The parent died before the death signal was armed.
+        if libc::getppid() != parent {
+            return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+        }
+    }
+    Ok(())
+}
+
+/// SIGTERM and SIGINT streams, created at the top of `run`.
+struct Stop {
+    term: tokio::signal::unix::Signal,
+    int: tokio::signal::unix::Signal,
+}
+impl Stop {
+    fn install() -> Result<Self, String> {
+        use tokio::signal::unix::{SignalKind, signal};
+        let stop = Self {
+            term: signal(SignalKind::terminate()).map_err(|e| e.to_string())?,
+            int: signal(SignalKind::interrupt()).map_err(|e| e.to_string())?,
+        };
+        // A signal held since main started is delivered here, to the handlers.
+        stop_signals(libc::SIG_UNBLOCK).map_err(|e| e.to_string())?;
+        Ok(stop)
+    }
+    async fn recv(&mut self) {
+        tokio::select! { _ = self.term.recv() => {}, _ = self.int.recv() => {} }
+    }
+    /// Run one startup step unless a stop signal comes first.
+    async fn before<T>(
+        &mut self,
+        step: impl std::future::Future<Output = Result<T, String>>,
+    ) -> Result<T, String> {
+        tokio::select! {
+            biased;
+            _ = self.recv() => Err(STOPPED_DURING_STARTUP.into()),
+            result = step => result,
+        }
+    }
+    /// Whether a signal arrived during the synchronous startup steps.
+    async fn arrived(&mut self) -> bool {
+        tokio::task::yield_now().await;
+        futures_util::FutureExt::now_or_never(self.recv()).is_some()
+    }
+}
+
+/// SIGTERM the managed upstream so its own shutdown runs, then kill it if it
+/// is still running after `UPSTREAM_STOP`. Ok only when it exited 0.
+async fn stop_upstream(child: &mut Child) -> Result<(), String> {
+    if let Some(pid) = child.id().and_then(|pid| libc::pid_t::try_from(pid).ok()) {
+        // SAFETY: `pid` is this process's own unreaped child, so it names no
+        // other process.
+        unsafe { libc::kill(pid, libc::SIGTERM) };
+    }
+    let status = match tokio::time::timeout(UPSTREAM_STOP, child.wait()).await {
+        Ok(status) => status.map_err(|e| e.to_string())?,
+        Err(_) => {
+            eprintln!(
+                "managed upstream still running {} s after SIGTERM; killing it",
+                UPSTREAM_STOP.as_secs()
+            );
+            let _ = child.kill().await;
+            return Err("managed upstream killed after its stop grace".into());
+        }
+    };
+    if status.success() {
+        eprintln!("managed upstream stopped cleanly after SIGTERM");
+        Ok(())
+    } else {
+        eprintln!("managed upstream exited with {status} after SIGTERM");
+        Err(format!(
+            "managed upstream exited with {status} after SIGTERM"
+        ))
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(
@@ -602,6 +726,24 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
                 m.commit_failures,
                 store.bucket()
             );
+            let index = store.index();
+            let snapshot = index.current();
+            let i = index.metrics.lock().unwrap().clone();
+            text += &format!(
+                "brigade_hub_memory_committed_seq {}\nbrigade_hub_memory_indexed_seq {}\nbrigade_hub_memory_index_lag_events {}\nbrigade_hub_memory_index_stale {}\nbrigade_hub_memory_index_segments {}\nbrigade_hub_memory_index_documents {}\nbrigade_hub_memory_index_publications_total {}\nbrigade_hub_memory_index_failures_total {}\nbrigade_hub_memory_index_rebuilds_total {}\nbrigade_hub_memory_index_rebuild_failures_total {}\nbrigade_hub_memory_index_build_seconds_last {}\nbrigade_hub_memory_index_build_documents_last {}\n",
+                i.committed_seq,
+                snapshot.indexed_seq,
+                (i.committed_seq - snapshot.indexed_seq).max(0),
+                u8::from(snapshot.stale),
+                snapshot.segments(),
+                snapshot.documents(),
+                i.publications,
+                i.failures,
+                i.rebuilds,
+                i.rebuild_failures,
+                i.build_seconds_last,
+                i.build_docs_last
+            );
         }
         return Response::builder()
             .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
@@ -1003,11 +1145,14 @@ fn body_too_large() -> Response<Body> {
         .unwrap()
 }
 
+/// Start or check the upstream. A managed child goes into `slot` as soon as it
+/// is spawned, so `run` can stop it gracefully if startup is cut short.
 async fn upstream(
     config: &Config,
     client: &HttpClient,
     key: &str,
-) -> Result<(String, Option<Child>), String> {
+    slot: &mut Option<Child>,
+) -> Result<String, String> {
     if let Some(url) = &config.upstream {
         let status =
             Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
@@ -1021,7 +1166,7 @@ async fn upstream(
         if !status.success() {
             return Err("Python upstream refused startup configuration".into());
         }
-        return Ok((url.trim_end_matches('/').into(), None));
+        return Ok(url.trim_end_matches('/').into());
     }
     let upstream_args = if let Some(clock) = &config.test_clock_file {
         let mut args = vec![
@@ -1036,16 +1181,24 @@ async fn upstream(
     } else {
         config.python_args(0)
     };
-    let mut child =
-        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+    let mut command =
+        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()));
+    let parent = libc::pid_t::try_from(std::process::id()).map_err(|e| e.to_string())?;
+    // SAFETY: the hook makes only async-signal-safe calls.
+    unsafe { command.pre_exec(move || upstream_child(parent)) };
+    let child = slot.insert(
+        command
             .args(upstream_args)
             .env("BRIGADE_HUB_MANAGED_LOOPBACK", key)
             .env("BRIGADE_HUB_UPSTREAM_KEY", key)
             .env("BRIGADE_HUB_CHECKPOINT_OWNER", "rust")
+            // Outside the terminal's foreground group a read would stop it.
+            .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| e.to_string())?,
+    );
     use tokio::io::{AsyncBufReadExt, BufReader};
     let stdout = child.stdout.take().ok_or("missing upstream stdout")?;
     let mut lines = BufReader::new(stdout).lines();
@@ -1073,7 +1226,7 @@ async fn upstream(
             .body(Body::empty())
             .unwrap();
         if matches!(client.request(req).await, Ok(r) if r.status() == StatusCode::OK) {
-            return Ok((url, Some(child)));
+            return Ok(url);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
@@ -1086,16 +1239,24 @@ fn parse_upstream_key(key: &str, managed: bool) -> Result<axum::http::HeaderValu
     axum::http::HeaderValue::from_str(key).map_err(|_| "invalid upstream key header".to_owned())
 }
 
+/// Exits Ok only after a stop signal, once the drain is over and a managed
+/// upstream has exited 0 after its SIGTERM, so exit status 0 means both hubs
+/// shut down cleanly.
 async fn run(mut config: Config) -> Result<(), String> {
+    let mut signals = Stop::install()?;
     config.validate()?;
     // Resolve defaults and user expansion through the matching Python runtime.
-    let output =
-        Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
-            .args(["-c", include_str!("../resolve_db.py")])
-            .args(config.db.iter())
-            .output()
-            .await
-            .map_err(|e| e.to_string())?;
+    let output = signals
+        .before(async {
+            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+                .args(["-c", include_str!("../resolve_db.py")])
+                .args(config.db.iter())
+                .kill_on_drop(true)
+                .output()
+                .await
+                .map_err(|e| e.to_string())
+        })
+        .await?;
     if !output.status.success() {
         return Err("Python database path resolution failed".into());
     }
@@ -1111,12 +1272,18 @@ async fn run(mut config: Config) -> Result<(), String> {
     let key = if config.upstream.is_some() {
         std::env::var("BRIGADE_HUB_UPSTREAM_KEY").unwrap_or_default()
     } else {
-        let output =
-            Command::new(std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()))
+        let output = signals
+            .before(async {
+                Command::new(
+                    std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
+                )
                 .args(["-c", "import secrets; print(secrets.token_hex(32))"])
+                .kill_on_drop(true)
                 .output()
                 .await
-                .map_err(|e| e.to_string())?;
+                .map_err(|e| e.to_string())
+            })
+            .await?;
         if !output.status.success() {
             return Err("per-start key generation failed".into());
         }
@@ -1126,7 +1293,49 @@ async fn run(mut config: Config) -> Result<(), String> {
             .to_owned()
     };
     let parsed_key = parse_upstream_key(&key, config.upstream.is_none())?;
-    let (upstream, mut child) = upstream(&config, &client, &key).await?;
+    let mut child = None;
+    let served = start_and_serve(
+        &mut signals,
+        &config,
+        client,
+        &key,
+        parsed_key,
+        database,
+        &mut child,
+    )
+    .await;
+    let Some(child) = child.as_mut() else {
+        return served;
+    };
+    match served {
+        Ok(()) => stop_upstream(child).await,
+        Err(e) => {
+            // Any startup or serving error stops a running upstream with
+            // SIGTERM too; dropping it would SIGKILL it. One that already
+            // exited has nothing left to stop.
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = stop_upstream(child).await;
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Start the upstream into `child`, bind, open the stores and serve until a
+/// stop signal and the drain end. `run` stops the upstream on every return.
+#[allow(clippy::too_many_arguments)]
+async fn start_and_serve(
+    signals: &mut Stop,
+    config: &Config,
+    client: HttpClient,
+    key: &str,
+    parsed_key: axum::http::HeaderValue,
+    database: String,
+    child: &mut Option<Child>,
+) -> Result<(), String> {
+    let upstream = signals
+        .before(upstream(config, &client, key, child))
+        .await?;
     let port = u16::try_from(config.port).map_err(|_| "port must be 0-65535")?;
     let address = tokio::net::lookup_host((config.host.as_str(), port))
         .await
@@ -1331,14 +1540,14 @@ async fn run(mut config: Config) -> Result<(), String> {
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
     let (stop, stopping) = watch::channel(false);
-    let mut signal = Box::pin(async {
-        let mut term =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
-        tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
-    });
+    // The bind and the store opens above do not yield; a stop that came
+    // during them still ends startup, without serving.
+    if signals.arrived().await {
+        return Err(STOPPED_DURING_STARTUP.into());
+    }
     loop {
         tokio::select! {
-            _ = &mut signal => break,
+            _ = signals.recv() => break,
             status = async { match child.as_mut() { Some(c) => c.wait().await, None => std::future::pending().await } } => {
                 return Err(format!("managed upstream exited: {status:?}"));
             },
@@ -1373,10 +1582,6 @@ async fn run(mut config: Config) -> Result<(), String> {
         tasks.abort_all();
     }
 
-    if let Some(ref mut child) = child {
-        let _ = child.kill().await;
-        let _ = child.wait().await;
-    }
     Ok(())
 }
 /// Maintenance asks for retention every second. Memory retention runs each
@@ -1437,8 +1642,13 @@ async fn serve(
     conn.as_mut().graceful_shutdown();
     let _ = conn.await;
 }
-#[tokio::main]
-async fn main() {
+fn main() {
+    // Before the runtime's threads exist, so none of them takes a stop signal
+    // with the default action. `Stop::install` unblocks them in `run`.
+    if let Err(e) = stop_signals(libc::SIG_BLOCK) {
+        eprintln!("error: blocking stop signals failed: {e}");
+        std::process::exit(2);
+    }
     let config = Config::parse();
     if let Err(e) = config.validate() {
         eprintln!("error: {e}");
@@ -1448,19 +1658,25 @@ async fn main() {
     // children so its safe resource API can raise our inherited descriptor limit.
     if std::env::var("BRIGADE_HUB_LIMIT_PID").ok() != Some(std::process::id().to_string()) {
         use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(
+        let mut command = std::process::Command::new(
             std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
-        )
-        .arg("-c")
-        .arg(include_str!("../limits.py"))
-        .arg((config.max_connections as u64 + 24 + 64).to_string())
-        .arg(std::env::current_exe().expect("executable path"))
-        .args(std::env::args_os().skip(1))
-        .exec();
+        );
+        // The child inherits this thread's mask, so the stop signals stay
+        // blocked through limits.py and its exec; the hook only makes that
+        // explicit. SAFETY: pthread_sigmask is async-signal-safe.
+        unsafe { command.pre_exec(|| stop_signals(libc::SIG_BLOCK)) };
+        let error = command
+            .arg("-c")
+            .arg(include_str!("../limits.py"))
+            .arg((config.max_connections as u64 + 24 + 64).to_string())
+            .arg(std::env::current_exe().expect("executable path"))
+            .args(std::env::args_os().skip(1))
+            .exec();
         eprintln!("error: descriptor limit setup failed: {error}");
         std::process::exit(2);
     }
-    if let Err(e) = run(config).await {
+    let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+    if let Err(e) = runtime.block_on(run(config)) {
         eprintln!("error: {e}");
         std::process::exit(2);
     }

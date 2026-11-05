@@ -36,8 +36,8 @@ change, and the hub behaviors recorded as observed live in
 - **Messages.** `POST /messages` `send` (idempotent on `client_id`), `list` with
   the paging guarantee, `count`, `ack`, `sent` (by cursor and by ids),
   `sent_lookup`, `reply`, `identity` (with and without `peers`), and the
-  station reads `who` and `claims`. 16 of the hub's 19 actions are covered, and
-  the three `events_*` actions are not.
+  station reads `who` and `claims`. 16 of the hub's 19 actions are covered,
+  and the three `events_*` actions are not.
 - **Keys and sealed mail.** `keys_publish`, `keys_get`, and `manifests_get`,
   then sealed `send` and `reply` with envelopes stored and returned byte for
   byte, and every structural refusal: non-canonical text, a duplicate key, bad
@@ -229,8 +229,13 @@ then A, a stale edit after retire and revival, a base revision under another
 `log_epoch`, an admin put stored as `agent-unreviewed`, an import refused
 without its grant and refused while the scan hook is unavailable, grants and
 private scopes, idempotent retries and the `client_event_id` window, log
-paging and visibility, and the refusal of a revoked node token. The drive
-enrolls a fresh node and principal per run.
+paging and visibility, and the refusal of a revoked node token. Search cases
+(S13b) run in a scope only that run writes: two cards with the same text tie
+and come back in `cards/<card_id>.md` order, `min_seq` covers the run's
+writes, a query with no word characters matches literally and scores 0.0, a
+principal sees only scopes it can read, a retired card leaves the results, and
+bad queries answer `memory_query_invalid`. The drive enrolls a fresh node and
+principal per run.
 
 `--memory-absent` runs the one case a hub without memory answers instead:
 `404 {"error": "not found"}`. The in-repo Python hub has no memory, so the
