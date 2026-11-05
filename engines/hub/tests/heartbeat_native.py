@@ -1,6 +1,7 @@
 """Native heartbeat wire bytes, atomic batches and shared-file storage."""
 
 import json
+import http.client
 import sqlite3
 import sys
 import tempfile
@@ -143,9 +144,25 @@ class Heartbeat(unittest.TestCase):
                     dict(action="end", harness="codex", session_id="session-one", repo_identity="example/moved"),
                 )
                 compare("GET", "/sessions")
+                outboxes = []
+                for hub in hubs:
+                    with sqlite3.connect(hub.db) as db:
+                        outboxes.append(
+                            db.execute(
+                                "SELECT name,subject,producer,data,created_at FROM fleet_events ORDER BY name,subject"
+                            ).fetchall()
+                        )
+                self.assertEqual(*outboxes)
+                self.assertEqual(len(outboxes[0]), 1)
                 clock.write_text(str(START + 100000), encoding="utf-8")
                 compare("GET", "/status?all=1")
                 compare("GET", "/sessions?all=yes")
+                from brigade.fleet_hub_events_dispatch import _prune_outbox
+
+                for hub in hubs:
+                    with sqlite3.connect(hub.db) as db:
+                        _prune_outbox(db, START + 100000)
+                        self.assertEqual(db.execute("SELECT count(*) FROM fleet_events").fetchone()[0], 0)
                 # End checks the exact repository identity. Cloud linkage on
                 # another repository must not turn a missing local row into an error.
                 for hub in hubs:
@@ -169,16 +186,6 @@ class Heartbeat(unittest.TestCase):
                         with sqlite3.connect(hub.db) as db:
                             rows.append(db.execute(f"SELECT * FROM {table} ORDER BY 1,2,3,4").fetchall())
                     self.assertEqual(*rows, table)
-                outboxes = []
-                for hub in hubs:
-                    with sqlite3.connect(hub.db) as db:
-                        outboxes.append(
-                            db.execute(
-                                "SELECT name,subject,producer,data,created_at FROM fleet_events ORDER BY name,subject"
-                            ).fetchall()
-                        )
-                self.assertEqual(*outboxes)
-                self.assertEqual(len(outboxes[0]), 1)
             finally:
                 for hub in hubs:
                     hc.stop_hub(hub)
@@ -210,6 +217,10 @@ class Heartbeat(unittest.TestCase):
                     with sqlite3.connect(hub.db) as db, concurrent.futures.ThreadPoolExecutor() as pool:
                         db.execute("BEGIN IMMEDIATE")
                         pending = pool.submit(send, hub, "POST", "/events", hub.tokens["node-a"], event)
+                        session = dict(action="upsert", harness="codex", session_id="waiting",
+                                       repo_identity="example/repo", identity_scope="fleet", repo_label="repo",
+                                       checkout_path="/workspace/repo", dirty_paths=[], dirty_truncated=False)
+                        waiting_session = pool.submit(send, hub, "POST", "/sessions", hub.tokens["node-a"], session)
                         time.sleep(0.2)
                         if revoke:
                             db.execute("UPDATE nodes SET revoked_at='2026-01-01' WHERE node_id='node-a'")
@@ -219,6 +230,8 @@ class Heartbeat(unittest.TestCase):
                         db.commit()
                         response = pending.result(timeout=10)
                         self.assertEqual(response.status, 401 if revoke else 503, response.body)
+                        self.assertEqual(waiting_session.result(timeout=10).status, 401 if revoke else 503)
+                        self.assertEqual(db.execute("SELECT count(*) FROM interactive_sessions").fetchone()[0], 0)
                         self.assertEqual(db.execute("SELECT count(*) FROM events").fetchone()[0], 0)
                         if not revoke:
                             db.execute(f"PRAGMA user_version={version}")
@@ -227,6 +240,144 @@ class Heartbeat(unittest.TestCase):
                             time.sleep(1)
             finally:
                 hc.stop_hub(hub)
+
+
+class ReviewRegressions(unittest.TestCase):
+    def setUp(self):
+        import claims_native
+
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        work = Path(self.directory.name)
+        clock = work / "clock"
+        clock.write_text(str(START), encoding="utf-8")
+        self.hubs = []
+        for native in (False, True):
+            previous = claims_native.BINARY
+            if native:
+                claims_native.BINARY = str(BINARY) + " --route-mode heartbeat=native"
+            try:
+                hub = launch(work / str(native), clock, native)
+            finally:
+                claims_native.BINARY = previous
+            self.hubs.append(hub)
+            self.addCleanup(hc.stop_hub, hub)
+            enroll(hub, "node-a")
+        self.event = dict(node_id="node-a", run_id="review", sequence=1,
+                          digest="one", state="run.created", ts="2026-01-01T00:00:00Z")
+
+    def compare(self, method, path, body=None, raw=None, schema_error=False):
+        answers = []
+        for index, hub in enumerate(self.hubs):
+            try:
+                token = hub.admin_token if schema_error and index == 0 else hub.tokens["node-a"]
+                answer = send(hub, method, path, token, body, raw)
+                answers.append((answer.status, answer.body))
+            except http.client.RemoteDisconnected:
+                # Python's unhandled SQLite integer overflow closes the request.
+                answers.append((None, b"disconnected"))
+        self.assertEqual(*answers)
+        return answers[0]
+
+    def test_event_array_limit(self):
+        for count in (1001, 5000):
+            with self.subTest(count=count):
+                self.assertEqual(self.compare("POST", "/events", [{}] * count),
+                                 (400, b'{"error": "JSON container exceeds 1000 items"}'))
+
+    def test_raw_integer_fallback(self):
+        for field, literal in (("exit_status", "-0"), ("sequence", "-0"),
+                               ("sequence", str(2**64)), ("exit_status", str(2**64)),
+                               ("sequence", str(2**80)), ("exit_status", str(-(2**80)))):
+            with self.subTest(field=field, literal=literal):
+                event = dict(self.event, **{field: "RAW"})
+                raw = json.dumps(event).replace('"RAW"', literal).encode("utf-8")
+                self.compare("POST", "/events", raw=raw)
+
+    def test_status_fence_structure(self):
+        for table in ("claim_fences", "claim_retired_holders"):
+            for change in ("index", "alter", "missing"):
+                with self.subTest(table=table, change=change):
+                    definitions = []
+                    for hub in self.hubs:
+                        with sqlite3.connect(hub.db) as db:
+                            definitions.append(db.execute(
+                                "SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL ORDER BY type DESC", (table,)
+                            ).fetchall())
+                            if change == "index":
+                                db.execute(f"CREATE INDEX review_extra ON {table}(generation)")
+                            elif change == "alter":
+                                db.execute(f"ALTER TABLE {table} ADD COLUMN extra TEXT")
+                            else:
+                                db.execute(f"DROP TABLE {table}")
+                    try:
+                        status, body = self.compare("GET", "/status", schema_error=True)
+                        self.assertEqual(status, 503)
+                        self.assertEqual(json.loads(body)["reason"], "claim-fence-refused")
+                    finally:
+                        for hub, schema in zip(self.hubs, definitions):
+                            with sqlite3.connect(hub.db) as db:
+                                db.execute(f"DROP TABLE IF EXISTS {table}")
+                                for (sql,) in schema:
+                                    db.execute(sql)
+
+    def test_status_sql_error(self):
+        for hub in self.hubs:
+            with sqlite3.connect(hub.db) as db:
+                db.execute("DROP TABLE events")
+        self.assertEqual(self.compare("GET", "/status", schema_error=True)[0], 500)
+
+    def test_claims_during_maximum_heartbeat_flood(self):
+        hub = self.hubs[1]
+        bodies = []
+        for i in range(12):
+            node = f"flood-{i}"
+            enroll(hub, node)
+            event = dict(self.event, node_id=node, padding="")
+            size = len(json.dumps(event).encode("utf-8"))
+            event["padding"] = "x" * (8 * 1024 * 1024 - size)
+            bodies.append((hub.tokens[node], json.dumps(event).encode("utf-8")))
+        import threading
+        start = threading.Barrier(13)
+
+        def flood(token, body):
+            start.wait(timeout=10)
+            return [send(hub, "POST", "/events", token, raw=body).status for _ in range(3)]
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=12) as pool:
+            pending = [pool.submit(flood, token, body) for token, body in bodies]
+            start.wait(timeout=10)
+            times = []
+            for i in range(3):
+                began = time.monotonic()
+                reply = send(hub, "POST", "/claims", hub.tokens["node-a"],
+                             dict(action="acquire", target=f"mixed-{i}", node_id="node-a", holder=f"holder-{i}"))
+                times.append(time.monotonic() - began)
+                self.assertEqual(reply.status, 200, reply.body)
+            statuses = [status for future in pending for status in future.result(timeout=30)]
+        self.assertIn(200, statuses)
+        self.assertTrue(all(status in (200, 503) for status in statuses), statuses)
+        self.assertLess(max(times), 5, times)
+        print(f"maximum-body flood claim seconds: {times}", flush=True)
+
+    def test_stored_json_fallback(self):
+        self.compare("POST", "/events", self.event)
+        session = dict(action="upsert", harness="codex", session_id="review",
+                       repo_identity="example/repo", identity_scope="fleet",
+                       repo_label="repo", checkout_path="/workspace/repo", dirty_paths=[], dirty_truncated=False)
+        self.assertEqual(self.compare("POST", "/sessions", session)[0], 200)
+        for column in ("context", "dirty_paths_json", "provider_link_json", "cloud_context_json"):
+            table, path = ("events", "/status?all=1") if column == "context" else ("interactive_sessions", "/sessions?all=1")
+            for item in (r'"\ud800"', str(2**64), str(2**80)):
+                value = "[" + item + "]" if column == "dirty_paths_json" else '{"version": 1, "note": ' + item + "}"
+                with self.subTest(column=column, value=value):
+                    for hub in self.hubs:
+                        with sqlite3.connect(hub.db) as db:
+                            db.execute(f"UPDATE {table} SET {column}=?", (value,))
+                    self.compare("GET", path)
+            for hub in self.hubs:
+                with sqlite3.connect(hub.db) as db:
+                    db.execute(f"UPDATE {table} SET {column}=?", ("[]" if column == "dirty_paths_json" else None,))
 
 
 if __name__ == "__main__":

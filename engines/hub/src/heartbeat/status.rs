@@ -42,6 +42,51 @@ fn fence_error(message: &str) -> Reply {
     )
 }
 pub(super) fn list(tx: &dyn ReadTx, all: bool, now: f64, stale: i64) -> Result<Option<Reply>> {
+    // Match Python's exact sqlite_master comparison, including extra indexes
+    // and triggers. The schema owner supplies refusal text on any mismatch.
+    let normalize = |s: &str| {
+        s.split(py_space)
+            .filter(|p| !p.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    for (table, schema, indexes) in [
+        (
+            "claim_fences",
+            "CREATE TABLE claim_fences ( target TEXT NOT NULL PRIMARY KEY, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807) )",
+            &[][..],
+        ),
+        (
+            "claim_retired_holders",
+            "CREATE TABLE claim_retired_holders ( target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL, generation INTEGER NOT NULL CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807), retired_at REAL NOT NULL CHECK (typeof(retired_at) IN ('integer', 'real') AND retired_at >= 0 AND retired_at <= 1.7976931348623157e308), PRIMARY KEY (target, owner_node, holder_token) )",
+            &[
+                "CREATE INDEX claim_retired_holders_age ON claim_retired_holders (retired_at)",
+                "CREATE INDEX claim_retired_holders_node_age ON claim_retired_holders (owner_node, retired_at)",
+            ][..],
+        ),
+    ] {
+        let rows = tx.query(
+            "SELECT type, sql FROM sqlite_master WHERE tbl_name=? COLLATE NOCASE",
+            &[text(table)],
+        )?;
+        let tables: Vec<_> = rows.iter().filter(|r| string(&r[0]) == "table").collect();
+        let mut actual: Vec<_> = rows
+            .iter()
+            .filter(|r| {
+                string(&r[0]) != "table" && !(string(&r[0]) == "index" && r[1] == Value::Null)
+            })
+            .map(|r| (string(&r[0]).to_string(), normalize(string(&r[1]))))
+            .collect();
+        actual.sort();
+        let mut declared: Vec<_> = indexes
+            .iter()
+            .map(|s| ("index".to_string(), normalize(s)))
+            .collect();
+        declared.sort();
+        if tables.len() != 1 || normalize(string(&tables[0][1])) != schema || actual != declared {
+            return Ok(None);
+        }
+    }
     for (sql, message, limit) in [
         (
             "SELECT COUNT(*) FROM claim_fences WHERE typeof(generation)!='integer' OR generation<1",
@@ -91,7 +136,10 @@ pub(super) fn list(tx: &dyn ReadTx, all: bool, now: f64, stale: i64) -> Result<O
             .map(|(k, v)| (*k, sql_json(v)))
             .collect();
         if row[13] != Value::Null {
-            fields[13].1 = json_wire(&serde_json::from_str(string(&row[13])).unwrap_or(Json::Null));
+            let Some(context) = stored_json(string(&row[13])) else {
+                return Ok(None);
+            };
+            fields[13].1 = json_wire(&context);
         }
         let seat = string(&row[3]);
         if py_trim(seat).is_empty() || py_trim(seat) == "-" {

@@ -818,6 +818,16 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             .await
         {
             Ok(value) => value,
+            // A checked reader can refuse a malformed fence schema before the
+            // route runs. Read-only heartbeat falls through to Python, which
+            // authenticates and returns the authoritative database error.
+            Err(())
+                if app.heartbeat.is_some()
+                    && req.method() == "GET"
+                    && matches!(req.uri().path(), "/status" | "/sessions") =>
+            {
+                None
+            }
             Err(()) => return busy("credential-lookup"),
         },
         None => None,

@@ -107,6 +107,7 @@ pub struct Writer {
     slots: Arc<Semaphore>,
     regular: Arc<Semaphore>,
     bytes: Arc<Semaphore>,
+    regular_bytes: Arc<Semaphore>,
     arbiter: Arc<Arbiter>,
     stats: Arc<WriterStats>,
     max_bytes: usize,
@@ -142,6 +143,11 @@ impl Writer {
             slots: Arc::new(Semaphore::new(config.capacity)),
             regular: Arc::new(Semaphore::new(config.capacity - config.durable_reserve)),
             bytes: Arc::new(Semaphore::new(config.queue_bytes)),
+            // Reserve one maximum payload for durable work. Tiny test queues
+            // retain the same one-eighth reserve as the default 64 MiB queue.
+            regular_bytes: Arc::new(Semaphore::new(
+                config.queue_bytes - (8 * 1024 * 1024).min(config.queue_bytes / 8),
+            )),
             arbiter: arbiter.clone(),
             stats: stats.clone(),
             max_bytes: config.queue_bytes,
@@ -172,6 +178,10 @@ impl Writer {
         let mut permits = Vec::new();
         if !budget.durable {
             permits.push(self.permit(&self.regular, 1, budget).await?);
+            permits.push(
+                self.permit(&self.regular_bytes, budget.bytes as u32, budget)
+                    .await?,
+            );
         }
         permits.push(self.permit(&self.slots, 1, budget).await?);
         permits.push(
@@ -255,6 +265,7 @@ where
         // the same byte reservation as other work. It never waits for admission.
         for (semaphore, count) in [
             (&self.writer.regular, 1),
+            (&self.writer.regular_bytes, 8 * 1024 * 1024),
             (&self.writer.slots, 1),
             (&self.writer.bytes, 8 * 1024 * 1024),
         ] {

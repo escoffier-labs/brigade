@@ -24,6 +24,7 @@ type Result<T> = std::result::Result<T, Error>;
 enum Error {
     Refusal(Reply),
     Sql(rusqlite::Error),
+    Python,
 }
 impl From<rusqlite::Error> for Error {
     fn from(e: rusqlite::Error) -> Self {
@@ -64,6 +65,21 @@ fn json_wire(v: &Json) -> String {
                 .collect::<Vec<_>>(),
         ),
     }
+}
+// Python can preserve lone surrogates and arbitrary-size integers in stored
+// JSON. Serde either refuses them or rounds them into floats. Delegate both.
+fn stored_json(s: &str) -> Option<Json> {
+    fn exact(v: &Json) -> bool {
+        match v {
+            Json::Array(a) => a.iter().all(exact),
+            Json::Object(o) => o.values().all(exact),
+            Json::Number(n) => {
+                !n.is_f64() || n.as_f64().is_some_and(|f| f.abs() < 9223372036854775808.0)
+            }
+            _ => true,
+        }
+    }
+    serde_json::from_str(s).ok().filter(exact)
 }
 fn repo_identity(s: &str) -> bool {
     let lower = s.to_lowercase();
@@ -136,6 +152,7 @@ impl writer::Command for Mutation {
             Ok(reply) => Ok(packed(reply)),
             Err(Error::Refusal(reply)) => Err(writer::ApplyError::Refused(packed(reply))),
             Err(Error::Sql(e)) => Err(e.into()),
+            Err(Error::Python) => Err(writer::ApplyError::Refused(json!({"python": true}))),
         }
     }
 }
@@ -162,6 +179,7 @@ impl Heartbeat {
         {
             Ok(Ok(_)) => None,
             Ok(Err((status, body))) => Some(Reply { status, body }.response()),
+            Err(_) if !write => None,
             Err(_) => Some(crate::busy("credential-lookup")),
         }
     }
@@ -197,13 +215,13 @@ impl Heartbeat {
                     match result {
                         Ok(r) => Ok(r),
                         Err(Error::Refusal(r)) => Ok(Some(r)),
-                        Err(Error::Sql(e)) => Err(e),
+                        Err(Error::Sql(_) | Error::Python) => Ok(None),
                     }
                 })
                 .await
             {
                 Ok(r) => r.map(Reply::response),
-                Err(_) => Some(crate::busy("reader-timeout")),
+                Err(_) => None,
             };
         }
         if !parts.headers.contains_key("content-length") {
@@ -223,7 +241,7 @@ impl Heartbeat {
             return None;
         }
         let events = if parts.uri.path() == "/events" {
-            raw.as_array().map_or(1, Vec::len)
+            raw.as_array().map_or(1, Vec::len).min(1000)
         } else {
             1
         };
@@ -243,6 +261,7 @@ impl Heartbeat {
             // The inclusive wire payload cap must remain admissible. Reserve
             // reply headroom where it fits within the writer payload ceiling.
             bytes: (body.len() + 32 * 1024).min(8 * 1024 * 1024),
+            // Admission class only. Every accepted command still commits at FULL.
             durable: false,
             deadline: Instant::now() + Duration::from_secs(10),
         };
@@ -253,6 +272,9 @@ impl Heartbeat {
             })),
             Err(e) => Err(e),
         };
+        if result.as_ref().is_ok_and(|v| v["python"] == true) {
+            return None;
+        }
         Some(match result {
             Ok(v) => Reply {
                 status: v["status"].as_u64().unwrap() as u16,
@@ -267,18 +289,114 @@ impl Heartbeat {
 /// Resolve the same startup-frozen deck setting as the Python schema owner.
 pub async fn stale_after(flag: Option<&str>) -> std::result::Result<i64, String> {
     let script = "import os,sys; from brigade import fleet_command_deck as d; p=d.resolve_config_path(sys.argv[1] or None,os.environ); print((d.load_config(p) if p else d.DeckConfig()).stale_history_after_seconds)";
-    let output = tokio::process::Command::new(
-        std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into()),
-    )
-    .args(["-c", script, flag.unwrap_or("")])
-    .output()
-    .await
-    .map_err(|_| "heartbeat configuration unavailable")?;
+    let interpreter = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+    let output = tokio::process::Command::new(&interpreter)
+        .args(["-c", script, flag.unwrap_or("")])
+        .output()
+        .await
+        .map_err(|_| "heartbeat configuration unavailable")?;
     if !output.status.success() {
         return Err("heartbeat configuration unavailable".into());
     }
-    String::from_utf8_lossy(&output.stdout)
+    let value = String::from_utf8_lossy(&output.stdout)
         .trim()
         .parse()
-        .map_err(|_| "heartbeat configuration unavailable".into())
+        .map_err(|_| "heartbeat configuration unavailable".to_string())?;
+    eprintln!("heartbeat stale_after={value} interpreter={interpreter:?}");
+    Ok(value)
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    use writer::{Arbiter, Budget, Config, Lane, Writer};
+
+    #[tokio::test]
+    async fn refused_heartbeat_and_claim_share_one_full_batch() {
+        let dir = std::env::temp_dir().join(format!("heartbeat-batch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("hub.db");
+        let python = std::env::var("BRIGADE_HUB_PYTHON").unwrap_or_else(|_| "python3".into());
+        assert!(std::process::Command::new(python).args(["-c", "import sys; from pathlib import Path; from brigade import fleet_hub as h; c=h.init_db(Path(sys.argv[1])); h.add_node(c,'node-a'); c.close()"])
+            .arg(&path).status().unwrap().success());
+        let arbiter = Arc::new(Arbiter::default());
+        let turn = arbiter
+            .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+            .unwrap();
+        let writer = Writer::start(Config::new(path.clone()), arbiter).unwrap();
+        let route = Heartbeat {
+            readers: Arc::new(ReaderPool::open(&path, 1, 8).unwrap()),
+            writer: writer.clone(),
+            admin: digest("fake-admin"),
+            clock: None,
+            allow_admin_writes: true,
+            events: false,
+            stale_after: 1800,
+        };
+        let budget = Budget {
+            events: 1,
+            bytes: 1024,
+            durable: false,
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        // A node mismatch refuses the heartbeat while the neighboring claim
+        // commits in the same FULL batch.
+        let event = json!({"node_id":"node-a","run_id":"refused","sequence":1,"digest":"one","state":"run.created","ts":"2026-01-01T00:00:00Z"});
+        let mut wrong = event.clone();
+        wrong["node_id"] = json!("node-b");
+        // Use the node credential for the node-mismatch refusal.
+        let db = rusqlite::Connection::open(&path).unwrap();
+        let key: String = db
+            .query_row(
+                "SELECT token_sha256 FROM nodes WHERE node_id='node-a'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let heartbeat = writer
+            .submit(
+                Mutation {
+                    raw: json!([event, wrong]),
+                    path: "/events".into(),
+                    key,
+                    route,
+                    seed: "test-seed".into(),
+                },
+                budget,
+            )
+            .await
+            .unwrap();
+        let request = claims::validate(&json!({"action":"acquire","target":"same-batch","node_id":"node-a","holder":"test-holder"})).unwrap();
+        let claim = writer
+            .submit(
+                claims::Claim {
+                    request,
+                    key: digest("fake-admin"),
+                    admin: digest("fake-admin"),
+                    allow_admin_writes: true,
+                    clock: None,
+                    events: false,
+                },
+                Budget {
+                    durable: true,
+                    ..budget
+                },
+            )
+            .await
+            .unwrap();
+        drop(turn);
+        assert_eq!(heartbeat.await.unwrap().unwrap()["status"], 403);
+        assert_eq!(claim.await.unwrap().unwrap()["status"], 200);
+        assert_eq!(writer.stats().snapshot().batch_size, 2);
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM events", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            db.query_row("SELECT count(*) FROM claims", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 }

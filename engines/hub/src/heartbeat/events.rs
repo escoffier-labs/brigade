@@ -18,9 +18,15 @@ pub(super) fn python_only(raw: &Json) -> bool {
             || e.get("sequence")
                 .and_then(Json::as_u64)
                 .is_some_and(|v| v > i64::MAX as u64)
-            || e.get("sequence")
-                .and_then(Json::as_f64)
-                .is_some_and(|v| v == 0.0 && v.is_sign_negative())
+            || ["sequence", "exit_status"].iter().any(|field| {
+                e.get(*field).is_some_and(|v| {
+                    v.as_i64().is_none()
+                        && v.as_u64().is_none()
+                        && v.as_f64().is_some_and(|f| {
+                            (f == 0.0 && f.is_sign_negative()) || f.abs() >= 9223372036854775808.0
+                        })
+                })
+            })
             || e.get("node_id")
                 .and_then(Json::as_str)
                 .is_some_and(|s| !s.is_ascii() || controls(s))

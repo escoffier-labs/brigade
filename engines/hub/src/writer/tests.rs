@@ -789,3 +789,60 @@ fn aborted_batches_count_once_per_batch() {
     assert_eq!((snapshot.batch_size, snapshot.aborted_batches), (2, 1));
     assert!(snapshot.commit_seconds > 0.0);
 }
+
+#[tokio::test]
+async fn heartbeat_bytes_leave_durable_admission_reserve() {
+    let path = fixture();
+    let arbiter = Arc::new(Arbiter::default());
+    let turn = arbiter
+        .acquire(Lane::Memory, Instant::now() + Duration::from_secs(1))
+        .unwrap();
+    let writer = start_fixture(Config::new(path.clone()), arbiter).unwrap();
+    let mut heartbeat = budget(false);
+    heartbeat.bytes = 8 * 1024 * 1024;
+    let mut accepted = Vec::new();
+    for _ in 0..7 {
+        accepted.push(
+            writer
+                .submit(Sql("INSERT INTO rows(value) VALUES(random())"), heartbeat)
+                .await
+                .unwrap(),
+        );
+    }
+    let refused = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES(random())"), heartbeat)
+        .await;
+    assert!(matches!(
+        refused,
+        Err(Failure {
+            status: 503,
+            reason: "writer-queue-full"
+        })
+    ));
+    let mut claim = budget(true);
+    claim.bytes = 8 * 1024 * 1024;
+    claim.deadline = Instant::now() + Duration::from_secs(1);
+    let reply = writer
+        .submit(Sql("INSERT INTO rows(value) VALUES('claim')"), claim)
+        .await
+        .unwrap();
+    assert_eq!(writer.bytes.available_permits(), 0);
+    drop(turn);
+    for reply in accepted {
+        assert!(reply.await.unwrap().is_ok());
+    }
+    assert!(reply.await.unwrap().is_ok());
+    assert_eq!(values(&path), 8);
+}
+
+#[test]
+fn commit_histogram_has_sum() {
+    let stats = Arc::new(WriterStats::default());
+    stats.batch(1, Duration::ZERO, Some(Duration::from_millis(2)), false);
+    stats.batch(1, Duration::ZERO, Some(Duration::from_millis(21)), true);
+    let telemetry = crate::telemetry::Telemetry::default();
+    telemetry.attach_writer(stats);
+    let text = telemetry.render();
+    assert_eq!(metric(&text, "writer_commit_duration_seconds_count"), 2.0);
+    assert!((metric(&text, "writer_commit_duration_seconds_sum") - 0.023).abs() < 1e-9);
+}

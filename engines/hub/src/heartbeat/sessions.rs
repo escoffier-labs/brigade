@@ -224,7 +224,7 @@ fn validate(raw: &Json, caller: Option<&str>) -> Result<Request> {
         link: o.contains_key("provider_link"),
     })
 }
-fn payload(row: &[Value], now: f64) -> String {
+fn payload(row: &[Value], now: f64) -> Option<String> {
     let names = [
         "node_id",
         "harness",
@@ -248,20 +248,15 @@ fn payload(row: &[Value], now: f64) -> String {
         .zip(row)
         .map(|(k, v)| (*k, sql_json(v)))
         .collect();
-    let dirty = serde_json::from_str::<Json>(string(&row[8]))
-        .ok()
-        .filter(Json::is_array)
-        .unwrap_or(json!([]));
+    let dirty = stored_json(string(&row[8]))?;
+    let dirty = if dirty.is_array() { dirty } else { json!([]) };
     fields[8].1 = json_wire(&dirty);
     fields[9].1 = (row[9] != Value::Integer(0)).to_string();
     if row[17] != Value::Null {
-        fields.push((
-            "provider_link",
-            json_wire(&serde_json::from_str(string(&row[17])).unwrap_or(Json::Null)),
-        ));
+        fields.push(("provider_link", json_wire(&stored_json(string(&row[17]))?)));
     }
     if row[16] != Value::Null {
-        let context: Json = serde_json::from_str(string(&row[16])).unwrap_or(Json::Null);
+        let context = stored_json(string(&row[16]))?;
         fields.push(("cloud_context", json_wire(&context)));
         if context["version"] == 2 {
             fields.push(("evidence_verification", quote("reported-unverified")));
@@ -286,11 +281,14 @@ fn payload(row: &[Value], now: f64) -> String {
             }),
         ));
     }
-    object(&fields)
+    Some(object(&fields))
 }
-fn fetch(tx: &(impl ReadTx + ?Sized), key: &[Value], now: f64) -> rusqlite::Result<String> {
+fn fetch(tx: &(impl ReadTx + ?Sized), key: &[Value], now: f64) -> Result<String> {
     let rows = tx.query(&format!("SELECT {COLUMNS} FROM interactive_sessions WHERE node_id=? AND harness=? AND session_id=? AND repo_identity=?"),key)?;
-    Ok(rows.first().map_or("null".into(), |r| payload(r, now)))
+    rows.first().map_or_else(
+        || Ok("null".into()),
+        |r| payload(r, now).ok_or(Error::Python),
+    )
 }
 pub(super) fn store(tx: &dyn WriteTx, raw: &Json, caller: Option<&str>, now: f64) -> Result<Reply> {
     let r = validate(raw, caller)?;
@@ -345,8 +343,12 @@ pub(super) fn store(tx: &dyn WriteTx, raw: &Json, caller: Option<&str>, now: f64
 }
 pub(super) fn list(tx: &dyn ReadTx, all: bool, now: f64) -> Result<Option<Reply>> {
     let rows = tx.query(&format!("SELECT {COLUMNS} FROM interactive_sessions WHERE (?=1 OR (state='active' AND expires_at>?)) AND NOT (harness='t3' AND provider_link_json IS NOT NULL AND state='active' AND expires_at>? AND EXISTS (SELECT 1 FROM interactive_sessions AS provider WHERE provider.node_id=interactive_sessions.node_id AND provider.harness=json_extract(interactive_sessions.provider_link_json,'$.harness') AND provider.session_id=json_extract(interactive_sessions.provider_link_json,'$.session_id') AND provider.checkout_path=interactive_sessions.checkout_path AND provider.state='active' AND provider.expires_at>?)) ORDER BY heartbeat_at DESC,started_at DESC,node_id,harness,session_id LIMIT ?"),&[Value::Integer(i64::from(all)),Value::Real(now),Value::Real(now),Value::Real(now),Value::Integer(if all {1000} else {500})])?;
-    Ok(Some(Reply::new(
-        200,
-        &[("sessions", array(rows.iter().map(|r| payload(r, now))))],
-    )))
+    let Some(sessions) = rows
+        .iter()
+        .map(|r| payload(r, now))
+        .collect::<Option<Vec<_>>>()
+    else {
+        return Ok(None);
+    };
+    Ok(Some(Reply::new(200, &[("sessions", array(sessions))])))
 }

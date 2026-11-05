@@ -37,6 +37,7 @@ pub struct WriterStats {
     batch_size: AtomicU64,
     apply_nanos: AtomicU64,
     commit_nanos: AtomicU64,
+    commit_sum_nanos: AtomicU64,
     lock_wait_nanos: AtomicU64,
     aborted_batches: AtomicU64,
     commit_buckets: [AtomicU64; 21],
@@ -83,6 +84,7 @@ impl WriterStats {
         self.apply_nanos.store(nanos(apply), Relaxed);
         self.commit_nanos.store(commit.map_or(0, nanos), Relaxed);
         if let Some(commit) = commit {
+            self.commit_sum_nanos.fetch_add(nanos(commit), Relaxed);
             let bucket = COMMIT_BOUNDS
                 .iter()
                 .position(|b| commit.as_secs_f64() <= *b)
@@ -100,6 +102,9 @@ impl WriterStats {
             COMMIT_BOUNDS,
             std::array::from_fn(|i| self.commit_buckets[i].load(Relaxed)),
         )
+    }
+    pub fn commit_sum_seconds(&self) -> f64 {
+        seconds(&self.commit_sum_nanos)
     }
     pub fn snapshot(&self) -> WriterSnapshot {
         WriterSnapshot {

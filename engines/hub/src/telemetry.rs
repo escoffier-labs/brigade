@@ -147,7 +147,10 @@ impl Telemetry {
                     "brigade_hub_writer_commit_duration_seconds_bucket{{le=\"{bound}\"}} {total}\n"
                 );
             }
-            text += &format!("brigade_hub_writer_commit_duration_seconds_count {total}\n");
+            text += &format!(
+                "brigade_hub_writer_commit_duration_seconds_count {total}\nbrigade_hub_writer_commit_duration_seconds_sum {}\n",
+                writer.commit_sum_seconds()
+            );
         }
         for (name, help, missing, probes) in [
             (
