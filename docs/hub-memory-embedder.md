@@ -63,8 +63,76 @@ The S18 scanner checks every outgoing payload. A pending version is never
 eligible for documents. Blocking query findings send no text. Scanner
 unavailability prevents all documents and every non-loopback query.
 
-S15 is split for review. S15a supplies this boundary and lexical mode.
-S15b supplies vector storage, jobs, pull workers, dense retrieval and mode
-switching. Until S15b, a configured hybrid mode reports switching and serves
-BM25, or degraded fallback when the query endpoint fails. The transport
-alone does not claim hybrid retrieval coverage.
+S15 is split into two stacked PRs. S15a supplies the HTTP boundary and
+lexical mode. S15b supplies the following storage and retrieval behavior.
+
+## Jobs and switching
+
+The hub starts one scheduler only in hybrid mode. It queues missing content
+hashes in bounded writer turns. Matching vectors are reused across revisions
+and scopes. Query results remain lexical until the configured fingerprint
+covers every live head. Status reports switching with covered and total card
+counts during the backfill. A failed embedding leaves the lexical index
+available. Changing back to lexical and restarting leaves vectors on disk,
+and loads none of them.
+
+Derived tables migrate the memory file from schema 1 to schema 2. The hub
+keeps vectors under a fingerprint of model name, reported digest, dimensions,
+normalizer version and query prefix version. Bump the prefix version when
+changing the prefix. Vectors use little-endian float32. Immutable append
+segments share older rows with retained snapshots. Compaction copies rows
+into a new main segment after deltas exceed 10% of the first segment. Work
+runs on reader-pool threads outside the writer locks. A later refresh picks
+up writes committed during that read snapshot. A query whose live head has
+no matching vector continues using BM25.
+
+Normalizing document text uses title, summary and body. Unrelated frontmatter
+and card aliases do not enter the payload. The stored scan receipt must be
+clean or flagged, and S18 scans the exact outgoing payload again. Pending
+revisions wait. Retiring or replacing a head removes its old lineage rows.
+A shared vector stays until no live head in any scope refers to its content.
+Finished jobs expire after seven days through the bounded writer sweep.
+
+Use `brigade memory reindex --target WORKSPACE --admin-token-file FILE` to
+queue missing vectors. The command drains bounded pages, and repeating it
+queues nothing after those pages exist. Its queued count describes the first
+page. The explicit admin credential is separate from the node credential.
+Use `--drop EMBEDDER_ID` to remove only that embedder's vectors, lineage and
+jobs. A configured active embedder can backfill itself again on its next
+scheduler pass. Old matrices stay available until explicitly dropped.
+
+## Pull worker
+
+Set `pull = true` in `[memory.embedder]` to have the hub queue jobs without
+making document requests. A GPU host can then run:
+
+```text
+brigade memory embed-worker --target WORKSPACE --config worker.toml
+```
+
+The worker configuration has the same model identity, dimensions, prefix
+version, shape and token file as the hub's model configuration. Its endpoint
+must be an allowlisted numeric loopback URL on the worker host. The worker
+holds a hub node or principal credential with only the embed grant on the
+scopes it serves. It needs no read grant and never opens the hub database.
+Each lease names at most four scanned texts and expires after 60 seconds.
+The worker verifies the endpoint digest and vectors, then submits base64
+little-endian float32 rows with the lease id. The hub checks ownership,
+expiry, dimensions and digest again. `--once` processes at most one lease.
+A failed worker leaves the lease available for recovery after expiry.
+
+For reachable query embedding, configure `query_endpoint` or `endpoint` on
+the hub under the same allowlist and secret-file policy. Pull mode can omit
+both endpoints and the model secret. It then answers lexical fallback with
+embedder-unavailable, even when document vectors are complete. Only a local
+loopback model is admitted by the Python pull worker. The Rust hub's remote
+backend supports allowlisted private HTTP and HTTPS endpoints.
+
+## Measurements
+
+At 20,000 synthetic rows, a matrix rebuild with its old snapshot retained
+recorded 171,508 KiB peak RSS at 1,024 dimensions and 651,560 KiB at 4,096
+dimensions. These are isolated matrix-process measurements, including test
+runtime overhead, without a lexical index, SQLite corpus or embedding model.
+The larger rebuild exceeds the reference 512 MiB allotment. Production
+memory planning must include those other components and any second model.

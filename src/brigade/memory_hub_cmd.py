@@ -437,6 +437,12 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
                         f"retrieval: {retrieval.get('mode')}, effective {retrieval.get('effective')}, "
                         f"state {retrieval.get('state')}"
                         + (f" ({retrieval['reason']})" if retrieval.get("reason") else "")
+                        + (
+                            f", coverage {retrieval['coverage'].get('cards')}/{retrieval['coverage'].get('total')}"
+                            if isinstance(retrieval.get("coverage"), dict)
+                            else ""
+                        )
+                        + (f", endpoint {retrieval['endpoint_host']}" if retrieval.get("endpoint_host") else "")
                     )
             else:
                 lines.append(f"hub: unavailable ({hub.get('reason')})")

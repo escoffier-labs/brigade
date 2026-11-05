@@ -38,6 +38,7 @@ pub struct Request {
     pub min_seq: Option<i64>,
     pub prompt: bool,
     pub push: bool,
+    pub dense: Option<(std::sync::Arc<super::dense::Matrix>, Vec<f32>)>,
 }
 
 fn invalid(message: &str) -> Reply {
@@ -147,6 +148,7 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
             Some("prompt")
         ),
         push: false,
+        dense: None,
     })
 }
 
@@ -263,6 +265,21 @@ pub fn run<T: ReadTx + ?Sized>(
     } else {
         (snap.score(&allowed, &request.tokens), true)
     };
+    let mut ranks = std::collections::HashMap::new();
+    let hits = if let Some((matrix, query)) = &request.dense {
+        let lexical = snap.top(hits, TOP);
+        let dense = snap.top(matrix.score(snap, &allowed, query), TOP);
+        let mut scores = std::collections::HashMap::new();
+        for (source, list) in [("lexical", lexical), ("dense", dense)] {
+            for (rank, (n, _)) in list.into_iter().enumerate() {
+                *scores.entry(n).or_insert(0.0) += 1.0 / (60 + rank + 1) as f64;
+                ranks.entry(n).or_insert_with(|| json!({}))[source] = json!(rank + 1);
+            }
+        }
+        scores.into_iter().collect()
+    } else {
+        hits
+    };
     // Push revalidates the exact snapshot head and its current scan receipt.
     // Unavailable, pending, flagged, retired and stale versions never leave here.
     let hits = if request.push {
@@ -306,7 +323,7 @@ pub fn run<T: ReadTx + ?Sized>(
                 "score": score,
                 "content_hash": &*d.content_hash,
                 "trust": &*d.trust,
-                "ranks": {"lexical": rank + 1},
+                "ranks": ranks.get(&n).cloned().unwrap_or_else(|| json!({"lexical": rank + 1})),
             });
             if request.prompt {
                 let Some(body) = blob(tx, &d.content_hash)? else {
@@ -331,7 +348,7 @@ pub fn run<T: ReadTx + ?Sized>(
         })
         .collect::<rusqlite::Result<_>>()?;
     let stale = snap.stale || request.min_seq.is_some_and(|m| snap.indexed_seq < m);
-    let mut retrieval = json!({"mode": "lexical", "degraded": false, "stale": stale});
+    let mut retrieval = json!({"mode": if request.dense.is_some() { "hybrid" } else { "lexical" }, "degraded": false, "stale": stale});
     if !complete {
         retrieval["truncated"] = json!(true);
     }

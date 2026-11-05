@@ -1439,7 +1439,10 @@ async fn start_and_serve(
             ) {
                 Ok(mut store) => {
                     store.configure_retrieval(&memory_config)?;
-                    memory_route::MemoryRoute::Store(Arc::new(store))
+                    let store = Arc::new(store);
+                    store.refresh_dense().await?;
+                    store.start_embeddings();
+                    memory_route::MemoryRoute::Store(store)
                 }
                 Err(e) => {
                     eprintln!("memory unavailable: {e}");

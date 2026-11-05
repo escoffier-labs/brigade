@@ -14,6 +14,10 @@ pub struct Base {
 }
 #[derive(Clone, Debug)]
 pub enum Action {
+    Embedding {
+        command: super::embedding::Command,
+        config: Option<super::embedder::Config>,
+    },
     Put {
         scope: String,
         card_id: String,
@@ -52,6 +56,11 @@ pub enum Action {
 impl Action {
     pub fn name(&self) -> &'static str {
         match self {
+            Action::Embedding { command, .. } => match command {
+                super::embedding::Command::Reindex { .. } => "reindex",
+                super::embedding::Command::Lease { .. } => "embed_lease",
+                _ => "embed_submit",
+            },
             Action::Put { import: false, .. } => "put",
             Action::Put { import: true, .. } => "import",
             Action::Retire { .. } => "retire",
@@ -65,6 +74,11 @@ impl Action {
     /// The grant an action needs, and the scope it needs it on.
     fn requirement(&self) -> (Option<&str>, &'static str) {
         match self {
+            Action::Embedding {
+                command: super::embedding::Command::Reindex { .. },
+                ..
+            } => (None, "admin"),
+            Action::Embedding { .. } => (None, "embed"),
             Action::Put {
                 scope,
                 import: false,
@@ -392,7 +406,15 @@ pub fn apply(
         }
         _ => {}
     }
-    let reply = run(tx, &p, authority)?;
+    let reply = run(tx, &p, authority, scanner)?;
+    if reply.status < 300 {
+        match &p.action {
+            Action::Put { scope, card_id, .. } | Action::Retire { scope, card_id, .. } => {
+                super::embedding::cleanup_card(tx, scope, card_id)?
+            }
+            _ => (),
+        }
+    }
     if reply.status < 300 {
         tx.execute(
             "INSERT INTO memory_idempotency(principal,client_event_id,request_digest,status,response,created_ms) VALUES(?1,?2,?3,?4,?5,?6)",
@@ -409,7 +431,12 @@ pub fn apply(
     Ok(reply)
 }
 
-fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Result<Reply> {
+fn run(
+    tx: &dyn WriteTx,
+    p: &Prepared,
+    _authority: &Authority,
+    scanner: &dyn super::scan::Scanner,
+) -> rusqlite::Result<Reply> {
     let stamp = ids::isoformat(p.now_ms);
     let current_epoch = epoch(tx)?;
     let epoch_changed = || {
@@ -423,6 +450,9 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
         )
     };
     match &p.action {
+        Action::Embedding { command, config } => {
+            super::embedding::apply(tx, p, command, config.as_ref(), scanner)
+        }
         Action::Put {
             scope,
             card_id,

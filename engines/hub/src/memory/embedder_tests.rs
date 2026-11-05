@@ -18,6 +18,7 @@ fn config(endpoint: String) -> Config {
     }
     Config {
         backend: "remote".into(),
+        pull: false,
         allowlist: vec![endpoint.clone()],
         endpoint,
         token_file: token,
@@ -33,7 +34,7 @@ fn config(endpoint: String) -> Config {
         input_chars: 6000,
     }
 }
-async fn fake(
+pub(super) async fn fake(
     digest: &str,
 ) -> (
     String,
@@ -389,4 +390,60 @@ async fn document_backoff_honors_retry_after_and_query_quiet_period() {
             .reason,
         "embedder-busy"
     );
+}
+
+#[tokio::test]
+async fn hung_http_server_pays_one_deadline_then_breaker_scales_down_best_of_three() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let streams = Arc::new(Mutex::new(Vec::new()));
+    let held = streams.clone();
+    let task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            held.lock().unwrap().push(stream);
+        }
+    });
+    let mut cold = Vec::new();
+    let mut skipped = Vec::new();
+    for _ in 0..3 {
+        let runtime = Runtime::new(
+            config(format!("http://{address}/api/embed")),
+            scan::bundled(),
+        )
+        .unwrap();
+        let start = std::time::Instant::now();
+        assert_eq!(
+            runtime.query("ordinary").await.unwrap_err().reason,
+            "embedder-timeout"
+        );
+        cold.push(start.elapsed());
+        let start = std::time::Instant::now();
+        assert!(runtime.query("ordinary").await.is_err());
+        skipped.push(start.elapsed());
+    }
+    let first = cold.into_iter().min().unwrap();
+    let skip = skipped.into_iter().min().unwrap();
+    eprintln!("S15 hung HTTP best-of-3 first={first:?} breaker={skip:?}");
+    assert!(first > skip * 10, "first={first:?} skipped={skip:?}");
+    task.abort();
+    streams.lock().unwrap().clear();
+}
+
+#[tokio::test(start_paused = true)]
+async fn failed_probe_keeps_breaker_open_for_thirty_seconds() {
+    let c = config("http://127.0.0.1:1/api/embed".into());
+    let backend = Arc::new(Backoff {
+        id: c.id.clone(),
+        calls: Mutex::new(0),
+    });
+    let runtime = Runtime::with(c, backend.clone());
+    assert!(runtime.query("first").await.is_err());
+    tokio::task::yield_now().await;
+    assert_eq!(*backend.calls.lock().unwrap(), 2);
+    tokio::time::advance(Duration::from_secs(29)).await;
+    assert!(runtime.query("skip").await.is_err());
+    assert_eq!(*backend.calls.lock().unwrap(), 2);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    assert!(runtime.query("retry").await.is_err());
+    assert!(*backend.calls.lock().unwrap() >= 3);
 }

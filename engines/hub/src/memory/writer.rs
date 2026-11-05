@@ -254,6 +254,10 @@ pub(super) fn sweep(db: &Connection, now_ms: i64) -> rusqlite::Result<usize> {
         "DELETE FROM memory_idempotency WHERE (principal,client_event_id) IN (SELECT principal,client_event_id FROM memory_idempotency WHERE created_ms < ?1 ORDER BY created_ms LIMIT ?2)",
         rusqlite::params![now_ms - super::ids::RETENTION_MS, SWEEP_BATCH as i64],
     );
+    let deleted = deleted.and_then(|n| {
+        let jobs = db.execute("DELETE FROM memory_embed_jobs WHERE (content_hash,embedder_id) IN (SELECT content_hash,embedder_id FROM memory_embed_jobs WHERE state='done' AND finished_ms < ?1 LIMIT ?2)", rusqlite::params![now_ms - 7*24*3600*1000, (SWEEP_BATCH-n) as i64])?;
+        Ok(n + jobs)
+    });
     let _ = db.progress_handler(0, None::<fn() -> bool>);
     match deleted {
         Ok(n) => match db.execute_batch("COMMIT") {

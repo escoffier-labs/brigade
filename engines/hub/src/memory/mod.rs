@@ -8,7 +8,11 @@
 //! Writes and prompt loads use the versioned guard scanner (S18).
 //! Proposals and decisions (S19a) and embedding (S15) follow in later slices.
 pub mod auth;
+pub mod dense;
 pub mod embedder;
+pub mod embedding;
+#[cfg(test)]
+mod embedding_tests;
 pub mod ids;
 pub mod index;
 pub mod ops;
@@ -53,14 +57,7 @@ const STATUS_SCOPES_MAX: usize = 64;
 /// How long `search` with `min_seq` waits for the index to reach it.
 pub const MIN_SEQ_WAIT: Duration = Duration::from_millis(500);
 /// Actions in the route table that later slices build.
-const LATER: &[&str] = &[
-    "propose",
-    "decide",
-    "rollback",
-    "preflight",
-    "embed_lease",
-    "embed_submit",
-];
+const LATER: &[&str] = &["propose", "decide", "rollback", "preflight"];
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Reply {
@@ -99,6 +96,10 @@ pub struct Store {
     last_sweep: std::sync::atomic::AtomicI64,
     index: Arc<index::Index>,
     retrieval: Option<Arc<embedder::Runtime>>,
+    dense: Arc<dense::Index>,
+    coverage: std::sync::RwLock<(usize, usize)>,
+    embedding_task: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    pull_embeddings: bool,
 }
 
 impl Drop for Store {
@@ -106,6 +107,9 @@ impl Drop for Store {
     /// connection is closed before anything swaps the memory file. The
     /// writer then answers what is queued and closes its connections.
     fn drop(&mut self) {
+        if let Some(task) = self.embedding_task.lock().unwrap().take() {
+            task.abort();
+        }
         self.index.stop();
     }
 }
@@ -179,13 +183,22 @@ impl Store {
             last_sweep: std::sync::atomic::AtomicI64::new(i64::MIN),
             index,
             retrieval: None,
+            dense: Arc::default(),
+            coverage: std::sync::RwLock::new((0, 0)),
+            embedding_task: std::sync::Mutex::new(None),
+            pull_embeddings: false,
         })
     }
     /// Lexical mode ignores an unused embedder table, including credentials.
     pub fn configure_retrieval(&mut self, config: &Json) -> Result<(), String> {
+        self.pull_embeddings = config["embedder"]["pull"].as_bool().unwrap_or(false);
         match config["retrieval"].as_str().unwrap_or("lexical") {
             "lexical" => {
+                if let Some(task) = self.embedding_task.lock().unwrap().take() {
+                    task.abort();
+                }
                 self.retrieval = None;
+                self.dense = Arc::default();
                 if config.get("embedder").is_some() {
                     eprintln!("INFO memory.embedder unused in lexical mode");
                 }
@@ -198,18 +211,244 @@ impl Store {
             }
             _ => return Err("memory.retrieval must be lexical or hybrid".into()),
         }
+        *self.coverage.write().unwrap() = (
+            0,
+            self.index
+                .current()
+                .live(&vec![true; self.index.current().scopes().len()])
+                .len(),
+        );
         Ok(())
     }
+    async fn embedding_request(&self, credential: &Credential, action: &str, raw: &Json) -> Reply {
+        let allowed: &[&str] = match action {
+            "reindex" => &["action", "client_event_id", "drop"],
+            "embed_lease" => &["action", "client_event_id", "embedder_id", "max"],
+            _ => &[
+                "action",
+                "client_event_id",
+                "lease_id",
+                "model_digest",
+                "vectors",
+            ],
+        };
+        if raw
+            .as_object()
+            .unwrap()
+            .keys()
+            .any(|k| !allowed.contains(&k.as_str()))
+        {
+            return invalid("unknown embedding field");
+        }
+        let command = if action == "reindex" && raw["drop"].is_string() {
+            embedding::Command::Reindex {
+                id: raw["drop"].as_str().unwrap().into(),
+                drop: true,
+            }
+        } else {
+            let Some(runtime) = &self.retrieval else {
+                return error(503, "memory_action_unavailable", "no embedder configured");
+            };
+            match embedding::parse(action, raw, &runtime.config) {
+                Ok(command) => command,
+                Err(reply) => return reply,
+            }
+        };
+        let Some((event, at)) = raw["client_event_id"]
+            .as_str()
+            .and_then(ids::parse_event_id)
+        else {
+            return error(
+                400,
+                "memory_client_event_invalid",
+                "client_event_id required",
+            );
+        };
+        let now = self.clock.now_ms();
+        if at < now - ids::WINDOW_MS || at > now + ids::FUTURE_MS {
+            return error(
+                409,
+                "memory_client_event_expired",
+                "event outside acceptance window",
+            );
+        }
+        let drop_id = if let embedding::Command::Reindex { id, drop: true } = &command {
+            Some(id.clone())
+        } else {
+            None
+        };
+        let reply = self
+            .write(Prepared {
+                credential: credential.clone(),
+                action: Action::Embedding {
+                    command,
+                    config: self.retrieval.as_ref().map(|r| r.config.clone()),
+                },
+                client_event_id: event,
+                request_digest: ids::sha256_hex(raw.to_string().as_bytes()),
+                now_ms: now,
+            })
+            .await;
+        // Complete the queue in bounded writer turns. No transaction holds all missing rows.
+        if action == "reindex" && drop_id.is_none() && reply.status == 200 {
+            while self
+                .derived(embedding::Command::Reindex {
+                    id: self.retrieval.as_ref().unwrap().config.id.key(),
+                    drop: false,
+                })
+                .await
+                .body["queued"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+            {}
+        }
+        if reply.status == 200 {
+            if let Some(id) = drop_id {
+                self.dense.drop_id(&id);
+            }
+            let _ = self.refresh_dense().await;
+        }
+        reply
+    }
+    async fn derived(&self, command: embedding::Command) -> Reply {
+        let now = self.clock.now_ms();
+        let digest = ids::sha256_hex(format!("{command:?}").as_bytes());
+        self.write(Prepared {
+            credential: Credential::Admin,
+            action: Action::Embedding {
+                command,
+                config: self.retrieval.as_ref().map(|r| r.config.clone()),
+            },
+            client_event_id: ids::mint(now),
+            request_digest: digest,
+            now_ms: now,
+        })
+        .await
+    }
+    async fn refresh_coverage(&self) {
+        if let Some(runtime) = &self.retrieval {
+            let id = runtime.config.id.key();
+            if let Ok(pair) = self
+                .readers
+                .submit(move |c| embedding::coverage(&Conn(c), &id))
+                .await
+            {
+                *self.coverage.write().unwrap() = pair;
+            }
+        }
+    }
+    pub async fn refresh_dense(&self) -> Result<(), String> {
+        let Some(runtime) = &self.retrieval else {
+            return Ok(());
+        };
+        let id = runtime.config.id.key();
+        let dimensions = runtime.config.id.dimensions;
+        let dense = self.dense.clone();
+        self.readers
+            .submit(move |c| dense.refresh(c, &id, dimensions).map(|_| ()))
+            .await
+            .map_err(|_| "dense refresh failed")?;
+        self.refresh_coverage().await;
+        Ok(())
+    }
+    /// One cancellable scheduler per store. Lexical mode creates no task.
+    pub fn start_embeddings(self: &Arc<Self>) {
+        if self.retrieval.is_none() {
+            return;
+        }
+        let mut task = self.embedding_task.lock().unwrap();
+        if task.is_some() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        *task = Some(tokio::spawn(async move {
+            loop {
+                let Some(store) = weak.upgrade() else {
+                    return;
+                };
+                store.embedding_tick().await;
+                drop(store);
+                tokio::time::sleep(Duration::from_secs(1)).await;
+            }
+        }));
+    }
+    pub async fn embedding_tick(&self) {
+        let Some(runtime) = self.retrieval.clone() else {
+            return;
+        };
+        self.derived(embedding::Command::Reindex {
+            id: runtime.config.id.key(),
+            drop: false,
+        })
+        .await;
+        let _ = self.refresh_dense().await;
+        if !self.pull_embeddings {
+            let lease = self.derived(embedding::Command::Lease { max: 4 }).await;
+            if lease.status == 200 {
+                let jobs = lease.body["jobs"].as_array().cloned().unwrap_or_default();
+                if !jobs.is_empty() {
+                    let texts = jobs
+                        .iter()
+                        .map(|j| {
+                            (
+                                j["text"].as_str().unwrap_or("").into(),
+                                j["scan_state"].as_str().unwrap_or("pending").into(),
+                            )
+                        })
+                        .collect();
+                    let command = match runtime.documents(texts).await {
+                        Ok(rows) => embedding::Command::Submit {
+                            lease: lease.body["lease_id"].as_str().unwrap().into(),
+                            digest: runtime.config.id.model_digest.clone(),
+                            vectors: jobs
+                                .iter()
+                                .zip(rows)
+                                .map(|(j, v)| {
+                                    (
+                                        j["content_hash"].as_str().unwrap().into(),
+                                        v.iter().flat_map(|f| f.to_le_bytes()).collect(),
+                                    )
+                                })
+                                .collect(),
+                        },
+                        Err(e) => embedding::Command::Failed {
+                            lease: lease.body["lease_id"].as_str().unwrap().into(),
+                            reason: e.reason.into(),
+                        },
+                    };
+                    self.derived(command).await;
+                    let _ = self.refresh_dense().await;
+                }
+            }
+        }
+    }
     pub fn retrieval_status(&self) -> Json {
-        match &self.retrieval {
+        let mut status = match &self.retrieval {
             None => json!({"mode": "lexical", "effective": "lexical", "state": "ok"}),
             Some(runtime) => match runtime.reason() {
                 Some(reason) => {
                     json!({"mode": "hybrid", "effective": "lexical-fallback", "state": "degraded", "reason": reason, "endpoint_host": url::Url::parse(&runtime.config.endpoint).ok().and_then(|u| u.host_str().map(String::from)), "breaker_open": runtime.breaker_open()})
                 }
-                None => json!({"mode": "hybrid", "effective": "lexical", "state": "switching"}),
+                None => {
+                    let (covered, total) = *self.coverage.read().unwrap();
+                    let complete = covered == total;
+                    json!({"mode": "hybrid", "effective": if complete { "hybrid" } else { "lexical" }, "state": if complete { "ok" } else { "switching" }, "coverage": {"cards": covered, "total": total}})
+                }
             },
+        };
+        if let Some(runtime) = &self.retrieval {
+            status["endpoint_host"] = json!(
+                url::Url::parse(&runtime.config.endpoint)
+                    .ok()
+                    .and_then(|u| u.host_str().map(String::from))
+            );
+            status["breaker_open"] = json!(runtime.breaker_open());
+            let (cards, total) = *self.coverage.read().unwrap();
+            status["coverage"] = json!({"cards": cards, "total": total});
+            status["embedder_id"] = json!(runtime.config.id.key());
         }
+        status
     }
     /// The lexical index, for `/metrics` and `status`.
     pub fn index(&self) -> &Arc<index::Index> {
@@ -267,6 +506,9 @@ impl Store {
         match action {
             "card" | "log" | "status" => self.read(credential, action, map).await,
             "search" => self.search(credential, map).await,
+            "reindex" | "embed_lease" | "embed_submit" => {
+                self.embedding_request(credential, action, &raw).await
+            }
             "put" | "import" | "retire" | "handoff" | "capture" | "grant" => {
                 match self.prepare(credential, action, map, &raw) {
                     Ok(prepared) => self.write(prepared).await,
@@ -287,7 +529,12 @@ impl Store {
             .submit(prepared, Instant::now() + COMMAND_DEADLINE)
             .await
         {
-            Ok(reply) => reply,
+            Ok(reply) => {
+                if reply.status < 300 {
+                    self.refresh_coverage().await;
+                }
+                reply
+            }
             Err(failure) => Reply::new(
                 failure.status,
                 json!({"error": "hub busy", "reason": failure.reason}),
@@ -582,35 +829,77 @@ impl Store {
             Some(min) => self.index.wait(min, MIN_SEQ_WAIT).await,
             None => self.index.current(),
         };
-        let credential = credential.clone();
-        let scanner = self.scanner.clone();
         let query = request.query.clone();
         let lexical = map.get("mode").and_then(Json::as_str) == Some("lexical");
-        match self
+        let c = credential.clone();
+        let r = request.clone();
+        let snap = snapshot.clone();
+        let scanner = self.scanner.clone();
+        let first = self
             .readers
-            .submit(move |c| {
-                search::run(&Conn(c), &credential, &request, &snapshot, scanner.as_ref())
-            })
-            .await
-        {
-            Ok(mut reply) => {
-                if reply.status == 200 && !lexical {
-                    if let Some(runtime) = &self.retrieval {
-                        if let Err(error) = runtime.query(&query).await {
-                            reply.body["retrieval"]["mode"] = json!("lexical-fallback");
-                            reply.body["retrieval"]["effective"] = json!("lexical-fallback");
-                            reply.body["retrieval"]["degraded"] = json!(true);
-                            reply.body["retrieval"]["reason"] = json!(error.reason);
-                        }
-                    }
-                }
-                reply
+            .submit(move |db| search::run(&Conn(db), &c, &r, &snap, scanner.as_ref()))
+            .await;
+        let mut reply = match first {
+            Ok(reply) => reply,
+            Err(_) => {
+                return Reply::new(
+                    503,
+                    json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
+                );
             }
-            Err(_) => Reply::new(
-                503,
-                json!({"error": "hub busy", "reason": "memory-reader-timeout"}),
-            ),
+        };
+        if reply.status != 200 || lexical {
+            return reply;
         }
+        if let Some(runtime) = &self.retrieval {
+            if let Some(reason) = runtime.reason() {
+                reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                reply.body["retrieval"]["degraded"] = json!(true);
+                reply.body["retrieval"]["reason"] = json!(reason);
+            }
+            let Some(matrix) = self.dense.current(&runtime.config.id.key()) else {
+                return reply;
+            };
+            let hashes = matrix.hashes();
+            let ready = snapshot
+                .live(&vec![true; snapshot.scopes().len()])
+                .iter()
+                .all(|n| hashes.contains(&*snapshot.doc(*n).content_hash));
+            if !ready {
+                return reply;
+            }
+            match runtime.query(&query).await {
+                Err(error) => {
+                    reply.body["retrieval"]["mode"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["effective"] = json!("lexical-fallback");
+                    reply.body["retrieval"]["degraded"] = json!(true);
+                    reply.body["retrieval"]["reason"] = json!(error.reason);
+                }
+                Ok(vector) => {
+                    request.dense = Some((matrix, vector));
+                    let credential = credential.clone();
+                    let scanner = self.scanner.clone();
+                    if let Ok(hybrid) = self
+                        .readers
+                        .submit(move |db| {
+                            search::run(
+                                &Conn(db),
+                                &credential,
+                                &request,
+                                &snapshot,
+                                scanner.as_ref(),
+                            )
+                        })
+                        .await
+                    {
+                        return hybrid;
+                    }
+                    reply.body["retrieval"]["stale"] = json!(true);
+                }
+            }
+        }
+        reply
     }
 
     async fn read(&self, credential: &Credential, action: &str, map: &Map<String, Json>) -> Reply {
@@ -640,6 +929,10 @@ impl Store {
             Ok(mut reply) => {
                 if is_status && reply.status == 200 {
                     reply.body["default_mode"] = retrieval["mode"].clone();
+                    if let Some(id) = retrieval.get("embedder_id") {
+                        reply.body["embedders"] =
+                            json!([{"id": id, "coverage": retrieval["coverage"]}]);
+                    }
                     reply.body["retrieval"] = retrieval;
                 }
                 reply
