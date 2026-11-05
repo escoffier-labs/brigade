@@ -118,10 +118,9 @@ fn defaults(credential: &Credential, scope: &str) -> &'static [&'static str] {
         _ => &[],
     }
 }
-fn grant_rows<T: ReadTx + ?Sized>(
-    tx: &T,
-    principal: &str,
-) -> rusqlite::Result<Vec<(String, BTreeSet<String>)>> {
+/// One principal's grants: (scope pattern, rights).
+type Grants = Vec<(String, BTreeSet<String>)>;
+fn grant_rows<T: ReadTx + ?Sized>(tx: &T, principal: &str) -> rusqlite::Result<Grants> {
     Ok(tx
         .query(
             "SELECT scope,rights FROM memory_grants WHERE principal=?1",
@@ -173,24 +172,33 @@ pub fn has_right<T: ReadTx + ?Sized>(
                 .iter()
                 .any(|(_, rights)| rights.contains(right)));
     };
+    if let Some(answer) = without_grants(credential, scope, right) {
+        return Ok(answer);
+    }
+    Ok(granted(&grant_rows(tx, principal)?, scope, right))
+}
+/// The answer for a scope when the grant rows cannot change it.
+fn without_grants(credential: &Credential, scope: &str, right: &str) -> Option<bool> {
     if let Some(owner) = scope.strip_prefix("principal:") {
-        if owner != principal {
-            return Ok(false);
+        if owner != credential.principal() {
+            return Some(false);
         }
     }
-    if defaults(credential, scope).contains(&right) {
-        return Ok(true);
-    }
-    Ok(grant_rows(tx, principal)?
+    defaults(credential, scope).contains(&right).then_some(true)
+}
+fn granted(grants: &Grants, scope: &str, right: &str) -> bool {
+    grants
         .iter()
-        .any(|(pattern, rights)| covers(pattern, scope) && rights.contains(right)))
+        .any(|(pattern, rights)| covers(pattern, scope) && rights.contains(right))
 }
 
-/// Per-request cache of readable scopes, for filtering a page of the log.
+/// Per-request cache of readable scopes, for filtering a page of the log or
+/// a search's corpus. The grant rows are read at most once per request.
 pub struct Readable<'a, T: ReadTx + ?Sized> {
     tx: &'a T,
     credential: &'a Credential,
     seen: std::collections::HashMap<String, bool>,
+    grants: Option<Grants>,
 }
 impl<'a, T: ReadTx + ?Sized> Readable<'a, T> {
     pub fn new(tx: &'a T, credential: &'a Credential) -> Self {
@@ -198,14 +206,86 @@ impl<'a, T: ReadTx + ?Sized> Readable<'a, T> {
             tx,
             credential,
             seen: Default::default(),
+            grants: None,
         }
     }
     pub fn scope(&mut self, scope: &str) -> rusqlite::Result<bool> {
         if let Some(v) = self.seen.get(scope) {
             return Ok(*v);
         }
-        let v = has_right(self.tx, self.credential, Some(scope), "read")?;
+        let v = match (
+            self.credential,
+            without_grants(self.credential, scope, "read"),
+        ) {
+            (Credential::Admin, _) => true,
+            (_, Some(v)) => v,
+            (_, None) => {
+                if self.grants.is_none() {
+                    self.grants = Some(grant_rows(self.tx, self.credential.principal())?);
+                }
+                granted(self.grants.as_ref().unwrap(), scope, "read")
+            }
+        };
         self.seen.insert(scope.into(), v);
         Ok(v)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+
+    struct Counting {
+        db: rusqlite::Connection,
+        grant_reads: Cell<usize>,
+    }
+    impl ReadTx for Counting {
+        fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+            if sql.contains("memory_grants") {
+                self.grant_reads.set(self.grant_reads.get() + 1);
+            }
+            let mut statement = self.db.prepare(sql)?;
+            let width = statement.column_count();
+            let rows = statement.query_map(rusqlite::params_from_iter(params), |row| {
+                (0..width).map(|i| row.get::<_, Value>(i)).collect()
+            })?;
+            rows.collect()
+        }
+    }
+
+    #[test]
+    fn readable_reads_the_grant_rows_once_per_request() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE memory_grants(principal TEXT, scope TEXT, rights TEXT);
+             INSERT INTO memory_grants VALUES('agent:dot','repo:keep','read'),('agent:dot','repo:*','write');",
+        )
+        .unwrap();
+        let tx = Counting {
+            db,
+            grant_reads: Cell::new(0),
+        };
+        let credential = Credential::Principal {
+            id: "agent:dot".into(),
+            digest: "d".into(),
+        };
+        let mut readable = Readable::new(&tx, &credential);
+        let mut read = 0;
+        for n in 0..5000 {
+            read += readable.scope(&format!("repo:r{n}")).unwrap() as usize;
+        }
+        assert!(readable.scope("repo:keep").unwrap());
+        assert!(!readable.scope("principal:other").unwrap());
+        assert!(!readable.scope("fleet").unwrap());
+        assert_eq!((read, tx.grant_reads.get()), (0, 1));
+        // The cached answers agree with the per-call check.
+        for scope in ["repo:keep", "repo:r7", "fleet", "principal:agent:dot"] {
+            assert_eq!(
+                Readable::new(&tx, &credential).scope(scope).unwrap(),
+                has_right(&tx, &credential, Some(scope), "read").unwrap(),
+                "{scope}"
+            );
+        }
     }
 }

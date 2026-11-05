@@ -121,7 +121,9 @@ fn scorer_matches_python_goldens() {
                 .collect();
             let tokens = text::tokenize(query);
             let hits = if tokens.is_empty() {
-                search::literal(&snap, &allowed, query, |h| Ok(texts.get(h).cloned())).unwrap()
+                search::literal(&snap, &allowed, query, |h| Ok(texts.get(h).cloned()))
+                    .unwrap()
+                    .hits
             } else {
                 snap.score(&allowed, &tokens)
             };
@@ -501,8 +503,7 @@ fn rebuild_time_and_peak_memory_at_20000_cards() {
     // A second full build while the first snapshot is still held, as a
     // background rebuild does.
     let started = Instant::now();
-    let (cards, watermark) = super::index::load(&db).unwrap();
-    let second = Builder::from_cards(cards, watermark).snapshot();
+    let second = super::index::load(&db).unwrap().snapshot();
     let rebuild = started.elapsed();
     let peak = status("VmHWM:");
     let started = Instant::now();
@@ -545,4 +546,307 @@ fn table_lookup_agrees_with_every_code_point() {
             }
         }
     }
+}
+
+fn nested(depth: usize) -> String {
+    format!("{}0{}", "[".repeat(depth), "]".repeat(depth))
+}
+
+#[test]
+fn literal_nesting_stops_at_cpythons_limit() {
+    use text::{Lit, MAX_NESTING, literal_eval};
+    assert_eq!(MAX_NESTING, 200);
+    assert!(matches!(literal_eval(&nested(200)), Some(Lit::List(_))));
+    assert_eq!(literal_eval(&nested(201)), None);
+    // Brackets and parentheses count together, as in the tokenizer.
+    let mixed = format!("[{}1{}]", "(".repeat(199), ")".repeat(199));
+    assert!(literal_eval(&mixed).is_some());
+    let over = format!("[{}1{}]", "(".repeat(200), ")".repeat(200));
+    assert_eq!(literal_eval(&over), None);
+    // Far past the limit the parser stops at once instead of recursing.
+    assert_eq!(literal_eval(&nested(200_000)), None);
+    let card = format!("---\ntags: {}\n---\nbody\n", nested(200_000));
+    let f = text::fields(&card, "deep");
+    assert_eq!(f.tags.len(), 1);
+    assert!(f.tags[0].starts_with("[[[["));
+}
+
+#[test]
+fn radix_integers_convert_to_decimal_within_pythons_digit_limit() {
+    use text::{Lit, literal_eval};
+    let int = |s: &str| match literal_eval(s) {
+        Some(Lit::List(items)) => items.into_iter().map(|i| i.repr()).collect::<Vec<_>>(),
+        other => panic!("{s}: {other:?}"),
+    };
+    assert_eq!(
+        int("[0x1F, 0o17, 0b101, 0X_ff, -0x10, -0x0, 0b_1_0, 0x00]"),
+        ["31", "15", "5", "255", "-16", "0", "2", "0"]
+    );
+    assert_eq!(
+        int("[0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF]"),
+        ["340282366920938463463374607431768211455"]
+    );
+    for bad in [
+        "[0x]", "[0b2]", "[0x1__2]", "[0x1_]", "[0x1e+5]", "[0o8]", "[0x_]",
+    ] {
+        assert_eq!(literal_eval(bad), None, "{bad}");
+    }
+    // 16**3571 - 1 has 4,300 digits; one more hex digit is past the limit,
+    // which Python parses but cannot turn back into text.
+    let at = format!("[0x{}]", "f".repeat(3571));
+    assert_eq!(int(&at)[0].len(), 4300);
+    let past = format!("[0x{}]", "f".repeat(3572));
+    assert_eq!(literal_eval(&past), None);
+    // A huge literal is refused by its size, before any conversion.
+    let started = Instant::now();
+    assert_eq!(literal_eval(&format!("[0b{}]", "1".repeat(400_000))), None);
+    assert!(started.elapsed() < Duration::from_secs(1));
+    let decimal = |n: usize| format!("[{}]", "1".repeat(n));
+    assert!(literal_eval(&decimal(4300)).is_some());
+    assert_eq!(literal_eval(&decimal(4301)), None);
+}
+
+/// Codex P1: a put whose front matter nests far past the limit committed,
+/// then overflowed the writer's stack while indexing, and again at every
+/// restart. It must index as raw text and survive a restart.
+#[tokio::test]
+async fn a_deeply_nested_card_indexes_and_survives_restart() {
+    let mut h = Hub::new();
+    let text = format!(
+        "---\ntags: {}{}\n---\nsurvivor\n",
+        "[".repeat(200_000),
+        "]".repeat(200_000)
+    );
+    assert!(text.len() < super::ids::MAX_TEXT_BYTES);
+    let put = h.put(NODE_TOKEN, "fleet", "deep", None, &text).await;
+    assert_eq!(put.status, 201, "{:?}", put.body);
+    let seq = put.body["event"]["seq"].as_i64().unwrap();
+    let found = search(&h, NODE_TOKEN, json!({"query":"survivor","min_seq":seq})).await;
+    assert_eq!(found.body["retrieval"]["stale"], json!(false));
+    assert_eq!(ids(&found), vec![pair("fleet", "deep")]);
+    let tags = found.body["matches"][0]["tags"][0].as_str().unwrap();
+    assert_eq!(tags.len(), 400_000);
+    h.store.take();
+    h.open(std::sync::Arc::new(super::scan::Unavailable), None);
+    let after = search(&h, NODE_TOKEN, json!({"query":"survivor"})).await;
+    assert_eq!(after.body, found.body);
+}
+
+/// Claude #2: a literal query's work is bounded however large the corpus.
+#[test]
+fn literal_queries_read_a_bounded_part_of_a_large_corpus() {
+    let cards = (0..20_000).map(|n| Card {
+        scope: "fleet".into(),
+        card_id: format!("card-{n:05}"),
+        revision: n + 1,
+        content_hash: format!("h{n}"),
+        trust: "agent-unreviewed".into(),
+        text: "path::to -> thing\n".into(),
+    });
+    let snap = Builder::from_cards(cards, 1).snapshot();
+    let (mut reads, mut bytes) = (0, 0);
+    let small = search::literal(&snap, &[true], "::", |_| {
+        reads += 1;
+        Ok(Some("path::to -> thing\n".into()))
+    })
+    .unwrap();
+    assert_eq!(reads, search::LITERAL_DOCS);
+    assert_eq!(small.hits.len(), search::LITERAL_DOCS);
+    assert!(!small.complete);
+    // Large cards stop the scan at the byte budget first.
+    let big = "x -> y ".repeat(64 * 1024);
+    reads = 0;
+    let large = search::literal(&snap, &[true], "->", |_| {
+        reads += 1;
+        bytes += big.len();
+        Ok(Some(big.clone()))
+    })
+    .unwrap();
+    assert!(!large.complete);
+    assert!(bytes < search::LITERAL_BYTES + big.len(), "{bytes}");
+    assert!(reads < search::LITERAL_DOCS, "{reads}");
+    // A corpus under both bounds is scanned in full.
+    let few = Builder::from_cards(
+        (0..10).map(|n| Card {
+            scope: "fleet".into(),
+            card_id: format!("c{n}"),
+            revision: n + 1,
+            content_hash: format!("h{n}"),
+            trust: "agent-unreviewed".into(),
+            text: "a :: b\n".into(),
+        }),
+        1,
+    )
+    .snapshot();
+    let all = search::literal(&few, &[true], "::", |_| Ok(Some("a :: b\n".into()))).unwrap();
+    assert!(all.complete);
+    assert_eq!(all.hits.len(), 10);
+}
+
+#[tokio::test]
+async fn a_truncated_literal_scan_is_reported() {
+    let h = Hub::new();
+    let mut last = 0;
+    for n in 0..search::LITERAL_DOCS + 5 {
+        let r = h
+            .put(NODE_TOKEN, "fleet", &format!("c{n:04}"), None, "a :: b")
+            .await;
+        last = r.body["event"]["seq"].as_i64().unwrap();
+    }
+    let r = search(&h, NODE_TOKEN, json!({"query":"::","min_seq":last})).await;
+    assert_eq!(r.body["retrieval"]["truncated"], json!(true));
+    assert_eq!(
+        r.body["match_count"].as_u64(),
+        Some(search::LITERAL_DOCS as u64)
+    );
+    let words = search(&h, NODE_TOKEN, json!({"query":"a"})).await;
+    assert!(words.body["retrieval"].get("truncated").is_none());
+}
+
+fn card(n: usize) -> Card {
+    Card {
+        scope: "fleet".into(),
+        card_id: format!("card-{n:05}"),
+        revision: n as i64 + 1,
+        content_hash: format!("h{n}"),
+        trust: "agent-unreviewed".into(),
+        text: format!("word{n}\n"),
+    }
+}
+
+/// Claude #4: many small commits and mostly-retire workloads also rebuild.
+#[test]
+fn rebuild_triggers_on_segment_count_and_dead_documents() {
+    use super::index::{MAX_DELTA_SEGMENTS, REBUILD_FLOOR};
+    // Segments: a large main segment, so the delta document share stays small.
+    let mut b = Builder::from_cards((0..10_000).map(card), 1);
+    for k in 0..MAX_DELTA_SEGMENTS {
+        b.apply(vec![Change::Live(card(20_000 + k))], k as i64 + 2);
+        assert!(!b.wants_rebuild(), "after {} deltas", k + 1);
+    }
+    b.apply(vec![Change::Live(card(30_000))], 100);
+    assert_eq!(b.snapshot().segments(), MAX_DELTA_SEGMENTS + 2);
+    assert!(b.wants_rebuild());
+    // Dead documents: retirements add no segment and no delta document.
+    let total = 4 * REBUILD_FLOOR;
+    let mut b = Builder::from_cards((0..total).map(card), 1);
+    let gone = |n: usize| Change::Gone {
+        scope: "fleet".into(),
+        card_id: format!("card-{n:05}"),
+    };
+    b.apply((0..total / 4).map(gone).collect(), 2);
+    assert_eq!(b.snapshot().segments(), 1);
+    assert!(!b.wants_rebuild(), "exactly a quarter dead");
+    b.apply(vec![gone(total / 4)], 3);
+    assert!(b.wants_rebuild());
+    // A small index never rebuilds for its dead documents alone.
+    let mut b = Builder::from_cards((0..10).map(card), 1);
+    b.apply((0..9).map(gone).collect(), 2);
+    assert!(!b.wants_rebuild());
+}
+
+#[tokio::test]
+async fn many_small_commits_rebuild_past_the_segment_cap() {
+    let h = Hub::new();
+    let i = index(&h);
+    let mut last = 0;
+    for n in 0..super::index::MAX_DELTA_SEGMENTS + 4 {
+        let r = h
+            .put(
+                NODE_TOKEN,
+                "fleet",
+                &format!("c{n:03}"),
+                None,
+                &format!("shared t{n}"),
+            )
+            .await;
+        last = r.body["event"]["seq"].as_i64().unwrap();
+    }
+    until("rebuild", || i.metrics.lock().unwrap().rebuilds >= 1).await;
+    let r = search(
+        &h,
+        NODE_TOKEN,
+        json!({"query":"shared","min_seq":last,"limit":20}),
+    )
+    .await;
+    assert_eq!(
+        r.body["match_count"].as_u64(),
+        Some(super::index::MAX_DELTA_SEGMENTS as u64 + 4)
+    );
+    assert!(i.current().segments() <= super::index::MAX_DELTA_SEGMENTS);
+}
+
+/// Claude #7: a failed rebuild retries on its own, so a retired card leaves
+/// search with no further write.
+#[tokio::test]
+async fn a_failed_rebuild_retries_without_a_new_commit() {
+    let h = Hub::new();
+    let put = h
+        .put(NODE_TOKEN, "fleet", "secret", None, "withdrawn words")
+        .await;
+    h.put(NODE_TOKEN, "fleet", "other", None, "other words")
+        .await;
+    let i = index(&h);
+    let seq = h.events();
+    until("publication", || i.current().indexed_seq >= seq).await;
+    // The retire's publication fails, then the first two loads fail.
+    i.fail_loads.store(2, std::sync::atomic::Ordering::SeqCst);
+    i.fail.store(1, std::sync::atomic::Ordering::SeqCst);
+    let epoch = h.epoch().await;
+    let retired = h
+        .call(
+            NODE_TOKEN,
+            json!({"action":"retire","scope":"fleet","card_id":"secret","base_revision":rev(&put),"base_epoch":epoch,"client_event_id":h.id()}),
+        )
+        .await;
+    assert_eq!(retired.status, 200, "{:?}", retired.body);
+    let retired_seq = retired.body["event"]["seq"].as_i64().unwrap();
+    until("rebuild after two failed loads", || {
+        i.metrics.lock().unwrap().rebuilds == 1
+    })
+    .await;
+    assert_eq!(i.metrics.lock().unwrap().rebuild_failures, 2);
+    let r = search(&h, NODE_TOKEN, json!({"query":"withdrawn words"})).await;
+    assert_eq!(r.body["retrieval"]["stale"], json!(false));
+    assert_eq!(r.body["indexed_seq"].as_i64(), Some(retired_seq));
+    assert_eq!(ids(&r), vec![pair("fleet", "other")]);
+}
+
+#[test]
+fn rebuild_backoff_doubles_to_its_cap() {
+    use super::index::{RETRY_FIRST, RETRY_MAX};
+    let waits: Vec<Duration> = (1..=12).map(super::index::backoff).collect();
+    assert_eq!(waits[0], RETRY_FIRST);
+    assert_eq!(waits[1], RETRY_FIRST * 2);
+    assert_eq!(waits[2], RETRY_FIRST * 4);
+    assert_eq!(*waits.last().unwrap(), RETRY_MAX);
+    assert!(waits.windows(2).all(|w| w[0] <= w[1]));
+}
+
+/// Claude #8: the raw guard counts bytes as sent, apart from the
+/// 256-character limit after normalization.
+#[tokio::test]
+async fn the_raw_query_guard_is_bytes_and_apart_from_the_normalized_limit() {
+    let h = Hub::new();
+    h.put(NODE_TOKEN, "fleet", "c", None, "a b").await;
+    let spaced = format!("a{}b", " ".repeat(search::RAW_QUERY_BYTES - 2));
+    let ok = search(&h, NODE_TOKEN, json!({"query": spaced})).await;
+    assert_eq!(ok.status, 200, "{:?}", ok.body);
+    assert_eq!(ok.body["query"], json!("a b"));
+    let over = format!("a{}b", " ".repeat(search::RAW_QUERY_BYTES - 1));
+    let refused = search(&h, NODE_TOKEN, json!({"query": over})).await;
+    assert_eq!(
+        (refused.status, code(&refused)),
+        (400, "memory_query_invalid")
+    );
+    let raw_message = refused.body["error"].as_str().unwrap().to_string();
+    assert!(raw_message.contains("4096 bytes"), "{raw_message}");
+    // 1,366 three-byte characters are under 4,096 characters but over 4,096 bytes.
+    let wide = "\u{3042}".repeat(1366);
+    let wide = search(&h, NODE_TOKEN, json!({"query": wide})).await;
+    assert_eq!(wide.body["error"].as_str(), Some(raw_message.as_str()));
+    let long = search(&h, NODE_TOKEN, json!({"query": "x".repeat(257)})).await;
+    let normalized = long.body["error"].as_str().unwrap();
+    assert!(normalized.contains("256 characters"), "{normalized}");
+    assert_ne!(normalized, raw_message);
 }

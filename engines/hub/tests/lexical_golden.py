@@ -33,6 +33,10 @@ GOLDEN = HUB / "tests/lexical-golden.json"
 WORD = re.compile(r"\w")
 SIGMA = "Σ"
 FINAL = "ς"
+# Escape text for lone surrogates, written in pieces so that no tool on the
+# way joins a high and a low escape into one character.
+HIGH = "\\u" + "d83c"
+LOW = "\\u" + "df89"
 
 TOKENIZE = [
     "Straße STRASSE ẞ",
@@ -86,6 +90,27 @@ FIELDS = [
     ("trailing-comma", "---\ntags: ['x', 'y',]\ntitle: [ ]\n---\nx\n"),
     ("top-level-tuple", "---\ntags: [1], ['two']\ntitle: [1], [2],\nsummary: ['s'] , \n---\nx\n"),
     ("not-at-start", "\n---\ntitle: x\n---\ny\n"),
+    # A lone surrogate reads as U+FFFD in the hub's fields, and its repr keeps the escape.
+    (
+        "lone-surrogates",
+        f"---\ntags: [\"deploy\", \"{HIGH}{LOW}\", 'a{SIGMA}{HIGH}', ['{LOW}']]\n"
+        f"title: ['x{HIGH}', '\\U0000{LOW[2:]}', '{LOW}{HIGH}']\n---\nx\n",
+    ),
+    (
+        "radix-ints",
+        "---\ntags: [0x1F, 0o17, 0b101, 0X_ff, -0x10, -0x0, 0b_1_0, 0O7, 0B1, 0x00]\n"
+        "title: [0xa_b, 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF]\n---\nx\n",
+    ),
+    ("radix-bad", "---\ntags: [0x1__2]\ntitle: [0o8]\nsummary: [0x1e+5]\n---\nx\n"),
+    ("radix-more", "---\ntags: [0x, 0b2, 0x1_, 0x1.5, 00x1, 0xg]\ntitle: [0x 1]\n---\nx\n"),
+    ("name-escape-unknown", "---\ntags: ['\\N{NO SUCH CHARACTER NAME}']\n---\nx\n"),
+    ("comments", "---\ntags: ['ops'] # owner: team ]\ntitle: ['a', # c ]\nsummary: [1]#x ]\n---\nx\n"),
+    ("comment-after-string", "---\ntags: ['a' # b ']\n---\nx\n"),
+    # CPython's tokenizer allows 200 open brackets and refuses the 201st.
+    ("nesting-200", "---\ntags: [" + "[" * 199 + "'deep'" + "]" * 199 + "]\ntitle: [" + "(" * 199 + "1" + ")" * 199 + "]\n---\nx\n"),
+    ("nesting-201", "---\ntags: [" + "[" * 200 + "'deep'" + "]" * 200 + "]\ntitle: [" + "(" * 200 + "1" + ")" * 200 + "]\n---\nx\n"),
+    # Python 3.12 converts integers of at most 4,300 decimal digits.
+    ("int-digits", "---\ntags: [" + "1" * 4300 + "]\ntitle: [" + "1" * 4301 + "]\nsummary: [0b" + "1" * 14284 + "]\n---\nx\n"),
     ("unicode-key-space", "---\n title : nbsp\n---\nx\n"),
 ]
 
@@ -229,6 +254,11 @@ def tables() -> str:
     return "\n".join(out) + "\n"
 
 
+def display(text: str) -> str:
+    """A field as the hub holds it: a lone surrogate reads as U+FFFD."""
+    return "".join("�" if 0xD800 <= ord(c) <= 0xDFFF else c for c in text)
+
+
 def search_fields(card_id: str, text: str) -> dict:
     """`memory_cmd._card_search_fields` for a card stored as `cards/<card_id>.md`."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -256,10 +286,10 @@ def golden() -> dict:
             {
                 "card_id": card_id,
                 "text": text,
-                "title": f["title"],
-                "tags": f["tags"],
-                "summary": f["summary"],
-                "card_text": full,
+                "title": display(f["title"]),
+                "tags": [display(t) for t in f["tags"]],
+                "summary": display(f["summary"]),
+                "card_text": display(full),
                 "length": len(memory_bm25.tokenize(full)),
             }
         )

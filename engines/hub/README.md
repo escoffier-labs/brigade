@@ -186,15 +186,41 @@ read, and breaks ties by `cards/<card_id>.md`, then scope. A write answers
 with its `seq`. A `search` with `min_seq` waits up to 500 ms for the index to
 reach it and otherwise answers with `retrieval.stale: true`. If the index
 cannot follow a commit, searches keep the last good snapshot, marked stale,
-until a background rebuild from the store replaces it. `/metrics` adds the
-committed and indexed `seq`, the lag between them, the stale flag, segments,
-documents, publications, failures, rebuilds and the last build's time. The
-Unicode tables in `src/memory/pytables.rs` and the goldens in
-`tests/lexical-golden.json` come from Python. After a change to the local
-scorer or a new Python minor version, regenerate both with
-`PYTHONPATH=src python engines/hub/tests/lexical_golden.py --write` from the
-repository root. `tests/memory.py` checks that they are current and runs gate
-R0 (same ids, order and scores as `bm25`) on `evals/memory-retrieval`.
+until a background rebuild from the store replaces it. A failed rebuild
+retries on its own, starting at 100 ms and doubling to 30 s, so a card
+retired during an index failure leaves search without waiting for another
+write. A rebuild also starts once delta documents pass 10% of the main
+segment, once there are more than 64 delta segments, or once a quarter of
+the indexed documents are dead (each of the first and last needs at least
+256 documents). `/metrics` adds the committed and indexed `seq`, the lag
+between them, the stale flag, segments, documents, publications, failures,
+rebuilds and the last build's time.
+
+The query is refused with `memory_query_invalid` when it is over 4,096 UTF-8
+bytes as sent (a guard on normalization's work, with its own message) or
+over 256 characters after normalization. A query with no word characters is
+matched literally, as the local scorer does, but over at most 1,000 cards or
+4 MiB of card text per request, and a scan that stopped there answers
+`retrieval.truncated: true`.
+
+The Unicode tables in `src/memory/pytables.rs` and the goldens in
+`tests/lexical-golden.json` come from Python 3.12, the version the Hub
+workflow pins, and R0 parity holds against Python 3.12. Brigade runs on
+Python 3.11 and later, and a local search on another minor version can
+tokenize characters that version's Unicode data classifies differently. After
+a change to the local scorer or a new pinned Python minor version, regenerate
+both with `PYTHONPATH=src python engines/hub/tests/lexical_golden.py --write`
+from the repository root. `tests/memory.py` checks that they are current and
+runs gate R0 (same ids, order and scores as `bm25`) on
+`evals/memory-retrieval`.
+
+Front-matter lists go through a copy of the subset of `ast.literal_eval` that
+cards use, including base-prefixed integers, lone surrogate escapes (shown as
+U+FFFD), trailing `#` comments and CPython's limit of 200 nested brackets.
+Where it differs, the hub keeps the raw text: a `\N{name}` escape, because
+the hub ships no Unicode name table, and a base-prefixed integer over 4,300
+decimal digits, where Python raises `ValueError`. A card with such a line can
+score differently from the local search.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.

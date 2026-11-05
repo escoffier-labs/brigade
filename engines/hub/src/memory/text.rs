@@ -125,10 +125,35 @@ pub fn py_splitlines(s: &str) -> Vec<&str> {
     out
 }
 
+/// A Python `str`, which unlike a Rust `String` may hold lone surrogates.
+/// Each one is kept as U+FFFD in `text`, with its byte offset and code point
+/// beside it so `repr` still writes `\udXXX`. Neither a surrogate nor U+FFFD
+/// is `\w`, changes case or is cased, so the tokens Python makes are the same.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PyStr {
+    pub text: String,
+    surrogates: Vec<(usize, u32)>,
+}
+impl PyStr {
+    fn push(&mut self, c: char) {
+        self.text.push(c);
+    }
+    /// A code point from an escape: `None` past U+10FFFF, as Python refuses it.
+    fn push_code(&mut self, cp: u32) -> Option<()> {
+        if (0xd800..=0xdfff).contains(&cp) {
+            self.surrogates.push((self.text.len(), cp));
+            self.text.push('\u{fffd}');
+        } else {
+            self.text.push(char::from_u32(cp)?);
+        }
+        Some(())
+    }
+}
+
 /// A value `ast.literal_eval` accepts inside a front-matter list.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Lit {
-    Str(String),
+    Str(PyStr),
     Int(String),
     Float(f64),
     Bool(bool),
@@ -166,14 +191,20 @@ fn py_bool(b: bool) -> &'static str {
     if b { "True" } else { "False" }
 }
 /// `repr(str)`.
-fn repr_str(s: &str) -> String {
+fn repr_str(py: &PyStr) -> String {
+    let s = py.text.as_str();
     let quote = if s.contains('\'') && !s.contains('"') {
         '"'
     } else {
         '\''
     };
     let mut out = String::from(quote);
-    for c in s.chars() {
+    let mut surrogates = py.surrogates.iter().peekable();
+    for (i, c) in s.char_indices() {
+        if let Some((_, cp)) = surrogates.next_if(|(at, _)| *at == i) {
+            out.push_str(&format!("\\u{cp:04x}"));
+            continue;
+        }
         match c {
             '\\' => out.push_str("\\\\"),
             '\t' => out.push_str("\\t"),
@@ -224,20 +255,40 @@ impl Lit {
     /// `str(value)`: a string is itself, everything else its repr.
     pub fn py_str(&self) -> String {
         match self {
-            Lit::Str(s) => s.clone(),
+            Lit::Str(s) => s.text.clone(),
             other => other.repr(),
         }
     }
 }
 
+/// Brackets open at once before CPython's tokenizer raises `too many nested
+/// parentheses` (its `MAXLEVEL`). The limit also bounds the parser's
+/// recursion, so a deeply nested card cannot overflow the stack.
+pub const MAX_NESTING: usize = 200;
+/// Digits Python 3.12 converts between an integer and decimal text
+/// (`sys.get_int_max_str_digits()`). A longer decimal literal is a
+/// `SyntaxError`, so the raw text stays.
+const INT_MAX_STR_DIGITS: usize = 4300;
+
 /// The subset of `ast.literal_eval` front-matter lists use: strings (with
-/// the `r` and `u` prefixes, escapes and implicit concatenation), decimal
-/// integers and floats with one sign, `True`, `False`, `None`, lists and
-/// tuples. Anything else, dicts and sets included, returns `None`, and the
-/// caller keeps the raw text as Python does when `literal_eval` raises.
+/// the `r` and `u` prefixes, escapes and implicit concatenation), integers in
+/// any base and floats with one sign, `True`, `False`, `None`, lists and
+/// tuples, nested at most [`MAX_NESTING`] deep, and a trailing `#` comment.
+/// Anything else, dicts and sets included, returns `None`, and the caller
+/// keeps the raw text as Python does when `literal_eval` raises.
+///
+/// Known differences: a `\N{name}` escape always returns `None`, because the
+/// hub ships no Unicode name table, while Python decodes a valid name. A
+/// binary, octal or hex integer longer than 4,300 decimal digits returns
+/// `None`, where Python parses it and then raises `ValueError` when the card's
+/// fields call `str` on it.
 pub fn literal_eval(source: &str) -> Option<Lit> {
     let chars: Vec<char> = source.chars().collect();
-    let mut p = Parser { s: &chars, i: 0 };
+    let mut p = Parser {
+        s: &chars,
+        i: 0,
+        depth: 0,
+    };
     let first = p.value()?;
     p.space();
     if p.peek() != Some(',') {
@@ -259,26 +310,41 @@ pub fn literal_eval(source: &str) -> Option<Lit> {
 struct Parser<'a> {
     s: &'a [char],
     i: usize,
+    /// Brackets open at `i`.
+    depth: usize,
 }
 impl Parser<'_> {
     fn peek(&self) -> Option<char> {
         self.s.get(self.i).copied()
     }
+    /// Blanks, then a `#` comment, which runs to the end of the line.
     fn space(&mut self) {
         while matches!(self.peek(), Some(' ' | '\t' | '\u{c}')) {
             self.i += 1;
         }
+        if self.peek() == Some('#') {
+            self.i = self.s.len();
+        }
+    }
+    /// Opens a bracket, or `None` past [`MAX_NESTING`].
+    fn open(&mut self) -> Option<()> {
+        self.i += 1;
+        self.depth += 1;
+        (self.depth <= MAX_NESTING).then_some(())
     }
     fn value(&mut self) -> Option<Lit> {
         self.space();
         match self.peek()? {
             '[' => {
-                self.i += 1;
-                Some(Lit::List(self.items(']')?.0))
+                self.open()?;
+                let (items, _) = self.items(']')?;
+                self.depth -= 1;
+                Some(Lit::List(items))
             }
             '(' => {
-                self.i += 1;
+                self.open()?;
                 let (items, comma) = self.items(')')?;
+                self.depth -= 1;
                 // `(x)` is just `x`; a tuple needs a comma or nothing at all.
                 if items.len() == 1 && !comma {
                     items.into_iter().next()
@@ -353,6 +419,9 @@ impl Parser<'_> {
         if raw.is_empty() {
             return None;
         }
+        if let Some(radix) = radix_prefix(&raw) {
+            return radix_int(&raw[2..], radix).map(Lit::Int);
+        }
         // Underscores only between digits.
         let bytes = raw.as_bytes();
         for (k, b) in bytes.iter().enumerate() {
@@ -373,7 +442,7 @@ impl Parser<'_> {
                     .all(|b| b == b'0')
                     .then(|| Lit::Int("0".into()));
             }
-            return Some(Lit::Int(clean));
+            return (clean.len() <= INT_MAX_STR_DIGITS).then_some(Lit::Int(clean));
         }
         let shape = clean
             .bytes()
@@ -388,7 +457,7 @@ impl Parser<'_> {
         clean.parse::<f64>().ok().map(Lit::Float)
     }
     fn strings(&mut self) -> Option<Lit> {
-        let mut out = String::new();
+        let mut out = PyStr::default();
         loop {
             let mut raw = false;
             if let Some(prefix @ ('r' | 'R' | 'u' | 'U')) = self.peek() {
@@ -441,7 +510,7 @@ impl Parser<'_> {
                                 None => break,
                             }
                         }
-                        out.push(char::from_u32(value)?);
+                        out.push_code(value)?;
                     }
                     'x' | 'u' | 'U' => {
                         let width = match next {
@@ -454,10 +523,10 @@ impl Parser<'_> {
                             return None;
                         }
                         self.i += width;
-                        // A lone surrogate is a valid Python str but not a Rust one.
-                        out.push(char::from_u32(u32::from_str_radix(&digits, 16).ok()?)?);
+                        out.push_code(u32::from_str_radix(&digits, 16).ok()?)?;
                     }
-                    // `\N{name}` needs the Unicode name table.
+                    // `\N{name}` needs the Unicode name table, which the hub
+                    // does not ship (see `literal_eval`).
                     'N' => return None,
                     other => {
                         out.push('\\');
@@ -477,6 +546,65 @@ impl Parser<'_> {
             }
         }
     }
+}
+
+/// The base a `0x`, `0o` or `0b` prefix names, in either case.
+fn radix_prefix(raw: &str) -> Option<u32> {
+    match raw.as_bytes() {
+        [b'0', b'x' | b'X', ..] => Some(16),
+        [b'0', b'o' | b'O', ..] => Some(8),
+        [b'0', b'b' | b'B', ..] => Some(2),
+        _ => None,
+    }
+}
+/// The digits after a base prefix, as decimal text. Python allows one
+/// underscore after the prefix and single underscores between digits.
+fn radix_int(digits: &str, radix: u32) -> Option<String> {
+    let mut values = Vec::with_capacity(digits.len());
+    for (k, part) in digits.split('_').enumerate() {
+        if part.is_empty() && k > 0 {
+            return None;
+        }
+        for c in part.chars() {
+            values.push(c.to_digit(radix)?);
+        }
+    }
+    if values.is_empty() {
+        return None;
+    }
+    let significant: Vec<u32> = values.into_iter().skip_while(|d| *d == 0).collect();
+    // Check the size first, so the conversion below stays cheap: bits per
+    // digit against about 3.32 bits per decimal digit, with slack for the
+    // leading digit. The exact digit count is checked at the end.
+    let bits = significant.len() as u64 * u64::from(radix.trailing_zeros());
+    if bits > INT_MAX_STR_DIGITS as u64 * 3322 / 1000 + 8 {
+        return None;
+    }
+    // Little-endian limbs of nine decimal digits, fed up to 30 bits of
+    // digits at a time.
+    const LIMB: u64 = 1_000_000_000;
+    let per = (30 / radix.trailing_zeros()) as usize;
+    let mut limbs: Vec<u64> = vec![0];
+    for chunk in significant.chunks(per) {
+        let scale = u64::from(radix).pow(chunk.len() as u32);
+        let mut carry = chunk
+            .iter()
+            .fold(0u64, |v, d| v * u64::from(radix) + u64::from(*d));
+        for limb in limbs.iter_mut() {
+            let v = *limb * scale + carry;
+            *limb = v % LIMB;
+            carry = v / LIMB;
+        }
+        while carry > 0 {
+            limbs.push(carry % LIMB);
+            carry /= LIMB;
+        }
+    }
+    let mut out = limbs.last().unwrap().to_string();
+    for limb in limbs.iter().rev().skip(1) {
+        out.push_str(&format!("{limb:09}"));
+    }
+    (out.len() <= INT_MAX_STR_DIGITS).then_some(out)
 }
 
 /// `memory_cmd._parse_frontmatter`: keys in order, the last duplicate wins.

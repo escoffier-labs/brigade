@@ -11,10 +11,15 @@
 //!   log after `indexed_seq`, builds one delta segment and publishes a new
 //!   snapshot. `indexed_seq` is the last `seq` that snapshot covers.
 //! - Rebuild: once delta documents pass 10% of the main segment (and at least
+//!   [`REBUILD_FLOOR`]), once there are more than [`MAX_DELTA_SEGMENTS`] delta
+//!   segments, once dead documents pass a quarter of the table (and at least
 //!   [`REBUILD_FLOOR`]), or after an index failure, a background thread builds
 //!   a new main segment from the store at a watermark it reads with the
-//!   cards. The writer replays the log after that watermark onto it and
-//!   publishes, so writes made during the rebuild are kept.
+//!   cards, streaming them one at a time. The writer replays the log after
+//!   that watermark onto it and publishes, so writes made during the rebuild
+//!   are kept. A failed rebuild retries with a backoff of its own, so a card
+//!   retired during an index failure leaves search without waiting for
+//!   another write.
 //! - Failure: if publication fails after a commit, the last good snapshot is
 //!   republished marked stale, `/metrics` shows the lag, and a rebuild starts.
 //! - Restart builds the index from `memory_cards` and `memory_blobs`.
@@ -37,6 +42,18 @@ pub const FORMAT_VERSION: &str = "1";
 /// Delta documents below this never start a rebuild, so a small index is not
 /// rebuilt on every write.
 pub const REBUILD_FLOOR: usize = 256;
+/// Delta segments past this start a rebuild, so each query term's lookups
+/// stay bounded however small the commits are.
+pub const MAX_DELTA_SEGMENTS: usize = 64;
+/// The first wait before a failed rebuild is tried again. It doubles up to
+/// [`RETRY_MAX`].
+pub const RETRY_FIRST: Duration = Duration::from_millis(100);
+pub const RETRY_MAX: Duration = Duration::from_secs(30);
+pub(super) fn backoff(failures: u32) -> Duration {
+    RETRY_FIRST
+        .saturating_mul(1 << failures.saturating_sub(1).min(16))
+        .min(RETRY_MAX)
+}
 const CHUNK: usize = 1024;
 /// Events one tail query reads, the same window the `log` reader scans.
 const WINDOW: i64 = 5000;
@@ -300,7 +317,7 @@ impl Builder {
         }
     }
     /// A new main segment over `cards`, covering the log up to `watermark`.
-    pub fn from_cards(cards: Vec<Card>, watermark: i64) -> Self {
+    pub fn from_cards(cards: impl IntoIterator<Item = Card>, watermark: i64) -> Self {
         let mut b = Self::empty();
         let (postings, added) = b.add(cards);
         b.snap.segments = vec![Arc::new(postings.finish())];
@@ -327,7 +344,7 @@ impl Builder {
             s.tokens -= length;
         }
     }
-    fn add(&mut self, cards: Vec<Card>) -> (Postings, usize) {
+    fn add(&mut self, cards: impl IntoIterator<Item = Card>) -> (Postings, usize) {
         let mut postings = Postings::default();
         let mut added = 0;
         for card in cards {
@@ -378,8 +395,14 @@ impl Builder {
     pub fn snapshot(&self) -> Arc<Snapshot> {
         Arc::new(self.snap.clone())
     }
-    fn wants_rebuild(&self) -> bool {
-        self.snap.delta_docs >= REBUILD_FLOOR && self.snap.delta_docs * 10 > self.snap.main_docs
+    pub(super) fn wants_rebuild(&self) -> bool {
+        let s = &self.snap;
+        let deltas = s.delta_docs >= REBUILD_FLOOR && s.delta_docs * 10 > s.main_docs;
+        let segments = s.segments.len().saturating_sub(1) > MAX_DELTA_SEGMENTS;
+        let live: u64 = s.stats.iter().map(|x| x.docs).sum();
+        let dead = s.docs.len - live as usize;
+        let dead = dead >= REBUILD_FLOOR && dead * 4 > s.docs.len;
+        deltas || segments || dead
     }
 }
 
@@ -394,8 +417,10 @@ fn card_row(r: &rusqlite::Row) -> rusqlite::Result<Card> {
         text: String::from_utf8_lossy(&bytes).into_owned(),
     })
 }
-/// Every live head and the watermark it is consistent with, in one read transaction.
-pub fn load(db: &Connection) -> rusqlite::Result<(Vec<Card>, i64)> {
+/// A main segment over every live head, at the watermark it is consistent
+/// with, in one read transaction. Rows go to the builder one at a time, so
+/// the corpus text is never held at once.
+pub fn load(db: &Connection) -> rusqlite::Result<Builder> {
     db.execute_batch("BEGIN")?;
     let result = (|| {
         let watermark: i64 =
@@ -405,10 +430,15 @@ pub fn load(db: &Connection) -> rusqlite::Result<(Vec<Card>, i64)> {
         let mut s = db.prepare(
             "SELECT c.scope,c.card_id,c.revision,c.content_hash,c.trust,b.bytes FROM memory_cards c JOIN memory_blobs b ON b.content_hash=c.content_hash WHERE c.state='live' ORDER BY c.scope,c.card_id",
         )?;
-        let cards = s
+        let mut failed = None;
+        let rows = s
             .query_map([], card_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok((cards, watermark))
+            .map_while(|row| row.map_err(|e| failed = Some(e)).ok());
+        let builder = Builder::from_cards(rows, watermark);
+        match failed {
+            Some(e) => Err(e),
+            None => Ok(builder),
+        }
     })();
     let _ = db.execute_batch("COMMIT");
     result
@@ -480,7 +510,7 @@ pub struct Metrics {
 
 /// A finished background build, sent to the memory writer to replay its tail.
 pub struct Rebuilt {
-    pub result: Result<Builder, String>,
+    pub builder: Builder,
     pub seconds: f64,
 }
 
@@ -504,14 +534,35 @@ pub struct Index {
     /// then waits for a release before it hands its result to the writer.
     #[cfg(test)]
     pub gate: Mutex<Option<Gate>>,
+    /// Test hook: the next this many background loads fail.
+    #[cfg(test)]
+    pub fail_loads: std::sync::atomic::AtomicUsize,
+}
+/// Test hook: takes one from a failure counter, if any are left.
+#[cfg(test)]
+fn take_one(counter: &std::sync::atomic::AtomicUsize) -> bool {
+    use std::sync::atomic::Ordering;
+    let mut current = counter.load(Ordering::SeqCst);
+    while current > 0 {
+        match counter.compare_exchange_weak(
+            current,
+            current - 1,
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => return true,
+            Err(actual) => current = actual,
+        }
+    }
+    false
 }
 impl Index {
     /// Builds the index from the store, as at every restart.
     pub fn open(db: &Connection, path: PathBuf) -> rusqlite::Result<Arc<Self>> {
         let started = Instant::now();
-        let (cards, watermark) = load(db)?;
-        let count = cards.len() as u64;
-        let builder = Builder::from_cards(cards, watermark);
+        let builder = load(db)?;
+        let watermark = builder.snap.indexed_seq;
+        let count = builder.snap.main_docs as u64;
         let snapshot = builder.snapshot();
         let (seq, _) = watch::channel(watermark);
         Ok(Arc::new(Self {
@@ -530,6 +581,8 @@ impl Index {
             fail: Default::default(),
             #[cfg(test)]
             gate: Mutex::new(None),
+            #[cfg(test)]
+            fail_loads: Default::default(),
         }))
     }
     pub fn current(&self) -> Arc<Snapshot> {
@@ -551,6 +604,7 @@ impl Index {
             index: self.clone(),
             builder,
             rebuilding: false,
+            failed_installs: 0,
         })
     }
 }
@@ -560,6 +614,8 @@ pub struct Publisher {
     index: Arc<Index>,
     builder: Builder,
     rebuilding: bool,
+    /// Rebuilds in a row whose log replay failed after the load.
+    failed_installs: u32,
 }
 impl Publisher {
     fn publish(&self) {
@@ -571,16 +627,8 @@ impl Publisher {
     }
     fn catch_up(&mut self, db: &Connection) -> rusqlite::Result<()> {
         #[cfg(test)]
-        {
-            use std::sync::atomic::Ordering;
-            if self
-                .index
-                .fail
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok()
-            {
-                return Err(rusqlite::Error::InvalidQuery);
-            }
+        if take_one(&self.index.fail) {
+            return Err(rusqlite::Error::InvalidQuery);
         }
         let (keys, last) = tail(db, self.builder.snap.indexed_seq)?;
         if last == self.builder.snap.indexed_seq && keys.is_empty() {
@@ -621,6 +669,12 @@ impl Publisher {
     }
     /// Starts one background build from the store, unless one is running.
     fn rebuild(&mut self) {
+        self.rebuild_after(Duration::ZERO);
+    }
+    /// Starts one background build after `delay`. A failed load is retried
+    /// in the same thread with a doubling backoff until it succeeds or the
+    /// memory writer is gone, so a retry needs no new commit.
+    fn rebuild_after(&mut self, delay: Duration) {
         if self.rebuilding {
             return;
         }
@@ -628,31 +682,55 @@ impl Publisher {
             return;
         };
         self.rebuilding = true;
-        let path = self.index.path.clone();
+        let index = self.index.clone();
         #[cfg(test)]
-        let gate = self.index.gate.lock().unwrap().take();
+        let mut gate = self.index.gate.lock().unwrap().take();
         let spawned = std::thread::Builder::new()
             .name("memory-index-rebuild".into())
             .spawn(move || {
-                let started = Instant::now();
-                let result = crate::schema::audit::open(
-                    &path,
-                    OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-                )
-                .map_err(|e| e.to_string())
-                .and_then(|c| load(&c).map_err(|e| e.to_string()))
-                .map(|(cards, watermark)| Builder::from_cards(cards, watermark));
-                #[cfg(test)]
-                if let Some((loaded, release)) = gate {
-                    let _ = loaded.send(());
-                    let _ = release.recv();
-                }
-                let rebuilt = Rebuilt {
-                    result,
-                    seconds: started.elapsed().as_secs_f64(),
-                };
-                if let Some(sender) = sender.upgrade() {
-                    let _ = sender.blocking_send(super::writer::Job::Rebuilt(Box::new(rebuilt)));
+                let mut wait = delay;
+                let mut failures = 0;
+                loop {
+                    std::thread::sleep(wait);
+                    // A writer that has stopped needs no index.
+                    if sender.upgrade().is_none() {
+                        return;
+                    }
+                    let started = Instant::now();
+                    let result = crate::schema::audit::open(
+                        &index.path,
+                        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+                    )
+                    .map_err(|e| e.to_string())
+                    .and_then(|c| load(&c).map_err(|e| e.to_string()));
+                    #[cfg(test)]
+                    let result = result.and_then(|b| {
+                        if take_one(&index.fail_loads) {
+                            Err("test: load failed".to_string())
+                        } else {
+                            Ok(b)
+                        }
+                    });
+                    let Ok(builder) = result else {
+                        index.metrics.lock().unwrap().rebuild_failures += 1;
+                        failures += 1;
+                        wait = backoff(failures);
+                        continue;
+                    };
+                    #[cfg(test)]
+                    if let Some((loaded, release)) = gate.take() {
+                        let _ = loaded.send(());
+                        let _ = release.recv();
+                    }
+                    let rebuilt = Rebuilt {
+                        builder,
+                        seconds: started.elapsed().as_secs_f64(),
+                    };
+                    if let Some(sender) = sender.upgrade() {
+                        let _ =
+                            sender.blocking_send(super::writer::Job::Rebuilt(Box::new(rebuilt)));
+                    }
+                    return;
                 }
             });
         if spawned.is_err() {
@@ -663,13 +741,7 @@ impl Publisher {
     /// it, then publish it in place of the old segments.
     pub fn installed(&mut self, rebuilt: Rebuilt, db: &Connection) {
         self.rebuilding = false;
-        let builder = match rebuilt.result {
-            Ok(b) => b,
-            Err(_) => {
-                self.index.metrics.lock().unwrap().rebuild_failures += 1;
-                return;
-            }
-        };
+        let builder = rebuilt.builder;
         {
             let mut m = self.index.metrics.lock().unwrap();
             m.rebuilds += 1;
@@ -678,13 +750,19 @@ impl Publisher {
         }
         let previous = std::mem::replace(&mut self.builder, builder);
         match self.catch_up(db) {
-            Ok(()) => self.publish(),
+            Ok(()) => {
+                self.failed_installs = 0;
+                self.publish();
+            }
             Err(_) => {
-                // Keep answering from the last good snapshot; the next commit retries.
+                // Keep answering from the last good snapshot, and build again
+                // after a backoff.
                 self.builder = previous;
                 self.builder.snap.stale = true;
                 self.index.metrics.lock().unwrap().failures += 1;
                 self.publish();
+                self.failed_installs += 1;
+                self.rebuild_after(backoff(self.failed_installs));
             }
         }
     }

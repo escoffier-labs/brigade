@@ -15,8 +15,15 @@ use serde_json::{Map, Value as Json, json};
 
 /// Query length after normalization, in characters.
 pub const QUERY_CHARS: usize = 256;
-/// Raw query text read before normalization, in characters.
-const RAW_QUERY_CHARS: usize = 4096;
+/// A guard on the query as sent, in UTF-8 bytes, before any normalization.
+/// It only bounds the work normalization does; the contract's limit is
+/// [`QUERY_CHARS`] after normalization.
+pub const RAW_QUERY_BYTES: usize = 4096;
+/// A literal query (no word characters) reads at most this many cards and
+/// this much card text per request, so its cost does not grow with the
+/// corpus. A scan that stops early answers `retrieval.truncated: true`.
+pub const LITERAL_DOCS: usize = 1000;
+pub const LITERAL_BYTES: usize = 4 << 20;
 pub const LIMIT_MAX: i64 = 20;
 const LIMIT_DEFAULT: i64 = 10;
 const SCOPES_MAX: usize = 64;
@@ -53,8 +60,10 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
         .get("query")
         .and_then(Json::as_str)
         .ok_or_else(|| invalid("query must be a string"))?;
-    if raw.chars().count() > RAW_QUERY_CHARS {
-        return Err(invalid("query is too long"));
+    if raw.len() > RAW_QUERY_BYTES {
+        return Err(invalid(&format!(
+            "query must be at most {RAW_QUERY_BYTES} bytes as sent, before normalization"
+        )));
     }
     // One line, as the recall hooks normalize it.
     let query = text::single_line(raw);
@@ -133,32 +142,49 @@ pub fn parse(map: &Map<String, Json>) -> Result<Request, Reply> {
     })
 }
 
+/// Literal hits, and whether the scan covered every visible card.
+pub struct Literal {
+    pub hits: Vec<(u32, f64)>,
+    pub complete: bool,
+}
 /// `memory_bm25.rank` for a query with no word characters: the literal
 /// substring match on the lowered field, every match scoring 0.0. `body`
-/// reads a document's card text from the store.
+/// reads a document's card text from the store. The scan goes in document
+/// order and stops after [`LITERAL_DOCS`] cards or [`LITERAL_BYTES`] of
+/// card text.
 pub fn literal(
     snap: &Snapshot,
     allowed: &[bool],
     query: &str,
     mut body: impl FnMut(&str) -> rusqlite::Result<Option<String>>,
-) -> rusqlite::Result<Vec<(u32, f64)>> {
+) -> rusqlite::Result<Literal> {
     let lowered = text::py_lower(query);
     let needles = text::py_split(&lowered);
-    let mut hits = Vec::new();
+    let mut out = Literal {
+        hits: Vec::new(),
+        complete: true,
+    };
     if needles.is_empty() {
-        return Ok(hits);
+        return Ok(out);
     }
+    let (mut docs, mut bytes) = (0, 0);
     for n in snap.live(allowed) {
+        if docs == LITERAL_DOCS || bytes >= LITERAL_BYTES {
+            out.complete = false;
+            break;
+        }
+        docs += 1;
         let doc = snap.doc(n);
         let Some(body) = body(&doc.content_hash)? else {
             continue;
         };
+        bytes += body.len();
         let field = text::py_lower(&text::card_text(&doc.fields, &body));
         if needles.iter().any(|needle| field.contains(needle)) {
-            hits.push((n, 0.0));
+            out.hits.push((n, 0.0));
         }
     }
-    Ok(hits)
+    Ok(out)
 }
 fn blob<T: ReadTx + ?Sized>(tx: &T, hash: &str) -> rusqlite::Result<Option<String>> {
     let rows = tx.query(
@@ -209,10 +235,11 @@ pub fn run<T: ReadTx + ?Sized>(
             }
         }
     }
-    let hits = if request.tokens.is_empty() {
-        literal(snap, &allowed, &request.query, |hash| blob(tx, hash))?
+    let (hits, complete) = if request.tokens.is_empty() {
+        let found = literal(snap, &allowed, &request.query, |hash| blob(tx, hash))?;
+        (found.hits, found.complete)
     } else {
-        snap.score(&allowed, &request.tokens)
+        (snap.score(&allowed, &request.tokens), true)
     };
     let total = hits.len();
     let matches: Vec<Json> = snap
@@ -239,13 +266,17 @@ pub fn run<T: ReadTx + ?Sized>(
         })
         .collect();
     let stale = snap.stale || request.min_seq.is_some_and(|m| snap.indexed_seq < m);
+    let mut retrieval = json!({"mode": "lexical", "degraded": false, "stale": stale});
+    if !complete {
+        retrieval["truncated"] = json!(true);
+    }
     Ok(Reply::new(
         200,
         json!({
             "query": request.query,
             "matches": matches,
             "match_count": total,
-            "retrieval": {"mode": "lexical", "degraded": false, "stale": stale},
+            "retrieval": retrieval,
             "indexed_seq": snap.indexed_seq,
         }),
     ))
