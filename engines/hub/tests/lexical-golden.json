@@ -1,0 +1,1219 @@
+{
+ "b": 0.75,
+ "corpora": {
+  "front-matter": {
+   "cards": [
+    {
+     "card_id": "fm",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Runbook\ntags: [ops, backup]\ndescription: Nightly backup\n---\nSteps here.\n"
+    },
+    {
+     "card_id": "plain",
+     "scope": "fleet",
+     "state": "live",
+     "text": "Runbook steps without front matter.\n"
+    },
+    {
+     "card_id": "tagged",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntags: backup\n---\nbackup backup\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "tagged",
+       0.5442
+      ],
+      [
+       "fleet",
+       "fm",
+       0.3693
+      ]
+     ],
+     "query": "tags",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "fm",
+       1.5413
+      ]
+     ],
+     "query": "title description",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "tagged",
+       0.8441
+      ],
+      [
+       "fleet",
+       "fm",
+       0.7131
+      ]
+     ],
+     "query": "backup",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "fm",
+       0.5442
+      ],
+      [
+       "fleet",
+       "plain",
+       0.5442
+      ]
+     ],
+     "query": "runbook",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "fm",
+       1.1357
+      ]
+     ],
+     "query": "ops",
+     "readable": [
+      "fleet"
+     ]
+    }
+   ]
+  },
+  "literal": {
+   "cards": [
+    {
+     "card_id": "colons",
+     "scope": "fleet",
+     "state": "live",
+     "text": "path::to::thing -> arrow\n"
+    },
+    {
+     "card_id": "arrow",
+     "scope": "fleet",
+     "state": "live",
+     "text": "an -> only\n"
+    },
+    {
+     "card_id": "plain",
+     "scope": "fleet",
+     "state": "live",
+     "text": "no punctuation\n"
+    },
+    {
+     "card_id": "upper",
+     "scope": "fleet",
+     "state": "live",
+     "text": "TITLE ~~ TILDE\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "colons",
+       0.0
+      ]
+     ],
+     "query": "::",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "arrow",
+       0.0
+      ],
+      [
+       "fleet",
+       "colons",
+       0.0
+      ]
+     ],
+     "query": "->",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "arrow",
+       0.0
+      ],
+      [
+       "fleet",
+       "colons",
+       0.0
+      ]
+     ],
+     "query": ":: ->",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "upper",
+       0.0
+      ]
+     ],
+     "query": "~~",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "!!",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "  ",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "arrow",
+       0.0
+      ],
+      [
+       "fleet",
+       "colons",
+       0.0
+      ]
+     ],
+     "query": "-",
+     "readable": [
+      "fleet"
+     ]
+    }
+   ]
+  },
+  "retired": {
+   "cards": [
+    {
+     "card_id": "live",
+     "scope": "fleet",
+     "state": "live",
+     "text": "deploy schedule\n"
+    },
+    {
+     "card_id": "gone",
+     "scope": "fleet",
+     "state": "retired",
+     "text": "deploy deploy deploy\n"
+    },
+    {
+     "card_id": "third",
+     "scope": "fleet",
+     "state": "live",
+     "text": "schedule notes\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "live",
+       0.6931
+      ]
+     ],
+     "query": "deploy",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "live",
+       0.1823
+      ],
+      [
+       "fleet",
+       "third",
+       0.1823
+      ]
+     ],
+     "query": "schedule",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "live",
+       0.8755
+      ],
+      [
+       "fleet",
+       "third",
+       0.8755
+      ]
+     ],
+     "query": "deploy schedule notes",
+     "readable": [
+      "fleet"
+     ]
+    }
+   ]
+  },
+  "scopes": {
+   "cards": [
+    {
+     "card_id": "alpha",
+     "scope": "fleet",
+     "state": "live",
+     "text": "deploy pipeline\n"
+    },
+    {
+     "card_id": "alpha",
+     "scope": "repo:one",
+     "state": "live",
+     "text": "deploy deploy notes\n"
+    },
+    {
+     "card_id": "beta",
+     "scope": "repo:two",
+     "state": "live",
+     "text": "pipeline notes\n"
+    },
+    {
+     "card_id": "mine",
+     "scope": "principal:agent:dot",
+     "state": "live",
+     "text": "deploy notes private\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "alpha",
+       0.2877
+      ]
+     ],
+     "query": "deploy",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "repo:one",
+       "alpha",
+       0.3956
+      ]
+     ],
+     "query": "deploy",
+     "readable": [
+      "repo:one"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "repo:one",
+       "alpha",
+       0.8959
+      ],
+      [
+       "fleet",
+       "alpha",
+       0.1936
+      ]
+     ],
+     "query": "deploy notes",
+     "readable": [
+      "fleet",
+      "repo:one"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "repo:one",
+       "alpha",
+       1.0463
+      ],
+      [
+       "fleet",
+       "alpha",
+       0.9801
+      ],
+      [
+       "repo:two",
+       "beta",
+       0.9801
+      ]
+     ],
+     "query": "deploy pipeline notes",
+     "readable": [
+      "fleet",
+      "repo:one",
+      "repo:two"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "repo:two",
+       "beta",
+       0.1936
+      ],
+      [
+       "principal:agent:dot",
+       "mine",
+       0.1723
+      ]
+     ],
+     "query": "notes",
+     "readable": [
+      "repo:two",
+      "principal:agent:dot"
+     ]
+    }
+   ]
+  },
+  "ties": {
+   "cards": [
+    {
+     "card_id": "a",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Same\n---\nshared words here\n"
+    },
+    {
+     "card_id": "a-b",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Same\n---\nshared words here\n"
+    },
+    {
+     "card_id": "build",
+     "scope": "fleet",
+     "state": "live",
+     "text": "build build build tooling\n"
+    },
+    {
+     "card_id": "other",
+     "scope": "fleet",
+     "state": "live",
+     "text": "words elsewhere\n"
+    },
+    {
+     "card_id": "a.b",
+     "scope": "fleet",
+     "state": "live",
+     "text": "---\ntitle: Shared\n---\nshared\n"
+    }
+   ],
+   "queries": [
+    {
+     "expected": [
+      [
+       "fleet",
+       "a.b",
+       0.8784
+      ],
+      [
+       "fleet",
+       "a-b",
+       0.489
+      ],
+      [
+       "fleet",
+       "a",
+       0.489
+      ]
+     ],
+     "query": "shared",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "build",
+       2.3292
+      ]
+     ],
+     "query": "build build build",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "a-b",
+       0.978
+      ],
+      [
+       "fleet",
+       "a",
+       0.978
+      ],
+      [
+       "fleet",
+       "a.b",
+       0.8784
+      ],
+      [
+       "fleet",
+       "other",
+       0.6367
+      ]
+     ],
+     "query": "words shared",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "a",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "a-b",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "a-b",
+       0.978
+      ],
+      [
+       "fleet",
+       "a",
+       0.978
+      ],
+      [
+       "fleet",
+       "a.b",
+       0.8784
+      ],
+      [
+       "fleet",
+       "other",
+       0.6367
+      ]
+     ],
+     "query": "Shared WORDS",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "nothing",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [],
+     "query": "",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "a-b",
+       0.0
+      ],
+      [
+       "fleet",
+       "a.b",
+       0.0
+      ],
+      [
+       "fleet",
+       "a",
+       0.0
+      ]
+     ],
+     "query": ":",
+     "readable": [
+      "fleet"
+     ]
+    },
+    {
+     "expected": [
+      [
+       "fleet",
+       "a-b",
+       1.2832
+      ],
+      [
+       "fleet",
+       "a",
+       1.2832
+      ],
+      [
+       "fleet",
+       "other",
+       0.6367
+      ]
+     ],
+     "query": "here here words",
+     "readable": [
+      "fleet"
+     ]
+    }
+   ]
+  }
+ },
+ "digits": 4,
+ "fields": [
+  {
+   "card_id": "plain",
+   "card_text": "Build notes\n[build, ci]\nHow we build\n---\ntitle: Build notes\ntags: [build, ci]\nsummary: How we build\n---\nBody text.\n",
+   "length": 19,
+   "summary": "How we build",
+   "tags": [
+    "[build, ci]"
+   ],
+   "text": "---\ntitle: Build notes\ntags: [build, ci]\nsummary: How we build\n---\nBody text.\n",
+   "title": "Build notes"
+  },
+  {
+   "card_id": "no-front-matter",
+   "card_text": "no-front-matter\n\n\n# Heading\nbody\n",
+   "length": 5,
+   "summary": "",
+   "tags": [],
+   "text": "# Heading\nbody\n",
+   "title": "no-front-matter"
+  },
+  {
+   "card_id": "precedence",
+   "card_text": "precedence\n\nD\n---\ndescription: D\nsummary: S\n---\nx\n",
+   "length": 7,
+   "summary": "D",
+   "tags": [],
+   "text": "---\ndescription: D\nsummary: S\n---\nx\n",
+   "title": "precedence"
+  },
+  {
+   "card_id": "title-list",
+   "card_text": "['a', \"b's\", 3, 2.5, True, None, [1, (2,)], (), 4]\n\n\n---\ntitle: ['a', \"b's\", 3, 2.50, True, None, [1, (2,)], (), (4)]\n---\nx\n",
+   "length": 24,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: ['a', \"b's\", 3, 2.50, True, None, [1, (2,)], (), (4)]\n---\nx\n",
+   "title": "['a', \"b's\", 3, 2.5, True, None, [1, (2,)], (), 4]"
+  },
+  {
+   "card_id": "tag-escapes",
+   "card_text": "tag-escapes\ncaf\u00e9 tab\there raw\\n ab u AA\n\n---\ntags: ['caf\\u00e9', 'tab\\there', r'raw\\n', 'a' 'b', u'u', '\\101\\x41']\n---\nx\n",
+   "length": 25,
+   "summary": "",
+   "tags": [
+    "caf\u00e9",
+    "tab\there",
+    "raw\\n",
+    "ab",
+    "u",
+    "AA"
+   ],
+   "text": "---\ntags: ['caf\\u00e9', 'tab\\there', r'raw\\n', 'a' 'b', u'u', '\\101\\x41']\n---\nx\n",
+   "title": "tag-escapes"
+  },
+  {
+   "card_id": "tags-unquoted",
+   "card_text": "tags-unquoted\n[a, b]\n\n---\ntags: [a, b]\n---\nx\n",
+   "length": 8,
+   "summary": "",
+   "tags": [
+    "[a, b]"
+   ],
+   "text": "---\ntags: [a, b]\n---\nx\n",
+   "title": "tags-unquoted"
+  },
+  {
+   "card_id": "tags-scalar",
+   "card_text": "tags-scalar\nsingle\n\n---\ntags: single\n---\nx\n",
+   "length": 6,
+   "summary": "",
+   "tags": [
+    "single"
+   ],
+   "text": "---\ntags: single\n---\nx\n",
+   "title": "tags-scalar"
+  },
+  {
+   "card_id": "tags-bool",
+   "card_text": "tags-bool\nTrue\n\n---\ntags: TRUE\ntitle: false\n---\nx\n",
+   "length": 8,
+   "summary": "",
+   "tags": [
+    "True"
+   ],
+   "text": "---\ntags: TRUE\ntitle: false\n---\nx\n",
+   "title": "tags-bool"
+  },
+  {
+   "card_id": "empty-values",
+   "card_text": "empty-values\n\n\n---\ntitle: ''\ntags: []\nsummary:\n---\nbody\n",
+   "length": 6,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: ''\ntags: []\nsummary:\n---\nbody\n",
+   "title": "empty-values"
+  },
+  {
+   "card_id": "duplicate-keys",
+   "card_text": "two\n\n\n---\ntitle: one\ntitle: two\n---\nx\n",
+   "length": 6,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: one\ntitle: two\n---\nx\n",
+   "title": "two"
+  },
+  {
+   "card_id": "unterminated",
+   "card_text": "unterminated\n\n\n---\ntitle: x\nbody\n",
+   "length": 4,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: x\nbody\n",
+   "title": "unterminated"
+  },
+  {
+   "card_id": "spaced-end",
+   "card_text": "spaced\n\n\n---\ntitle: spaced\n  ---  \nafter\n",
+   "length": 4,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: spaced\n  ---  \nafter\n",
+   "title": "spaced"
+  },
+  {
+   "card_id": "keys-and-colons",
+   "card_text": "a: b\n\nquoted\n---\n title : a: b\n: nokey\nnocolon\nsummary: \"quoted\"'\n---\nx\n",
+   "length": 11,
+   "summary": "quoted",
+   "tags": [],
+   "text": "---\n title : a: b\n: nokey\nnocolon\nsummary: \"quoted\"'\n---\nx\n",
+   "title": "a: b"
+  },
+  {
+   "card_id": "vertical-tab",
+   "card_text": "v\n\nsplit\n---\ntitle: v\u000bsummary: split\n---\nx\n",
+   "length": 7,
+   "summary": "split",
+   "tags": [],
+   "text": "---\ntitle: v\u000bsummary: split\n---\nx\n",
+   "title": "v"
+  },
+  {
+   "card_id": "numbers",
+   "card_text": "numbers\n1000 0 0 5 1000.0 0.5 1.0 inf -2.5e-07 0\n\n---\ntags: [1_000, 0, -0, +5, 1e3, .5, 1., 1e999, -2.5e-7, 00]\n---\nx\n",
+   "length": 30,
+   "summary": "",
+   "tags": [
+    "1000",
+    "0",
+    "0",
+    "5",
+    "1000.0",
+    "0.5",
+    "1.0",
+    "inf",
+    "-2.5e-07",
+    "0"
+   ],
+   "text": "---\ntags: [1_000, 0, -0, +5, 1e3, .5, 1., 1e999, -2.5e-7, 00]\n---\nx\n",
+   "title": "numbers"
+  },
+  {
+   "card_id": "bad-number",
+   "card_text": "bad-number\n[007]\n\n---\ntags: [007]\n---\nx\n",
+   "length": 6,
+   "summary": "",
+   "tags": [
+    "[007]"
+   ],
+   "text": "---\ntags: [007]\n---\nx\n",
+   "title": "bad-number"
+  },
+  {
+   "card_id": "bad-literals",
+   "card_text": "[f'x']\n[1, 2] + [3]\n[--5]\n---\ntags: [1, 2] + [3]\ntitle: [f'x']\nsummary: [--5]\n---\nx\n",
+   "length": 16,
+   "summary": "[--5]",
+   "tags": [
+    "[1, 2] + [3]"
+   ],
+   "text": "---\ntags: [1, 2] + [3]\ntitle: [f'x']\nsummary: [--5]\n---\nx\n",
+   "title": "[f'x']"
+  },
+  {
+   "card_id": "repr-escapes",
+   "card_text": "['\\x00', '\\u200b', '\u00e9', '\ud83d\ude00', \"it's\", 'say \"hi\"', 'both \\' \"', '\\\\']\n\n\n---\ntitle: ['\\x00', '\\u200b', '\u00e9', '\\U0001F600', \"it's\", 'say \"hi\"', 'both \\' \"', '\\\\']\n---\nx\n",
+   "length": 19,
+   "summary": "",
+   "tags": [],
+   "text": "---\ntitle: ['\\x00', '\\u200b', '\u00e9', '\\U0001F600', \"it's\", 'say \"hi\"', 'both \\' \"', '\\\\']\n---\nx\n",
+   "title": "['\\x00', '\\u200b', '\u00e9', '\ud83d\ude00', \"it's\", 'say \"hi\"', 'both \\' \"', '\\\\']"
+  },
+  {
+   "card_id": "trailing-comma",
+   "card_text": "trailing-comma\nx y\n\n---\ntags: ['x', 'y',]\ntitle: [ ]\n---\nx\n",
+   "length": 9,
+   "summary": "",
+   "tags": [
+    "x",
+    "y"
+   ],
+   "text": "---\ntags: ['x', 'y',]\ntitle: [ ]\n---\nx\n",
+   "title": "trailing-comma"
+  },
+  {
+   "card_id": "top-level-tuple",
+   "card_text": "[1], [2],\n([1], ['two'])\n['s'] ,\n---\ntags: [1], ['two']\ntitle: [1], [2],\nsummary: ['s'] , \n---\nx\n",
+   "length": 14,
+   "summary": "['s'] ,",
+   "tags": [
+    "([1], ['two'])"
+   ],
+   "text": "---\ntags: [1], ['two']\ntitle: [1], [2],\nsummary: ['s'] , \n---\nx\n",
+   "title": "[1], [2],"
+  },
+  {
+   "card_id": "not-at-start",
+   "card_text": "not-at-start\n\n\n\n---\ntitle: x\n---\ny\n",
+   "length": 6,
+   "summary": "",
+   "tags": [],
+   "text": "\n---\ntitle: x\n---\ny\n",
+   "title": "not-at-start"
+  },
+  {
+   "card_id": "unicode-key-space",
+   "card_text": "nbsp\n\n\n---\n\u00a0title\u00a0: nbsp\n---\nx\n",
+   "length": 4,
+   "summary": "",
+   "tags": [],
+   "text": "---\n\u00a0title\u00a0: nbsp\n---\nx\n",
+   "title": "nbsp"
+  }
+ ],
+ "k1": 1.2,
+ "round": [
+  [
+   0.03125,
+   0.0312
+  ],
+  [
+   0.00015,
+   0.0001
+  ],
+  [
+   1.23455,
+   1.2346
+  ],
+  [
+   2.5,
+   2.5
+  ],
+  [
+   4.9999e-05,
+   0.0
+  ],
+  [
+   12.34565,
+   12.3456
+  ],
+  [
+   1e-05,
+   0.0
+  ],
+  [
+   3.14159265,
+   3.1416
+  ],
+  [
+   0.99995,
+   1.0
+  ],
+  [
+   7.00005,
+   7.0
+  ]
+ ],
+ "single_line": [
+  {
+   "line": "Stra\u00dfe STRASSE \u1e9e",
+   "text": "Stra\u00dfe STRASSE \u1e9e"
+  },
+  {
+   "line": "\u0130stanbul \u0131i I",
+   "text": "\u0130stanbul \u0131i I"
+  },
+  {
+   "line": "\u039f\u0394\u039f\u03a3 \u039f\u0394\u039f\u03a3. \u03a3\u0391\u03a3 \u03a3 a\u03a3\u0301 a\u03a3\u0301b",
+   "text": "\u039f\u0394\u039f\u03a3 \u039f\u0394\u039f\u03a3. \u03a3\u0391\u03a3 \u03a3 a\u03a3\u0301 a\u03a3\u0301b"
+  },
+  {
+   "line": "e\u0301cole caf\u00e9 na\u00efve",
+   "text": "e\u0301cole caf\u00e9 na\u00efve"
+  },
+  {
+   "line": "\u8a18\u61b6\u691c\u7d22 \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8",
+   "text": "\u8a18\u61b6\u691c\u7d22 \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8"
+  },
+  {
+   "line": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8",
+   "text": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8"
+  },
+  {
+   "line": "\u2460\u2461 \u00b2\u00b3 \u00bc \u216b \u0663\u0664 42 \uff14\uff12",
+   "text": "\u2460\u2461 \u00b2\u00b3 \u00bc \u216b \u0663\u0664 42 \uff14\uff12"
+  },
+  {
+   "line": "snake_case __init__ a_b-c/d.e",
+   "text": "snake_case __init__ a_b-c/d.e"
+  },
+  {
+   "line": "\u01c5ungla \u01c8",
+   "text": "\u01c5ungla \u01c8"
+  },
+  {
+   "line": "\uff21\uff22\uff23 \uff46\uff55\uff4c\uff4c",
+   "text": "\uff21\uff22\uff23 \uff46\uff55\uff4c\uff4c"
+  },
+  {
+   "line": "\u13a0 \u13e3 \u1c90",
+   "text": "\u13a0 \u13e3 \u1c90"
+  },
+  {
+   "line": "\u212a \u2126 \u212b",
+   "text": "\u212a \u2126 \u212b"
+  },
+  {
+   "line": "\ufb01ne \ufb00",
+   "text": "\ufb01ne \ufb00"
+  },
+  {
+   "line": "\u0939\u093f\u0928\u094d\u0926\u0940 \u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940",
+   "text": "\u0939\u093f\u0928\u094d\u0926\u0940 \u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940"
+  },
+  {
+   "line": "\u0e44\u0e17\u0e22",
+   "text": "\u0e44\u0e17\u0e22"
+  },
+  {
+   "line": "zero width join",
+   "text": "zero\u200dwidth\u200cjoin"
+  },
+  {
+   "line": "emoji \ud83c\udf89 test",
+   "text": "emoji \ud83c\udf89 test"
+  },
+  {
+   "line": "tab sep vt fs",
+   "text": "tab\tsep\u000bvt\u001cfs"
+  },
+  {
+   "line": "\u203funder\u203ftie",
+   "text": "\u203funder\u203ftie"
+  },
+  {
+   "line": "x\u00b7y \u24b6 \u24d0",
+   "text": "x\u00b7y \u24b6 \u24d0"
+  },
+  {
+   "line": "\ud835\udc00\ud835\udc01 \ud835\udfcf",
+   "text": "\ud835\udc00\ud835\udc01 \ud835\udfcf"
+  },
+  {
+   "line": "\u0345 MiXeD123abc",
+   "text": "\u0345 MiXeD123abc"
+  },
+  {
+   "line": ":: -- //",
+   "text": ":: -- //"
+  },
+  {
+   "line": "",
+   "text": ""
+  }
+ ],
+ "tokenize": [
+  {
+   "lower": "stra\u00dfe strasse \u00df",
+   "text": "Stra\u00dfe STRASSE \u1e9e",
+   "tokens": [
+    "stra\u00dfe",
+    "strasse",
+    "\u00df"
+   ]
+  },
+  {
+   "lower": "i\u0307stanbul \u0131i i",
+   "text": "\u0130stanbul \u0131i I",
+   "tokens": [
+    "i",
+    "stanbul",
+    "\u0131i",
+    "i"
+   ]
+  },
+  {
+   "lower": "\u03bf\u03b4\u03bf\u03c2 \u03bf\u03b4\u03bf\u03c2. \u03c3\u03b1\u03c2 \u03c3 a\u03c2\u0301 a\u03c3\u0301b",
+   "text": "\u039f\u0394\u039f\u03a3 \u039f\u0394\u039f\u03a3. \u03a3\u0391\u03a3 \u03a3 a\u03a3\u0301 a\u03a3\u0301b",
+   "tokens": [
+    "\u03bf\u03b4\u03bf\u03c2",
+    "\u03bf\u03b4\u03bf\u03c2",
+    "\u03c3\u03b1\u03c2",
+    "\u03c3",
+    "a\u03c2",
+    "a\u03c3",
+    "b"
+   ]
+  },
+  {
+   "lower": "e\u0301cole caf\u00e9 na\u00efve",
+   "text": "e\u0301cole caf\u00e9 na\u00efve",
+   "tokens": [
+    "e",
+    "cole",
+    "caf\u00e9",
+    "na\u00efve"
+   ]
+  },
+  {
+   "lower": "\u8a18\u61b6\u691c\u7d22 \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8",
+   "text": "\u8a18\u61b6\u691c\u7d22 \u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8",
+   "tokens": [
+    "\u8a18\u61b6\u691c\u7d22",
+    "\u65e5\u672c\u8a9e\u306e\u30c6\u30ad\u30b9\u30c8"
+   ]
+  },
+  {
+   "lower": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8",
+   "text": "\ud55c\uad6d\uc5b4 \ud14d\uc2a4\ud2b8",
+   "tokens": [
+    "\ud55c\uad6d\uc5b4",
+    "\ud14d\uc2a4\ud2b8"
+   ]
+  },
+  {
+   "lower": "\u2460\u2461 \u00b2\u00b3 \u00bc \u217b \u0663\u0664 42 \uff14\uff12",
+   "text": "\u2460\u2461 \u00b2\u00b3 \u00bc \u216b \u0663\u0664 42 \uff14\uff12",
+   "tokens": [
+    "\u2460\u2461",
+    "\u00b2\u00b3",
+    "\u00bc",
+    "\u217b",
+    "\u0663\u0664",
+    "42",
+    "\uff14\uff12"
+   ]
+  },
+  {
+   "lower": "snake_case __init__ a_b-c/d.e",
+   "text": "snake_case __init__ a_b-c/d.e",
+   "tokens": [
+    "snake_case",
+    "__init__",
+    "a_b",
+    "c",
+    "d",
+    "e"
+   ]
+  },
+  {
+   "lower": "\u01c6ungla \u01c9",
+   "text": "\u01c5ungla \u01c8",
+   "tokens": [
+    "\u01c6ungla",
+    "\u01c9"
+   ]
+  },
+  {
+   "lower": "\uff41\uff42\uff43 \uff46\uff55\uff4c\uff4c",
+   "text": "\uff21\uff22\uff23 \uff46\uff55\uff4c\uff4c",
+   "tokens": [
+    "\uff41\uff42\uff43",
+    "\uff46\uff55\uff4c\uff4c"
+   ]
+  },
+  {
+   "lower": "\uab70 \uabb3 \u10d0",
+   "text": "\u13a0 \u13e3 \u1c90",
+   "tokens": [
+    "\uab70",
+    "\uabb3",
+    "\u10d0"
+   ]
+  },
+  {
+   "lower": "k \u03c9 \u00e5",
+   "text": "\u212a \u2126 \u212b",
+   "tokens": [
+    "k",
+    "\u03c9",
+    "\u00e5"
+   ]
+  },
+  {
+   "lower": "\ufb01ne \ufb00",
+   "text": "\ufb01ne \ufb00",
+   "tokens": [
+    "\ufb01ne",
+    "\ufb00"
+   ]
+  },
+  {
+   "lower": "\u0939\u093f\u0928\u094d\u0926\u0940 \u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940",
+   "text": "\u0939\u093f\u0928\u094d\u0926\u0940 \u0926\u0947\u0935\u0928\u093e\u0917\u0930\u0940",
+   "tokens": [
+    "\u0939",
+    "\u0928",
+    "\u0926",
+    "\u0926",
+    "\u0935\u0928",
+    "\u0917\u0930"
+   ]
+  },
+  {
+   "lower": "\u0e44\u0e17\u0e22",
+   "text": "\u0e44\u0e17\u0e22",
+   "tokens": [
+    "\u0e44\u0e17\u0e22"
+   ]
+  },
+  {
+   "lower": "zero\u200dwidth\u200cjoin",
+   "text": "zero\u200dwidth\u200cjoin",
+   "tokens": [
+    "zero",
+    "width",
+    "join"
+   ]
+  },
+  {
+   "lower": "emoji \ud83c\udf89 test",
+   "text": "emoji \ud83c\udf89 test",
+   "tokens": [
+    "emoji",
+    "test"
+   ]
+  },
+  {
+   "lower": "tab\tsep\u000bvt\u001cfs",
+   "text": "tab\tsep\u000bvt\u001cfs",
+   "tokens": [
+    "tab",
+    "sep",
+    "vt",
+    "fs"
+   ]
+  },
+  {
+   "lower": "\u203funder\u203ftie",
+   "text": "\u203funder\u203ftie",
+   "tokens": [
+    "under",
+    "tie"
+   ]
+  },
+  {
+   "lower": "x\u00b7y \u24d0 \u24d0",
+   "text": "x\u00b7y \u24b6 \u24d0",
+   "tokens": [
+    "x",
+    "y"
+   ]
+  },
+  {
+   "lower": "\ud835\udc00\ud835\udc01 \ud835\udfcf",
+   "text": "\ud835\udc00\ud835\udc01 \ud835\udfcf",
+   "tokens": [
+    "\ud835\udc00\ud835\udc01",
+    "\ud835\udfcf"
+   ]
+  },
+  {
+   "lower": "\u0345 mixed123abc",
+   "text": "\u0345 MiXeD123abc",
+   "tokens": [
+    "mixed123abc"
+   ]
+  },
+  {
+   "lower": ":: -- //",
+   "text": ":: -- //",
+   "tokens": []
+  },
+  {
+   "lower": "",
+   "text": "",
+   "tokens": []
+  }
+ ],
+ "unicode": "15.0.0"
+}

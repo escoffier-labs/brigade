@@ -599,6 +599,24 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
                 m.commit_failures,
                 store.bucket()
             );
+            let index = store.index();
+            let snapshot = index.current();
+            let i = index.metrics.lock().unwrap().clone();
+            text += &format!(
+                "brigade_hub_memory_committed_seq {}\nbrigade_hub_memory_indexed_seq {}\nbrigade_hub_memory_index_lag_events {}\nbrigade_hub_memory_index_stale {}\nbrigade_hub_memory_index_segments {}\nbrigade_hub_memory_index_documents {}\nbrigade_hub_memory_index_publications_total {}\nbrigade_hub_memory_index_failures_total {}\nbrigade_hub_memory_index_rebuilds_total {}\nbrigade_hub_memory_index_rebuild_failures_total {}\nbrigade_hub_memory_index_build_seconds_last {}\nbrigade_hub_memory_index_build_documents_last {}\n",
+                i.committed_seq,
+                snapshot.indexed_seq,
+                (i.committed_seq - snapshot.indexed_seq).max(0),
+                u8::from(snapshot.stale),
+                snapshot.segments(),
+                snapshot.documents(),
+                i.publications,
+                i.failures,
+                i.rebuilds,
+                i.rebuild_failures,
+                i.build_seconds_last,
+                i.build_docs_last
+            );
         }
         return Response::builder()
             .header("content-type", "text/plain; version=0.0.4; charset=utf-8")

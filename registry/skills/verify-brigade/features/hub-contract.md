@@ -36,8 +36,8 @@ change, and the hub behaviors recorded as observed live in
 - **Messages.** `POST /messages` `send` (idempotent on `client_id`), `list` with
   the paging guarantee, `count`, `ack`, `sent` (by cursor and by ids),
   `sent_lookup`, `reply`, `identity` (with and without `peers`), and the
-  station reads `who` and `claims`. 16 of the hub's 19 actions are covered;
-  the three `events_*` actions are not.
+  station reads `who` and `claims`. 16 of the hub's 19 actions are covered,
+  and the three `events_*` actions are not.
 - **Keys and sealed mail.** `keys_publish`, `keys_get`, and `manifests_get`,
   then sealed `send` and `reply` with envelopes stored and returned byte for
   byte, and every structural refusal: non-canonical text, a duplicate key, bad
@@ -60,7 +60,7 @@ change, and the hub behaviors recorded as observed live in
   `enqueued_at` parsing and its expiry and future limits, key record
   validation, sealed envelopes without content or with a stale recipient key,
   question arguments, principal enrollment arguments, and node, session,
-  claim and event fields. Each case pins its status; the golden pins its text.
+  claim and event fields. Each case pins its status, and the golden pins its text.
 - **Error text (S1b).** Every response at an expected 4xx status, from the
   core cases, the hot set, the sweep and the lifecycle cases, has its `error`,
   `code` and `reason` (or its body, when it is not JSON) compared with
@@ -70,13 +70,13 @@ change, and the hub behaviors recorded as observed live in
 - **Lifecycle (S1b).** On a second hub that reads the drive's clock
   (`hub_contract_lifecycle.py`): messages past the 90-day retention leave
   `list`, `count`, `sent`, `sent_lookup`, `ack` and `reply`, with the
-  boundary pinned to the second; a plaintext `reply_to` to a purged parent
-  reads null while a sealed reply keeps its parent id; a sealed message
+  boundary pinned to the second. A plaintext `reply_to` to a purged parent
+  reads null while a sealed reply keeps its parent id. A sealed message
   acknowledged 8 days ago reads as its tombstone in `sent_lookup`, `sent` and
   `list`, one acknowledged 6 days ago and one never acknowledged stay sealed,
-  and the 7-day boundary is pinned to the second; a `client_id` resend returns
-  the first id on day 89 and makes a new message once the first has expired;
-  a question times out at its deadline, records a late operator answer (but
+  and the 7-day boundary is pinned to the second. A `client_id` resend returns
+  the first id on day 89 and makes a new message once the first has expired.
+  A question times out at its deadline, records a late operator answer (but
   not one at exactly the deadline), stops counting toward the two-pending
   limit, and is gone after 90 days. The two
   tombstones must equal the bytes Python's own purge wrote, kept in the golden.
@@ -229,8 +229,13 @@ then A, a stale edit after retire and revival, a base revision under another
 `log_epoch`, an admin put stored as `agent-unreviewed`, an import refused
 without its grant and refused while the scan hook is unavailable, grants and
 private scopes, idempotent retries and the `client_event_id` window, log
-paging and visibility, and the refusal of a revoked node token. The drive
-enrolls a fresh node and principal per run.
+paging and visibility, and the refusal of a revoked node token. Search cases
+(S13b) run in a scope only that run writes: two cards with the same text tie
+and come back in `cards/<card_id>.md` order, `min_seq` covers the run's
+writes, a query with no word characters matches literally and scores 0.0, a
+principal sees only scopes it can read, a retired card leaves the results, and
+bad queries answer `memory_query_invalid`. The drive enrolls a fresh node and
+principal per run.
 
 `--memory-absent` runs the one case a hub without memory answers instead:
 `404 {"error": "not found"}`. The in-repo Python hub has no memory, so the
@@ -292,7 +297,7 @@ With `--hub-url` it probes a running hub using a node token from
 `BRIGADE_HUB_PROBE_NODE_TOKEN` and the token of an operator-enrolled probe
 principal with no send grants from `BRIGADE_HUB_PROBE_PRINCIPAL_TOKEN`
 (`--node-token-env` and `--probe-token-env` rename them). It never enrolls.
-This is the only drive run allowed against production; the runbook is
+This is the only drive run allowed against production. The runbook is
 `docs/runbooks/fleet-hub-proxmox.md`.
 
 Observed on main `ff46d78f2` plus this change: the audit exits 0 on the Python

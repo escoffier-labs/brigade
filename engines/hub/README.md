@@ -157,10 +157,10 @@ S7 claims handlers run with `--route-mode claims=native` (proxy by default).
 This serves `GET /claims` and every `POST /claims` action natively, with
 generation fencing, retired holders, lease expiry and `claim.expired` events
 through the same writer as registration. Three cases stay on the Python
-upstream: `GET /owners`, which joins policy, sessions and Grok Bot state; a
-`GET /claims` while Grok Bot leases are active, which needs Python's display
-projection; and a `POST /claims` whose target is not ASCII, since its refusal
-text carries Python's `repr()` of the target.
+upstream. `GET /owners` joins policy, sessions and Grok Bot state. A
+`GET /claims` while Grok Bot leases are active needs Python's display
+projection. A `POST /claims` whose target is not ASCII needs Python's
+`repr()` of the target in its refusal text.
 
 Hub memory (S13a) runs with `--route-mode memory=native`. This serves
 `POST /memory` from `fleet-hub-memory.db` beside the hub database, which the
@@ -177,6 +177,24 @@ After restoring the memory file from a copy, start a new `log_epoch` before
 serving it (`brigade_hub::memory::schema::rotate_epoch`, which S31's restore
 tool calls). `/metrics` adds `brigade_hub_memory_*` lines for batches,
 hub-lock residence and wait, authority timeouts and the residence bucket.
+
+`search` (S13b) answers from an in-memory lexical index that the hub builds
+from the memory file at start and the memory writer updates after every
+commit. It scores with BM25 (k1=1.2, b=0.75), using the local scorer's
+tokenizer and card fields, over the live cards in the scopes the caller can
+read, and breaks ties by `cards/<card_id>.md`, then scope. A write answers
+with its `seq`. A `search` with `min_seq` waits up to 500 ms for the index to
+reach it and otherwise answers with `retrieval.stale: true`. If the index
+cannot follow a commit, searches keep the last good snapshot, marked stale,
+until a background rebuild from the store replaces it. `/metrics` adds the
+committed and indexed `seq`, the lag between them, the stale flag, segments,
+documents, publications, failures, rebuilds and the last build's time. The
+Unicode tables in `src/memory/pytables.rs` and the goldens in
+`tests/lexical-golden.json` come from Python. After a change to the local
+scorer or a new Python minor version, regenerate both with
+`PYTHONPATH=src python engines/hub/tests/lexical_golden.py --write` from the
+repository root. `tests/memory.py` checks that they are current and runs gate
+R0 (same ids, order and scores as `bm25`) on `evals/memory-retrieval`.
 
 Acceptance drives can use `--test-clock-file PATH` to share a deterministic
 clock with the managed Python upstream. This flag is for throwaway fixtures.

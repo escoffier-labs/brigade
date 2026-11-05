@@ -11,6 +11,7 @@
 use super::{
     Reply,
     auth::{self, Credential},
+    index,
     ops::{self, Authority, Prepared},
 };
 use crate::writer::{Arbiter, Lane, ReadTx, WriteTx, worker};
@@ -51,6 +52,8 @@ pub struct Config {
     pub max_new_bytes: usize,
     pub apply_budget: Duration,
     pub hook: Option<Hook>,
+    /// The lexical index this writer publishes after each committed batch.
+    pub index: Option<Arc<index::Index>>,
 }
 impl Config {
     pub fn new(memory: PathBuf, hub: PathBuf, admin_digest: String) -> Self {
@@ -66,6 +69,7 @@ impl Config {
             max_new_bytes: 1024 * 1024,
             apply_budget: Duration::from_millis(10),
             hook: None,
+            index: None,
         }
     }
 }
@@ -98,6 +102,8 @@ pub enum Job {
     },
     /// Bounded retention, run on this writer and never under the hub lock.
     Sweep { now_ms: i64 },
+    /// A background index build finished; this writer replays its tail.
+    Rebuilt(Box<index::Rebuilt>),
 }
 
 /// The only handle on the memory writer's hub connection.
@@ -184,6 +190,9 @@ impl Writer {
     ) -> rusqlite::Result<Self> {
         let hub = HubLock::open(&config.hub)?;
         let (sender, receiver) = mpsc::channel(config.capacity);
+        if let Some(index) = &config.index {
+            index.attach(sender.downgrade());
+        }
         let metrics = Arc::new(Mutex::new(Metrics::default()));
         let m = metrics.clone();
         let thread = std::thread::Builder::new()
@@ -309,8 +318,14 @@ pub(crate) fn run(
 ) {
     let mut writes: VecDeque<Pending> = VecDeque::new();
     let mut sweeps: VecDeque<i64> = VecDeque::new();
+    let mut rebuilt: Vec<Box<index::Rebuilt>> = Vec::new();
     let mut directory_synced = false;
-    let accept = |job: Job, writes: &mut VecDeque<Pending>, sweeps: &mut VecDeque<i64>| match job {
+    // Index publication runs on this thread after step 5, never under a lock.
+    let mut publisher = config.index.as_ref().and_then(|i| i.publisher());
+    let accept = |job: Job,
+                  writes: &mut VecDeque<Pending>,
+                  sweeps: &mut VecDeque<i64>,
+                  rebuilt: &mut Vec<Box<index::Rebuilt>>| match job {
         Job::Write {
             command,
             deadline,
@@ -325,6 +340,7 @@ pub(crate) fn run(
                 sweeps.push_back(now_ms);
             }
         }
+        Job::Rebuilt(r) => rebuilt.push(r),
     };
     loop {
         // Take from the channel only what the next batch can use, so overload
@@ -333,7 +349,12 @@ pub(crate) fn run(
             let Ok(job) = receiver.try_recv() else {
                 break;
             };
-            accept(job, &mut writes, &mut sweeps);
+            accept(job, &mut writes, &mut sweeps, &mut rebuilt);
+        }
+        for r in rebuilt.drain(..) {
+            if let Some(p) = publisher.as_mut() {
+                p.installed(*r, &db);
+            }
         }
         {
             let mut m = metrics.lock().unwrap();
@@ -353,7 +374,7 @@ pub(crate) fn run(
             }
             match receiver.blocking_recv() {
                 Some(job) => {
-                    accept(job, &mut writes, &mut sweeps);
+                    accept(job, &mut writes, &mut sweeps, &mut rebuilt);
                     continue;
                 }
                 None => return,
@@ -493,6 +514,9 @@ pub(crate) fn run(
         if committed {
             for (p, result) in results {
                 answer(p, result);
+            }
+            if let Some(p) = publisher.as_mut() {
+                p.after_commit(&db);
             }
             continue;
         }

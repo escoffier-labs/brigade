@@ -1,4 +1,4 @@
-"""`hub-contract --profile memory`: additive v1 drive cases for `POST /memory` (S13a).
+"""`hub-contract --profile memory`: additive v1 drive cases for `POST /memory` (S13a, S13b).
 
 Memory routes are new under contract v1 (D21), so every 4xx carries
 `{error, code}`. A hub without memory answers `404 {"error": "not found"}`,
@@ -61,6 +61,37 @@ STATUS = {
     "embedders": list,
     "default_mode": str,
 }
+
+
+MATCH = {
+    "path": str,
+    "scope": str,
+    "card_id": str,
+    "card_aliases": list,
+    "revision": int,
+    "title": str,
+    "summary": str,
+    "tags": list,
+    "score": float,
+    "content_hash": HEX64,
+    "trust": str,
+    "ranks": {"lexical": int},
+}
+
+
+def found(*, count: int | None = None) -> dict:
+    return {
+        "query": str,
+        "matches": [MATCH],
+        "match_count": int if count is None else hc.Eq(count),
+        "retrieval": {"mode": hc.Eq("lexical"), "degraded": hc.Eq(False), "stale": hc.Eq(False)},
+        "indexed_seq": int,
+    }
+
+
+def _matches(body: dict) -> list:
+    items = body.get("matches")
+    return [m for m in items if isinstance(m, dict)] if isinstance(items, list) else []
 
 
 def _revision(body: dict) -> int:
@@ -421,8 +452,9 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         token=node_token,
         shape={"recorded": hc.Eq(True)},
     )
+    _search_cases(d, mem, put, card, suffix, node_token=node_token, agent_token=agent_token, repo_one=repo_one)
     # Bounds and actions later slices build.
-    mem("memory-action-later", {"action": "search", "query": "x"}, status=501, shape=err("memory_action_unavailable"))
+    mem("memory-action-later", {"action": "propose"}, status=501, shape=err("memory_action_unavailable"))
     mem("memory-action-unknown", {"action": "nope"}, status=400, shape=err("memory_request_invalid"))
     put(
         "memory-card-too-large",
@@ -450,6 +482,113 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         shape={"error": hc.Eq("unauthorized: node token revoked")},
     )
     return _result(d)
+
+
+def _search_cases(
+    d: hc.Drive, mem, put, card, suffix: str, *, node_token: str, agent_token: str, repo_one: str
+) -> None:
+    """`search` (S13b): BM25 over the caller's visible corpus, ties by path.
+
+    Cases run in a scope only this run writes, named in `scopes`, so a reused
+    hub's other cards change neither the statistics nor the order.
+    """
+    scope = f"repo:contract/search-{suffix}"
+    word = f"lexical{suffix}"
+    same = f"---\ntitle: Same\n---\n{word} shared\n"
+    tie = card("tie")
+    put("memory-search-put-tie", scope, tie, None, same, status=201)
+    put("memory-search-put-tie-b", scope, f"{tie}-b", None, same, status=201)
+    colons = put("memory-search-put-literal", scope, card("colons"), None, f"{word} path::to", status=201)
+    granted = put("memory-search-put-granted", repo_one, card("granted"), None, f"{word} {word}", status=201)
+    seq = max(_seq(colons), _seq(granted))
+    body = {"action": "search", "query": word, "scopes": [scope], "min_seq": seq}
+    page = mem("memory-search", body, token=node_token, shape=found(count=3))
+    order = [(m.get("card_id"), m.get("score")) for m in _matches(page)]
+    twins = [(c, score) for c, score in order if c in (tie, f"{tie}-b")]
+    # cards/<tie>-b.md sorts before cards/<tie>.md, and the twins tie on score.
+    d.invariant(
+        "memory-search",
+        [c for c, _ in twins] == [f"{tie}-b", tie]
+        and twins[0][1] == twins[1][1]
+        and isinstance(page.get("indexed_seq"), int)
+        and page["indexed_seq"] >= seq,
+        "the tied pair in path order, indexed through min_seq",
+        {"order": order, "indexed_seq": page.get("indexed_seq")},
+    )
+    mem(
+        "memory-search-limit",
+        {**body, "limit": 1},
+        token=node_token,
+        shape={**found(count=3), "matches": hc.Pred(lambda v: isinstance(v, list) and len(v) == 1, "one match")},
+    )
+    literal = mem(
+        "memory-search-literal",
+        {**body, "query": "::"},
+        token=node_token,
+        shape=found(count=1),
+    )
+    d.invariant(
+        "memory-search-literal",
+        [(m.get("card_id"), m.get("score")) for m in _matches(literal)] == [(card("colons"), 0.0)],
+        "a query with no word characters matches the text literally and scores 0.0",
+        _matches(literal),
+    )
+    # The principal reads repo_one only, so it never sees the other scope's cards.
+    agent = mem(
+        "memory-search-principal", {"action": "search", "query": word, "min_seq": seq}, token=agent_token, shape=found()
+    )
+    d.invariant(
+        "memory-search-principal",
+        {(m.get("scope"), m.get("card_id")) for m in _matches(agent)} == {(repo_one, card("granted"))},
+        "only cards in scopes the principal can read",
+        _matches(agent),
+    )
+    mem(
+        "memory-search-unreadable-scope",
+        {"action": "search", "query": word, "scopes": [scope]},
+        token=agent_token,
+        status=403,
+        shape=err("memory_grant_missing"),
+    )
+    tied = mem("memory-search-card", {"action": "card", "card_id": f"{tie}-b", "scope": scope}, token=node_token)
+    retired = mem(
+        "memory-search-retire",
+        {
+            "action": "retire",
+            "scope": scope,
+            "card_id": f"{tie}-b",
+            "base_revision": hc._obj(tied.get("card")).get("revision"),
+            "base_epoch": tied.get("log_epoch"),
+            "client_event_id": event_id(),
+        },
+        token=node_token,
+        shape=event("agent-unreviewed", "retired"),
+    )
+    after = mem(
+        "memory-search-after-retire",
+        {**body, "min_seq": _seq(retired)},
+        token=node_token,
+        shape=found(count=2),
+    )
+    d.invariant(
+        "memory-search-after-retire",
+        f"{tie}-b" not in [m.get("card_id") for m in _matches(after)],
+        "a retired card leaves the results",
+        _matches(after),
+    )
+    for case, extra in (
+        ("memory-search-query-blank", {"query": " \t "}),
+        ("memory-search-query-long", {"query": "q" * 257}),
+        ("memory-search-limit-invalid", {"limit": 21}),
+        ("memory-search-mode-invalid", {"mode": "dense"}),
+        ("memory-search-field-unknown", {"extra": True}),
+    ):
+        mem(case, {**body, **extra}, token=node_token, status=400, shape=err("memory_query_invalid"))
+
+
+def _seq(body: dict) -> int:
+    value = hc._obj(body.get("event")).get("seq")
+    return value if isinstance(value, int) else 0
 
 
 def _result(d: hc.Drive) -> dict:
