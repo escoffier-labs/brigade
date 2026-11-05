@@ -390,7 +390,7 @@ def _replica_card(
         chunk = text[args.offset : args.offset + REPLICA_CHUNK]
         end = args.offset + len(chunk)
         following = end if end < len(text) else None
-    card = {
+    card: dict[str, Any] = {
         "scope": head.get("scope"),
         "card_id": args.card_id,
         "revision": head.get("revision"),
