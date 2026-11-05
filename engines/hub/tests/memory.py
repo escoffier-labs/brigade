@@ -124,7 +124,7 @@ class Memory(unittest.TestCase):
         self.assertEqual(hit, {"card_id": "override", "blocked": "role-override"})
         self.assertEqual(found.json["content_trust"], "untrusted")
 
-    def test_s18_per_input_match_limit_refuses_without_storage(self):
+    def test_s18_nested_path_is_flagged_and_import_refused(self):
         hub = self.run_hub("scan-failed", "--route-mode memory=native")
         for action in ("put", "import", "handoff"):
             body = {"action": action, "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!", "client_event_id": hm.event_id()}
@@ -133,13 +133,17 @@ class Memory(unittest.TestCase):
             else:
                 body.update(scope="fleet", card_id="failed")
             response = hc.request(hub.url, "POST", "/memory", token=hub.admin_token, body=body)
-            self.assertEqual((response.status, response.json["code"]), (503, "memory_scan_failed"))
-            self.assertNotIn("rules", response.json)
-            self.assertIs(response.json["retryable"], False)
-            self.assertIn("retrying will not help", response.json["error"])
+            if action == "import":
+                self.assertEqual((response.status, response.json["code"]), (422, "memory_content_blocked"))
+            else:
+                self.assertEqual(response.status, 201, response)
+                if action == "put":
+                    self.assertEqual(response.json["event"]["trust"], "flagged")
+                else:
+                    self.assertTrue(response.json["handoff_id"])
         with sqlite3.connect(self.work / "scan-failed/fleet-hub-memory.db") as db:
-            for table in ("memory_blobs", "memory_scans", "memory_events", "memory_idempotency"):
-                self.assertEqual(db.execute(f"SELECT count(*) FROM {table}").fetchone()[0], 0)
+            self.assertEqual(db.execute("SELECT count(*) FROM memory_scans WHERE state='flagged'").fetchone()[0], 1)
+            self.assertEqual(db.execute("SELECT scan_state FROM memory_handoffs").fetchone()[0], "flagged")
 
     def test_not_configured_is_the_upstream_404(self):
         hub = self.run_hub("absent")

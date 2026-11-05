@@ -168,6 +168,7 @@ jobs:
               - 'scripts/memory_scan_bundle.py'
               - 'tests/test_memory_content_scan.py'
               - 'tests/fixtures/memory-scan-corpus.json'
+              - 'tests/fixtures/memory-scan-groups.json'
               - 'src/brigade/fleet_hub_server.py'
               - 'tests/test_fleet_hub_server.py'
               - 'src/brigade/fleet_hub*.py'

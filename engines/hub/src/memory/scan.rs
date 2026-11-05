@@ -336,7 +336,23 @@ mod native {
                 "pattern": "(*NO_START_OPT)(*NO_AUTO_POSSESS)(a+)+$"
             })])
             .unwrap();
-            assert_eq!(guard.scan(&format!("{}!", "a".repeat(100))), Scan::Failed);
+            let text = format!("{}!", "a".repeat(100));
+            assert_eq!(
+                guard.rules[0]
+                    .utf
+                    .is_match(text.as_bytes())
+                    .unwrap_err()
+                    .code(),
+                -47
+            );
+            for run in 1..=2 {
+                let start = std::time::Instant::now();
+                assert_eq!(guard.scan(&text), Scan::Failed);
+                println!(
+                    "match-limit run={run} seconds={:.6}",
+                    start.elapsed().as_secs_f64()
+                );
+            }
         }
 
         #[test]

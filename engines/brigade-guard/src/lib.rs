@@ -3,6 +3,10 @@ pub use pcre2::bytes::Regex;
 use pcre2::bytes::RegexBuilder;
 use std::ffi::c_void;
 
+// A deliberate ceiling for repeated groups in supported 512 KiB memory values.
+// Allocated on demand by PCRE2, rather than the implicit 32 KiB default.
+pub const MAX_JIT_STACK_BYTES: usize = 32 * 1024 * 1024;
+
 pub fn compile(pattern: &str, flags: u32, utf: bool) -> Result<Regex, Box<dyn std::error::Error>> {
     if flags & !(2 | 8 | 16 | 32 | 64 | 256) != 0 || !pattern.is_ascii() {
         return Err("unsupported Python regex flags or pattern".into());
@@ -18,6 +22,7 @@ pub fn compile(pattern: &str, flags: u32, utf: bool) -> Result<Regex, Box<dyn st
         .utf(utf)
         .ucp(utf)
         .jit(true)
+        .max_jit_stack_size(Some(MAX_JIT_STACK_BYTES))
         .build(pattern)?)
 }
 

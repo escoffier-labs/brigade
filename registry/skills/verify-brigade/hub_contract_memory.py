@@ -300,12 +300,12 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
         "memory-import-scan-gated",
         {**imported, "client_event_id": event_id()},
         status=201 if scan_available else 503,
-        shape=event("imported") if scan_available else err("memory_scan_unavailable"),
+        shape=event("imported") if scan_available else {**err("memory_scan_unavailable"), "retryable": hc.Eq(True)},
     )
-    # Input-specific errors refuse the request instead of storing pending bytes.
+    # The explicit JIT stack permits this nested path to reach its warning.
     if scan_available:
         mem(
-            "memory-per-input-match-limit",
+            "memory-nested-path-flagged",
             {
                 **imported,
                 "action": "put",
@@ -313,12 +313,8 @@ def run_memory(hub: hc.Hub, *, memory_absent: bool = False) -> dict:
                 "text": "C:" + chr(92) + "Users" + chr(92) + "a/" * 1000 + "!",
                 "client_event_id": event_id(),
             },
-            status=503,
-            shape={
-                **err("memory_scan_failed"),
-                "retryable": hc.Eq(False),
-                "error": hc.Eq("input cannot be scanned, retrying will not help"),
-            },
+            status=201,
+            shape=event("flagged"),
         )
         for index, text in enumerate(
             [

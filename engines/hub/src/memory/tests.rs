@@ -466,6 +466,7 @@ async fn admin_put_stores_agent_unreviewed_and_import_needs_the_grant() {
         (admin.status, code(&admin)),
         (503, "memory_scan_unavailable")
     );
+    assert_eq!(admin.body["retryable"], true);
     assert_eq!(h.events(), before);
     let status = h.call(NODE_TOKEN, json!({"action":"status"})).await;
     assert_eq!(

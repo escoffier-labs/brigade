@@ -27,6 +27,7 @@ class Unavailable(unittest.TestCase):
             raised = request({"action": "import", "scope": "fleet", "card_id": "raised",
                               "text": "release checklist", "client_event_id": hm.event_id()})
             self.assertEqual((raised.status, raised.json["code"]), (503, "memory_scan_unavailable"))
+            self.assertIs(raised.json["retryable"], True)
             # Even preexisting trusted data must not push while the engine is missing.
             with sqlite3.connect(state / "fleet-hub-memory.db") as db:
                 db.execute("UPDATE memory_cards SET trust='imported'")

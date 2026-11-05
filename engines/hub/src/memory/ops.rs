@@ -446,7 +446,10 @@ fn run(tx: &dyn WriteTx, p: &Prepared, _authority: &Authority) -> rusqlite::Resu
             // Only import raises trust here, and only on a clean scan (D24).
             if *import && !scan.permits_raise() {
                 return Ok(match scan {
-                    Scan::Unavailable => error(503, "memory_scan_unavailable", "scan unavailable"),
+                    Scan::Unavailable => with(
+                        error(503, "memory_scan_unavailable", "scan unavailable"),
+                        json!({"retryable": true}),
+                    ),
                     _ => blocked(scan.rules()),
                 });
             }

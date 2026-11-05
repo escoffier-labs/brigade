@@ -104,17 +104,29 @@ def blocked_rule(texts: Iterable[str]) -> str | None:
     # Scan each field independently too: a leading BOM exemption belongs to one
     # field, and concatenation must not hide a field's role directive at line start.
     values = [value for value in texts if isinstance(value, str)]
-    for text in [*values, "\n".join(value.removeprefix("\ufeff") for value in values)]:
+    # Equal fields and an equal joined value cannot add a finding. Keep the
+    # BOM-stripped joined copy when it differs, and preserve field order.
+    for text in dict.fromkeys([*values, "\n".join(value.removeprefix("\ufeff") for value in values)]):
         rule = invisible_rule(text)
         if rule:
             return rule
         joiner = "\u200c" in text or "\u200d" in text
         lines, injection_lines, normalized = _scan_copies(text)
+        # Bundle patterns are ASCII. On an ASCII copy the earlier Unicode
+        # pass is identical, so only non-ASCII copies need the ASCII pass.
+        copies = tuple(dict.fromkeys((text, lines)))
+        extra_copies = tuple(copy for copy in dict.fromkeys((injection_lines, normalized)) if copy not in copies)
+        # These rules require a literal @. Without it, dotted near-matches
+        # otherwise restart an unanchored local-part search at every label.
         for name, _action, pattern in _RULES:
-            if pattern.search(text) or pattern.search(lines):
+            if name in ("email", "example-email-reserved", "ssh-private-target") and not any(
+                "@" in copy for copy in copies
+            ):
+                continue
+            if any(pattern.search(copy) for copy in copies if not (pattern.flags & re.ASCII and copy.isascii())):
                 return name
         for name, _action, pattern in _INJECTIONS:
-            if pattern.search(injection_lines) or pattern.search(normalized):
+            if any(pattern.search(copy) for copy in extra_copies if not (pattern.flags & re.ASCII and copy.isascii())):
                 return name
         if joiner:
             return JOINER_RULE

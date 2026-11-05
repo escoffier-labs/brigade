@@ -103,8 +103,49 @@ fn s18_round2_salutation_gap_is_bounded() {
 }
 
 #[test]
-fn s18_round2_pathological_path_fails_closed() {
+fn s18_round3_nested_path_is_flagged() {
     let scanner = scan::bundled();
     let text = format!("C:\\Users\\{}!", "a/".repeat(1000)); // <!-- content-guard: allow windows-home-path -->
-    assert_eq!(scanner.scan(&text).state(), "failed");
+    for run in 1..=2 {
+        let start = Instant::now();
+        let result = scanner.scan(&text);
+        println!(
+            "nested-path scan run={run} seconds={:.6} state={}",
+            start.elapsed().as_secs_f64(),
+            result.state()
+        );
+        assert_eq!(result.state(), "flagged");
+        assert!(result.rules().iter().any(|id| id == "windows-home-path"));
+    }
+}
+
+#[test]
+fn s18_round3_repeated_groups() {
+    let scanner = scan::bundled();
+    let corpus: serde_json::Value = serde_json::from_str(include_str!(
+        "../../../tests/fixtures/memory-scan-groups.json"
+    ))
+    .unwrap();
+    for size in [128 * 1024, 512 * 1024] {
+        for (name, case) in corpus.as_object().unwrap() {
+            let prefix: String = case["prefix_parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|part| part.as_str().unwrap())
+                .collect();
+            let unit = case["unit"].as_str().unwrap();
+            let text = format!("{prefix}{}", unit.repeat(size / unit.len() + 1));
+            let result = scanner.scan(&text[..size]);
+            if let Some(rule) = case["rule"].as_str() {
+                assert_eq!(result.state(), "flagged", "{name} bytes={size}");
+                assert!(
+                    result.rules().iter().any(|id| id == rule),
+                    "{name}: {result:?}"
+                );
+            } else {
+                assert_eq!(result.state(), "clean", "{name} bytes={size}");
+            }
+        }
+    }
 }

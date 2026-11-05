@@ -64,7 +64,7 @@ baselines and allow comments do not apply. `status.scan.ruleset_version` and
 | Warning, role override, U+200C or U+200D | `put` stores `flagged`, with a Tier 2 floor and rule ids attached to the content hash |
 | Clean `put`, including combining marks or a leading BOM | Stores `agent-unreviewed`. Scanning never raises trust |
 | `import` with any finding | Refused with `422`. Imports keep their clean-scan requirement |
-| Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` |
+| Engine missing, pin mismatch or rule compilation failure | `put` and `handoff` store `pending`. `import` returns `503 memory_scan_unavailable` with `retryable: true` |
 | Input-specific engine failure | `503 memory_scan_failed` with `retryable: false`. No bytes are stored |
 | Invalid UTF-8 or an unpaired surrogate in the JSON request | `400 memory_request_invalid` before normalization |
 
@@ -93,10 +93,28 @@ stored. An earlier or later blocking finding still returns
 The response includes `retryable: false` and the message
 `input cannot be scanned, retrying will not help`. Edit the input before
 submitting it again. The Python client records a proposal and removes any
-spooled copy. It does not automatically retry this refusal.
+spooled copy. It does not automatically retry this refusal. Generic status-based
+retry policies should not retry `memory_scan_failed`, even though its status is 503.
 Each native regex has an explicit 8,388,608 match limit, 16 times the
-512 KiB text limit. Supported-size prose, source, logs, Markdown, long letter
-runs and repeated salutations have clean-scan corpus coverage in both engines.
+512 KiB text limit. Each compiled regex also has an explicit 32 MiB JIT stack
+ceiling, allocated on demand. The former implicit 32 KiB ceiling returned PCRE2
+`-46` on a 1,000-segment Windows path. That input now reaches the Windows-path
+warning. A separate exponential regex tests the match limit (`-47`), and a
+repeated-alternation regex tests the explicit JIT stack limit (`-46`).
+The 32 MiB setting was measured against 128 KiB and 512 KiB repeated path
+segments, Windows space-separated tokens and dotted hostnames. Home paths
+produce their existing warning ids. Dotted hostnames and dense single-line
+salutations are clean.
+
+Python prompt loads scan each distinct field and joined value once. They skip
+equal scan copies and redundant ASCII passes on ASCII text. Non-ASCII text
+retains both regex modes. Email and SSH-target rules require an `@` before
+running their unanchored searches. Full-width normalization is included in that
+check. Two Linux runs at 512 KiB reduced the six clean corpus cases from
+1.035-1.527 seconds to 0.103-0.246 seconds. Dense single-line salutations took
+0.355 seconds per `blocked_rule` call. The corpus subprocess deadline is
+5 seconds, over 14 times the slowest measured call. Windows CI must confirm
+the remaining headroom on its slower runner.
 
 The bundle uses conservative guard matches in both PCRE2 UTF and byte modes.
 Python prompt loads also run Unicode and ASCII-class passes. The scanned
