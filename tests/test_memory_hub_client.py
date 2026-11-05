@@ -1784,3 +1784,139 @@ def test_drop_refuses_a_proposal_for_another_scope_than_the_config(hub, tmp_path
     assert code == 2 and "repo:test/app" in err and "fleet" in err, out + err
     assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
     assert card.read_text(encoding="utf-8") == "# One\nmine\n"
+
+
+def _rate_limit_cards(hub: FakeHub) -> None:
+    hub.do_card = lambda body: (429, {})
+
+
+def test_card_never_falls_back_to_a_replica_from_the_epoch_status_replaced(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "x", "replicated under the old epoch")
+    sync.pull(target, client(hub), settings(target))
+    original = hub.do_card
+    _rate_limit_cards(hub)
+    code, payload, _ = _card_x(target, capsys)
+    assert code == 0 and payload["source"] == "replica"
+    # A restore after the pull: status answers the new log_epoch, then the card call is rate limited.
+    hub.do_card = original
+    hub.restore(hub.snapshot())
+    _rate_limit_cards(hub)
+    code, payload, output = _card_x(target, capsys)
+    assert code == 1 and payload.get("hub") == "unavailable"
+    assert "replicated under the old epoch" not in output
+
+
+def test_card_never_falls_back_to_a_replica_pulled_as_another_principal(hub, tmp_path, capsys, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "x", "replicated as node-1")
+    sync.pull(target, client(hub), settings(target))
+    hub.do_card = lambda body: (503, {"error": "hub busy"})
+    code, payload, _ = _card_x(target, capsys)
+    assert code == 0 and payload["source"] == "replica"
+    # The node token now belongs to node-2: status names it, then the card call answers 503.
+    monkeypatch.setenv("BRIGADE_FLEET_NODE_TOKEN", OTHER_CREDENTIAL)
+    code, payload, output = _card_x(target, capsys)
+    assert code == 1 and payload.get("hub") == "unavailable"
+    assert "replicated as node-1" not in output
+
+
+def test_card_never_falls_back_after_a_first_chunk_from_another_epoch(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="read", scope="repo:a", read_scopes=("repo:b", "repo:a"))
+    _put(hub, "repo:a", "x", "repo a replicated text")
+    sync.pull(target, client(hub), settings(target))
+    _put(hub, "repo:b", "x", "repo b text")  # after the pull, so the replica lacks it
+    original = hub.do_card
+    restored = {"epoch": hub.epoch}
+
+    def b_answers_then_a_rate_limited(body):
+        if body.get("scope") == "repo:a":
+            return 429, {}
+        status, reply = original(body)
+        return status, {**reply, "log_epoch": restored["epoch"]}
+
+    hub.do_card = b_answers_then_a_rate_limited
+    code, payload, _ = _card_x(target, capsys)
+    assert code == 0 and payload["source"] == "replica" and payload["card"]["scope"] == "repo:a"
+    # repo:b's first chunk now comes from a restored hub; status still reports the replica's epoch.
+    restored["epoch"] = hubc.event_id()
+    code, payload, output = _card_x(target, capsys)
+    assert code == 1 and payload.get("hub") == "unavailable"
+    assert "repo a replicated text" not in output
+
+
+@POSIX_DOT
+def test_dot_memory_card_never_opens_a_replica_from_a_replaced_epoch(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "x", "otter under the old epoch")
+    sync.pull(target, client(hub), settings(target))
+    hub.restore(hub.snapshot())
+    _rate_limit_cards(hub)
+    assert _dot_cli(target).memory_card("x", scope="fleet") == {"error": "card_not_found", "name": "x"}
+
+
+def test_a_spooled_write_never_replays_into_a_scope_the_config_left(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", scope="fleet", x="# X\nfleet-wide text\n")
+    hub.mode = "down"
+    assert [s["card_id"] for s in sync.push(target, client(hub), settings(target), yes=True)["spooled"]] == ["x"]
+    config = target / ".brigade" / "memory-care.toml"
+    config.write_text(
+        config.read_text(encoding="utf-8").replace('scope = "fleet"', 'scope = "repo:me/app"'), encoding="utf-8"
+    )
+    hub.mode = "up"
+    code, out, err = run(["memory", "hub", "push", "--target", str(target), "--yes", "--json"], capsys)
+    report = json.loads(out)
+    assert code == 0, err
+    assert [put["scope"] for put in hub.puts()] == ["repo:me/app"]
+    assert ("fleet", "x") not in hub.cards
+    assert [(p["card_id"], p["reason"]) for p in report["proposals"]] == [("x", "scope-changed")]
+    assert store.spool_count(target) == 0
+    (kept,) = list(store.proposals(target))
+    assert kept["entry"]["scope"] == "fleet"
+
+
+def test_a_write_after_the_pull_keeps_the_proposal_open(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nA\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "# One\nB\n", "# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    _put_on(hub, "one", "# One\nC\n")  # a third writer, after the pull
+    card.write_text("# One\nB\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == [] and report["published"] == []
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    assert hub.cards[("repo:test/app", "one")]["text"] == "# One\nC\n"
+
+
+def test_a_restore_without_a_pull_keeps_the_proposal_open(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nA\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "# One\nB\n", "# One\nmine\n")
+    sync.pull(target, client(hub), settings(target))
+    hub.restore(hub.snapshot())  # same data under a new log_epoch; no pull follows
+    card.write_text("# One\nB\n", encoding="utf-8")
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == [] and report["published"] == []
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    # A pull under the new epoch, whose head the hub confirms, resolves it.
+    sync.pull(target, client(hub), settings(target))
+    report = sync.push(target, client(hub), settings(target))
+    assert report["resolved"] == [proposal_id] and report["published"] == []
+
+
+def test_keep_hub_refuses_a_private_card(hub, tmp_path, capsys):
+    target = workspace(tmp_path, mode="sync", one="# One\nfirst\n")
+    card = target / "memory" / "cards" / "one.md"
+    sync.push(target, client(hub), settings(target), yes=True)
+    proposal_id = _conflict(hub, target, "theirs\n", "# One\nmine\n")
+    private = "---\nvisibility: private\n---\n# One\nprivate notes\n"
+    card.write_text(private, encoding="utf-8")
+    sync.pull(target, client(hub), settings(target))
+    argv = ["memory", "hub", "proposals", "drop", "--target", str(target), "--keep-hub", proposal_id]
+    code, out, err = run(argv, capsys)
+    assert code == 2 and "private" in err and "--keep-local" in err, out + err
+    assert card.read_text(encoding="utf-8") == private
+    assert [p["proposal_id"] for p in store.proposals(target)] == [proposal_id]
+    assert not store.dropped_dir(target).exists()

@@ -358,15 +358,20 @@ def _resolves(records: list[dict[str, Any]], card: dict[str, Any], head: dict[st
 
 
 def _publishable(
-    target: Path, settings: hubc.HubSettings, hub: str, principal: object
+    target: Path,
+    settings: hubc.HubSettings,
+    hub: str,
+    principal: object,
+    confirm: Callable[[str, dict[str, Any]], bool],
 ) -> tuple[list[dict], list[dict], list[dict], list[str], list[dict]]:
     """Local cards whose bytes differ from what this workspace last published here.
 
     Also returns the proposals this run resolves: the local card now holds
-    exactly the hub head the conflict reported, and the replica holds that
-    head too, so the conflict is over and that head is the base. The last
-    item is every readable local card, so a spooled write replays only onto
-    the card it came from (`_replay_refusal`).
+    exactly the hub head the conflict reported, the replica holds that head
+    too, and `confirm(card_id, head)` says the hub's head is that one now,
+    so the conflict is over and that head is the base. The last item is
+    every readable local card, so a spooled write replays only onto the card
+    it came from (`_replay_refusal`).
     """
     scope = str(settings.scope)
     state = store.published(target).get(hub, {}).get(scope, {})
@@ -392,7 +397,12 @@ def _publishable(
         key = (scope, card["card_id"])
         head = heads.get(store.Replica.key(scope, card["card_id"])) or {}
         matches_head = bool(head) and head.get("content_hash") == card["content_hash"]
-        if key in conflicts and key not in spooled and _resolves(conflicts[key], card, head):
+        if (
+            key in conflicts
+            and key not in spooled
+            and _resolves(conflicts[key], card, head)
+            and confirm(card["card_id"], head)
+        ):
             resolved.extend(str(record["proposal_id"]) for record in conflicts.pop(key))
             adopted.append({"card": card, "revision": head.get("revision"), "log_epoch": log_epoch})
             continue
@@ -410,15 +420,19 @@ def _publishable(
     return changes, skipped, adopted, resolved, local
 
 
-def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, Any]]) -> str | None:
+def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, Any]], scope: str | None) -> str | None:
     """Why a spooled write must stay local instead of replaying, or None to replay it.
 
-    It replays only when exactly one current, readable, public local card
-    holds its card id, at the path it was spooled from. Anything else (the
+    It replays only into the current `[hub] scope` (`scope`), and only when
+    exactly one current, readable, public local card holds its card id, at
+    the path it was spooled from. Anything else (the scope changed, or the
     card turned private, was renamed, moved, re-identified, duplicated,
     deleted or made unreadable) fails closed: a moved public card waits for
-    review too, so a write never goes out under a stale identity.
+    review too, so a write never goes out under a stale identity or into a
+    scope the config left.
     """
+    if entry.get("scope") != scope:
+        return "scope-changed"
     card_id, rel = entry.get("card_id"), entry.get("path")
     holders = [card for card in local if card["card_id"] == card_id]
     at_path = [card for card in local if card["rel"] == rel]
@@ -558,6 +572,30 @@ class _Preflight:
         self.principal = body.get("principal")
 
 
+def _hub_holds(
+    target: Path,
+    client: hubc.MemoryHubClient,
+    preflight: _Preflight,
+    scope: str,
+    card_id: str,
+    head: dict[str, Any],
+) -> bool:
+    """The hub's head for the card is the replica's `head` now, under the epoch the replica was pulled in.
+
+    Both the conflict reply and the replica are snapshots: another write
+    after the pull, or a restore since, leaves them agreeing on a head the
+    hub no longer holds. Any mismatch, refusal or unavailable answer says no.
+    """
+    epoch = store.replica(target).meta.get("log_epoch")
+    if not preflight.reachable or preflight.epoch is None or preflight.epoch != epoch:
+        return False
+    try:
+        _require_current_head(client, scope, card_id, head, epoch)
+    except (hubc.HubConfigError, hubc.HubRefusal, hubc.HubUnavailable):
+        return False
+    return True
+
+
 def push(
     target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings, *, yes: bool = False
 ) -> dict[str, Any]:
@@ -579,7 +617,11 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
     principal = preflight.principal
     if principal is not None and forget_other_principal(target, hub, principal):
         warnings.append("the replica was pulled as another principal and was discarded; run pull to rebuild it")
-    changes, skipped, adopted, resolved, local = _publishable(target, settings, hub, principal)
+
+    def confirm(card_id: str, head: dict[str, Any]) -> bool:
+        return _hub_holds(target, client, preflight, scope, card_id, head)
+
+    changes, skipped, adopted, resolved, local = _publishable(target, settings, hub, principal, confirm)
     first = scope not in store.published(target).get(hub, {})
     if first and not yes:
         return {
@@ -605,10 +647,10 @@ def _push(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             kept[proposal_id] = closed["dropped_to"]
     run = _Push(target, client, preflight.epoch, reachable=preflight.reachable)
     for entry in store.spool_entries(target, hub):
-        refusal = _replay_refusal(target, entry, local)
+        refusal = _replay_refusal(target, entry, local, settings.scope)
         if refusal is not None:
-            # The card is not the one this write was spooled from any more:
-            # keep its text as a local proposal and never send it.
+            # The card or the scope is not the one this write was spooled
+            # for any more: keep its text as a local proposal and never send it.
             run._propose(entry, refusal)
             continue
         run.send(entry, spooled=True)
@@ -650,6 +692,7 @@ def drop_proposal(
       hub head, the next push sends nothing, and `local_card` says why.
     - `keep-hub`: the local card file is rewritten with the replica's hub head,
       which becomes the published base, so the next push sends nothing for it.
+      It refuses a private local card, which the hub's public text would replace.
 
     Both need a replica pulled from this hub, as the principal and under the
     log_epoch its `status` reports now, whose head for the card is the one the
@@ -705,6 +748,11 @@ def drop_proposal(
         extra: dict[str, Any] = {}
         local_card = "present"
         if keep == DROP_KEEP_HUB:
+            if holder is not None and holder["private"]:
+                raise DropRefused(
+                    f"{holder['rel']} is private, and --keep-hub would replace it with the hub's public text; "
+                    "drop with --keep-local, or edit the card yourself"
+                )
             if head is None:
                 raise DropRefused(
                     f"the replica holds no hub head for {scope}/{card_id}; it is retired or absent, "

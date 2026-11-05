@@ -64,7 +64,8 @@ def register(memory_sub: argparse._SubParsersAction) -> None:
                 const="keep-hub",
                 help=(
                     "Keep the hub's text: the local card file is rewritten with the hub head and the "
-                    "next push sends nothing for it. The replaced local text is kept with the record."
+                    "next push sends nothing for it. The replaced local text is kept with the record. "
+                    "Refuses a private local card."
                 ),
             )
             for action in (listing, drop):
@@ -128,21 +129,39 @@ class _CardUnavailable(hubc.HubUnavailable):
     which the replica never serves. `fallback` is False when the read showed
     that nothing the replica holds may stand in: `status` refused this
     credential every read grant, or the log_epoch moved under the read.
+    `principal` is the principal `status` named (None when status did not
+    answer), and `epochs` every log_epoch an answer in this read carried; the
+    replica stands in only when it was pulled as that principal under each of
+    those epochs.
     """
 
-    def __init__(self, exc: hubc.HubUnavailable, refused: tuple[str, ...], *, fallback: bool) -> None:
+    def __init__(
+        self,
+        exc: hubc.HubUnavailable,
+        refused: tuple[str, ...],
+        *,
+        fallback: bool,
+        principal: object = None,
+        epochs: tuple[str, ...] = (),
+    ) -> None:
         super().__init__(exc.reason, status=exc.status)
         self.refused = refused
         self.fallback = fallback
+        self.principal = principal
+        self.epochs = epochs
 
 
 def _card_scope(
-    client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: argparse.Namespace, refused: list[str]
+    client: hubc.MemoryHubClient,
+    settings: hubc.HubSettings,
+    args: argparse.Namespace,
+    refused: list[str],
+    epochs: list[str],
 ) -> tuple[str, dict]:
     """The read scope that holds the card, and the first chunk's answer. Never a scope outside the config.
 
-    Each scope that refuses the card is added to `refused`, which the caller
-    keeps for the whole read.
+    Each scope that refuses the card is added to `refused`, and each first
+    chunk's log_epoch to `epochs`; the caller keeps both for the whole read.
     """
     if args.scope:
         if args.scope not in settings.read_scopes:
@@ -156,13 +175,16 @@ def _card_scope(
     refusal: hubc.HubRefusal | None = None
     for scope in candidates:
         try:
-            found.append((scope, client.call("card", card_id=args.card_id, scope=scope, offset=args.offset)))
+            body = client.call("card", card_id=args.card_id, scope=scope, offset=args.offset)
         except hubc.HubRefusal as exc:
             if len(candidates) == 1 or exc.code not in {"memory_card_not_found", "memory_grant_missing"}:
                 raise
             refusal = refusal or exc
             if scope not in refused:
                 refused.append(scope)
+            continue
+        epochs.append(str(body.get("log_epoch") or ""))
+        found.append((scope, body))
     if len(found) > 1:
         scopes = [scope for scope, _ in found]
         raise hubc.HubRefusal(
@@ -260,21 +282,31 @@ def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: ar
     cannot read a card either; the card call then carries the hub's refusal.
 
     Any HubUnavailable during the read leaves as _CardUnavailable, carrying
-    every scope refused across both attempts and every chunk, and allowing no
+    every scope refused across both attempts and every chunk, the principal
+    `status` named and every log_epoch an answer carried, and allowing no
     replica answer after a `status` 403 or an epoch move seen in this read.
     """
     refused: list[str] = []
+    epochs: list[str] = []
+    principal: object = None
     fallback = True
     try:
         try:
-            hubc.refuse_admin(client.call("status"))
+            status = hubc.refuse_admin(client.call("status"))
         except hubc.HubRefusal as exc:
             if not (exc.status == 403 and exc.code == "memory_grant_missing"):
                 raise
             # This credential can read no scope now, so the replica speaks for none.
             fallback = False
+        else:
+            # What the hub says now: the replica must have been pulled as this
+            # principal under this epoch to stand in for it.
+            principal = status.get("principal")
+            epochs.append(str(status.get("log_epoch") or ""))
+            if not isinstance(principal, str) or not principal:
+                fallback = False
         for attempt in (1, 2):
-            scope, body = _card_scope(client, settings, args, refused)
+            scope, body = _card_scope(client, settings, args, refused, epochs)
             try:
                 card, epoch = _read_chunks(client, args, scope, body)
             except _ChunkEpochMoved:
@@ -291,7 +323,9 @@ def _hub_card(client: hubc.MemoryHubClient, settings: hubc.HubSettings, args: ar
                 continue
             return {"ok": True, "card": card, "log_epoch": epoch, "source": "hub"}
     except hubc.HubUnavailable as exc:
-        raise _CardUnavailable(exc, tuple(refused), fallback=fallback) from exc
+        raise _CardUnavailable(
+            exc, tuple(refused), fallback=fallback, principal=principal, epochs=tuple(epochs)
+        ) from exc
     raise AssertionError("unreachable")
 
 
@@ -301,20 +335,28 @@ def _replica_card(
     settings: hubc.HubSettings,
     args: argparse.Namespace,
     *,
-    refused: tuple[str, ...] = (),
+    unavailable: _CardUnavailable,
 ) -> dict[str, Any] | None:
     """The card from this host's replica, used only when the hub is unavailable.
 
     The replica must have been pulled from this hub, and only heads in scopes
     both configured now and readable at that pull count. A refusal never
-    reaches here, and a scope the hub refused during this read (`refused`)
-    is never served. None when the replica does not hold the card.
+    reaches here, and a scope the hub refused during this read is never
+    served. When the hub answered anything in this read, the replica must
+    have been pulled as the principal its `status` named and under every
+    log_epoch its answers carried. None when the replica does not hold the
+    card or may not stand in.
     """
     from . import memory_hub_store as store
 
     replica = store.replica(target)
     if replica.watermark(client.identity) is None or not replica.meta.get("principal"):
         return None
+    if unavailable.principal is not None and not replica.belongs_to(client.identity, unavailable.principal):
+        return None
+    if any(epoch != replica.meta.get("log_epoch") for epoch in unavailable.epochs):
+        return None
+    refused = unavailable.refused
     scopes = [scope for scope in ((args.scope,) if args.scope else settings.read_scopes) if scope not in refused]
     found = [
         head
@@ -447,7 +489,7 @@ def dispatch(args: argparse.Namespace, *, transport: hubc.Transport | None = Non
             # unless this read showed it may not.
             if not isinstance(exc, _CardUnavailable) or not exc.fallback:
                 raise
-            fallback = _replica_card(target, client, settings, args, refused=exc.refused)
+            fallback = _replica_card(target, client, settings, args, unavailable=exc)
             if fallback is None:
                 raise
             warning = f"hub unavailable ({exc.reason}); answered from this host's replica"
