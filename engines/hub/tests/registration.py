@@ -1,5 +1,6 @@
 """Native registration preserves Python wire bytes and immediate revocation."""
 
+import os
 import sys
 import tempfile
 import unittest
@@ -9,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "registry/skills/verify-brigade"))
 import hub_contract as hc  # noqa: E402 - repository-local drive helper
 
-BINARY = ROOT / "engines/hub/target/debug/brigade-hub"
+BINARY = Path(os.environ.get("BRIGADE_HUB_BINARY", ROOT / "engines/hub/target/debug/brigade-hub"))
 
 
 class Registration(unittest.TestCase):

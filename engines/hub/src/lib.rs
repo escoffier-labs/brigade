@@ -12,4 +12,5 @@ pub mod telemetry;
 
 // S5 and S7 native route domains.
 pub mod claims;
+pub mod messages;
 pub mod wire;

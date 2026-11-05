@@ -90,7 +90,7 @@ def _assert_clean_audit(payload: dict) -> None:
     assert all(count > 0 for count in audit["overdue_rows"].values()), audit["overdue_rows"]
     assert audit["window_findings"] == []
     assert audit["digest_changes"] == []
-    assert [item["operation"] for item in audit["controls"]] == ["question_status", "who", "list", "policy inventory"]
+    assert [item["operation"] for item in audit["controls"]] == ["question_status", "who", "ack", "policy inventory"]
     assert all(item["ok"] and item["writes"] > 0 for item in audit["controls"]), audit["controls"]
 
 

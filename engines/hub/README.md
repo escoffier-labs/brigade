@@ -112,8 +112,8 @@ registry/skills/verify-brigade/control-brigade.py hub-contract --hub-cmd \
 Repeat `--route-mode family=native|shadow|proxy` to override a family. The last
 value wins. `health` defaults to native and supports proxy and shadow on
 `GET /health`. `/ready` always stays local. `metrics` requires native mode.
-`registration` and `claims` accept native or proxy. `memory` accepts native or proxy (see below).
-`heartbeat`, `messages`, `cold` and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
+`registration`, `claims` and `messages` accept native or proxy. `memory` accepts native or proxy (see below).
+`heartbeat`, `cold` and `browser` currently accept proxy only. Selecting an unavailable native or shadow handler refuses
 startup. Native handlers and housekeeping audits for those families land in
 S5 to S8 and S12. Long-poll requests cannot be shadowed by this slice.
 
@@ -157,10 +157,50 @@ S7 claims handlers run with `--route-mode claims=native` (proxy by default).
 This serves `GET /claims` and every `POST /claims` action natively, with
 generation fencing, retired holders, lease expiry and `claim.expired` events
 through the same writer as registration. Three cases stay on the Python
-upstream: `GET /owners`, which joins policy, sessions and Grok Bot state; a
-`GET /claims` while Grok Bot leases are active, which needs Python's display
-projection; and a `POST /claims` whose target is not ASCII, since its refusal
-text carries Python's `repr()` of the target.
+upstream:
+
+- `GET /owners`, which joins policy, sessions and Grok Bot state.
+- `GET /claims` while Grok Bot leases are active, which needs Python's display
+  projection.
+- `POST /claims` with a target that is not ASCII, since its refusal text
+  carries Python's `repr()` of the target.
+
+S8 messages handlers run with `--route-mode messages=native` (proxy by
+default). This serves the `POST /messages` actions `send`, `reply`, `ack`,
+`list`, `sent`, `sent_lookup`, `count`, `identity`, `keys_get`,
+`manifests_get` and the three `question_*` actions through the same writer as
+registration and claims, with sealed envelope checks, sender and fleet storage
+quotas, `message.created` events and the `BRIGADE_FLEET_MESSAGES_*` storage
+policy plus `--require-sealed`. Writes run Python's retention housekeeping in
+the same transaction, its 32-row sealed purge included. Reads never write:
+they hide expired rows, show a `reply_to` to an expired parent as null, and
+show every sealed row acknowledged at least 7 days ago as its tombstone, so a
+native read never returns ciphertext past its lifetime, even with a purge
+backlog. The maintenance thread runs the same retention as a writer command
+at most once a minute, up to 256 rows per command, and pauses under the
+read-only audit.
+
+A `list` with `wait_ms` waits natively: the recipient's wake epoch is marked
+before every read, native commits move it after they commit, and woken
+waiters re-read in groups of up to 256 per reader job. While anyone waits, a
+watch connection samples `PRAGMA data_version` every 250 ms and wakes the
+recipients of messages another process committed. Waiter caps: 2 per
+principal, 64 per source except the front, and 3,072 in total at the default
+4,096 connections, with 1,024 connections kept for requests that do not wait.
+
+These stay on the Python upstream:
+
+- `who` and `claims`, which build paging snapshots over sessions and claims.
+- `keys_publish`, whose stored record keeps the client's key order, which
+  serde_json does not.
+- Every `events_*` action.
+- Sealed sends while a hub identity is installed, which need Python's checks
+  of the signed identity metadata.
+- An `enqueued_at` outside the common
+  `YYYY-MM-DDTHH:MM:SS[.fff|.ffffff][Z|+HH:MM]` forms.
+
+Under the read-only audit the native families read `HUB_AUDIT_CLOCK` when `--test-clock-file` is absent,
+and the audit traces every write statement a native connection runs.
 
 Hub memory (S13a) runs with `--route-mode memory=native`. This serves
 `POST /memory` from `fleet-hub-memory.db` beside the hub database, which the

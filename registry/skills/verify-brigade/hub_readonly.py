@@ -605,7 +605,9 @@ def controls(fixture: Fixture) -> list[tuple[str, str, str, dict | None, str]]:
     return [
         ("question_status", "POST", "/messages", {"action": "question_status", "question_id": fixture.question_id}, a),
         ("who", "POST", "/messages", {"action": "who", "limit": 1}, b),
-        ("list", "POST", "/messages", {"action": "list", "after": 0, "unacked": False}, b),
+        # Not `list`: a native hub serves it as a projection that never writes.
+        # `ack` runs the same retention writes on both hubs.
+        ("ack", "POST", "/messages", {"action": "ack", "id": 1}, b),
         ("policy inventory", "GET", "/policy/inventory", None, a),
     ]
 

@@ -2,6 +2,7 @@
 mod admission;
 mod claims_route;
 mod memory_route;
+mod messages_route;
 mod registration;
 mod response;
 
@@ -233,6 +234,7 @@ struct App {
     lookup: Option<admission::Lookup>,
     registration: Option<registration::Registration>,
     claims: Option<claims_route::Claims>,
+    messages: Option<messages_route::Messages>,
     /// None: memory is not configured and `/memory` is proxied like any unknown path.
     memory: Option<memory_route::MemoryRoute>,
     trust_identity: bool,
@@ -257,6 +259,7 @@ impl App {
             lookup: None,
             registration: None,
             claims: None,
+            messages: None,
             memory: None,
             trust_identity,
             trust_proto,
@@ -724,6 +727,18 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    let messages = app
+        .messages
+        .as_ref()
+        .filter(|_| messages_route::Messages::route(parts.method.as_str(), parts.uri.path()))
+        .filter(|_| !query_names_token(parts.uri.query()));
+    let messages = match messages {
+        Some(route) => match route.auth(&parts).await {
+            Ok(caller) => Some((route, caller)),
+            Err(refusal) => return *refusal,
+        },
+        None => None,
+    };
     // Native memory authenticates and checks size before any body byte is read.
     let memory = match app
         .memory
@@ -789,6 +804,15 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         // The same serde_json gap as registration: Python answers those bodies.
         if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
             if let Some(response) = claims.handle(&parts, node, &body).await {
+                return response;
+            }
+        }
+    }
+    if let Some((route, caller)) = messages {
+        // The same serde_json gap as registration: Python answers those bodies.
+        if body.is_empty() || serde_json::from_slice::<serde_json::Value>(&body).is_ok() {
+            let source = (source != "front").then(|| source.clone());
+            if let Some(response) = route.handle(&parts, caller, &body, source).await {
                 return response;
             }
         }
@@ -1119,6 +1143,13 @@ async fn run(mut config: Config) -> Result<(), String> {
     );
     let path = std::path::PathBuf::from(&database);
     let modes = brigade_hub::modes::Modes::parse(&config.route_mode)?;
+    // Native families read the acceptance clock. Under the read-only audit the
+    // managed child takes its clock from `HUB_AUDIT_CLOCK`, so they read it too.
+    let native_clock = config.test_clock_file.clone().or_else(|| {
+        brigade_hub::schema::audit::enabled()
+            .then(|| std::env::var("HUB_AUDIT_CLOCK").ok())
+            .flatten()
+    });
     let admin = std::env::var("BRIGADE_FLEET_TOKEN")
         .ok()
         .filter(|v| !v.trim().is_empty())
@@ -1139,6 +1170,11 @@ async fn run(mut config: Config) -> Result<(), String> {
     // Shared by every writer of the hub file, the memory writer included (D23).
     let arbiter = Arc::new(brigade_hub::writer::Arbiter::default());
     let memory_path = path.with_file_name("fleet-hub-memory.db");
+    // Filled once the native messages writer starts.
+    let message_sweeps: Arc<
+        std::sync::OnceLock<Box<dyn brigade_hub::maintenance::WriterCommands>>,
+    > = Arc::default();
+    let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let memory =
         match modes.configured("memory") {
             None => None,
@@ -1148,7 +1184,7 @@ async fn run(mut config: Config) -> Result<(), String> {
                     hub: path.clone(),
                     admin_digest: registration::digest(&admin),
                     clock: brigade_hub::memory::ids::Clock {
-                        file: config.test_clock_file.clone().map(Into::into),
+                        file: native_clock.clone().map(Into::into),
                     },
                     scanner: Arc::new(brigade_hub::memory::scan::Unavailable),
                     arbiter: arbiter.clone(),
@@ -1165,10 +1201,14 @@ async fn run(mut config: Config) -> Result<(), String> {
             Some(_) => Some(memory_route::MemoryRoute::Unavailable),
         };
     let storage = if config.upstream.is_none() {
-        let sweeps: Arc<dyn brigade_hub::maintenance::WriterCommands> = match &memory {
-            Some(memory_route::MemoryRoute::Store(store)) => Arc::new(MemorySweeps(store.clone())),
-            _ => Arc::new(brigade_hub::maintenance::NoSweeps),
-        };
+        let sweeps: Arc<dyn brigade_hub::maintenance::WriterCommands> = Arc::new(HubSweeps {
+            memory: match &memory {
+                Some(memory_route::MemoryRoute::Store(store)) => Some(store.clone()),
+                _ => None,
+            },
+            messages: message_sweeps.clone(),
+            last: Mutex::new(None),
+        });
         Some(brigade_hub::maintenance::Maintenance::start(
             &path,
             &memory_path,
@@ -1204,7 +1244,7 @@ async fn run(mut config: Config) -> Result<(), String> {
     state.lookup = Some(admission::Lookup::new(readers.clone(), &admin));
     let native = |family| state.modes.get(family) == brigade_hub::modes::Mode::Native;
     // One S4a writer per file, shared by every native family. It owns the writer metrics.
-    let writer = if native("registration") || native("claims") {
+    let writer = if native("registration") || native("claims") || native("messages") {
         let writer = brigade_hub::writer::Writer::start(
             brigade_hub::writer::Config::new(path.clone()),
             arbiter.clone(),
@@ -1220,15 +1260,48 @@ async fn run(mut config: Config) -> Result<(), String> {
             readers: readers.clone(),
             writer: writer.clone().unwrap(),
             admin: registration::digest(&admin),
-            clock: config.test_clock_file.clone(),
+            clock: native_clock.clone(),
         });
+    }
+    if native("messages") {
+        let policy = brigade_hub::messages::Policy::from_env(
+            |name| std::env::var(name).ok(),
+            config.require_sealed,
+        )?;
+        let (limits, kept) =
+            brigade_hub::messages::wake::Limits::for_connections(config.max_connections as usize);
+        let wake = Arc::new(brigade_hub::messages::wake::Wake::new(limits));
+        brigade_hub::messages::wake::watch_external(&path, wake.clone())?;
+        let writer = writer.clone().unwrap();
+        let sweep_policy = policy.clone();
+        let sweep_clock = native_clock.clone();
+        let _ = message_sweeps.set(Box::new(writer.sweeps(move |sweep| {
+            (sweep == brigade_hub::maintenance::Sweep::HubRetention).then(|| {
+                Box::new(brigade_hub::messages::Sweep {
+                    policy: sweep_policy.clone(),
+                    clock: sweep_clock.clone(),
+                }) as Box<dyn brigade_hub::writer::Command>
+            })
+        })));
+        state.messages = Some(messages_route::Messages::new(
+            readers.clone(),
+            writer,
+            registration::digest(&admin),
+            native_clock.clone(),
+            config.allow_admin_writes,
+            policy,
+            wake,
+            connections.clone(),
+            config.max_connections as usize,
+            kept,
+        ));
     }
     if native("claims") {
         state.claims = Some(claims_route::Claims {
             readers,
             writer: writer.unwrap(),
             admin: registration::digest(&admin),
-            clock: config.test_clock_file.clone(),
+            clock: native_clock.clone(),
             allow_admin_writes: config.allow_admin_writes,
             events: brigade_hub::claims::events_enabled(),
         });
@@ -1253,7 +1326,6 @@ async fn run(mut config: Config) -> Result<(), String> {
         }
     });
     let app = Router::new().fallback(any(handle)).with_state(state);
-    let connections = Arc::new(Semaphore::new(config.max_connections as usize));
     let sources = Arc::<Counts>::default();
     let mut tasks = tokio::task::JoinSet::new();
     let (stop, stopping) = watch::channel(false);
@@ -1305,11 +1377,39 @@ async fn run(mut config: Config) -> Result<(), String> {
     }
     Ok(())
 }
-/// Maintenance asks for retention every second; only memory retention is native.
-struct MemorySweeps(Arc<brigade_hub::memory::Store>);
-impl brigade_hub::maintenance::WriterCommands for MemorySweeps {
+/// Maintenance asks for retention every second. Memory retention runs each
+/// time; native messages purge expired content at most once a minute.
+struct HubSweeps {
+    memory: Option<Arc<brigade_hub::memory::Store>>,
+    messages: Arc<std::sync::OnceLock<Box<dyn brigade_hub::maintenance::WriterCommands>>>,
+    last: Mutex<Option<std::time::Instant>>,
+}
+impl brigade_hub::maintenance::WriterCommands for HubSweeps {
     fn schedule(&self, sweep: brigade_hub::maintenance::Sweep) -> bool {
-        sweep == brigade_hub::maintenance::Sweep::MemoryRetention && self.0.sweep()
+        use brigade_hub::maintenance::Sweep;
+        match sweep {
+            Sweep::MemoryRetention => self.memory.as_ref().is_some_and(|store| store.sweep()),
+            Sweep::HubRetention => {
+                // The read-only audit pauses retention so overdue rows stay put.
+                let Some(messages) = self
+                    .messages
+                    .get()
+                    .filter(|_| !brigade_hub::schema::audit::enabled())
+                else {
+                    return false;
+                };
+                let mut last = self.last.lock().unwrap();
+                if last.is_some_and(|at| at.elapsed() < Duration::from_secs(60)) {
+                    return true;
+                }
+                let scheduled = messages.schedule(sweep);
+                if scheduled {
+                    *last = Some(std::time::Instant::now());
+                }
+                scheduled
+            }
+            _ => false,
+        }
     }
 }
 fn front_peer(bind: IpAddr, peer: IpAddr) -> bool {

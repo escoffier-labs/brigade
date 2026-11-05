@@ -483,7 +483,7 @@ impl Command for Claim {
     }
 }
 /// `time.time()`: the acceptance clock's file value as written, unrounded.
-fn raw_time(clock: Option<&str>) -> f64 {
+pub(crate) fn raw_time(clock: Option<&str>) -> f64 {
     clock
         .and_then(|p| std::fs::read_to_string(p).ok())
         .and_then(|s| s.trim().parse::<f64>().ok())

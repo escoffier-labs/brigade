@@ -50,9 +50,8 @@ fn trace(event: TraceEvent<'_>) {
         let mut words = sql
             .split(|c: char| !c.is_ascii_alphabetic())
             .filter(|s| !s.is_empty());
-        if words
-            .next()
-            .is_some_and(|s| s.eq_ignore_ascii_case("BEGIN"))
+        let first = words.next();
+        if first.is_some_and(|s| s.eq_ignore_ascii_case("BEGIN"))
             && words.next().is_some_and(|s| {
                 s.eq_ignore_ascii_case("IMMEDIATE") || s.eq_ignore_ascii_case("EXCLUSIVE")
             })
@@ -61,6 +60,16 @@ fn trace(event: TraceEvent<'_>) {
             if emit("begin", "write-lock").is_err() {
                 std::process::abort();
             }
+        }
+        // The authorizer fires only when a statement is prepared, and the
+        // writer's statements are cached. This trace fires each time one runs.
+        if first.is_some_and(|s| {
+            ["INSERT", "UPDATE", "DELETE", "REPLACE"]
+                .iter()
+                .any(|w| s.eq_ignore_ascii_case(w))
+        }) && emit("write", "native-step").is_err()
+        {
+            std::process::abort();
         }
     }
 }
